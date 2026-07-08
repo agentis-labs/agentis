@@ -9,7 +9,7 @@
  * caller falls back to skipping the image, so it never breaks a connection.
  */
 
-import type { ModelProfile } from './orchestratorModelRouter.js';
+import type { ModelProfile } from './orchestrator/orchestratorModelRouter.js';
 import type { Logger } from '../logger.js';
 
 export interface VisionInput {

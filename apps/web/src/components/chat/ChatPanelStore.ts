@@ -1,7 +1,7 @@
-/**
- * Chat panel state — Zustand store, persisted to localStorage.
+﻿/**
+ * Chat panel state â€” Zustand store, persisted to localStorage.
  *
- * State machine: hidden ↔ docked. Workspace switches
+ * State machine: hidden â†” docked. Workspace switches
  * trigger a reset that re-fetches rooms/threads.
  */
 
@@ -164,7 +164,7 @@ export const useChatPanelStore = create<ChatPanelStore>((set) => ({
   resetForWorkspace: () => set({ selectedThread: null, unreadCount: 0, unreadByScope: {}, launchContext: null, openRequestId: 0, activeTask: null }),
 }));
 
-// Global keyboard shortcut: ⌘/ toggles chat
+// Global keyboard shortcut: âŒ˜/ toggles chat
 if (typeof window !== 'undefined') {
   window.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === '/') {
@@ -176,3 +176,6 @@ if (typeof window !== 'undefined') {
     }
   });
 }
+
+
+

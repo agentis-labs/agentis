@@ -1,14 +1,14 @@
-/**
- * RunOutputCard — renders the final node's output of a workflow run.
+﻿/**
+ * RunOutputCard â€” renders the final node's output of a workflow run.
  *
- * The shape rendered depends on the node kind (WORKFLOW-PAGE-REDESIGN.md §Tab 3):
- *   response     → plain text card
- *   agent_task   → agent output card (text when available, else JSON)
- *   data_write   → "wrote N records to {table}" notice
- *   scratchpad   → raw JSON inspector
- *   checkpoint   → "paused at checkpoint" notice
- *   router       → "branched to {target}" notice
- *   anything else → raw JSON code block
+ * The shape rendered depends on the node kind (WORKFLOW-PAGE-REDESIGN.md Â§Tab 3):
+ *   response     â†’ plain text card
+ *   agent_task   â†’ agent output card (text when available, else JSON)
+ *   data_write   â†’ "wrote N records to {table}" notice
+ *   scratchpad   â†’ raw JSON inspector
+ *   checkpoint   â†’ "paused at checkpoint" notice
+ *   router       â†’ "branched to {target}" notice
+ *   anything else â†’ raw JSON code block
  */
 
 import { useState } from 'react';
@@ -94,11 +94,11 @@ function humanizeLabel(value: string): string {
 }
 
 function truncateText(value: string, max = 140): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  return value.length > max ? `${value.slice(0, max - 1)}â€¦` : value;
 }
 
 function formatValue(value: unknown): string {
-  if (value == null) return '—';
+  if (value == null) return 'â€”';
   if (typeof value === 'number') return new Intl.NumberFormat().format(value);
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'string') return value;
@@ -191,7 +191,7 @@ const DEVICE_WIDTHS = { desktop: '100%', tablet: '768px', mobile: '375px' } as c
 type DeviceMode = keyof typeof DEVICE_WIDTHS;
 
 /**
- * LiveHTMLRenderer — renders HTML output in a sandboxed iframe (Layer 6).
+ * LiveHTMLRenderer â€” renders HTML output in a sandboxed iframe (Layer 6).
  * The frame is deliberately passive: generated output cannot execute script
  * or send embedded data to arbitrary network endpoints.
  */
@@ -603,3 +603,6 @@ export function RunOutputCard({ output }: { output: FinalNodeOutput }) {
     </div>
   );
 }
+
+
+

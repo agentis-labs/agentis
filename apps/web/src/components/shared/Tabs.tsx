@@ -1,5 +1,5 @@
-/**
- * Tabs — accessible tabbed navigation with sliding indicator.
+﻿/**
+ * Tabs â€” accessible tabbed navigation with sliding indicator.
  *
  * Use for in-page sub-section navigation. URL-stateful via the `param`
  * prop (writes to ?tab= search param so reloads preserve the tab).
@@ -99,3 +99,6 @@ export function Tabs<T extends string = string>({
     </div>
   );
 }
+
+
+

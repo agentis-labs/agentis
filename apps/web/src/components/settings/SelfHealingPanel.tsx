@@ -1,10 +1,4 @@
-/**
- * SelfHealingPanel — Settings → Workspace (AGENT-AUTONOMY §W7 UX).
- *
- * Lets the operator turn on autonomous, intent-preserving workflow self-healing
- * (within budget) and choose how far it may go: propose structural fixes for
- * approval (default) or apply them autonomously (harness-style bypass).
- */
+﻿
 
 import { useEffect, useState } from 'react';
 import { Wand2, Check, AlertCircle, ShieldCheck, Zap } from 'lucide-react';
@@ -50,7 +44,7 @@ export function SelfHealingPanel() {
         <div className="min-w-0 flex-1">
           <h3 className="text-heading text-text-primary">Self-fixing workflows</h3>
           <p className="mt-1 text-[12px] text-text-secondary">
-            When a step fails, an agent diagnoses why and repairs the workflow within budget —
+            When a step fails, an agent diagnoses why and repairs the workflow within budget â€”
             preserving its intent and never fabricating data. Fixing workflows by hand is a nightmare; let your agents do it.
           </p>
         </div>
@@ -83,7 +77,7 @@ export function SelfHealingPanel() {
             active={cfg.mode === 'bypass'}
             onClick={() => void save({ mode: 'bypass' })}
             title="Full bypass"
-            body="Certified, intent-preserving graph edits apply without asking, within budget — like a harness with permissions skipped."
+            body="Certified, intent-preserving graph edits apply without asking, within budget â€” like a harness with permissions skipped."
           />
 
           <div className="flex items-center justify-between pt-1">
@@ -113,7 +107,7 @@ export function SelfHealingPanel() {
             >
               <option value="">Orchestrator (default)</option>
               {agents.map((a) => (
-                <option key={a.id} value={a.id}>{a.name}{a.role ? ` · ${a.role}` : ''}</option>
+                <option key={a.id} value={a.id}>{a.name}{a.role ? ` Â· ${a.role}` : ''}</option>
               ))}
             </select>
           </div>
@@ -137,3 +131,6 @@ function ModeOption({ icon, active, onClick, title, body }: {
     </button>
   );
 }
+
+
+

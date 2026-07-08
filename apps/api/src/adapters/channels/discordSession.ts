@@ -83,7 +83,6 @@ export class DiscordSession {
     }
   }
 
-  // ── internals ───────────────────────────────────────────
 
   async #start(): Promise<void> {
     const loaded = await loadDiscord();

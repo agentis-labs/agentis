@@ -99,7 +99,6 @@ import {
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { detectStagnation, computeProgress, chooseReflection } from './pursuitControl.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { LedgerService } from '../services/ledger.js';
@@ -110,17 +109,17 @@ import type { ExtensionRuntime } from '../services/extensionRuntime.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { WorktreeManager, WorktreeHandle } from '../services/worktreeManager.js';
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
-import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
-import type { ConversationStore } from '../services/conversationStore.js';
+import type { KnowledgeBaseService } from '../services/knowledge/knowledgeBase.js';
+import type { ConversationStore } from '../services/conversation/conversationStore.js';
 import { buildIntegrationDeliveryReceipt, manifestHttpConnector, type ConnectorRegistry } from '@agentis/integrations';
-import type { WorkflowStoreService } from '../services/workflowStore.js';
-import type { WorkspaceStoreService } from '../services/workspaceStore.js';
+import type { WorkflowStoreService } from '../services/workflow/workflowStore.js';
+import type { WorkspaceStoreService } from '../services/workspace/workspaceStore.js';
 import type { EvaluationRuntime } from '../services/structuredEvaluatorRuntime.js';
 import { StructuredEvaluatorRuntime } from '../services/structuredEvaluatorRuntime.js';
 import { AdapterStructuredCompleter, FallbackStructuredCompleter, type StructuredCompleter } from '../services/structuredCompleter.js';
-import { WorkflowSelfHealService, type IntentAnchor, type RepairResourceContext, type DeepPlanArgs, type DeepPlanResult } from '../services/workflowSelfHeal.js';
+import { WorkflowSelfHealService, type IntentAnchor, type RepairResourceContext, type DeepPlanArgs, type DeepPlanResult } from '../services/workflow/workflowSelfHeal.js';
 import { getSelfHealConfig, type SelfHealConfig } from '../services/selfHealSettings.js';
-import { selfHealGuardDecision } from '../services/workflowBlueprint.js';
+import { selfHealGuardDecision } from '../services/workflow/workflowBlueprint.js';
 import {
   evaluateEvolution,
   summarizeContract,
@@ -130,46 +129,52 @@ import {
   type EvolutionRegression,
 } from '../services/atomicEvolution.js';
 import { type IntentManifest } from '../services/intentContract.js';
-import { graphContentHash, stampBuildLoop, readBuildLoop, type BuildLoopOutcomeHealth } from '../services/workflowCompass.js';
-import { readWorkflowSpec, type WorkflowSpec } from '../services/workflowSpec.js';
-import { evaluateRunVerdict, unwrapReturnEnvelope, type RunVerdict, type VerdictProbeDeps } from '../services/workflowVerdict.js';
-import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../services/workflowRecoveryPolicy.js';
-import { composeOperatingManual, getWorkspaceManual } from '../services/agentOperatingManual.js';
-import { loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../services/agentIdentity.js';
+import { graphContentHash, stampBuildLoop, readBuildLoop, type BuildLoopOutcomeHealth } from '../services/workflow/workflowCompass.js';
+import { readWorkflowSpec, type WorkflowSpec } from '../services/workflow/workflowSpec.js';
+import { evaluateRunVerdict, unwrapReturnEnvelope, type RunVerdict, type VerdictProbeDeps } from '../services/workflow/workflowVerdict.js';
+import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../services/workflow/workflowRecoveryPolicy.js';
+import { composeOperatingManual, getWorkspaceManual } from '../services/agent/agentOperatingManual.js';
+import { loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../services/agent/agentIdentity.js';
 import { parseGeneric } from '../services/evaluatorRuntime.js';
 import type { CredentialVault } from '../services/credentialVault.js';
-import type { WorkspaceIntelligenceService } from '../services/workspaceIntelligence.js';
+import type { WorkspaceIntelligenceService } from '../services/workspace/workspaceIntelligence.js';
 import type { BrowserPool } from '../services/browserPool.js';
-import type { SpecialistAgentService } from '../services/specialistAgents.js';
+import type { SpecialistAgentService } from '../services/specialist/specialistAgents.js';
 import { resolveResponsibleSpecialist } from '../services/responsibleSpecialist.js';
-import type { SpecialistProfileService } from '../services/specialistProfileService.js';
-import type { SpecialistRuntimeService } from '../services/specialistRuntimeService.js';
+import type { SpecialistProfileService } from '../services/specialist/specialistProfileService.js';
+import type { SpecialistRuntimeService } from '../services/specialist/specialistRuntimeService.js';
 import type { AuditTrailService } from '../services/auditTrail.js';
 import type { InstinctEngine } from '../services/instinctEngine.js';
-import type { AgentToolRuntime } from '../services/agentToolRuntime.js';
-import { AgentToolLoop, type StructuredLlm } from '../services/agentToolLoop.js';
+import type { AgentToolRuntime } from '../services/agent/agentToolRuntime.js';
+import { AgentToolLoop, type StructuredLlm } from '../services/agent/agentToolLoop.js';
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
-import { ChatSessionExecutor } from '../services/chatSessionExecutor.js';
-import type { AgentSessionService } from '../services/agentSession.js';
-import { estimateTokens } from '../services/agentSession.js';
-import type { AgentSessionRuntime, SessionRunContext, SessionOutcome, SessionYield } from '../services/agentSessionRuntime.js';
-import { attenuateGrant } from '../services/agentSessionRuntime.js';
+import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
+import type { AgentSessionService } from '../services/agent/agentSession.js';
+import { estimateTokens } from '../services/agent/agentSession.js';
+import type { AgentSessionRuntime, SessionRunContext, SessionOutcome, SessionYield } from '../services/agent/agentSessionRuntime.js';
+import { attenuateGrant } from '../services/agent/agentSessionRuntime.js';
 import type { PlanService } from '../services/planService.js';
-import type { AgentMemoryService } from '../services/agentMemory.js';
+import type { AgentMemoryService } from '../services/agent/agentMemory.js';
 import type { PersonalBrainService } from '../services/personalBrain.js';
 import type { FailureReflectionService } from '../services/failureReflection.js';
 import { FeynmanReflectionService, REPEAT_FAILURE_THRESHOLD, type FeynmanTrigger } from '../services/feynmanReflection.js';
-import type { SpecialistMindService } from '../services/specialistMindService.js';
-import type { EmbeddingProvider } from '../services/embeddingProvider.js';
-import { embedText as embedTextHelper } from '../services/embeddingProvider.js';
+import type { SpecialistMindService } from '../services/specialist/specialistMindService.js';
+import type { EmbeddingProvider } from '../services/embedding/embeddingProvider.js';
+import { embedText as embedTextHelper } from '../services/embedding/embeddingProvider.js';
 import type { SharedIntelligenceService } from '../services/sharedIntelligence.js';
 import type { CognitivePromotionQueueWorker } from '../services/cognitivePromotionQueueWorker.js';
-import { resolveMemoryPolicy } from '../services/memoryPolicyResolver.js';
+import { resolveMemoryPolicy } from '../services/memory/memoryPolicyResolver.js';
 import type { PeerProfileService } from '../services/peerProfileService.js';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateWorkflowGraph } from './validateGraph.js';
 import { noopTelemetry, type Telemetry } from '../telemetry/index.js';
 import { buildTemplateContext, resolveTemplate, resolveTemplateDeep, readTemplatePath, type TemplateContext } from './templateResolver.js';
+import { readDotPath } from './dotPath.js';
+import { NodeExecutorController, type NodeExecutorHost } from './executors/nodeExecutors.js';
+import { SelfHealController, type SelfHealHost } from './selfHeal/selfHealController.js';
+import { isSelfHealableNode, declaredOutputKeys, graphDiffPatch, stringValue, toolInputSchemaToChatParameters } from './selfHeal/selfHealHelpers.js';
+import { sleep, backoffMs, redactUrl, asString } from './executorHelpers.js';
+import { ConvergeLoopController, type LoopEngineHost } from './convergeLoop.js';
 import { nodeIdempotencyKey } from './idempotency.js';
 import { NodeHandlerRegistry, type PureNodeHandler } from './handlers/NodeHandler.js';
 import { registerPureNodeHandlers } from './handlers/pureHandlers.js';
@@ -177,7 +182,7 @@ import { registerUtilityNodeHandlers } from './handlers/utilityHandlers.js';
 import { evaluateExpression, evaluateBooleanExpression } from './safeExpression.js';
 import { repairExpressionReferences } from './validateExpressions.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
-import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
+import { normalizeWorkflowGraph } from '../services/workflow/workflowGraphNormalization.js';
 import { getCustomIntegrationManifest } from '../services/integrationRegistry.js';
 import { routeModelForTask } from '../services/modelRoutingPolicy.js';
 import { artifactPolicyFromUnknown } from '../services/artifactRetentionPolicy.js';
@@ -359,7 +364,7 @@ export interface SpecialistRouterPort {
   }>;
 }
 
-type SelfHealEngineResult =
+export type SelfHealEngineResult =
   | { kind: 'output_fixed'; output: Record<string, unknown> }
   | { kind: 'structural_applied' }
   | { kind: 'awaiting_approval' }
@@ -403,11 +408,58 @@ export class WorkflowEngine {
   readonly #telemetry: Telemetry;
   /** Decomposition seam (NATIVE-ADVANCEMENT Proposal 4): pure node kinds resolve here, not in the dispatch switch. */
   readonly #nodeHandlers = new NodeHandlerRegistry();
+  /** Agentic looping (loop / converge / pursue) lives in its own controller (Phase A extraction). */
+  readonly #convergeLoop: ConvergeLoopController;
+  /** Node-kind executors live in their own controller (Phase A extraction). */
+  readonly #executors: NodeExecutorController;
+  /** Self-heal / recovery subsystem in its own controller (Phase A extraction). */
+  readonly #selfHeal: SelfHealController;
 
   constructor(private readonly deps: EngineDeps) {
     this.#telemetry = deps.telemetry ?? noopTelemetry;
     registerPureNodeHandlers(this.#nodeHandlers);
     registerUtilityNodeHandlers(this.#nodeHandlers);
+    this.#convergeLoop = new ConvergeLoopController({
+      deps: this.deps,
+      startRun: (args) => this.startRun(args),
+      completeNode: (ctx, nodeId, output) => this.#completeNode(ctx, nodeId, output),
+      failNode: (ctx, nodeId, error) => this.#failNode(ctx, nodeId, error),
+      tick: (ctx) => this.#tick(ctx),
+      persistRun: (ctx) => this.#persistRun(ctx),
+      buildConditionScope: (ctx, data) => this.#buildConditionScope(ctx, data),
+      specForRun: (ctx) => this.#specForRun(ctx),
+      verdictProbeDeps: (ctx, spec) => this.#verdictProbeDeps(ctx, spec),
+      resolveEvaluationRuntime: (ctx, node, targetPath) => this.#resolveEvaluationRuntime(ctx, node, targetPath),
+      recordEvaluationTokens: (ctx, nodeId, usage, agentId) => this.#recordEvaluationTokens(ctx, nodeId, usage, agentId),
+    });
+    this.#executors = new NodeExecutorController({
+      deps: this.deps,
+      buildConditionScope: (ctx, data) => this.#buildConditionScope(ctx, data),
+      enforceSpecConstraints: (ctx, service, callRef, ...aliases) => this.#enforceSpecConstraints(ctx, service, callRef, ...aliases),
+      persistArtifact: (ctx, node, args) => this.#persistArtifact(ctx, node, args),
+      persistRun: (ctx) => this.#persistRun(ctx),
+      recordEvaluationTokens: (ctx, nodeId, usage, agentId) => this.#recordEvaluationTokens(ctx, nodeId, usage, agentId),
+      resolveEvaluationRuntime: (ctx, node, targetPath) => this.#resolveEvaluationRuntime(ctx, node, targetPath),
+    });
+    this.#selfHeal = new SelfHealController({
+      deps: this.deps,
+      debugRuns: this.#debugRuns,
+      agentConfiguredModel: (agentId) => this.#agentConfiguredModel(agentId),
+      agentHasConnectedRuntime: (agentId) => this.#agentHasConnectedRuntime(agentId),
+      agentRole: (agentId) => this.#agentRole(agentId),
+      audit: (ctx, entry) => this.#audit(ctx, entry),
+      dispatchAgentTask: (ctx, node, config, inputData) => this.#dispatchAgentTask(ctx, node, config, inputData),
+      dispatchNode: (ctx, node, item) => this.#dispatchNode(ctx, node, item),
+      emitWorkStep: (ctx, node, phase, detail) => this.#emitWorkStep(ctx, node, phase, detail),
+      failNode: (ctx, nodeId, error) => this.#failNode(ctx, nodeId, error),
+      findAgentByRole: (workspaceId, role) => this.#findAgentByRole(workspaceId, role),
+      pendingApprovals: (ctx) => this.#pendingApprovals(ctx),
+      persistRun: (ctx) => this.#persistRun(ctx),
+      resolveConnectedFallbackAgent: (workspaceId, capabilityTags, requires, preferredRole) => this.#resolveConnectedFallbackAgent(workspaceId, capabilityTags, requires, preferredRole),
+      tick: (ctx) => this.#tick(ctx),
+      applyGraphPatch: (args) => this.applyGraphPatch(args),
+      notifyAgentActivity: (args) => this.notifyAgentActivity(args),
+    });
   }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1067,8 +1119,8 @@ export class WorkflowEngine {
         case 'router': {
           const cfg = resolvedConfig as RouterNodeConfig;
           const branchOutputs = cfg.routingMode === 'llm_route'
-            ? await this.#executeRouterLlm(ctx, node, cfg, args.inputs)
-            : this.#executeRouter(ctx, cfg, args.inputs);
+            ? await this.#executors.executeRouterLlm(ctx, node, cfg, args.inputs)
+            : this.#executors.executeRouter(ctx, cfg, args.inputs);
           output = { branches: branchOutputs };
           break;
         }
@@ -1100,25 +1152,25 @@ export class WorkflowEngine {
           output = await this.#executeArtifactSave(ctx, node, resolvedConfig as ArtifactSaveNodeConfig, args.inputs);
           break;
         case 'browser':
-          output = await this.#executeBrowser(ctx, node, resolvedConfig as BrowserNodeConfig, args.inputs);
+          output = await this.#executors.executeBrowser(ctx, node, resolvedConfig as BrowserNodeConfig, args.inputs);
           break;
         case 'integration':
-          output = await this.#executeIntegration(ctx, node, resolvedConfig as IntegrationNodeConfig, args.inputs);
+          output = await this.#executors.executeIntegration(ctx, node, resolvedConfig as IntegrationNodeConfig, args.inputs);
           break;
         case 'http_request':
-          output = await this.#executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig);
+          output = await this.#executors.executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig);
           break;
         case 'workflow_store':
-          output = await this.#executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
+          output = await this.#executors.executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
           break;
         case 'workspace_store':
-          output = await this.#executeWorkspaceStore(ctx, node.config as WorkspaceStoreNodeConfig, tctx);
+          output = await this.#executors.executeWorkspaceStore(ctx, node.config as WorkspaceStoreNodeConfig, tctx);
           break;
         case 'evaluator':
           output = await this.#executeEvaluator(ctx, node, node.config as EvaluatorNodeConfig, args.inputs, tctx);
           break;
         case 'guardrails': {
-          const result = this.#executeGuardrails(node.config as GuardrailsNodeConfig, args.inputs);
+          const result = this.#executors.executeGuardrails(node.config as GuardrailsNodeConfig, args.inputs);
           if (result.shouldFail) {
             return { ok: false, error: result.message, code: 'VALIDATION_FAILED', durationMs: Date.now() - startedAt };
           }
@@ -1126,13 +1178,13 @@ export class WorkflowEngine {
           break;
         }
         case 'code':
-          output = await this.#executeCode(ctx, node, resolvedConfig as CodeNodeConfig, args.inputs, tctx);
+          output = await this.#executors.executeCode(ctx, node, resolvedConfig as CodeNodeConfig, args.inputs, tctx);
           break;
         case 'spreadsheet':
-          output = await this.#executeSpreadsheet(node, resolvedConfig as SpreadsheetNodeConfig, args.inputs);
+          output = await this.#executors.executeSpreadsheet(node, resolvedConfig as SpreadsheetNodeConfig, args.inputs);
           break;
         case 'graphql':
-          output = await this.#executeGraphQl(ctx, node, resolvedConfig as GraphQlNodeConfig);
+          output = await this.#executors.executeGraphQl(ctx, node, resolvedConfig as GraphQlNodeConfig);
           break;
         case 'stop_error': {
           const cfg = resolvedConfig as StopErrorNodeConfig;
@@ -1307,7 +1359,7 @@ export class WorkflowEngine {
       // from the agent's OWN output, or apply/queue a structural repair, before
       // failing. Only `output_fixed` continues inline; structural outcomes
       // re-dispatch or pause the node themselves.
-      const heal = node ? await this.#runSelfHeal(ctx, node, args.output, (err as Error).message) : { kind: 'none' as const };
+      const heal = node ? await this.#selfHeal.runSelfHeal(ctx, node, args.output, (err as Error).message) : { kind: 'none' as const };
       if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return;
       if (heal.kind !== 'output_fixed') {
         await this.#failNode(ctx, args.nodeId, selfHealFailureMessage((err as Error).message, heal));
@@ -1344,494 +1396,10 @@ export class WorkflowEngine {
     void this.#tick(ctx);
   }
 
-  /**
-   * W5.0 / W7 — autonomous, intent-preserving self-healing for a failed agent
-   * node. Tries to recover the declared output from the agent's OWN output
-   * (W5.0); otherwise diagnoses and (when certified + validated) applies a
-   * STRUCTURAL graph repair — autonomously or via operator approval per the
-   * workspace setting. Never fabricates; escalates on uncertainty.
-   *
-   *   output_fixed       → caller completes the node with `output`.
-   *   structural_applied → patch applied + node re-dispatched; caller returns.
-   *   awaiting_approval  → approval created + node WAITING; caller returns.
-   *   none               → no safe heal; caller fails the node honestly.
-   */
-  async #runSelfHeal(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    rawOutput: Record<string, unknown>,
-    error: string,
-  ): Promise<SelfHealEngineResult> {
-    // P1.2: a debug/test run never self-heals — surface the raw failure.
-    if (this.#debugRuns.has(ctx.runId)) return { kind: 'none' };
-    if (!this.deps.selfHeal) return { kind: 'none' };
-    if (!isSelfHealableNode(node)) return { kind: 'none' };
-    let cfg;
-    try { cfg = getSelfHealConfig(this.deps.db, ctx.workspaceId); } catch { return { kind: 'none' }; }
-    if (!cfg.enabled) return { kind: 'none' };
-    const attempts = selfHealAttemptCount(ctx, node.id);
-    if (attempts >= cfg.maxRepairPlans) {
-      return this.#blockSelfHeal(ctx, node, {
-        mode: cfg.mode,
-        attempt: attempts,
-        maxAttempts: cfg.maxRepairPlans,
-        error,
-        reason: `Self-healing stopped after ${attempts}/${cfg.maxRepairPlans} distinct repair plans for this failure lineage.`,
-        diagnosis: 'Attempt limit reached before a certified repair could be applied.',
-        exhausted: true,
-      });
-    }
-    this.#recordSelfHealIncident(ctx, node, {
-      status: 'DIAGNOSING',
-      mode: cfg.mode,
-      attempt: attempts + 1,
-      maxAttempts: cfg.maxRepairPlans,
-      error,
-    });
-    this.#emitWorkStep(ctx, node, 'thinking', 'Checking deterministic recovery options');
-    await this.#persistRun(ctx).catch(() => {});
 
-    // ── STRATEGY 1 (deterministic, zero-token): runtime repair. The most common
-    //    long-run failure is an agent whose runtime dropped or was never bound.
-    //    Rebind it, or reroute the step to the configured healer (default: the
-    //    orchestrator). Only when neither is possible do we spend tokens on LLM
-    //    diagnosis / a structural patch.
-    if (node.config.kind === 'agent_task' && isRuntimeBindingFailure(error)) {
-      const runtimeRepair = await this.#repairNodeRuntime(ctx, node, error, cfg);
-      if (runtimeRepair.kind !== 'none') return runtimeRepair;
-    }
 
-    // ── CAPABILITY-AWARE (E4): a missing capability/provider/tool/binary is not a
-    //    structural fault — swapping the agent or rewriting the graph cannot add it.
-    //    Escalate honestly with the capability to enable instead of burning LLM
-    //    replans that pointlessly reroute the agent (the sonnet→hermes loop).
-    const capGap = capabilityGapReason(error);
-    if (capGap) {
-      this.#emitWorkStep(ctx, node, 'fail', `Missing capability — ${capGap}. Enable it rather than swapping the agent.`);
-      this.#audit(ctx, { nodeId: node.id, action: 'self_heal.capability_gap', actorType: 'system', actorId: 'engine', outputSummary: capGap });
-      this.deps.logger.info('engine.self_heal.capability_gap', { runId: ctx.runId, nodeId: node.id, reason: capGap });
-      return {
-        kind: 'none',
-        reason: `This step needs a capability that isn't available — ${capGap}. Enable it (or bind a runtime/agent that provides it); rewriting or swapping the agent cannot add a missing capability`,
-        diagnosis: capGap,
-      };
-    }
 
-    // ── CONFIG-AWARE: a missing env var / working directory / credential is a
-    //    configuration gap, not a graph fault — no graph rewrite can set it. The
-    //    old classifier only caught missing binaries, so store_factory's
-    //    "requires a working directory — set AGENTIS_STORES_DIR …" fell through to
-    //    structural repair and died as "could not derive a grounded repair". Now
-    //    we escalate with the exact remedy the extension already named.
-    const cfgGap = configGapReason(error);
-    if (cfgGap) {
-      this.#emitWorkStep(ctx, node, 'fail', `Configuration gap — ${cfgGap}`);
-      this.#audit(ctx, { nodeId: node.id, action: 'self_heal.config_gap', actorType: 'system', actorId: 'engine', outputSummary: cfgGap });
-      this.deps.logger.info('engine.self_heal.config_gap', { runId: ctx.runId, nodeId: node.id, reason: cfgGap });
-      return {
-        kind: 'none',
-        reason:
-          `This step failed on missing CONFIGURATION, not a broken graph — ${cfgGap}. `
-          + `No graph edit or agent swap can supply it: set the required environment/config on the server, `
-          + `or add it to this node's config (e.g. workingDir on an extension_task), then re-run. `
-          + `Self-healing left the workflow untouched — restructuring it would only break a working graph over a config gap.`,
-        diagnosis: `config gap: ${cfgGap}`,
-      };
-    }
 
-    // ── BRAIN-BLUEPRINT-10X — the guard law, consulted BEFORE any model-driven
-    //    planning. (1) A runtime-class failure (bad model, quota, auth, spawn,
-    //    timeout) never gets graph surgery — no graph edit can fix it. (2) A graph
-    //    whose current hash is BLESSED (blueprint/hardened stamp) is never
-    //    autonomously restructured: one bad run must not vandalize a
-    //    production-proven workflow. Deterministic runtime REBINDING (strategy 1
-    //    above) already ran — this only blocks the structural path.
-    try {
-      let blueprintHash: string | null = null;
-      let hardenedHash: string | null = null;
-      if (ctx.workflowId) {
-        const wfRow = this.deps.db
-          .select({ settings: schema.workflows.settings })
-          .from(schema.workflows)
-          .where(eq(schema.workflows.id, ctx.workflowId))
-          .get();
-        const loop = readBuildLoop(wfRow?.settings);
-        blueprintHash = loop.blueprint?.graphHash ?? null;
-        hardenedHash = loop.hardened?.graphHash ?? null;
-      }
-      const guard = selfHealGuardDecision({
-        error,
-        currentGraphHash: graphContentHash(ctx.graph),
-        blueprintHash,
-        hardenedHash,
-      });
-      if (!guard.allow) {
-        this.#emitWorkStep(ctx, node, 'fail', guard.reason);
-        this.#audit(ctx, { nodeId: node.id, action: `self_heal.guard.${guard.class}`, actorType: 'system', actorId: 'engine', outputSummary: guard.reason.slice(0, 300) });
-        this.deps.logger.info('engine.self_heal.guard_blocked', { runId: ctx.runId, nodeId: node.id, class: guard.class });
-        return {
-          kind: 'none',
-          reason: guard.reason,
-          diagnosis: guard.class === 'runtime' ? 'runtime-class failure — the graph was not changed' : 'blueprint-protected graph — autonomous restructure blocked',
-        };
-      }
-    } catch { /* the guard is best-effort — a read failure must never block healing */ }
-
-    const prompt = (node.config as { prompt?: string }).prompt ?? '';
-    const completer = this.#resolveSelfHealCompleter(ctx, node, prompt, error, cfg);
-    const intent: IntentAnchor = {
-      goal: node.title || prompt || 'workflow node',
-      nodeObjective: prompt || node.title || '',
-      declaredOutputKeys: declaredOutputKeys(node),
-      inputContract: ctx.graph.inputContract,
-    };
-    this.#recordSelfHealIncident(ctx, node, {
-      status: 'PLANNING',
-      mode: cfg.mode,
-      attempt: attempts + 1,
-      maxAttempts: cfg.maxRepairPlans,
-      error,
-      diagnosis: 'Orchestrator is repairing the workflow with the chat tool loop.',
-    });
-    await this.#persistRun(ctx).catch(() => {});
-    try {
-      const res = await this.deps.selfHeal.heal({
-        workspaceId: ctx.workspaceId,
-        graph: ctx.graph,
-        node,
-        error,
-        rawOutput,
-        upstreamOutputs: this.#upstreamOutputs(ctx, node.id),
-        intent,
-        completer,
-        tier: recoveryTierForPlan(this.#repairPlansFor(ctx, node.id).length),
-        immutableNodeIds: this.#immutableRecoveryNodeIds(ctx, node.id),
-        resources: this.#availableRepairResources(ctx),
-        // FULL POWER: the orchestrator runs through the chat executor first and
-        // returns a candidate graph that still passes finalize/validate/certify.
-        deepPlan: (args) => this.#orchestratorReplan(ctx, node, args),
-        onProgress: (progress) => {
-          const detail = progress.phase === 'stalled'
-            ? 'Repair runtime stalled; falling back only to the configured route.'
-            : progress.phase === 'started'
-              ? 'Asking the selected repair runtime for a grounded plan'
-              : progress.phase === 'thinking'
-                ? 'Repair runtime is reasoning'
-                : 'Repair runtime is responding';
-          this.#emitWorkStep(ctx, node, 'thinking', detail);
-        },
-      });
-      const attempt = recordSelfHealAttempt(ctx, node.id);
-      await this.#persistRun(ctx).catch((persistErr) => {
-        this.deps.logger.warn('engine.self_heal.attempt_persist_failed', {
-          runId: ctx.runId,
-          nodeId: node.id,
-          error: (persistErr as Error).message,
-        });
-      });
-
-      if (res.outcome === 'output_fixed') {
-        this.#recordSelfHealIncident(ctx, node, {
-          status: 'APPLIED',
-          mode: cfg.mode,
-          attempt,
-          maxAttempts: cfg.maxRepairPlans,
-          diagnosis: res.diagnosis,
-          outcome: 'output_fixed',
-        });
-        this.deps.logger.info('engine.self_heal.output_fixed', { runId: ctx.runId, nodeId: node.id, attempt });
-        this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, {
-          runId: ctx.runId,
-          nodeId: node.id,
-          reason: 'self_heal_output_recovered',
-          detail: res.diagnosis,
-          attempt,
-        });
-        await this.deps.ledger.append({
-          workspaceId: ctx.workspaceId,
-          ambientId: ctx.ambientId,
-          runId: ctx.runId,
-          eventType: 'self_heal.output_fixed',
-          nodeId: node.id,
-          payload: { diagnosis: res.diagnosis, attempt },
-        }).catch(() => {});
-        this.#audit(ctx, { nodeId: node.id, action: 'self_heal.output_fixed', actorType: 'system', actorId: 'engine', outputSummary: res.diagnosis });
-        return { kind: 'output_fixed', output: res.output };
-      }
-
-      // Structural repair flows for ANY re-dispatchable node (agent_task,
-      // evaluator, transform, integration, …): #applyHealAndRedispatch /
-      // #proposeHealForApproval reset the node and re-run it through #dispatchNode,
-      // which handles every node kind uniformly.
-      if (res.outcome === 'graph_repair') {
-        const patch = this.#buildHealPatch(ctx, res.patchedGraph, res.diagnosis);
-        // Patch ids and graph revisions change on every apply; they must not
-        // defeat duplicate detection for the same semantic repair.
-        const fingerprint = repairPlanFingerprint({
-          tier: res.tier,
-          resumeNodeId: res.resumeNodeId,
-          addNodes: patch.addNodes,
-          updateNodes: patch.updateNodes,
-          removeNodeIds: patch.removeNodeIds,
-          addEdges: patch.addEdges,
-          removeEdgeIds: patch.removeEdgeIds,
-        });
-        const priorPlans = this.#repairPlansFor(ctx, node.id);
-        if (priorPlans.some((plan) => plan.fingerprint === fingerprint)) {
-          return this.#blockSelfHeal(ctx, node, {
-            mode: cfg.mode,
-            attempt,
-            maxAttempts: cfg.maxRepairPlans,
-            error,
-            reason: 'Self-healing rejected a duplicate repair plan instead of retrying the same change.',
-            diagnosis: res.diagnosis,
-          });
-        }
-        const runPlanCount = Object.values(ctx.state.selfHealIncidents ?? {}).reduce((total, incident) => total + (incident.plans?.length ?? 0), 0);
-        if (runPlanCount >= Math.max(1, cfg.maxRepairPlans) * 2) {
-          return this.#blockSelfHeal(ctx, node, {
-            mode: cfg.mode,
-            attempt,
-            maxAttempts: cfg.maxRepairPlans,
-            error,
-            reason: 'Run-level self-healing circuit breaker reached; Agentis stopped instead of cycling between failures.',
-            diagnosis: res.diagnosis,
-          });
-        }
-        const policy = decideRecoveryPolicy(cfg.mode, ctx.graph, res.patchedGraph);
-        const plan = this.#appendRepairPlan(ctx, node, {
-          tier: res.tier,
-          fingerprint,
-          requiresApproval: policy.requiresApproval,
-          patchId: patch.patchId,
-          resumeNodeId: res.resumeNodeId,
-          riskReason: policy.impact.reason,
-          status: policy.requiresApproval ? 'awaiting_approval' : 'planned',
-        });
-        if (policy.requiresApproval) {
-          const queued = await this.#proposeHealForApproval(ctx, node, patch, res.resumeNodeId, res.diagnosis, res.grounding, attempt, cfg.maxRepairPlans, policy.impact.reason, plan.id);
-          return queued
-            ? { kind: 'awaiting_approval' }
-            : await this.#blockSelfHeal(ctx, node, {
-                mode: cfg.mode,
-                attempt,
-                maxAttempts: cfg.maxRepairPlans,
-                error,
-                reason: 'Self-healing produced a guarded repair but could not create its confirmation request.',
-                diagnosis: res.diagnosis,
-              });
-        }
-        const applied = await this.#applyHealAndRedispatch(ctx, res.resumeNodeId, patch, plan.id);
-        if (!applied) {
-          return this.#blockSelfHeal(ctx, node, {
-            mode: cfg.mode,
-            attempt,
-            maxAttempts: cfg.maxRepairPlans,
-            error,
-            reason: 'Self-healing certified a graph repair, but the repair could not be applied.',
-            diagnosis: res.diagnosis,
-          });
-        }
-        this.#completeRepairPlan(ctx, node, plan.id, 'applied');
-        this.#recordSelfHealIncident(ctx, node, {
-          status: 'APPLIED', mode: cfg.mode, attempt, maxAttempts: cfg.maxRepairPlans,
-          tier: res.tier, diagnosis: res.diagnosis, reason: res.grounding,
-          riskReason: policy.impact.reason, resumeNodeId: res.resumeNodeId, outcome: 'graph_patch_applied',
-        });
-        await this.deps.ledger.append({
-          workspaceId: ctx.workspaceId, ambientId: ctx.ambientId, runId: ctx.runId,
-          eventType: 'self_heal.graph_patched', nodeId: node.id,
-          payload: { diagnosis: res.diagnosis, grounding: res.grounding, tier: res.tier, fingerprint, impact: policy.impact.impact },
-        }).catch(() => {});
-        this.#audit(ctx, { nodeId: node.id, action: 'self_heal.graph_patched', actorType: 'system', actorId: 'engine', outputSummary: res.diagnosis });
-        return { kind: 'structural_applied' };
-      }
-
-      if (res.outcome === 'escalate') {
-        this.deps.logger.info('engine.self_heal.escalate', { runId: ctx.runId, nodeId: node.id, reason: res.reason, attempt });
-        await this.deps.ledger.append({
-          workspaceId: ctx.workspaceId,
-          ambientId: ctx.ambientId,
-          runId: ctx.runId,
-          eventType: 'self_heal.escalated',
-          nodeId: node.id,
-          payload: { reason: res.reason, diagnosis: res.diagnosis, attempt },
-        }).catch(() => {});
-        this.#audit(ctx, { nodeId: node.id, action: 'self_heal.escalated', actorType: 'system', actorId: 'engine', outputSummary: `${res.reason}: ${res.diagnosis}` });
-        // The orchestrator (the primary repair, inside heal()) already had its full
-        // tool-loop turn. If it couldn't ground a safe fix, blindly re-running the
-        // same step just burns minutes (the real failure log showed exactly that).
-        // Stop honestly and offer the operator the "send to Agentis team" path.
-        return this.#blockSelfHeal(ctx, node, {
-          mode: cfg.mode,
-          attempt,
-          maxAttempts: cfg.maxRepairPlans,
-          error,
-          reason: res.reason,
-          diagnosis: res.diagnosis,
-        });
-      }
-      return { kind: 'none' };
-    } catch (err) {
-      const message = (err as Error).message;
-      this.deps.logger.warn('engine.self_heal.failed', { runId: ctx.runId, nodeId: node.id, error: message });
-      await this.deps.ledger.append({
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        runId: ctx.runId,
-        eventType: 'self_heal.failed',
-        nodeId: node.id,
-        payload: { error: message },
-      }).catch(() => {});
-      return this.#blockSelfHeal(ctx, node, {
-        mode: cfg.mode,
-        attempt: selfHealAttemptCount(ctx, node.id),
-        maxAttempts: cfg.maxRepairPlans,
-        error,
-        reason: `Self-healing failed before it could produce a certified repair: ${message}`,
-      });
-    }
-  }
-
-  /**
-   * STRATEGY 1 — deterministic runtime repair (zero LLM tokens). Handles the most
-   * common long-run failure: a step whose agent has no connected runtime. First
-   * rebind the step's own agent (no intent change at all, always safe → applied
-   * regardless of mode). If that can't be done, reroute the step to the healer
-   * (configured agent, else the orchestrator) — an intent-preserving change of
-   * executor that honours the structural mode (autonomous applies, approve asks).
-   * Returns `{ kind: 'none' }` when no runtime repair is possible, so the caller
-   * falls through to LLM diagnosis / honest escalation.
-   */
-  async #repairNodeRuntime(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    error: string,
-    cfg: SelfHealConfig,
-  ): Promise<SelfHealEngineResult> {
-    if (node.config.kind !== 'agent_task') return { kind: 'none' };
-    const config = node.config;
-    const pinnedId = config.agentId ?? null;
-
-    // 1) Rebind the step's own agent runtime — the least invasive repair.
-    if (pinnedId && this.#tryBindAgentRuntime(ctx, pinnedId, config.prompt, stringValue(config.modelOverride) ?? this.#agentConfiguredModel(pinnedId))) {
-      const attempt = recordSelfHealAttempt(ctx, node.id);
-      await this.#persistRun(ctx).catch(() => {});
-      const diagnosis = `Reconnected the runtime for "${this.#agentDisplayName(pinnedId)}" and re-ran the step.`;
-      const ok = await this.#redispatchNodeFresh(ctx, node.id, 'self_heal_runtime_rebound');
-      if (ok) {
-        this.#recordSelfHealIncident(ctx, node, {
-          status: 'APPLIED', mode: cfg.mode, attempt, maxAttempts: cfg.maxRepairPlans,
-          diagnosis, outcome: 'runtime_rebound',
-        });
-        await this.#persistRun(ctx).catch(() => {});
-        await this.deps.ledger.append({
-          workspaceId: ctx.workspaceId, ambientId: ctx.ambientId, runId: ctx.runId,
-          eventType: 'self_heal.runtime_rebound', nodeId: node.id, payload: { agentId: pinnedId, attempt },
-        }).catch(() => {});
-        this.#audit(ctx, { nodeId: node.id, action: 'self_heal.runtime_rebound', actorType: 'system', actorId: 'engine', outputSummary: diagnosis });
-        return { kind: 'structural_applied' };
-      }
-    }
-
-    // 2) Reroute the step to the healer (configured agent, else orchestrator).
-    const healerId = this.#resolveHealerExecutor(ctx, cfg, config.prompt);
-    if (healerId && healerId !== pinnedId) {
-      const attempt = recordSelfHealAttempt(ctx, node.id);
-      await this.#persistRun(ctx).catch(() => {});
-      const healerName = this.#agentDisplayName(healerId);
-      const reroutedGraph: WorkflowGraph = {
-        ...ctx.graph,
-        nodes: ctx.graph.nodes.map((n) => (n.id === node.id ? { ...n, config: { ...config, agentId: healerId } } : n)),
-      };
-      const patch = this.#buildHealPatch(ctx, reroutedGraph, 'runtime_reroute');
-      const diagnosis = `${pinnedId ? `Agent "${this.#agentDisplayName(pinnedId)}"` : 'This step\'s agent'} has no connected runtime. Re-routed the step to ${healerName} (online), preserving the task and its declared output contract.`;
-      const grounding = `runtime reroute: ${pinnedId ?? 'unbound'} → ${healerId}`;
-      const policy = decideRecoveryPolicy(cfg.mode, ctx.graph, reroutedGraph);
-      const fingerprint = repairPlanFingerprint({
-        tier: 'deterministic',
-        addNodes: patch.addNodes,
-        updateNodes: patch.updateNodes,
-        removeNodeIds: patch.removeNodeIds,
-        addEdges: patch.addEdges,
-        removeEdgeIds: patch.removeEdgeIds,
-      });
-      if (this.#repairPlansFor(ctx, node.id).some((plan) => plan.fingerprint === fingerprint)) {
-        return this.#blockSelfHeal(ctx, node, {
-          mode: cfg.mode, attempt, maxAttempts: cfg.maxRepairPlans, error,
-          reason: 'Self-healing rejected a duplicate runtime reroute instead of cycling executors.', diagnosis,
-        });
-      }
-      const plan = this.#appendRepairPlan(ctx, node, {
-        tier: 'deterministic',
-        fingerprint,
-        requiresApproval: policy.requiresApproval,
-        patchId: patch.patchId,
-        resumeNodeId: node.id,
-        riskReason: policy.impact.reason,
-        status: policy.requiresApproval ? 'awaiting_approval' : 'planned',
-      });
-      if (!policy.requiresApproval) {
-        const applied = await this.#applyHealAndRedispatch(ctx, node.id, patch, plan.id);
-        if (applied) {
-          this.#recordSelfHealIncident(ctx, node, {
-            status: 'APPLIED', mode: cfg.mode, attempt, maxAttempts: cfg.maxRepairPlans,
-            diagnosis, reason: grounding, outcome: 'runtime_rerouted',
-          });
-          await this.#persistRun(ctx).catch(() => {});
-          await this.deps.ledger.append({
-            workspaceId: ctx.workspaceId, ambientId: ctx.ambientId, runId: ctx.runId,
-            eventType: 'self_heal.runtime_rerouted', nodeId: node.id, payload: { from: pinnedId, to: healerId, attempt },
-          }).catch(() => {});
-          this.#audit(ctx, { nodeId: node.id, action: 'self_heal.runtime_rerouted', actorType: 'system', actorId: 'engine', outputSummary: diagnosis });
-          return { kind: 'structural_applied' };
-        }
-      } else {
-        const queued = await this.#proposeHealForApproval(ctx, node, patch, node.id, diagnosis, grounding, attempt, cfg.maxRepairPlans, policy.impact.reason, plan.id);
-        if (queued) return { kind: 'awaiting_approval' };
-      }
-    }
-
-    return { kind: 'none' };
-  }
-
-  /** Bind an agent's runtime if it isn't already connected. Returns true if it ends up connected. */
-  #tryBindAgentRuntime(ctx: RunningContext, agentId: string, task?: string | null, model?: string | null): boolean {
-    if (this.#agentHasConnectedRuntime(agentId)) return true;
-    try {
-      const runtime = this.deps.resolveAgentRuntime?.(ctx.workspaceId, agentId, task ?? null, model ?? null);
-      if (runtime) {
-        this.deps.adapters.register(agentId, runtime);
-        this.deps.logger.info('engine.self_heal.runtime_bound', { runId: ctx.runId, agentId, adapterType: runtime.adapterType });
-      }
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.runtime_bind_failed', { runId: ctx.runId, agentId, error: (err as Error).message });
-    }
-    return this.#agentHasConnectedRuntime(agentId);
-  }
-
-  /** The agent that backs self-healing: configured healer → orchestrator → any connected agent. Ensures a runtime. */
-  #resolveHealerExecutor(ctx: RunningContext, cfg: SelfHealConfig, task?: string | null): string | null {
-    const ready = (id: string | null | undefined): string | null =>
-      id && this.#tryBindAgentRuntime(ctx, id, task, this.#agentConfiguredModel(id)) ? id : null;
-    return ready(cfg.healerAgentId)
-      ?? ready(this.#findAgentByRole(ctx.workspaceId, 'orchestrator'))
-      ?? this.#resolveConnectedFallbackAgent(ctx.workspaceId, []);
-  }
-
-  /** Human-readable name for an agent id (falls back to role, then id). */
-  #agentDisplayName(agentId: string): string {
-    try {
-      const row = this.deps.db
-        .select({ name: schema.agents.name, role: schema.agents.role })
-        .from(schema.agents)
-        .where(eq(schema.agents.id, agentId))
-        .get();
-      return row?.name?.trim() || row?.role?.trim() || agentId;
-    } catch {
-      return agentId;
-    }
-  }
 
   /**
    * The owning App's id for a workflow, or null for a bare workflow. When an
@@ -1858,931 +1426,29 @@ export class WorkflowEngine {
   }
   readonly #appScopeCache = new Map<string, string | null>();
 
-  /** The REAL agents a repair may use, so the planner routes to something that exists. */
-  #availableRepairResources(ctx: RunningContext): RepairResourceContext {
-    try {
-      const agents = this.deps.db
-        .select({ id: schema.agents.id, role: schema.agents.role, status: schema.agents.status, capabilityTags: schema.agents.capabilityTags, isPaused: schema.agents.isPaused })
-        .from(schema.agents)
-        .where(eq(schema.agents.workspaceId, ctx.workspaceId))
-        .all()
-        .filter((a) => !a.isPaused)
-        .map((a) => ({
-          id: a.id,
-          ...(a.role ? { role: a.role } : {}),
-          status: this.#agentHasConnectedRuntime(a.id) ? 'connected' : (a.status ?? 'offline'),
-          ...(Array.isArray(a.capabilityTags) && a.capabilityTags.length > 0 ? { capabilities: a.capabilityTags as string[] } : {}),
-        }));
-      return { agents };
-    } catch {
-      return {};
-    }
-  }
 
-  /**
-   * FULL POWER (the top rung): run the orchestrator as a real agent — the SAME
-   * tool surface chat has — to replan a failed run. With the registry wired it can
-   * CREATE what's missing (new agents, extensions, abilities, workflows) and then
-   * resume; without it, it falls back to a read-only discovery loop. Either way it
-   * only RETURNS a repaired graph: the service's finalize/validate/certify gates
-   * and the engine's immutable-node/resume/policy/attempt-cap all apply unchanged,
-   * so agency never bypasses safety and it can't loop (one plan per bounded
-   * attempt; on failure it falls through to honest escalation).
-   */
-  async #orchestratorReplan(ctx: RunningContext, node: WorkflowNode, args: DeepPlanArgs): Promise<DeepPlanResult | null> {
-    let cfg: SelfHealConfig;
-    try { cfg = getSelfHealConfig(this.deps.db, ctx.workspaceId); } catch { return null; }
-    const prompt = (node.config as { prompt?: string }).prompt ?? '';
-    const healerId = this.#resolveHealerExecutor(ctx, cfg, prompt);
-    const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-    const resourceLines = (args.resources?.agents ?? [])
-      .map((a) => `- ${a.id}${a.role ? ` (${a.role})` : ''} [${a.status ?? 'unknown'}]${a.capabilities?.length ? ` caps: ${a.capabilities.join(',')}` : ''}`)
-      .join('\n');
-    // BYPASS = full autonomy. The healer is a real coding harness that ALREADY has
-    // total desktop control (shell, files, scripts — its native tools run with
-    // --dangerously-skip-permissions). In bypass mode we STOP restricting it to a
-    // "return a graph" straitjacket and let it fix the WORLD like a human engineer:
-    // set config/env, create dirs, run setup, fix credentials, repair extension
-    // source — whatever the failure needs — then resume. Guarded keeps the safe
-    // "propose a graph for approval" path.
-    const autonomous = cfg.mode === 'bypass';
-    const powerLine = autonomous
-      ? 'YOU HAVE FULL CONTROL of this machine and workspace — the same power as your own coding sessions: shell, filesystem, running scripts, editing files, installing dependencies, setting configuration and credentials — PLUS every Agentis tool (create agents/extensions/abilities/workflows, patch graphs). Fix this failed run BY ANY MEANS a human engineer would use at a terminal. Do NOT hand config/setup work back to the human and do NOT give up because "no graph edit can fix it" — if the fix lives outside the graph (a missing directory, an unset env var, a bad credential, an unbuilt project), DO IT YOURSELF, then resume.'
-      : 'Prefer the real available agents below. If a needed capability is genuinely missing, you MAY create it (a new agent, extension, ability, or workflow) with your tools. Never reference a resource you have not verified exists or created.';
-    const closingLine = autonomous
-      ? 'When the run can now succeed, resume it. If the failure was ENVIRONMENTAL (missing config/dir/credential/setup/build) and the graph LOGIC is already correct, fix the environment with your tools, then return the SAME nodes/edges UNCHANGED with resumeNodeId set to the failed node — the engine re-runs it and it now passes. If the graph LOGIC is wrong, return the corrected nodes/edges. Do not rerun or cancel the live run yourself — the engine resumes after you finish; everything else on this machine is yours to fix.'
-      : 'Do not directly patch or rerun this live run with a tool. Create missing internal resources if needed, then RETURN the candidate repaired graph. The engine will validate, certify, checkpoint, apply, and resume.';
-    const brief = [
-      autonomous
-        ? 'You are an AUTONOMOUS ENGINEER repairing a FAILED workflow run so it still achieves its goal. You have root-level power over this machine and workspace.'
-        : 'You are the orchestrator repairing a FAILED workflow run so it still achieves its goal.',
-      'Rules: change HOW, never WHAT (preserve the goal, input contract, and the meaning of declared outputs).',
-      'NEVER alter the immutable (completed/active) nodes — their work is done; reusing it is mandatory and saves tokens.',
-      'Resume from the minimal failed frontier; do not rebuild completed steps.',
-      powerLine,
-      '',
-      `GOAL: ${clip(args.intent.goal, 500)}`,
-      `DECLARED OUTPUTS (meaning immutable): ${args.intent.declaredOutputKeys.join(', ')}`,
-      `FAILING NODE: ${args.node.id}`,
-      `ERROR: ${clip(args.error, 600)}`,
-      `DIAGNOSIS: ${clip(args.diagnosis, 500)}`,
-      `IMMUTABLE NODE IDS: ${args.immutableNodeIds.join(', ') || '(none)'}`,
-      resourceLines ? `AVAILABLE AGENTS:\n${clip(resourceLines, 2000)}` : 'AVAILABLE AGENTS: (none connected)',
-      `COMPLETED UPSTREAM OUTPUTS (read-only evidence):\n${clip(JSON.stringify(args.upstreamOutputs ?? {}), 6000)}`,
-      `CURRENT NODES:\n${clip(JSON.stringify(args.graph.nodes), 9000)}`,
-      `CURRENT EDGES:\n${clip(JSON.stringify(args.graph.edges), 4000)}`,
-      '',
-      closingLine,
-      'When the workflow can succeed, finish with EXACTLY one JSON object between <agentis_self_heal_repair> tags:',
-      '<agentis_self_heal_repair>',
-      '{"nodes":[...full nodes...],"edges":[...full edges...],"resumeNodeId":"<node id to resume from>","grounding":"<one line: what you did / the evidence>","preservesIntent":true,"grounded":true,"cannotRepair":false}',
-      '</agentis_self_heal_repair>',
-      'If you genuinely cannot make it succeed, output <agentis_self_heal_repair>{"cannotRepair":true}</agentis_self_heal_repair>.',
-    ].join('\n');
-    this.#emitWorkStep(ctx, node, 'thinking', 'Orchestrator is replanning the workflow with full power');
 
-    const chatPlan = await this.#chatReplanLoop(ctx, node, healerId, brief, clip, autonomous);
-    if (chatPlan) return chatPlan;
 
-    // Fallback: read-only discovery loop when no chat-capable repair agent exists.
-    const llm = (this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'evaluation', { task: args.error, purpose: 'self_heal_replan' })
-      ?? this.deps.evaluatorRuntime
-      ?? this.#resolveSelfHealCompleter(ctx, node, prompt, args.error, cfg)) as StructuredLlm | null;
-    if (!llm) return null;
-    if (!this.deps.agentTools) return null;
-    const role = ((healerId ? this.#agentRole(healerId) : null) ?? 'orchestrator') as AgentRole;
-    const discoveryTools: AgentTool[] = ['web_search', 'read_url', 'knowledge_search', 'agent_memory_search', 'workflow_memory_read', 'run_code'];
-    try {
-      const result = await new AgentToolLoop({ runtime: this.deps.agentTools, llm, logger: this.deps.logger }).run({
-        workspaceId: ctx.workspaceId, role, task: brief, tools: discoveryTools, maxSteps: 6, workflowId: ctx.workflowId,
-        ...(healerId ? { agentId: healerId } : {}),
-        onStep: (step) => { if (step.phase === 'thinking' && step.thought) this.#emitWorkStep(ctx, node, 'thinking', clip(step.thought, 200)); },
-        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
-      });
-      return this.#parseReplanOutput(result.output);
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.replan_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
-      return null;
-    }
-  }
 
-  /** The full-power ReAct loop over the complete agent tool registry (creation included). */
-  async #chatReplanLoop(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    healerId: string | null,
-    brief: string,
-    clip: (s: string, n: number) => string,
-    autonomous: boolean,
-  ): Promise<DeepPlanResult | null> {
-    if (!healerId) return null;
-    const adapter = this.deps.adapters.get(healerId)?.adapter;
-    if (!adapter?.chat || adapter.capabilities?.().interactiveChat === false) return null;
-    const systemAddendum = (autonomous
-      ? [
-          'SELF-HEALING MODE (BYPASS / FULL AUTONOMY): you are an autonomous engineer fixing a live workflow run with root-level power.',
-          'Use ANY tool — your OWN shell/filesystem/desktop tools AND every Agentis tool — to make the run succeed. Create directories, run setup scripts, install dependencies, set environment/config, fix credentials, repair an extension\'s source, create agents/extensions/abilities/workflows, or change the graph. Do whatever a human engineer would do at a terminal.',
-          'You will NOT be asked to confirm — act. Only the final answer must be the tagged repair JSON.',
-          'Hard boundary (safety, not capability): do NOT call agentis.workflow.run, agentis.ephemeral.run, agentis.run.cancel, agentis.approval.resolve, or outbound channel-send tools — the engine resumes the run after you finish. Everything else on this machine and workspace is yours to fix.',
-          'Final response contract: reply with only <agentis_self_heal_repair>{...}</agentis_self_heal_repair>. If you fixed the ENVIRONMENT and the graph logic is correct, return the current nodes/edges UNCHANGED with resumeNodeId = the failed node.',
-        ]
-      : [
-          'SELF-HEALING MODE: you are repairing a live workflow run.',
-          'You may use ANY tool below — including creating new agents, skills, extensions, or workflows — to make the run succeed.',
-          'Use normal chat tool calls while working; only the final answer must be the tagged repair JSON.',
-          '  {"thought":"...","action":"tool","toolId":"<id>","arguments":{...}}  — to use/create with a tool',
-          '  {"thought":"...","action":"final","output":{...repair graph...}}      — when the workflow can now succeed',
-          'Hard boundary: do not call agentis.workflow.patch, agentis.workflow.run, agentis.ephemeral.run, agentis.run.cancel, agentis.approval.resolve, or outbound channel-send tools for this repair. The engine applies and observes the repair after your final graph.',
-          'Final response contract: reply with only <agentis_self_heal_repair>{...}</agentis_self_heal_repair>. No prose outside the tags.',
-        ]).join('\n');
-    let text = '';
-    let sawConfirmation = false;
-    try {
-      for await (const delta of ChatSessionExecutor.turn(adapter, [], brief, {
-        workspaceId: ctx.workspaceId,
-        agentId: healerId,
-        userId: ctx.userId,
-        conversationId: `self-heal:${ctx.runId}:${node.id}`,
-        clientTurnId: `self-heal:${ctx.runId}:${node.id}`,
-        executionMode: 'chat',
-        // BYPASS = act without asking. In auto mode a mutating tool never raises a
-        // confirmation, so the repair agent can create/set/fix freely instead of
-        // aborting the heal at the first approval prompt. Guarded stays 'ask'.
-        ...(autonomous ? { permissionMode: 'auto' as const } : {}),
-        runId: ctx.runId,
-        ambientId: ctx.ambientId,
-        viewport: {
-          surface: 'run_detail',
-          route: `/runs/${ctx.runId}`,
-          resourceId: ctx.runId,
-          resourceKind: 'run',
-          activeRunId: ctx.runId,
-          workspaceId: ctx.workspaceId,
-          ambientId: ctx.ambientId,
-        },
-        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
-      }, {
-        tools: this.#selfHealChatTools(),
-        maxTurns: 8,
-        // High backstop, not the governor — a real repair (diagnose → author fix →
-        // dry-run → verify) can take many tool steps; the old 24 clipped a
-        // legitimate heal mid-way. ChatProgressMonitor still stops true loops fast.
-        maxToolCalls: 2000,
-        systemAddendum,
-      })) {
-        if (delta.type === 'text') text += delta.delta;
-        if (delta.type === 'confirmation_required') sawConfirmation = true;
-        this.#relaySelfHealChatDelta(ctx, node, healerId, delta, clip);
-      }
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.replan_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
-      return null;
-    }
-    if (sawConfirmation) {
-      this.#emitWorkStep(ctx, node, 'thinking', 'The repair agent reached a tool confirmation; self-heal will stop instead of applying an unreviewed tool action.');
-      return null;
-    }
-    const out = this.#parseReplanOutput(text);
-    if (out) this.deps.logger.info('engine.self_heal.replan_planned', { runId: ctx.runId, nodeId: node.id, source: 'chat' });
-    return out;
-      // a chat turn — the monitor/console/canvas all read these events, so the
-  }
 
-  #relaySelfHealChatDelta(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    healerId: string,
-    delta: ChatDelta,
-    clip: (s: string, n: number) => string,
-  ): void {
-    if (delta.type === 'activity') {
-      this.#emitWorkStep(ctx, node, delta.phase === 'error' ? 'fail' : delta.phase === 'complete' ? 'complete' : 'thinking', [delta.label, delta.detail].filter(Boolean).join(' - '));
-      return;
-    }
-    if (delta.type === 'thinking') {
-      this.notifyAgentActivity({ runId: ctx.runId, agentId: healerId, taskId: node.id, kind: 'thinking', text: clip(delta.delta, 1000) });
-      return;
-    }
-    if (delta.type === 'text' && delta.delta.trim()) {
-      this.notifyAgentActivity({ runId: ctx.runId, agentId: healerId, taskId: node.id, kind: 'text', text: clip(delta.delta, 1000) });
-      return;
-    }
-    if (delta.type === 'tool_call') {
-      this.notifyAgentActivity({ runId: ctx.runId, agentId: healerId, taskId: node.id, kind: 'tool_call', tool: delta.name, toolInput: delta.args });
-      return;
-    }
-    if (delta.type === 'tool_result') {
-      this.notifyAgentActivity({ runId: ctx.runId, agentId: healerId, taskId: node.id, kind: 'tool_result', tool: delta.name, toolResult: delta.error ? { error: delta.error } : delta.result });
-      return;
-    }
-    if (delta.type === 'confirmation_required') {
-      this.#emitWorkStep(ctx, node, 'thinking', `Repair tool "${delta.toolCall.name}" needs confirmation`);
-    }
-  }
 
-  #selfHealChatTools(): ToolDefinition[] | undefined {
-    const registry = this.deps.toolRegistry;
-    if (!registry) return undefined;
-    const blocked = new Set([
-      'agentis.workflow.patch',
-      'agentis.workflow.run',
-      'agentis.ephemeral.run',
-      'agentis.run.cancel',
-      'agentis.approval.resolve',
-      'agentis.channel.send',
-    ]);
-    return registry.catalog().tools
-      .filter((tool) => !blocked.has(tool.id))
-      .map((tool) => ({
-        name: tool.id,
-        description: tool.longDescription ?? tool.description,
-        parameters: toolInputSchemaToChatParameters(tool.inputSchema),
-      }));
-  }
 
-  #parseReplanOutput(out: unknown): DeepPlanResult | null {
-    type ReplanShape = {
-      nodes?: WorkflowNode[];
-      edges?: WorkflowGraph['edges'];
-      resumeNodeId?: string;
-      grounding?: string;
-      preservesIntent?: boolean;
-      grounded?: boolean;
-      cannotRepair?: boolean;
-    };
-    let parsed: ReplanShape | null = null;
-    if (out && typeof out === 'object') parsed = out as ReplanShape;
-    else if (typeof out === 'string') {
-      const tagged = out.match(/<agentis_self_heal_repair>\s*([\s\S]*?)\s*<\/agentis_self_heal_repair>/i)?.[1] ?? out;
-      parsed = parseGeneric(tagged) as ReplanShape | null;
-    }
-    if (!parsed || parsed.cannotRepair || !Array.isArray(parsed.nodes) || parsed.nodes.length === 0) return null;
-    return {
-      nodes: parsed.nodes,
-      ...(parsed.edges ? { edges: parsed.edges } : {}),
-      ...(parsed.resumeNodeId ? { resumeNodeId: parsed.resumeNodeId } : {}),
-      ...(parsed.grounding ? { grounding: parsed.grounding } : {}),
-      ...(parsed.preservesIntent === true ? { preservesIntent: true } : {}),
-      ...(parsed.grounded === true ? { grounded: true } : {}),
-    };
-  }
 
-  /** Reset a node to PENDING and re-dispatch it through the normal path (no graph change). */
-  async #redispatchNodeFresh(ctx: RunningContext, nodeId: string, reason: string): Promise<boolean> {
-    const node = ctx.graph.nodes.find((n) => n.id === nodeId);
-    if (!node) return false;
-    const inputData = ctx.state.nodeStates[nodeId]?.inputData ?? {};
-    const ns = ctx.state.nodeStates[nodeId];
-    if (ns) ns.status = 'PENDING';
-    delete ctx.state.activeExecutions[nodeId];
-    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, { runId: ctx.runId, nodeId, reason });
-    try {
-      await this.#dispatchNode(ctx, node, { nodeId, priority: 0, insertedAt: new Date().toISOString(), inputData });
-      void this.#tick(ctx);
-      return true;
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.redispatch_failed', { runId: ctx.runId, nodeId, error: (err as Error).message });
-      return false;
-    }
-  }
 
-  /**
-   * Resolve the brain that grounds self-healing. A dedicated evaluator is best,
-   * but Agentis must not block repairs just because no evaluator model is
-   * configured: the connected orchestrator/specialists are already valid
-   * reasoning runtimes.
-   */
-  #resolveSelfHealCompleter(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    prompt: string,
-    error: string,
-    cfg: SelfHealConfig,
-  ): StructuredCompleter | null {
-    const task = prompt || error || node.title;
-    const dedicated = this.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'evaluation', {
-      task,
-      purpose: 'self_heal',
-    }) ?? this.deps.evaluatorRuntime;
-    if (dedicated && typeof (dedicated as { completeStructured?: unknown }).completeStructured === 'function') {
-      return dedicated as unknown as StructuredCompleter;
-    }
 
-    const fallbacks: StructuredCompleter[] = [];
-    for (const candidate of this.#selfHealAgentCandidates(ctx, node, cfg)) {
-      const completer = this.#adapterCompleterForSelfHealAgent(ctx, candidate.agentId, {
-        nodeId: node.id,
-        task,
-        preferredModel: candidate.preferredModel,
-        label: candidate.label,
-      });
-      if (completer) fallbacks.push(completer);
-    }
-    return fallbacks.length === 0 ? null : fallbacks.length === 1 ? (fallbacks.at(0) ?? null) : new FallbackStructuredCompleter(fallbacks);
-  }
 
-  #selfHealAgentCandidates(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    cfg: SelfHealConfig,
-  ): Array<{ agentId: string; preferredModel?: string; label: string }> {
-    const candidates: Array<{ agentId: string; preferredModel?: string; label: string }> = [];
-    const seen = new Set<string>();
-    const add = (agentId: unknown, label: string, preferredModel?: string | null) => {
-      if (typeof agentId !== 'string' || !agentId.trim() || seen.has(agentId)) return;
-      seen.add(agentId);
-      candidates.push({
-        agentId,
-        label,
-        ...(preferredModel ? { preferredModel } : {}),
-      });
-    };
 
-    const workspaceAgents = this.deps.db
-      .select({
-        id: schema.agents.id,
-        role: schema.agents.role,
-        status: schema.agents.status,
-        isPaused: schema.agents.isPaused,
-      })
-      .from(schema.agents)
-      .where(eq(schema.agents.workspaceId, ctx.workspaceId))
-      .all();
-    // Strict and inspectable: configured healer, then orchestrator. A failed
-    // repair must never silently commandeer an unrelated workspace agent.
-    if (cfg.healerAgentId) add(cfg.healerAgentId, 'self-heal configured healer');
-    const orchestrator = workspaceAgents.find((agent) => agent.role === 'orchestrator' && !agent.isPaused)
-      ?? workspaceAgents.find((agent) => agent.role === 'orchestrator');
-    if (orchestrator) add(orchestrator.id, 'self-heal orchestrator runtime');
 
-    return candidates;
-  }
 
-  #adapterCompleterForSelfHealAgent(
-    ctx: RunningContext,
-    agentId: string,
-    args: { nodeId: string; task: string; preferredModel?: string; label: string },
-  ): StructuredCompleter | null {
-    const preferredModel = args.preferredModel ?? this.#agentConfiguredModel(agentId) ?? undefined;
-    let adapter = this.deps.adapters.get(agentId)?.adapter;
-    if (!adapter) {
-      const resolved = this.deps.resolveAgentRuntime?.(ctx.workspaceId, agentId, args.task, preferredModel ?? null);
-      if (resolved) {
-        this.deps.adapters.register(agentId, resolved);
-        adapter = resolved;
-        this.deps.logger.info('engine.self_heal.runtime_bound', {
-          runId: ctx.runId,
-          nodeId: args.nodeId,
-          agentId,
-          adapterType: resolved.adapterType,
-        });
-      }
-    }
-    if (!adapter?.chat || adapter.capabilities?.().interactiveChat === false) return null;
-    this.deps.logger.info('engine.self_heal.agent_runtime', {
-      runId: ctx.runId,
-      nodeId: args.nodeId,
-      agentId,
-      adapterType: adapter.adapterType,
-      source: args.label,
-    });
-    return new AdapterStructuredCompleter(adapter, `${args.label}:${agentId}`, preferredModel);
-  }
 
-  /** Collect the outputs of nodes feeding into `nodeId` (read-only diagnosis context). */
-  #upstreamOutputs(ctx: RunningContext, nodeId: string): Record<string, unknown> {
-    const out: Record<string, unknown> = {};
-    for (const edge of ctx.graph.edges) {
-      if (edge.target !== nodeId) continue;
-      const data = ctx.state.nodeStates[edge.source]?.outputData;
-      if (data) out[edge.source] = data;
-    }
-    return out;
-  }
 
-  #repairPlansFor(ctx: RunningContext, nodeId: string) {
-    return ctx.state.selfHealIncidents?.[nodeId]?.plans ?? [];
-  }
 
-  #immutableRecoveryNodeIds(ctx: RunningContext, failedNodeId: string): string[] {
-    return Object.values(ctx.state.nodeStates)
-      .filter((state) => state.nodeId !== failedNodeId && (state.status === 'COMPLETED' || state.status === 'RUNNING'))
-      .map((state) => state.nodeId);
-  }
 
-  #appendRepairPlan(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    plan: Omit<NonNullable<WorkflowSelfHealIncident['plans']>[number], 'id' | 'createdAt'>,
-  ): NonNullable<WorkflowSelfHealIncident['plans']>[number] {
-    const now = new Date().toISOString();
-    const next = { ...plan, id: randomUUID(), createdAt: now };
-    const current = ctx.state.selfHealIncidents?.[node.id];
-    this.#recordSelfHealIncident(ctx, node, {
-      incidentId: current?.incidentId ?? node.id,
-      failureFingerprint: current?.failureFingerprint ?? recoveryFailureFingerprint(node.id, current?.error ?? ''),
-      plans: [...(current?.plans ?? []), next],
-      tier: next.tier,
-      status: 'PLANNING',
-    });
-    return next;
-  }
 
-  #completeRepairPlan(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    planId: string,
-    status: Extract<NonNullable<WorkflowSelfHealIncident['plans']>[number]['status'], 'applied' | 'rejected' | 'blocked' | 'rolled_back'>,
-    checkpointId?: string,
-  ): void {
-    const current = ctx.state.selfHealIncidents?.[node.id];
-    if (!current?.plans) return;
-    const now = new Date().toISOString();
-    this.#recordSelfHealIncident(ctx, node, {
-      plans: current.plans.map((plan) => plan.id === planId ? { ...plan, status, checkpointId: checkpointId ?? plan.checkpointId, completedAt: now } : plan),
-      checkpointId: checkpointId ?? current.checkpointId,
-    });
-  }
 
-  #recordSelfHealIncident(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    update: Partial<WorkflowSelfHealIncident>,
-  ): WorkflowSelfHealIncident {
-    const now = new Date().toISOString();
-    const current = ctx.state.selfHealIncidents?.[node.id];
-    const status = update.status ?? current?.status ?? 'DIAGNOSING';
-    const terminal = status === 'APPLIED' || status === 'BLOCKED' || status === 'EXHAUSTED';
-    const incident: WorkflowSelfHealIncident = {
-      ...current,
-      incidentId: update.incidentId ?? current?.incidentId ?? node.id,
-      nodeId: node.id,
-      nodeTitle: node.title,
-      status,
-      mode: update.mode ?? current?.mode ?? 'guarded',
-      attempt: update.attempt ?? current?.attempt ?? 0,
-      maxAttempts: update.maxAttempts ?? current?.maxAttempts ?? 0,
-      error: update.error ?? current?.error,
-      diagnosis: update.diagnosis ?? current?.diagnosis,
-      reason: update.reason ?? current?.reason,
-      tier: update.tier ?? current?.tier,
-      failureFingerprint: update.failureFingerprint ?? current?.failureFingerprint ?? recoveryFailureFingerprint(node.id, update.error ?? current?.error ?? ''),
-      plans: update.plans ?? current?.plans,
-      riskReason: update.riskReason ?? current?.riskReason,
-      approvalId: update.approvalId ?? current?.approvalId,
-      checkpointId: update.checkpointId ?? current?.checkpointId,
-      resumeNodeId: update.resumeNodeId ?? current?.resumeNodeId,
-      outcome: update.outcome ?? current?.outcome,
-      startedAt: current?.startedAt ?? now,
-      updatedAt: now,
-      ...(terminal ? { completedAt: update.completedAt ?? current?.completedAt ?? now } : {}),
-    };
-    ctx.state.selfHealIncidents = { ...(ctx.state.selfHealIncidents ?? {}), [node.id]: incident };
-    return incident;
-  }
 
-  async #blockSelfHeal(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    args: {
-      mode: WorkflowRecoveryMode;
-      attempt: number;
-      maxAttempts: number;
-      error: string;
-      reason: string;
-      diagnosis?: string;
-      exhausted?: boolean;
-    },
-  ): Promise<SelfHealEngineResult> {
-    const status = args.exhausted ? 'EXHAUSTED' : 'BLOCKED';
-    this.#recordSelfHealIncident(ctx, node, {
-      status,
-      mode: args.mode,
-      attempt: args.attempt,
-      maxAttempts: args.maxAttempts,
-      error: args.error,
-      reason: args.reason,
-      diagnosis: args.diagnosis,
-      outcome: args.exhausted ? 'exhausted' : 'blocked',
-    });
-    await this.deps.ledger.append({
-      workspaceId: ctx.workspaceId,
-      ambientId: ctx.ambientId,
-      runId: ctx.runId,
-      eventType: args.exhausted ? 'self_heal.exhausted' : 'self_heal.blocked',
-      nodeId: node.id,
-      payload: {
-        reason: args.reason,
-        diagnosis: args.diagnosis,
-        attempt: args.attempt,
-        maxAttempts: args.maxAttempts,
-      },
-    }).catch(() => {});
-    this.#audit(ctx, {
-      nodeId: node.id,
-      action: args.exhausted ? 'self_heal.exhausted' : 'self_heal.blocked',
-      actorType: 'system',
-      actorId: 'engine',
-      outputSummary: args.diagnosis ? `${args.reason}: ${args.diagnosis}` : args.reason,
-    });
-    await this.#persistRun(ctx).catch(() => {});
-    return { kind: 'none', reason: args.reason, diagnosis: args.diagnosis };
-  }
 
-  /** Turn a certified full graph into the one shared graph-patch representation. */
-  #buildHealPatch(ctx: RunningContext, patchedGraph: WorkflowGraph, reason: string): WorkflowGraphPatch {
-    void reason;
-    return graphDiffPatch(ctx.graph, patchedGraph, ctx.state.graphRevision ?? 0);
-  }
 
-  /** Apply a certified heal patch (reuses applyGraphPatch: validate+persist+revision+audit), then re-run the node. */
-  async #applyHealAndRedispatch(ctx: RunningContext, nodeId: string, patch: WorkflowGraphPatch, repairPlanId?: string): Promise<boolean> {
-    const graphBefore = ctx.graph;
-    const revisionBefore = ctx.state.graphRevision ?? 0;
-    try {
-      await this.applyGraphPatch({ runId: ctx.runId, patch });
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.apply_failed', { runId: ctx.runId, nodeId, error: (err as Error).message });
-      return false;
-    }
-    let checkpointId: string | undefined;
-    if (repairPlanId) {
-      const incident = Object.values(ctx.state.selfHealIncidents ?? {}).find((item) => item.plans?.some((plan) => plan.id === repairPlanId));
-      if (incident) {
-        checkpointId = randomUUID();
-        try {
-          await this.deps.db.insert(schema.workflowRepairCheckpoints).values({
-            id: checkpointId,
-            workspaceId: ctx.workspaceId,
-            runId: ctx.runId,
-            workflowId: ctx.workflowId || null,
-            incidentId: incident.incidentId ?? incident.nodeId,
-            planId: repairPlanId,
-            revisionBefore,
-            revisionAfter: ctx.state.graphRevision ?? revisionBefore + 1,
-            graphBefore: graphBefore as unknown as object,
-            graphAfter: ctx.graph as unknown as object,
-            patch: patch as unknown as object,
-          });
-          const incidentNode = ctx.graph.nodes.find((node) => node.id === incident.nodeId) ?? {
-            id: incident.nodeId,
-            title: incident.nodeTitle ?? incident.nodeId,
-          } as WorkflowNode;
-          this.#completeRepairPlan(ctx, incidentNode, repairPlanId, 'applied', checkpointId);
-        } catch (err) {
-          this.deps.logger.warn('engine.self_heal.checkpoint_failed', { runId: ctx.runId, repairPlanId, error: (err as Error).message });
-          return false;
-        }
-      }
-    }
-    // Reconciliation belongs beside the only repair executor. New topology gets
-    // fresh pending state, while completed/in-flight nodes were rejected by the
-    // planner before this point.
-    for (const removedNodeId of patch.removeNodeIds) {
-      const state = ctx.state.nodeStates[removedNodeId];
-      // The failed node may still be marked RUNNING while #failNode invokes
-      // recovery. Completed work is immutable; the failing execution is not.
-      if (state?.status === 'COMPLETED') return false;
-      delete ctx.state.nodeStates[removedNodeId];
-      delete ctx.state.activeExecutions[removedNodeId];
-      ctx.state.readyQueue = ctx.state.readyQueue.filter((item) => item.nodeId !== removedNodeId);
-    }
-    for (const added of patch.addNodes) {
-      ctx.state.nodeStates[added.id] ??= { nodeId: added.id, status: 'PENDING' };
-    }
-    const patched = ctx.graph.nodes.find((n) => n.id === nodeId);
-    if (!patched) return false;
-    const inputData = ctx.state.nodeStates[nodeId]?.inputData ?? {};
-    // Reset the node so it re-runs through the ORIGINAL dispatch path
-    // (#dispatchNode handles useRoleTools / session / adapter uniformly — calling
-    // #dispatchAgentTask directly would skip routing + the tool-loop branch).
-    const ns = ctx.state.nodeStates[nodeId];
-    if (ns) ns.status = 'PENDING';
-    else ctx.state.nodeStates[nodeId] = { nodeId, status: 'PENDING', inputData };
-    delete ctx.state.activeExecutions[nodeId];
-    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, { runId: ctx.runId, nodeId, reason: 'self_heal_structural' });
-    await this.#dispatchNode(ctx, patched, { nodeId, priority: 0, insertedAt: new Date().toISOString(), inputData });
-    if (repairPlanId) this.#completeRepairPlan(ctx, patched, repairPlanId, 'applied', checkpointId);
-    // Drive the settle pass — re-dispatch may originate outside the tick loop
-    // (e.g. resolveApproval), where nothing else would transition the run.
-    void this.#tick(ctx);
-    return true;
-  }
-
-  /** Queue a structural heal patch for operator approval; pause the node (W7 approve mode). */
-  async #proposeHealForApproval(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    patch: WorkflowGraphPatch,
-    resumeNodeId: string,
-    diagnosis: string,
-    grounding: string,
-    attempt: number,
-    maxAttempts: number,
-    riskReason?: string,
-    repairPlanId?: string,
-  ): Promise<boolean> {
-    try {
-      const approval = await this.deps.approvals.create({
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        userId: ctx.userId,
-        runId: ctx.runId,
-        taskId: null,
-        targetId: node.id,
-        gatewayId: null,
-        source: 'self_heal',
-        title: `Confirm outward self-healing change for "${node.title}"`,
-        summary: `${diagnosis}\n\nGrounding: ${grounding}\n\nWhy confirmation is needed: ${riskReason ?? 'The repair changes an outward or irreversible action.'}\n\nApprove to apply and resume.`,
-        confidence: null,
-        payload: {
-          kind: 'graph_patch',
-          workflowId: ctx.workflowId,
-          runId: ctx.runId,
-          nodeId: node.id,
-          nodeTitle: node.title,
-          diagnosis,
-          grounding,
-          attempt,
-          maxAttempts,
-          patch,
-          resumeNodeId,
-          riskReason,
-          repairPlanId,
-        },
-      });
-      this.#pendingApprovals(ctx).set(approval.id, {
-        kind: 'self_heal', targetId: node.id, healAction: 'graph_patch', healPatch: patch,
-        healResumeNodeId: resumeNodeId, repairPlanId,
-      });
-      const ns = ctx.state.nodeStates[node.id];
-      if (ns) ns.status = 'WAITING';
-      delete ctx.state.activeExecutions[node.id];
-      this.#recordSelfHealIncident(ctx, node, {
-        status: 'AWAITING_APPROVAL',
-        mode: 'guarded',
-        attempt,
-        maxAttempts,
-        diagnosis,
-        reason: grounding,
-        riskReason,
-        resumeNodeId,
-        approvalId: approval.id,
-        outcome: 'graph_patch_awaiting_approval',
-      });
-      await this.#persistRun(ctx);
-      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_WAITING_FOR_INPUT, {
-        runId: ctx.runId,
-        nodeId: node.id,
-        reason: 'self_heal_approval',
-        detail: diagnosis,
-        approvalId: approval.id,
-      });
-      await this.deps.ledger.append({
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        runId: ctx.runId,
-        eventType: 'self_heal.approval_requested',
-        nodeId: node.id,
-        payload: { approvalId: approval.id, diagnosis, grounding, attempt, maxAttempts },
-      }).catch(() => {});
-      this.#audit(ctx, { nodeId: node.id, action: 'self_heal.approval_requested', actorType: 'system', actorId: 'engine', outputSummary: diagnosis });
-      return true;
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.approval_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
-      return false;
-    }
-  }
-
-  async #retryWithRepairContext(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    error: string,
-    diagnosis: string,
-    attempt: number,
-    maxAttempts: number,
-    mode: WorkflowRecoveryMode = 'bypass',
-  ): Promise<boolean> {
-    if (node.config.kind !== 'agent_task') return false;
-    const inputData = ctx.state.nodeStates[node.id]?.inputData ?? {};
-    const retryConfig: AgentTaskNodeConfig = {
-      ...node.config,
-      prompt:
-        `${node.config.prompt}\n\n---\nSELF-HEALING RETRY (attempt ${attempt}/${maxAttempts}).\n` +
-        `Failure: ${error}\nDiagnosis: ${diagnosis}\n` +
-        'Repair the step while preserving the workflow intent. Do not fabricate missing source data.',
-    };
-    const retryNode: WorkflowNode = { ...node, config: retryConfig };
-    const ns = ctx.state.nodeStates[node.id];
-    if (ns) ns.status = 'PENDING';
-    delete ctx.state.activeExecutions[node.id];
-    this.#recordSelfHealIncident(ctx, node, {
-      status: 'RETRYING',
-      mode,
-      attempt,
-      maxAttempts,
-      error,
-      diagnosis,
-      outcome: 'retrying',
-    });
-    await this.#persistRun(ctx).catch(() => {});
-    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, {
-      runId: ctx.runId,
-      nodeId: node.id,
-      attempt,
-      reason: 'self_heal_retry_with_repair_context',
-    });
-    try {
-      await this.#dispatchNode(ctx, retryNode, {
-        nodeId: node.id,
-        priority: 0,
-        insertedAt: new Date().toISOString(),
-        inputData,
-      });
-      void this.#tick(ctx);
-      return true;
-    } catch (err) {
-      await this.#failNode(ctx, node.id, (err as Error).message);
-      return false;
-    }
-  }
-
-  async #proposeRetryForApproval(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    error: string,
-    diagnosis: string,
-    attempt: number,
-    maxAttempts: number,
-  ): Promise<boolean> {
-    if (node.config.kind !== 'agent_task') return false;
-    try {
-      const approval = await this.deps.approvals.create({
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        userId: ctx.userId,
-        runId: ctx.runId,
-        taskId: null,
-        targetId: node.id,
-        gatewayId: null,
-        source: 'self_heal',
-        title: `Approve self-healing retry for "${node.title}"`,
-        summary: `${diagnosis}\n\nThe agent can retry this step with the failure context attached. Approve to retry and resume.`,
-        confidence: null,
-        payload: {
-          kind: 'retry_with_repair_context',
-          workflowId: ctx.workflowId,
-          runId: ctx.runId,
-          nodeId: node.id,
-          nodeTitle: node.title,
-          error,
-          diagnosis,
-          attempt,
-          maxAttempts,
-        },
-      });
-      this.#pendingApprovals(ctx).set(approval.id, {
-        kind: 'self_heal',
-        targetId: node.id,
-        healAction: 'retry_with_repair_context',
-        retryError: error,
-        retryDiagnosis: diagnosis,
-        retryAttempt: attempt,
-        retryMaxAttempts: maxAttempts,
-      });
-      const ns = ctx.state.nodeStates[node.id];
-      if (ns) ns.status = 'WAITING';
-      delete ctx.state.activeExecutions[node.id];
-      this.#recordSelfHealIncident(ctx, node, {
-        status: 'AWAITING_APPROVAL',
-        mode: 'guarded',
-        attempt,
-        maxAttempts,
-        error,
-        diagnosis,
-        approvalId: approval.id,
-        outcome: 'retry_awaiting_approval',
-      });
-      await this.#persistRun(ctx);
-      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_WAITING_FOR_INPUT, {
-        runId: ctx.runId,
-        nodeId: node.id,
-        reason: 'self_heal_retry_approval',
-        detail: diagnosis,
-        approvalId: approval.id,
-      });
-      await this.deps.ledger.append({
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        runId: ctx.runId,
-        eventType: 'self_heal.retry_approval_requested',
-        nodeId: node.id,
-        payload: { approvalId: approval.id, diagnosis, attempt, maxAttempts },
-      }).catch(() => {});
-      this.#audit(ctx, { nodeId: node.id, action: 'self_heal.retry_approval_requested', actorType: 'system', actorId: 'engine', outputSummary: diagnosis });
-      return true;
-    } catch (err) {
-      this.deps.logger.warn('engine.self_heal.retry_approval_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
-      return false;
-    }
-  }
-
-  async #tryLegacyAgentTaskSelfHealRetry(ctx: RunningContext, node: WorkflowNode, error: string): Promise<boolean> {
-    if (node.config.kind !== 'agent_task' || !node.config.retryPolicy?.selfHeal) return false;
-    const max = node.config.retryPolicy.maxSelfHealAttempts ?? 2;
-    const attempts = selfHealAttemptCount(ctx, node.id);
-    if (attempts >= max) return false;
-    const nextAttempt = recordSelfHealAttempt(ctx, node.id);
-    await this.#persistRun(ctx).catch(() => {});
-    this.deps.logger.info('engine.self_heal.retry', {
-      runId: ctx.runId,
-      nodeId: node.id,
-      attempt: nextAttempt,
-      max,
-    });
-    this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.NODE_RETRY_SCHEDULED, {
-      runId: ctx.runId,
-      nodeId: node.id,
-      attempt: nextAttempt,
-      reason: 'self_heal',
-    });
-    const inputData = ctx.state.nodeStates[node.id]?.inputData ?? {};
-    const healConfig: AgentTaskNodeConfig = {
-      ...node.config,
-      prompt:
-        `${node.config.prompt}\n\n---\nPREVIOUS ATTEMPT FAILED (attempt ${nextAttempt}/${max}).\n` +
-        `Error: ${error}\nAnalyse the error and correct your output.`,
-    };
-    await this.#dispatchAgentTask(ctx, node, healConfig, inputData);
-    return true;
-  }
-
-  #reflectHardNodeFailure(ctx: RunningContext, node: WorkflowNode, error: string): void {
-    if (node.config.kind !== 'agent_task') return;
-    if (this.deps.failureReflection) {
-      const agentId = ctx.state.activeExecutions[node.id]?.executorRef ?? node.config.agentId;
-      if (agentId) {
-        this.deps.failureReflection.reflect({
-          workspaceId: ctx.workspaceId,
-          agentId,
-          runId: ctx.runId,
-          nodeTitle: node.title,
-          prompt: node.config.prompt,
-          error,
-        });
-      }
-    }
-
-    // Phase 4 - Feynman repair loop. We reach here when an agent_task has hard-
-    // failed (self-heal disabled or exhausted). Record the failure for cross-run
-    // counting, and enqueue a grounded reflection only when self-heal exhausted
-    // or the same node keeps failing.
-    if (this.deps.feynmanReflection && this.deps.brainQueue) {
-      try {
-        const fr = this.deps.feynmanReflection;
-        const max = node.config.retryPolicy?.maxSelfHealAttempts ?? 2;
-        const selfHealExhausted = Boolean(node.config.retryPolicy?.selfHeal)
-          && selfHealAttemptCount(ctx, node.id) >= max;
-        const agentId = ctx.state.activeExecutions[node.id]?.executorRef ?? node.config.agentId ?? null;
-        const failureCount = fr.recordFailure({
-          workspaceId: ctx.workspaceId,
-          workflowId: ctx.workflowId,
-          nodeId: node.id,
-          runId: ctx.runId,
-          agentId,
-        });
-        const trigger: FeynmanTrigger | null = selfHealExhausted
-          ? 'self_heal_exhausted'
-          : failureCount >= REPEAT_FAILURE_THRESHOLD
-            ? 'repeated_failure'
-            : null;
-        if (trigger) {
-          const inputData = ctx.state.nodeStates[node.id]?.inputData ?? null;
-          this.deps.brainQueue.enqueue({
-            workspaceId: ctx.workspaceId,
-            itemType: 'feynman_reflection',
-            priority: 'normal',
-            payload: {
-              workspaceId: ctx.workspaceId,
-              runId: ctx.runId,
-              workflowId: ctx.workflowId,
-              nodeId: node.id,
-              nodeTitle: node.title,
-              agentId,
-              scopeId: agentId,
-              prompt: node.config.prompt,
-              error,
-              observations: inputData ? JSON.stringify(inputData).slice(0, 800) : null,
-              trigger,
-            },
-          });
-          this.deps.logger.info('engine.feynman.enqueued', { runId: ctx.runId, nodeId: node.id, trigger, failureCount });
-        }
-      } catch (err) {
-        this.deps.logger.warn('engine.feynman.enqueue_failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
-      }
-    }
-  }
 
   async notifyTaskFailed(args: { runId: string; nodeId: string; error: string }): Promise<void> {
     const ctx = this.#runs.get(args.runId);
@@ -3235,8 +1901,8 @@ export class WorkflowEngine {
         id: incident.nodeId,
         title: incident.nodeTitle ?? incident.nodeId,
       } as WorkflowNode;
-      this.#completeRepairPlan(ctx, node, checkpoint.planId, 'rolled_back', checkpoint.id);
-      this.#recordSelfHealIncident(ctx, node, { status: 'ROLLED_BACK', outcome: 'rolled_back', checkpointId: checkpoint.id, reason: 'The latest self-healing repair was rolled back by the operator.' });
+      this.#selfHeal.completeRepairPlan(ctx, node, checkpoint.planId, 'rolled_back', checkpoint.id);
+      this.#selfHeal.recordSelfHealIncident(ctx, node, { status: 'ROLLED_BACK', outcome: 'rolled_back', checkpointId: checkpoint.id, reason: 'The latest self-healing repair was rolled back by the operator.' });
       await this.#persistRun(ctx);
     }
     await this.deps.ledger.append({
@@ -3648,10 +2314,10 @@ export class WorkflowEngine {
       case 'router': {
         const cfg = resolvedConfig as RouterNodeConfig;
         if (cfg.routingMode === 'llm_route') {
-          const branchOutputs = await this.#executeRouterLlm(ctx, node, cfg, item.inputData);
+          const branchOutputs = await this.#executors.executeRouterLlm(ctx, node, cfg, item.inputData);
           await this.#completeNode(ctx, node.id, { branches: branchOutputs });
         } else {
-          const branchOutputs = this.#executeRouter(ctx, cfg, item.inputData);
+          const branchOutputs = this.#executors.executeRouter(ctx, cfg, item.inputData);
           await this.#completeNode(ctx, node.id, { branches: branchOutputs });
         }
         return;
@@ -3738,13 +2404,13 @@ export class WorkflowEngine {
         return;
       }
       case 'browser': {
-        const result = await this.#executeBrowser(ctx, node, resolvedConfig as BrowserNodeConfig, item.inputData);
+        const result = await this.#executors.executeBrowser(ctx, node, resolvedConfig as BrowserNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'integration': {
         const integrationConfig = resolvedConfig as IntegrationNodeConfig;
-        const result = await this.#executeIntegration(ctx, node, integrationConfig, item.inputData);
+        const result = await this.#executors.executeIntegration(ctx, node, integrationConfig, item.inputData);
         const receipt = buildIntegrationDeliveryReceipt(
           integrationConfig.integrationId,
           integrationConfig.operationId,
@@ -3760,27 +2426,27 @@ export class WorkflowEngine {
         return;
       }
       case 'mcp': {
-        const result = await this.#executeMcp(ctx, node, resolvedConfig as McpNodeConfig);
+        const result = await this.#executors.executeMcp(ctx, node, resolvedConfig as McpNodeConfig);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'data_query': {
-        const result = this.#executeDataQuery(ctx, resolvedConfig as DataQueryNodeConfig);
+        const result = this.#executors.executeDataQuery(ctx, resolvedConfig as DataQueryNodeConfig);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'data_mutate': {
-        const result = this.#executeDataMutate(ctx, resolvedConfig as DataMutateNodeConfig);
+        const result = this.#executors.executeDataMutate(ctx, resolvedConfig as DataMutateNodeConfig);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'aggregate_window': {
-        const result = this.#executeAggregateWindow(ctx, node, resolvedConfig as AggregateWindowNodeConfig, item.inputData);
+        const result = this.#executors.executeAggregateWindow(ctx, node, resolvedConfig as AggregateWindowNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'http_request': {
-        const result = await this.#executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig, item.idempotencyKey);
+        const result = await this.#executors.executeHttpRequest(ctx, node, resolvedConfig as HttpRequestNodeConfig, item.idempotencyKey);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -3797,27 +2463,27 @@ export class WorkflowEngine {
         });
       }
       case 'code': {
-        const result = await this.#executeCode(ctx, node, resolvedConfig as CodeNodeConfig, item.inputData, tctx);
+        const result = await this.#executors.executeCode(ctx, node, resolvedConfig as CodeNodeConfig, item.inputData, tctx);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'spreadsheet': {
-        const result = await this.#executeSpreadsheet(node, resolvedConfig as SpreadsheetNodeConfig, item.inputData);
+        const result = await this.#executors.executeSpreadsheet(node, resolvedConfig as SpreadsheetNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'graphql': {
-        const result = await this.#executeGraphQl(ctx, node, resolvedConfig as GraphQlNodeConfig);
+        const result = await this.#executors.executeGraphQl(ctx, node, resolvedConfig as GraphQlNodeConfig);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'workflow_store': {
-        const result = await this.#executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
+        const result = await this.#executors.executeWorkflowStore(ctx, node.config as WorkflowStoreNodeConfig, tctx);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
       case 'workspace_store': {
-        const result = await this.#executeWorkspaceStore(ctx, node.config as WorkspaceStoreNodeConfig, tctx);
+        const result = await this.#executors.executeWorkspaceStore(ctx, node.config as WorkspaceStoreNodeConfig, tctx);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -3827,7 +2493,7 @@ export class WorkflowEngine {
         return;
       }
       case 'guardrails': {
-        const result = this.#executeGuardrails(node.config as GuardrailsNodeConfig, item.inputData);
+        const result = this.#executors.executeGuardrails(node.config as GuardrailsNodeConfig, item.inputData);
         if (result.shouldFail) {
           throw new AgentisError('VALIDATION_FAILED', result.message);
         }
@@ -4443,7 +3109,7 @@ export class WorkflowEngine {
         systemAddendum,
       })) {
         if (delta.type === 'text') text += delta.delta;
-        this.#relaySelfHealChatDelta(ctx, node, agentId, delta, clip);
+        this.#selfHeal.relaySelfHealChatDelta(ctx, node, agentId, delta, clip);
       }
     } catch (err) {
       this.deps.logger.warn('engine.agent_task.harness_loop_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
@@ -6361,67 +5027,7 @@ export class WorkflowEngine {
     return handler.execute(node.config, { inputData: item.inputData, tctx });
   }
 
-  #executeRouter(
-    ctx: RunningContext,
-    config: RouterNodeConfig,
-    inputData: Record<string, unknown>,
-  ): string[] {
-    // P0.1: real per-id `nodes` + real `trigger` (previously both aliased to
-    // `inputData`, so `nodes["other"].x` / `trigger.x` silently re-read the
-    // router's own input). Shared with edge conditions + the build validator.
-    const scope = this.#buildConditionScope(ctx, inputData);
-    const matches: string[] = [];
-    for (const branch of config.branches) {
-      if (config.routingMode === 'space_route') {
-        const targetSpace = String(inputData.spaceId ?? '');
-        if (targetSpace && branch.condition === targetSpace) {
-          matches.push(branch.branchId);
-          break;
-        }
-      } else if (evalCondition(branch.condition, scope)) {
-        matches.push(branch.branchId);
-        if (config.routingMode === 'first_match') break;
-      }
-    }
-    return matches;
-  }
 
-  /**
-   * LLM-routed router. Asks the configured evaluator-tier model to pick exactly
-   * one branch by id, given the branch labels + the current input. Falls back
-   * to `first_match` semantics if the evaluator runtime isn't wired or if the
-   * LLM response can't be parsed.
-   */
-  async #executeRouterLlm(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: RouterNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<string[]> {
-    const resolved = this.#resolveEvaluationRuntime(ctx, node);
-    const evaluator = resolved?.runtime;
-    if (!evaluator) {
-      this.deps.logger.warn('engine.router.llm_route.no_runtime', { nodeId: node.id });
-      return this.#executeRouter(ctx, { ...config, routingMode: 'first_match' }, inputData);
-    }
-    try {
-      const branchIds = config.branches.map((b) => b.branchId);
-      const decision = await evaluator.routeBranch({
-        workspaceId: ctx.workspaceId,
-        input: inputData,
-        branches: config.branches.map((b) => ({ branchId: b.branchId, label: b.label, condition: b.condition })),
-      });
-      // Meter + attribute the routing model's spend (same sink as agents/evaluators).
-      this.#recordEvaluationTokens(ctx, node.id, evaluator.lastUsage, resolved?.agentId ?? null);
-      if (decision && branchIds.includes(decision)) {
-        return [decision];
-      }
-      this.deps.logger.warn('engine.router.llm_route.bad_decision', { nodeId: node.id, decision });
-    } catch (err) {
-      this.deps.logger.warn('engine.router.llm_route.failed', { nodeId: node.id, err: (err as Error).message });
-    }
-    return this.#executeRouter(ctx, { ...config, routingMode: 'first_match' }, inputData);
-  }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // New deterministic primitives â€” wait / transform / filter
@@ -6576,152 +5182,12 @@ export class WorkflowEngine {
     return { id, name: args.name, title, type: args.type, contentType: contentTypeFor(args.name, args.type), size: args.content.length };
   }
 
-  /**
-   * Native browser node (Layer 3 Â§3.2). Renders HTML / navigates URLs via the
-   * BrowserPool (headless Chromium) and persists screenshots/PDFs as artifacts.
-   */
-  async #executeBrowser(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: BrowserNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    if (!this.deps.browserPool) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'browser node present but BrowserPool not wired');
-    }
-    const html = config.html
-      ?? (config.htmlPath ? asString(readDotPath(inputData, config.htmlPath)) : extractInputHtml(inputData));
-    const opts = {
-      url: config.url,
-      html: html || undefined,
-      selector: config.selector,
-      formData: config.formData,
-      submitSelector: config.submitSelector,
-      fullPage: config.fullPage,
-      headless: config.headless,
-      viewport: config.viewport,
-      // Bounded like http_request: an uncapped/omitted timeout must never let
-      // a browser op hold the node (and the run) open indefinitely.
-      timeout: Math.max(1, Math.min(config.timeout ?? 30_000, 120_000)),
-      // Run-scoped cancellation: Stop closes the page so in-flight Chromium
-      // work rejects immediately instead of running to its timeout.
-      ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
-    };
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `browser:${node.id}`,
-      nodeId: node.id,
-      executorType: 'browser',
-      executorRef: config.operation,
-      startedAt: new Date().toISOString(),
-    };
-    // Persist the dispatch transition so observers see the browser op in flight.
-    await this.#persistRun(ctx).catch(() => {});
-    try {
-      switch (config.operation) {
-        case 'serve_html':
-        case 'screenshot': {
-          const png = await this.deps.browserPool.screenshot(opts);
-          const name = config.artifactName ?? (config.operation === 'serve_html' ? 'page.png' : 'screenshot.png');
-          const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
-          const artifact = this.#persistArtifact(ctx, node, { name, type: 'image', content: dataUrl, savedBy: 'browser' });
-          if (config.operation === 'serve_html') {
-            // Emit both the live HTML (for a downstream return_output iframe) and
-            // the screenshot artifact card.
-            return { type: 'html', content: html ?? '', screenshot: artifact, artifactId: artifact.id };
-          }
-          return { screenshot: artifact, artifactId: artifact.id };
-        }
-        case 'pdf': {
-          const pdf = await this.deps.browserPool.pdf(opts);
-          const name = config.artifactName ?? 'document.pdf';
-          const dataUrl = `data:application/pdf;base64,${pdf.toString('base64')}`;
-          const artifact = this.#persistArtifact(ctx, node, { name, type: 'document', content: dataUrl, savedBy: 'browser' });
-          return { pdf: artifact, artifactId: artifact.id };
-        }
-        case 'navigate': {
-          const r = await this.deps.browserPool.navigate(opts);
-          return { title: r.title, text: r.text, html: r.html };
-        }
-        case 'extract_text': {
-          const text = await this.deps.browserPool.extractText(opts);
-          return { text };
-        }
-        case 'fill_form': {
-          const r = await this.deps.browserPool.fillForm(opts);
-          return { title: r.title, values: r.values, html: r.html };
-        }
-        case 'extract_table': {
-          const rows = await this.deps.browserPool.extractTable(opts);
-          return { rows, count: rows.length };
-        }
-        default:
-          throw new AgentisError('VALIDATION_FAILED', `browser: unknown operation ${(config as { operation: string }).operation}`);
-      }
-    } finally {
-      delete ctx.state.activeExecutions[node.id];
-    }
-  }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Integration / HTTP
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  async #executeIntegration(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: IntegrationNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    if (!config.integrationId) {
-      throw new AgentisError('VALIDATION_FAILED', 'integration node missing integrationId');
-    }
-    if (!config.operationId) {
-      throw new AgentisError('VALIDATION_FAILED', 'integration node missing operationId');
-    }
-    this.#enforceSpecConstraints(ctx, config.integrationId, `${config.integrationId}.${config.operationId}`);
-    const credential = this.#resolveIntegrationCredential(ctx.workspaceId, config);
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `integration:${node.id}`,
-      nodeId: node.id,
-      executorType: 'integration',
-      executorRef: `${config.integrationId}.${config.operationId}`,
-      startedAt: new Date().toISOString(),
-    };
-    try {
-      return await this.#invokeConnector(ctx.workspaceId, config.integrationId, {
-        operation: config.operationId,
-        params: config.inputs ?? {},
-        credential,
-        inputData,
-      });
-    } finally {
-      delete ctx.state.activeExecutions[node.id];
-    }
-  }
 
-  /**
-   * Invoke a connector operation, preferring a registered connector, then a
-   * workspace custom manifest, then the registry fallback. Shared by the
-   * `integration` node path and the agent-facing {@link runIntegrationOperation}
-   * so both resolve the same connector the same way.
-   */
-  async #invokeConnector(
-    workspaceId: string,
-    integrationId: string,
-    executeOptions: { operation: string; params: Record<string, unknown>; credential: Record<string, unknown> | null; inputData: Record<string, unknown> },
-  ): Promise<Record<string, unknown>> {
-    if (this.deps.connectors?.has(integrationId)) {
-      return await this.deps.connectors.execute(integrationId, executeOptions);
-    }
-    const customManifest = this.#customIntegrationManifest(workspaceId, integrationId);
-    if (customManifest) {
-      return await manifestHttpConnector(customManifest).execute(executeOptions);
-    }
-    if (!this.deps.connectors) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'integration node present but ConnectorRegistry not wired');
-    }
-    return await this.deps.connectors.execute(integrationId, executeOptions);
-  }
 
   /**
    * Run a connector operation standalone — the agent-facing analog of an
@@ -6740,12 +5206,12 @@ export class WorkflowEngine {
   ): Promise<Record<string, unknown>> {
     if (!integrationId?.trim()) throw new AgentisError('VALIDATION_FAILED', 'integrationId is required');
     if (!operationId?.trim()) throw new AgentisError('VALIDATION_FAILED', 'operationId is required');
-    const credential = this.#resolveIntegrationCredential(workspaceId, {
+    const credential = this.#executors.resolveIntegrationCredential(workspaceId, {
       integrationId,
       operationId,
       ...(opts?.credentialId ? { credentialId: opts.credentialId } : {}),
     } as IntegrationNodeConfig);
-    return this.#invokeConnector(workspaceId, integrationId, {
+    return this.#executors.invokeConnector(workspaceId, integrationId, {
       operation: operationId,
       params: params ?? {},
       credential,
@@ -6753,658 +5219,29 @@ export class WorkflowEngine {
     });
   }
 
-  /** `mcp` node — call a registered MCP server's tool via the bridge. */
-  async #executeMcp(ctx: RunningContext, node: WorkflowNode, config: McpNodeConfig): Promise<Record<string, unknown>> {
-    if (!this.deps.mcpBridge) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'mcp node present but MCP bridge not wired');
-    }
-    if (!config.toolId) {
-      throw new AgentisError('VALIDATION_FAILED', 'mcp node missing toolId');
-    }
-    // Spec constraint plane: mcp__<slug>__<tool> is in scope when the slug (or
-    // its `mcp:<slug>` form) is allowed.
-    const mcpSlug = config.toolId.match(/^mcp__([^_]+(?:_[^_]+)*?)__/u)?.[1] ?? config.toolId;
-    this.#enforceSpecConstraints(ctx, mcpSlug, config.toolId, `mcp:${mcpSlug}`);
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `mcp:${node.id}`,
-      nodeId: node.id,
-      executorType: 'integration',
-      executorRef: config.toolId,
-      startedAt: new Date().toISOString(),
-    };
-    try {
-      const result = await this.deps.mcpBridge.call(ctx.workspaceId, config.toolId, config.arguments ?? {});
-      if (!result.ok) {
-        throw new AgentisError('INTEGRATION_OPERATION_FAILED', `MCP tool ${config.toolId} failed: ${result.error ?? 'unknown error'}`);
-      }
-      return config.outputKey ? { [config.outputKey]: result.result ?? null } : { result: result.result ?? null };
-    } finally {
-      delete ctx.state.activeExecutions[node.id];
-    }
-  }
 
-  /**
-   * Resolve the App id for a data node: the node's explicit `appId`, else the
-   * App that owns the running workflow (so deterministic persist works without a
-   * build-time appId — the App is created after the workflow).
-   */
-  #resolveDataAppId(ctx: RunningContext, configAppId: string | undefined): string {
-    const appId = configAppId ?? this.deps.resolveAppIdForWorkflow?.(ctx.workspaceId, ctx.workflowId);
-    if (!appId) {
-      throw new AgentisError('VALIDATION_FAILED', 'data node requires an appId (none on the node and no owning App resolvable from the running workflow)');
-    }
-    return appId;
-  }
 
-  /** `data_query` node — read or aggregate an Agentic App datastore collection. */
-  #executeDataQuery(ctx: RunningContext, config: DataQueryNodeConfig): Record<string, unknown> {
-    if (!this.deps.appData) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'data_query node present but app datastore not wired');
-    }
-    if (!config.collection) {
-      throw new AgentisError('VALIDATION_FAILED', 'data_query node requires a collection');
-    }
-    const appId = this.#resolveDataAppId(ctx, config.appId);
-    if (config.mode === 'aggregate') {
-      if (!config.op) throw new AgentisError('VALIDATION_FAILED', 'data_query aggregate requires an op');
-      const buckets = this.deps.appData.aggregate(ctx.workspaceId, appId, config.collection, {
-        op: config.op,
-        ...(config.field ? { field: config.field } : {}),
-        ...(config.groupBy ? { groupBy: config.groupBy } : {}),
-        ...(config.filter ? { filter: config.filter } : {}),
-      });
-      return { [config.outputKey ?? 'buckets']: buckets };
-    }
-    if (config.paginate) {
-      // Follow the keyset cursor internally and return every matching row.
-      const maxRows = Math.min(Math.max(config.maxRows ?? 1000, 1), 10_000);
-      const pageSize = Math.min(config.limit && config.limit > 0 ? config.limit : 200, maxRows);
-      const all: unknown[] = [];
-      let cursor: string | undefined;
-      // Bound the page loop too (defensive against a non-advancing cursor).
-      for (let page = 0; page < 1000 && all.length < maxRows; page += 1) {
-        const res = this.deps.appData.query(ctx.workspaceId, appId, config.collection, {
-          ...(config.filter ? { filter: config.filter } : {}),
-          ...(config.sort ? { sort: config.sort } : {}),
-          limit: pageSize,
-          ...(cursor ? { cursor } : {}),
-        });
-        for (const row of res.rows) {
-          if (all.length >= maxRows) break;
-          all.push(row);
-        }
-        if (!res.nextCursor || res.rows.length === 0) break;
-        cursor = res.nextCursor;
-      }
-      return { [config.outputKey ?? 'rows']: all, count: all.length };
-    }
-    const res = this.deps.appData.query(ctx.workspaceId, appId, config.collection, {
-      ...(config.filter ? { filter: config.filter } : {}),
-      ...(config.sort ? { sort: config.sort } : {}),
-      ...(config.limit ? { limit: config.limit } : {}),
-      ...(config.cursor ? { cursor: config.cursor } : {}),
-    });
-    return { [config.outputKey ?? 'rows']: res.rows, ...(res.nextCursor ? { nextCursor: res.nextCursor } : {}) };
-  }
 
-  /** `data_mutate` node — write to an Agentic App datastore collection. */
-  #executeDataMutate(ctx: RunningContext, config: DataMutateNodeConfig): Record<string, unknown> {
-    if (!this.deps.appData) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'data_mutate node present but app datastore not wired');
-    }
-    if (!config.collection) {
-      throw new AgentisError('VALIDATION_FAILED', 'data_mutate node requires a collection');
-    }
-    const { workspaceId } = ctx;
-    const appId = this.#resolveDataAppId(ctx, config.appId);
-    switch (config.operation) {
-      case 'insert':
-        return { [config.outputKey ?? 'record']: this.deps.appData.insert(workspaceId, appId, config.collection, config.record ?? {}) };
-      case 'update': {
-        if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate update requires recordId');
-        return { [config.outputKey ?? 'record']: this.deps.appData.update(workspaceId, appId, config.collection, config.recordId, config.record ?? {}) };
-      }
-      case 'upsert':
-        return { [config.outputKey ?? 'record']: this.deps.appData.upsert(workspaceId, appId, config.collection, config.match ?? {}, config.record ?? {}) };
-      case 'delete': {
-        if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate delete requires recordId');
-        this.deps.appData.delete(workspaceId, appId, config.collection, config.recordId);
-        return { [config.outputKey ?? 'deleted']: config.recordId };
-      }
-      default:
-        throw new AgentisError('VALIDATION_FAILED', `data_mutate: unknown operation ${String(config.operation)}`);
-    }
-  }
 
-  /** `aggregate_window` node — buffer events across runs; emit a batch when the window closes. */
-  #executeAggregateWindow(ctx: RunningContext, node: WorkflowNode, config: AggregateWindowNodeConfig, inputData: Record<string, unknown>): Record<string, unknown> {
-    if (!this.deps.workflowStore) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'aggregate_window node present but workflow store not wired');
-    }
-    const { workspaceId, workflowId } = ctx;
-    const itemsKey = `__aggwin:${node.id}:${config.key ?? 'default'}`;
-    const firstAtKey = `${itemsKey}:firstAt`;
-    this.deps.workflowStore.append(workspaceId, workflowId, itemsKey, inputData);
-    const buffered = this.deps.workflowStore.get(workspaceId, workflowId, itemsKey);
-    const items = Array.isArray(buffered) ? buffered : [];
-    let firstAt = Number(this.deps.workflowStore.get(workspaceId, workflowId, firstAtKey) ?? 0);
-    if (!firstAt) {
-      firstAt = Date.now();
-      this.deps.workflowStore.set(workspaceId, workflowId, firstAtKey, firstAt);
-    }
-    const countReady = config.maxCount ? items.length >= config.maxCount : false;
-    const timeReady = config.windowMs ? Date.now() - firstAt >= config.windowMs : false;
-    if (countReady || timeReady) {
-      // Flush: reset the buffer and emit the batch downstream.
-      this.deps.workflowStore.set(workspaceId, workflowId, itemsKey, []);
-      this.deps.workflowStore.set(workspaceId, workflowId, firstAtKey, 0);
-      return { [config.outputKey ?? 'items']: items, count: items.length, ready: true };
-    }
-    // Window still open — hold: complete the node but fire NO downstream this run.
-    return { __hold: true, ready: false, buffered: items.length };
-  }
 
-  #customIntegrationManifest(workspaceId: string, service: string): ReturnType<typeof getCustomIntegrationManifest> | null {
-    try {
-      return getCustomIntegrationManifest(this.deps.db, workspaceId, service);
-    } catch (err) {
-      if (err instanceof AgentisError && err.code === 'RESOURCE_NOT_FOUND') return null;
-      throw err;
-    }
-  }
 
-  #resolveIntegrationCredential(workspaceId: string, config: IntegrationNodeConfig): Record<string, unknown> | null {
-    const explicitId = config.credentialId?.trim();
-    const row = explicitId
-      ? this.#credentialRowById(workspaceId, explicitId)
-      : this.#credentialRowForIntegration(workspaceId, config.integrationId);
-    if (!row) return null;
-    if (!this.deps.vault) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'integration credential found but CredentialVault is not wired');
-    }
-    try {
-      const decoded = this.deps.vault.decrypt(row.encryptedValue);
-      const parsed = parseJsonOrString(decoded);
-      return typeof parsed === 'object' && parsed !== null
-        ? (parsed as Record<string, unknown>)
-        : { value: decoded };
-    } catch (err) {
-      throw new AgentisError('INTEGRATION_CREDENTIAL_MISSING', `failed to decrypt credential: ${(err as Error).message}`);
-    }
-  }
 
-  #credentialRowById(workspaceId: string, credentialId: string): typeof schema.credentials.$inferSelect {
-    const row = this.deps.db
-      .select()
-      .from(schema.credentials)
-      .where(and(eq(schema.credentials.id, credentialId), eq(schema.credentials.workspaceId, workspaceId)))
-      .get();
-    if (!row) {
-      throw new AgentisError('RESOURCE_NOT_FOUND', `credential '${credentialId}' not found`);
-    }
-    return row;
-  }
 
-  #credentialRowForIntegration(workspaceId: string, integrationId: string): typeof schema.credentials.$inferSelect | null {
-    const slug = integrationId.toLowerCase();
-    const candidates = this.deps.db
-      .select()
-      .from(schema.credentials)
-      .where(eq(schema.credentials.workspaceId, workspaceId))
-      .all()
-      .filter((row) => {
-        const type = row.credentialType.toLowerCase();
-        return type === slug || type === `integration_${slug}` || type === `oauth_${slug}`;
-      });
-    return candidates.sort((left, right) => String(right.updatedAt ?? right.createdAt).localeCompare(String(left.updatedAt ?? left.createdAt)))[0] ?? null;
-  }
 
-  async #executeHttpRequest(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: HttpRequestNodeConfig,
-    idempotencyKey?: string,
-  ): Promise<Record<string, unknown>> {
-    if (!config.url) throw new AgentisError('VALIDATION_FAILED', 'http_request node missing url');
-    const requestUrl = await assertSafeUrl(config.url, {
-      allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
-    });
-    const method = (config.method ?? 'GET').toUpperCase();
-    const timeoutMs = Math.max(1, Math.min(config.timeoutMs ?? 30_000, 120_000));
-    const maxRetries = Math.max(0, Math.min(config.maxRetries ?? 0, 5));
-    const retryOn = new Set((config.retryOn ?? []).map((c) => Number(c)));
-    const headers: Record<string, string> = { ...(config.headers ?? {}) };
-    // AEJ (NATIVE-ADVANCEMENT Proposal 1): on a crash-recovery re-dispatch the
-    // node carries a stable idempotency key. Send it as a standard
-    // `Idempotency-Key` header so a request that may already have been sent
-    // before the crash is deduped server-side — turning the retry into
-    // effectively once. Never override an operator-supplied header.
-    if (idempotencyKey && !Object.keys(headers).some((h) => h.toLowerCase() === 'idempotency-key')) {
-      headers['Idempotency-Key'] = idempotencyKey;
-    }
-    if (config.auth && config.auth.type !== 'none') {
-      const credentialId = (config.auth as { credentialId?: string }).credentialId;
-      if (!credentialId) {
-        throw new AgentisError('VALIDATION_FAILED', 'http_request auth requires credentialId; inline secrets are not allowed');
-      }
-      if (!this.deps.vault) {
-        throw new AgentisError('VALIDATION_FAILED', 'http_request auth requires the credential vault');
-      }
-      const row = this.deps.db
-        .select()
-        .from(schema.credentials)
-        .where(and(eq(schema.credentials.id, credentialId), eq(schema.credentials.workspaceId, ctx.workspaceId)))
-        .get();
-      if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `credential '${credentialId}' not found`);
-      const secret = this.deps.vault.decrypt(row.encryptedValue);
-      switch (config.auth.type) {
-        case 'bearer':
-          headers['authorization'] = `Bearer ${secret}`;
-          break;
-        case 'api_key':
-          headers[config.auth.header.toLowerCase()] = secret;
-          break;
-        case 'basic':
-          headers['authorization'] = `Basic ${Buffer.from(secret).toString('base64')}`;
-          break;
-        default:
-          break;
-      }
-    }
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `http:${node.id}`,
-      nodeId: node.id,
-      executorType: 'http',
-      executorRef: `${method} ${redactUrl(requestUrl.toString())}`,
-      startedAt: new Date().toISOString(),
-    };
-    try {
-      let attempt = 0;
-      let lastError: Error | null = null;
-      while (attempt <= maxRetries) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        // Honor run-scoped cancellation: a cancelRun() aborts the outbound
-        // request instead of letting it finish after the run was cancelled.
-        const runSignal = ctx.abortController?.signal;
-        const signal = runSignal ? AbortSignal.any([controller.signal, runSignal]) : controller.signal;
-        try {
-          const res = await fetch(requestUrl, {
-            method,
-            headers,
-            body: method === 'GET' || method === 'DELETE' ? undefined : config.body,
-            signal,
-            redirect: 'manual',
-          });
-          clearTimeout(timer);
-          const text = await res.text();
-          let parsed: unknown = text;
-          if (text && res.headers.get('content-type')?.includes('json')) {
-            try {
-              parsed = JSON.parse(text);
-            } catch {
-              /* keep text */
-            }
-          }
-          if (!res.ok) {
-            if (retryOn.has(res.status) && attempt < maxRetries) {
-              attempt += 1;
-              await sleep(backoffMs(attempt));
-              continue;
-            }
-            return {
-              ok: false,
-              status: res.status,
-              body: parsed,
-            };
-          }
-          const out: Record<string, unknown> = {
-            ok: true,
-            status: res.status,
-            body: parsed,
-          };
-          if (config.responseMapping) {
-            const key = config.responseMapping.outputKey;
-            if (config.responseMapping.bodyPath) {
-              out[key] = readDotPath(parsed, config.responseMapping.bodyPath);
-            } else {
-              out[key] = parsed;
-            }
-          }
-          return out;
-        } catch (err) {
-          clearTimeout(timer);
-          lastError = err as Error;
-          if (attempt >= maxRetries) break;
-          attempt += 1;
-          await sleep(backoffMs(attempt));
-        }
-      }
-      throw new AgentisError('INTEGRATION_OPERATION_FAILED', `http_request failed: ${lastError?.message ?? 'unknown error'}`);
-    } finally {
-      delete ctx.state.activeExecutions[node.id];
-    }
-  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // Utility & data primitives — code / spreadsheet / graphql (WORKFLOW-UPDATE)
   // ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * `code` node. JavaScript runs in the engine's guarded VM realm (same sandbox
-   * as transform/filter — no Node globals, no require/import). Python is
-   * best-effort via a child `python3` process; if Python is not on PATH the node
-   * fails with a clean, actionable error.
-   */
-  async #executeCode(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: CodeNodeConfig,
-    inputData: Record<string, unknown>,
-    tctx?: TemplateContext,
-  ): Promise<Record<string, unknown>> {
-    const input = config.inputKeys && config.inputKeys.length > 0
-      ? Object.fromEntries(config.inputKeys.map((k) => [k, inputData[k]]))
-      : inputData;
-    const wrapResult = (result: unknown): Record<string, unknown> => {
-      if (config.outputKey) return { [config.outputKey]: result };
-      if (result && typeof result === 'object' && !Array.isArray(result)) return result as Record<string, unknown>;
-      return { value: result };
-    };
 
-    if (config.language === 'javascript') {
-      // Unified Expression Contract: `code` bodies get the SAME scope as
-      // transform/filter (nodes/trigger/scratchpad/store/workspace/run/loop) —
-      // previously only `input` was bound, so the other names resolved to a
-      // silent empty object.
-      const scope = tctx
-        ? {
-            trigger: tctx.trigger,
-            nodes: tctx.nodes,
-            scratchpad: tctx.scratchpad,
-            store: tctx.store,
-            ...(tctx.workspace ? { workspace: tctx.workspace } : {}),
-            ...(tctx.run ? { run: tctx.run } : {}),
-            ...(tctx.loop ? { loop: tctx.loop } : {}),
-          }
-        : undefined;
-      const result = evaluateExpression<unknown>(config.code, { input, ...(scope ? { ctx: scope } : {}) }, { timeoutMs: config.timeoutMs });
-      return wrapResult(result);
-    }
 
-    if (config.language === 'python') {
-      const result = await this.#runPython(ctx, config.code, input, config.timeoutMs);
-      return wrapResult(result);
-    }
 
-    throw new AgentisError('VALIDATION_FAILED', `code: unsupported language ${(config as { language: string }).language}`);
-  }
-
-  async #runPython(
-    ctx: RunningContext,
-    code: string,
-    input: Record<string, unknown>,
-    timeoutMs?: number,
-  ): Promise<unknown> {
-    const { spawn } = await import('node:child_process');
-    const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
-    // Cap raised to 15min so `code`(python) nodes can shell out to long-running
-    // build/deploy scripts (store-demo seed + Vercel deploy) via subprocess.
-    const timeout = Math.max(1, Math.min(timeoutMs ?? 15_000, 900_000));
-    // The user code reads `input` (a dict) and assigns `output`; we print it as JSON.
-    const program = [
-      'import sys, json',
-      'input = json.loads(sys.stdin.read())',
-      'output = None',
-      'def _main():',
-      '    global output',
-      ...code.split('\n').map((line) => `    ${line}`),
-      '_main()',
-      'sys.stdout.write(json.dumps(output))',
-    ].join('\n');
-
-    let lastErr = 'python runtime not found';
-    for (const bin of candidates) {
-      try {
-        const result = await new Promise<unknown>((resolve, reject) => {
-          const child = spawn(bin, ['-c', program], { stdio: ['pipe', 'pipe', 'pipe'] });
-          let out = '';
-          let err = '';
-          const runSignal = ctx.abortController?.signal;
-          const onAbort = () => child.kill('SIGKILL');
-          runSignal?.addEventListener('abort', onAbort, { once: true });
-          const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`python execution timed out after ${timeout}ms`)); }, timeout);
-          child.on('error', (e) => { clearTimeout(timer); reject(e); });
-          child.stdout.on('data', (d) => { out += String(d); });
-          child.stderr.on('data', (d) => { err += String(d); });
-          child.on('close', (codeNum) => {
-            clearTimeout(timer);
-            runSignal?.removeEventListener('abort', onAbort);
-            if (codeNum !== 0) { reject(new Error(err.trim() || `python exited with code ${codeNum}`)); return; }
-            try { resolve(out.trim() ? JSON.parse(out) : null); } catch { resolve(out); }
-          });
-          child.stdin.write(JSON.stringify(input));
-          child.stdin.end();
-        });
-        return result;
-      } catch (e) {
-        lastErr = (e as Error).message;
-        // ENOENT → try the next candidate; a real execution error → surface it.
-        if (!/ENOENT|not found|not recognized/i.test(lastErr)) {
-          throw new AgentisError('INTEGRATION_OPERATION_FAILED', `code (python) failed: ${lastErr}`);
-        }
-      }
-    }
-    throw new AgentisError('EXTENSION_RUNTIME_UNAVAILABLE', `code (python) requires a python interpreter on PATH: ${lastErr}`);
-  }
-
-  /** `spreadsheet` node. CSV is built-in; XLSX uses the bundled exceljs. */
-  async #executeSpreadsheet(
-    node: WorkflowNode,
-    config: SpreadsheetNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const key = config.outputKey ?? (config.operation === 'parse' ? 'rows' : 'content');
-    const source = config.inputPath ? readDotPath(inputData, config.inputPath) : inputData;
-    const hasHeaders = config.hasHeaders !== false;
-
-    if (config.operation === 'parse') {
-      if (config.format === 'csv') {
-        const rows = parseCsv(asString(source), hasHeaders);
-        return { [key]: rows };
-      }
-      // xlsx parse — source is a base64 string or Buffer.
-      const ExcelJS = (await import('exceljs')).default;
-      const wb = new ExcelJS.Workbook();
-      const buf = Buffer.isBuffer(source) ? source : Buffer.from(asString(source), 'base64');
-      await wb.xlsx.load(buf as unknown as Parameters<typeof wb.xlsx.load>[0]);
-      const ws = config.sheet ? wb.getWorksheet(config.sheet) ?? wb.worksheets[0] : wb.worksheets[0];
-      const rows = worksheetToRows(ws, hasHeaders);
-      return { [key]: rows };
-    }
-
-    // build
-    const records = Array.isArray(source) ? (source as Array<Record<string, unknown>>) : [];
-    if (config.format === 'csv') {
-      return { [key]: buildCsv(records, hasHeaders) };
-    }
-    const ExcelJS = (await import('exceljs')).default;
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet(typeof config.sheet === 'string' ? config.sheet : 'Sheet1');
-    const headers = records.length > 0 ? Object.keys(records[0]!) : [];
-    if (hasHeaders && headers.length) ws.addRow(headers);
-    for (const rec of records) ws.addRow(headers.map((h) => rec[h] as unknown));
-    const out = await wb.xlsx.writeBuffer();
-    return { [key]: Buffer.from(out).toString('base64'), encoding: 'base64' };
-  }
-
-  /** `graphql` node — POSTs a structured query to the configured endpoint. */
-  async #executeGraphQl(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: GraphQlNodeConfig,
-  ): Promise<Record<string, unknown>> {
-    if (!config.endpoint) throw new AgentisError('VALIDATION_FAILED', 'graphql node missing endpoint');
-    const endpoint = await assertSafeUrl(config.endpoint, {
-      allowPrivate: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
-    });
-    const timeoutMs = Math.max(1, Math.min(config.timeoutMs ?? 30_000, 120_000));
-    const headers: Record<string, string> = { 'content-type': 'application/json', ...(config.headers ?? {}) };
-    if (config.credentialId) {
-      if (!this.deps.vault) throw new AgentisError('VALIDATION_FAILED', 'graphql credential requires the credential vault');
-      const row = this.deps.db
-        .select()
-        .from(schema.credentials)
-        .where(and(eq(schema.credentials.id, config.credentialId), eq(schema.credentials.workspaceId, ctx.workspaceId)))
-        .get();
-      if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `credential '${config.credentialId}' not found`);
-      headers['authorization'] = `Bearer ${this.deps.vault.decrypt(row.encryptedValue)}`;
-    }
-    const variables: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(config.variables ?? {})) variables[k] = coerceJson(v);
-
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `graphql:${node.id}`,
-      nodeId: node.id,
-      executorType: 'http',
-      executorRef: `GraphQL ${redactUrl(endpoint.toString())}`,
-      startedAt: new Date().toISOString(),
-    };
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const runSignal = ctx.abortController?.signal;
-    const signal = runSignal ? AbortSignal.any([controller.signal, runSignal]) : controller.signal;
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ query: config.query, variables }),
-        signal,
-        redirect: 'manual',
-      });
-      const text = await res.text();
-      let body: unknown = text;
-      try { body = JSON.parse(text); } catch { /* keep text */ }
-      const errors = (body as { errors?: unknown[] })?.errors;
-      if (!res.ok || (Array.isArray(errors) && errors.length > 0)) {
-        throw new AgentisError('INTEGRATION_OPERATION_FAILED', `graphql request failed (status ${res.status}): ${JSON.stringify(errors ?? body).slice(0, 500)}`);
-      }
-      const data = (body as { data?: unknown })?.data ?? body;
-      return config.outputKey ? { [config.outputKey]: data } : { data, ok: true, status: res.status };
-    } catch (err) {
-      if (err instanceof AgentisError) throw err;
-      throw new AgentisError('INTEGRATION_OPERATION_FAILED', `graphql request failed: ${(err as Error).message}`);
-    } finally {
-      clearTimeout(timer);
-      delete ctx.state.activeExecutions[node.id];
-    }
-  }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Workflow-scoped persistent KV
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  async #executeWorkflowStore(
-    ctx: RunningContext,
-    config: WorkflowStoreNodeConfig,
-    tctx: TemplateContext,
-  ): Promise<Record<string, unknown>> {
-    if (!this.deps.workflowStore) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'workflow_store node present but WorkflowStoreService not wired');
-    }
-    if (!ctx.workflowId) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'workflow_store node requires a persistent workflow id (ephemeral runs are not supported)');
-    }
-    const out: Record<string, unknown> = {};
-    for (const op of config.operations ?? []) {
-      const key = op.key ? resolveTemplate(op.key, tctx) : undefined;
-      const outKey = op.outputKey ?? key ?? op.op;
-      switch (op.op) {
-        case 'get': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.get requires a key');
-          out[outKey] = this.deps.workflowStore.get(ctx.workspaceId, ctx.workflowId, key);
-          break;
-        }
-        case 'set': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.set requires a key');
-          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
-          out[outKey] = this.deps.workflowStore.set(ctx.workspaceId, ctx.workflowId, key, value);
-          break;
-        }
-        case 'delete': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.delete requires a key');
-          out[outKey] = this.deps.workflowStore.delete(ctx.workspaceId, ctx.workflowId, key);
-          break;
-        }
-        case 'increment': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.increment requires a key');
-          out[outKey] = this.deps.workflowStore.increment(ctx.workspaceId, ctx.workflowId, key, op.incrementBy ?? 1);
-          break;
-        }
-        case 'append': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workflow_store.append requires a key');
-          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
-          out[outKey] = this.deps.workflowStore.append(ctx.workspaceId, ctx.workflowId, key, value);
-          break;
-        }
-        case 'get_all': {
-          out[outKey] = this.deps.workflowStore.snapshot(ctx.workspaceId, ctx.workflowId);
-          break;
-        }
-        default:
-          throw new AgentisError('VALIDATION_FAILED', `workflow_store: unknown op ${(op as { op: string }).op}`);
-      }
-    }
-    return out;
-  }
 
-  async #executeWorkspaceStore(
-    ctx: RunningContext,
-    config: WorkspaceStoreNodeConfig,
-    tctx: TemplateContext,
-  ): Promise<Record<string, unknown>> {
-    if (!this.deps.workspaceStore) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'workspace_store node present but WorkspaceStoreService not wired');
-    }
-    const ws = ctx.workspaceId;
-    const out: Record<string, unknown> = {};
-    for (const op of config.operations ?? []) {
-      const key = op.key ? resolveTemplate(op.key, tctx) : undefined;
-      const outKey = op.outputKey ?? key ?? op.op;
-      switch (op.op) {
-        case 'get':
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.get requires a key');
-          out[outKey] = this.deps.workspaceStore.get(ws, key);
-          break;
-        case 'set': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.set requires a key');
-          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
-          out[outKey] = this.deps.workspaceStore.set(ws, key, value);
-          break;
-        }
-        case 'delete':
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.delete requires a key');
-          out[outKey] = this.deps.workspaceStore.delete(ws, key);
-          break;
-        case 'increment':
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.increment requires a key');
-          out[outKey] = this.deps.workspaceStore.increment(ws, key, op.incrementBy ?? 1);
-          break;
-        case 'append': {
-          if (!key) throw new AgentisError('VALIDATION_FAILED', 'workspace_store.append requires a key');
-          const value = op.value !== undefined ? parseJsonOrString(resolveTemplate(op.value, tctx)) : undefined;
-          out[outKey] = this.deps.workspaceStore.append(ws, key, value);
-          break;
-        }
-        case 'get_all':
-          out[outKey] = this.deps.workspaceStore.snapshot(ws);
-          break;
-        default:
-          throw new AgentisError('VALIDATION_FAILED', `workspace_store: unknown op ${(op as { op: string }).op}`);
-      }
-    }
-    return out;
-  }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Evaluator / Guardrails
@@ -7584,29 +5421,6 @@ export class WorkflowEngine {
     return candidates;
   }
 
-  #executeGuardrails(
-    config: GuardrailsNodeConfig,
-    inputData: Record<string, unknown>,
-  ): { shouldFail: boolean; message: string; output: Record<string, unknown> } {
-    const violations: Array<{ rule: string; target: string; message: string }> = [];
-    for (const rule of config.rules ?? []) {
-      const value = readDotPath(inputData, rule.target);
-      const ok = checkGuardrail(rule.type, value, rule);
-      if (!ok) {
-        violations.push({
-          rule: rule.type,
-          target: rule.target,
-          message: rule.message ?? `guardrail '${rule.type}' failed for '${rule.target}'`,
-        });
-      }
-    }
-    const block = (config.onViolation ?? 'block') === 'block' && violations.length > 0;
-    return {
-      shouldFail: block,
-      message: violations.map((v) => v.message).join('; ') || 'guardrails violated',
-      output: { ...inputData, guardrailViolations: violations },
-    };
-  }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Loop
@@ -7619,724 +5433,18 @@ export class WorkflowEngine {
     inputData: Record<string, unknown>,
     tctx: TemplateContext,
   ): Promise<void> {
-    if (!this.deps.subflows) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'loop node present but SubflowExecutor not wired');
-    }
-    if (!config.bodyWorkflowId) {
-      throw new AgentisError('VALIDATION_FAILED', 'loop node missing bodyWorkflowId');
-    }
-    // Resolve items array â€” accept either a `{{path}}` template or a raw dot path.
-    let items: unknown;
-    if (config.itemsExpression?.includes('{{')) {
-      // Stringified pass â€” we need typed access, so read the path directly.
-      const stripped = config.itemsExpression.replace(/^\{\{\s*|\s*\}\}$/g, '');
-      items = readTemplatePath(tctx, stripped);
-    } else if (config.itemsExpression) {
-      items = readTemplatePath(tctx, config.itemsExpression) ?? readDotPath(inputData, config.itemsExpression);
-    }
-    if (!Array.isArray(items)) {
-      throw new AgentisError('VALIDATION_FAILED', `loop.itemsExpression did not resolve to an array (got ${typeof items})`);
-    }
-    if (items.length === 0) {
-      await this.#completeNode(ctx, node.id, { [config.outputArrayKey]: [], count: 0 });
-      return;
-    }
-    const concurrency = Math.max(1, Math.min(config.maxConcurrency ?? 1, 32));
-    const chunkSize = Math.max(1, config.chunkSize ?? items.length);
-    const errorPolicy = config.onIterationError ?? 'stop_all';
-
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `loop:${node.id}`,
-      nodeId: node.id,
-      executorType: 'loop',
-      executorRef: `${items.length} items, c=${concurrency}, chunk=${chunkSize}`,
-      startedAt: new Date().toISOString(),
-    };
-    // Persist the dispatch transition so observers see the loop in flight
-    // (same staleness class as agent_task/wait).
-    await this.#persistRun(ctx).catch(() => {});
-
-    // Run loop fully async; complete/fail the node once all chunks settle.
-    void this.#runLoop(ctx, node, config, items, concurrency, chunkSize, errorPolicy)
-      .catch((err) => {
-        delete ctx.state.activeExecutions[node.id];
-        void this.#failNode(ctx, node.id, (err as Error).message);
-        void this.#tick(ctx);
-      });
+    return this.#convergeLoop.dispatchLoop(ctx, node, config, inputData, tctx);
   }
-
-  async #runLoop(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: LoopNodeConfig,
-    items: unknown[],
-    concurrency: number,
-    chunkSize: number,
-    errorPolicy: 'stop_all' | 'continue' | 'collect_errors',
-  ): Promise<void> {
-    const results: unknown[] = new Array(items.length);
-    const errors: Array<{ index: number; message: string }> = [];
-
-    // Durable / idempotent resume (masterplan 1.4): crash recovery re-dispatches
-    // an interrupted loop node, so we persist each iteration's result and SKIP it
-    // on re-run — side effects fire at most once per iteration instead of the
-    // whole loop replaying. `_loopState` is the persisted completed/failed map.
-    const priorState = (ctx.state.nodeStates[node.id]?.outputData?._loopState ?? {}) as {
-      completed?: Record<string, unknown>;
-      failed?: Record<string, string>;
-    };
-    const completedMap: Record<string, unknown> = { ...(priorState.completed ?? {}) };
-    const failedMap: Record<string, string> = { ...(priorState.failed ?? {}) };
-    for (const [idx, value] of Object.entries(completedMap)) results[Number(idx)] = value;
-    for (const [idx, message] of Object.entries(failedMap)) errors.push({ index: Number(idx), message });
-
-    const persistLoopState = async (chunkEnd: number): Promise<void> => {
-      const loopNs = ctx.state.nodeStates[node.id];
-      if (!loopNs) return;
-      loopNs.outputData = {
-        ...(loopNs.outputData ?? {}),
-        _loopState: { completed: completedMap, failed: failedMap },
-        _loopProgress: { completed: chunkEnd, total: items.length, errors: errors.length },
-      };
-      await this.#persistRun(ctx);
-    };
-
-    for (let chunkStart = 0; chunkStart < items.length; chunkStart += chunkSize) {
-      const chunkEnd = Math.min(chunkStart + chunkSize, items.length);
-      const chunkIndexes: number[] = [];
-      for (let i = chunkStart; i < chunkEnd; i += 1) chunkIndexes.push(i);
-
-      // Process this chunk with bounded concurrency.
-      const pool: Array<Promise<void>> = [];
-      const next = (async () => {
-        let cursor = 0;
-        const runOne = async (i: number): Promise<void> => {
-          // Already settled on a prior attempt — reuse the persisted outcome.
-          if (Object.prototype.hasOwnProperty.call(completedMap, String(i)) || Object.prototype.hasOwnProperty.call(failedMap, String(i))) {
-            return;
-          }
-          try {
-            const itemOutput = await this.#runLoopIteration(ctx, node, config, items[i], i);
-            results[i] = itemOutput;
-            completedMap[String(i)] = itemOutput;
-          } catch (err) {
-            const message = (err as Error).message;
-            errors.push({ index: i, message });
-            failedMap[String(i)] = message;
-            if (errorPolicy === 'stop_all') throw err;
-          }
-        };
-        const workers: Array<Promise<void>> = [];
-        const launch = async (): Promise<void> => {
-          while (cursor < chunkIndexes.length) {
-            const my = chunkIndexes[cursor++]!;
-            await runOne(my);
-          }
-        };
-        for (let w = 0; w < Math.min(concurrency, chunkIndexes.length); w += 1) {
-          workers.push(launch());
-        }
-        await Promise.all(workers);
-      })();
-      pool.push(next);
-
-      try {
-        await Promise.all(pool);
-      } catch (err) {
-        // stop_all: bubble up (persist what completed so a resume skips it).
-        delete ctx.state.activeExecutions[node.id];
-        await persistLoopState(chunkEnd);
-        await this.#failNode(ctx, node.id, `loop aborted on item ${errors.at(-1)?.index ?? '?'}: ${(err as Error).message}`);
-        void this.#tick(ctx);
-        return;
-      }
-
-      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.LOOP_PROGRESS, {
-        runId: ctx.runId,
-        nodeId: node.id,
-        completed: chunkEnd,
-        total: items.length,
-        errors: errors.length,
-      });
-
-      // Persist per-chunk so a crash-recovery re-dispatch resumes from here
-      // (skipping completed iterations) instead of replaying the whole loop.
-      await persistLoopState(chunkEnd);
-    }
-
-    delete ctx.state.activeExecutions[node.id];
-    const output: Record<string, unknown> = {
-      [config.outputArrayKey]: results,
-      count: items.length,
-    };
-    if (errorPolicy === 'collect_errors' && errors.length > 0) {
-      output['errors'] = errors;
-    }
-    await this.#completeNode(ctx, node.id, output);
-    void this.#tick(ctx);
-  }
-
-  /**
-   * Run a single loop iteration by delegating to SubflowExecutor.
-   * Returns the child run's final output map.
-   */
-  async #runLoopIteration(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: LoopNodeConfig,
-    item: unknown,
-    index: number,
-  ): Promise<Record<string, unknown>> {
-    return new Promise((resolve, reject) => {
-      void this.deps.subflows!.start({
-        parentRunId: ctx.runId,
-        parentNodeId: `${node.id}:item:${index}`,
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        userId: ctx.userId,
-        childWorkflowId: config.bodyWorkflowId,
-        inputs: { loop: { item, index } },
-        resumeParent: async (output) => resolve(output ?? {}),
-        failParent: async (msg) => reject(new Error(msg)),
-        startChildRun: async (childArgs) => {
-          const handle = await this.startRun(childArgs);
-          return { runId: handle.runId };
-        },
-      });
-    });
-  }
-
-  // ───────────────────────────────────────────────────────────────────────
-  // Convergence loop (`converge`) — AGENT-COOPERATION-10X §Pillar 1.
-  // Iterate a cohort sub-graph until a continuation policy says stop. Stateful
-  // across iterations via the blackboard, owns one isolated worktree for the
-  // whole cohort (§Pillar 3), and stops on goal / stall / budget / ceiling with
-  // an honest terminal verdict. No graph cycle — the body subflow is re-invoked.
-  // ───────────────────────────────────────────────────────────────────────
 
   async #dispatchConverge(
     ctx: RunningContext,
     node: WorkflowNode,
     config: ConvergeNodeConfig,
     inputData: Record<string, unknown>,
-    _tctx: TemplateContext,
+    tctx: TemplateContext,
   ): Promise<void> {
-    if (!this.deps.subflows) {
-      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'converge node present but SubflowExecutor not wired');
-    }
-    if (!config.bodyWorkflowId) {
-      throw new AgentisError('VALIDATION_FAILED', 'converge node missing bodyWorkflowId');
-    }
-    ctx.state.activeExecutions[node.id] = {
-      taskId: `converge:${node.id}`,
-      nodeId: node.id,
-      executorType: 'converge',
-      executorRef: config.bodyWorkflowId,
-      startedAt: new Date().toISOString(),
-    };
-    // Persist the dispatch transition so observers see the converge in flight.
-    await this.#persistRun(ctx).catch(() => {});
-    void this.#runConverge(ctx, node, config, inputData).catch((err) => {
-      delete ctx.state.activeExecutions[node.id];
-      void this.#failNode(ctx, node.id, (err as Error).message);
-      void this.#tick(ctx);
-    });
+    return this.#convergeLoop.dispatchConverge(ctx, node, config, inputData, tctx);
   }
-
-  async #runConverge(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: ConvergeNodeConfig,
-    inputData: Record<string, unknown>,
-  ): Promise<void> {
-    const stateKey = config.stateKey?.trim() || node.id;
-    const maxIterations = Math.max(1, Math.min(config.maxIterations ?? 8, 100));
-    const stallWindow = Math.max(1, config.stallPolicy?.window ?? 2);
-    const carry = config.carryStrategy ?? 'accumulate';
-    const startedAt = Date.now();
-
-    // Durable resume — pick up persisted iteration state after a crash recovery.
-    const priorState = (ctx.state.nodeStates[node.id]?.outputData?.['_convergeState'] ?? {}) as ConvergeRunState;
-    const history: ConvergeIterationRecord[] = [...(priorState.history ?? [])];
-    let iteration = priorState.history?.length ?? 0;
-    const accumulated: Record<string, unknown> = { ...(priorState.accumulated ?? {}) };
-    let lastSignature: string | undefined = priorState.lastSignature;
-    this.deps.scratchpad.hydrate(ctx.runId);
-
-    // §Pillar 3: one worktree the whole cohort shares for the loop lifetime.
-    const worktree = await this.#acquireConvergeWorktree(ctx, node, config);
-    if (worktree?.path) {
-      this.deps.scratchpad.write(
-        ctx.runId,
-        `${stateKey}.workspace`,
-        { path: worktree.path, mode: worktree.mode },
-        { namespace: stateKey, identity: CONVERGE_IDENTITY },
-      );
-    }
-
-    let verdictKind: ConvergeVerdict = 'max_iterations';
-    let lastOutput: Record<string, unknown> = priorState.lastOutput ?? {};
-    let stallStreak = priorState.stallStreak ?? 0;
-
-    // ASSESS + REFLECT (COGNITIVE-LOOPING-RFC). `assess` off + `maxPivots` 0 →
-    // exact `converge` parity; a `pursue` node turns both on via the normalizer.
-    const assess = config.assess ?? false;
-    // A graded done-check yields a real 0..1 progress (judge score / objective
-    // acceptance-pass fraction) → enables the plateau (s3) + regression (s4)
-    // stall signals. Deterministic/signal checks are binary, so they rely on s1/s5.
-    const graded = config.continuation.type === 'judge' || config.continuation.type === 'objective';
-    const maxPivots = Math.max(0, config.maxPivots ?? 0);
-    const deltaTrajectory: number[] = [...(priorState.deltaTrajectory ?? [])];
-    const reflections: string[] = [...(priorState.reflections ?? [])];
-    const pivotsUsed: string[] = [...(priorState.pivotsUsed ?? [])];
-    const signatureRing: string[] = [...(priorState.signatureRing ?? [])];
-    let pendingReflection: string | undefined;
-
-    try {
-      // ASSESS on entry (RFC §7.4): on a durable resume, if the prior output
-      // already satisfies the done-check, settle WITHOUT acting — the cheapest
-      // iteration is the one we skip. Gated on real prior state so a fresh run
-      // never pays for an extra evaluation (and `converge` never enters here).
-      if (assess && (Object.keys(accumulated).length > 0 || Object.keys(lastOutput).length > 0)) {
-        const seed = Object.keys(accumulated).length > 0 ? accumulated : lastOutput;
-        const entry = await this.#evaluateConvergeContinuation(ctx, node, config, seed, iteration);
-        if (!entry.continue) verdictKind = 'goal_met';
-      }
-      while (verdictKind !== 'goal_met' && iteration < maxIterations) {
-        // Budget breaker — wall clock (always) + real recorded cost / tokens
-        // across this run and its descendant cohort runs (when a spend resolver
-        // is wired). Any crossed limit stops the loop with an honest verdict.
-        if (this.#convergeBudgetExceeded(ctx, config.budget, startedAt)) {
-          verdictKind = 'budget_exhausted';
-          break;
-        }
-
-        const iterStart = Date.now();
-        const iterInput: Record<string, unknown> = {
-          ...inputData,
-          converge: {
-            iteration,
-            stateKey,
-            state: carry === 'replace' ? lastOutput : accumulated,
-            workspace: worktree?.path ? { path: worktree.path, mode: worktree.mode } : undefined,
-            // REFLECT rung 1: the previous stall's self-critique, so the body
-            // changes tack this pass instead of repeating (RFC §8).
-            reflection: pendingReflection,
-          },
-        };
-        pendingReflection = undefined; // one-shot — consumed by this iteration
-
-        const rawOutput = await this.#runConvergeIteration(ctx, node, config, iterInput, iteration);
-        // The body must not feed our control envelope back into shared state — a
-        // body that echoes its inputs would otherwise create a self-referential
-        // cycle (state → converge → state) that breaks run-state serialization.
-        const output = stripConvergeEnvelope(rawOutput);
-        lastOutput = output;
-
-        if (carry === 'accumulate') {
-          Object.assign(accumulated, output);
-        } else {
-          for (const k of Object.keys(accumulated)) delete accumulated[k];
-          Object.assign(accumulated, output);
-        }
-
-        // Record this iteration's output so the operator + next pass can read it.
-        this.deps.scratchpad.write(ctx.runId, `${stateKey}.iteration.${iteration}`, output, {
-          namespace: stateKey,
-          iteration,
-          identity: CONVERGE_IDENTITY,
-        });
-
-        const decision = await this.#evaluateConvergeContinuation(ctx, node, config, output, iteration);
-
-        // ASSESS + multi-signal stagnation detection (RFC §3.2/§6). Measure the
-        // distance-to-goal delta, then vote across structural repeat / oscillation
-        // / progress plateau / regression. For a plain `converge` (assess off,
-        // graded off) this collapses to the original single-signal behaviour.
-        const signature = convergeStableSignature(output);
-        const progress = computeProgress(decision);
-        deltaTrajectory.push(progress);
-        const stag = detectStagnation({
-          signature,
-          prevSignature: lastSignature,
-          signatureRing,
-          deltaTrajectory,
-          window: stallWindow,
-          prevStallStreak: stallStreak,
-          assess,
-          graded,
-        });
-        stallStreak = stag.stallStreak;
-        signatureRing.push(signature);
-        if (signatureRing.length > 8) signatureRing.shift();
-        lastSignature = signature;
-
-        const record: ConvergeIterationRecord = {
-          iteration,
-          durationMs: Date.now() - iterStart,
-          continue: decision.continue,
-          verdict: decision.verdict,
-          score: decision.score,
-          critique: decision.critique,
-          stallStreak,
-          progress: graded ? progress : undefined,
-          stallReasons: stag.reasons.length ? stag.reasons : undefined,
-        };
-        history.push(record);
-        iteration += 1;
-
-        await this.#persistConvergeState(ctx, node, {
-          history,
-          accumulated,
-          lastSignature,
-          lastOutput,
-          stallStreak,
-          deltaTrajectory,
-          reflections,
-          pivotsUsed,
-          signatureRing,
-        });
-        this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONVERGE_ITERATION, {
-          runId: ctx.runId,
-          nodeId: node.id,
-          ...record,
-          // ASSESS — distance-to-goal, so the canvas can show "progress N%".
-          delta: graded ? Math.max(0, 1 - progress) : undefined,
-          pivots: pivotsUsed.length,
-          spendMs: Date.now() - startedAt,
-          maxIterations,
-        });
-
-        if (!decision.continue) {
-          verdictKind = 'goal_met';
-          break;
-        }
-
-        // A stall is actionable only when the author asked for it: a `converge`
-        // node needs a stallPolicy (parity); a `pursue` node opts in via
-        // maxPivots. On a stall we REFLECT (feed a self-critique forward and try
-        // a different tack) up to the pivot budget, and only then settle
-        // `stalled` — the "pivot, don't quit" rule (RFC §8).
-        const stallActive = !!config.stallPolicy || maxPivots > 0;
-        if (stallActive && stag.stalled) {
-          if (pivotsUsed.length < maxPivots) {
-            const reflection = chooseReflection(decision.critique, stag.reasons, pivotsUsed.length + 1);
-            reflections.push(reflection);
-            pivotsUsed.push('reflect');
-            pendingReflection = reflection;
-            this.deps.scratchpad.write(
-              ctx.runId,
-              `${stateKey}.reflection.${iteration - 1}`,
-              { reflection, reasons: stag.reasons },
-              { namespace: stateKey, iteration: iteration - 1, identity: CONVERGE_IDENTITY },
-            );
-            this.deps.logger.info('pursuit.reflect', {
-              nodeId: node.id,
-              iteration: iteration - 1,
-              reasons: stag.reasons,
-              pivot: pivotsUsed.length,
-              maxPivots,
-            });
-            continue; // REFLECT → ACT
-          }
-          verdictKind = 'stalled';
-          break;
-        }
-      }
-
-      const preserveResult = worktree ? await worktree.release() : { preserved: false };
-      delete ctx.state.activeExecutions[node.id];
-
-      // Graduate the converged knowledge from the run-scoped blackboard to durable
-      // workspace memory — but only when the goal was actually met, and only the
-      // surviving (non-superseded) claims, gated by the Brain's formation judge.
-      if (verdictKind === 'goal_met') {
-        await this.#promoteConvergedKnowledge(ctx, node, stateKey, lastOutput);
-      }
-
-      const result: Record<string, unknown> = {
-        converged: verdictKind === 'goal_met',
-        verdict: verdictKind,
-        iterations: iteration,
-        history,
-        output: lastOutput,
-        state: accumulated,
-        // ASSESS/REFLECT observability — the progress trajectory and any
-        // self-critiques the Pursuit generated on the way (RFC §3.2/§8).
-        ...(deltaTrajectory.length ? { deltaTrajectory } : {}),
-        ...(reflections.length ? { reflections, pivots: pivotsUsed.length } : {}),
-      };
-      if (preserveResult.preserved) {
-        result['branch'] = preserveResult.branch;
-        if (preserveResult.prUrl) result['prUrl'] = preserveResult.prUrl;
-        result['changedFiles'] = preserveResult.changedFiles;
-      }
-
-      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONVERGE_SETTLED, {
-        runId: ctx.runId,
-        nodeId: node.id,
-        verdict: verdictKind,
-        iterations: iteration,
-        preserved: preserveResult,
-      });
-      await this.#completeNode(ctx, node.id, result);
-      void this.#tick(ctx);
-    } catch (err) {
-      if (worktree) await worktree.release().catch(() => {});
-      throw err;
-    }
-  }
-
-  /** Run one convergence iteration by delegating the body cohort to SubflowExecutor. */
-  async #runConvergeIteration(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: ConvergeNodeConfig,
-    inputs: Record<string, unknown>,
-    iteration: number,
-  ): Promise<Record<string, unknown>> {
-    return new Promise((resolve, reject) => {
-      void this.deps.subflows!.start({
-        parentRunId: ctx.runId,
-        parentNodeId: `${node.id}:iter:${iteration}`,
-        workspaceId: ctx.workspaceId,
-        ambientId: ctx.ambientId,
-        userId: ctx.userId,
-        childWorkflowId: config.bodyWorkflowId,
-        inputs,
-        resumeParent: async (output) => resolve(output ?? {}),
-        failParent: async (msg) => reject(new Error(msg)),
-        startChildRun: async (childArgs) => {
-          const handle = await this.startRun(childArgs);
-          return { runId: handle.runId };
-        },
-      });
-    });
-  }
-
-  /**
-   * Decide whether the loop should run another iteration. Three pluggable
-   * sources, one interface (deterministic | judge | signal). `continue: true`
-   * means keep iterating; `false` means the goal is met.
-   */
-  async #evaluateConvergeContinuation(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: ConvergeNodeConfig,
-    output: Record<string, unknown>,
-    iteration: number,
-  ): Promise<{ continue: boolean; verdict: string; score?: number; critique?: string }> {
-    const cont = config.continuation;
-
-    if (cont.type === 'deterministic') {
-      const expr = cont.expr.replace(/^\{\{\s*|\s*\}\}$/g, '');
-      let keepGoing = false;
-      try {
-        keepGoing = evalCondition(expr, {
-          ...this.#buildConditionScope(ctx, output),
-          body: output,
-          iteration,
-        });
-      } catch (err) {
-        // A broken predicate stops the loop (fail-safe) rather than spin forever.
-        this.deps.logger.warn('converge.continuation.expr_failed', { nodeId: node.id, err: (err as Error).message });
-        keepGoing = false;
-      }
-      return { continue: keepGoing, verdict: keepGoing ? 'open' : 'converged' };
-    }
-
-    if (cont.type === 'signal') {
-      const channel = cont.channel?.trim() || 'converge';
-      const msgs = this.deps.scratchpad.readChannel(ctx.runId, channel, 10);
-      const done = msgs.some((m) => /^done\b|__converge_done__/i.test(m.message));
-      return { continue: !done, verdict: done ? 'signalled_done' : 'open' };
-    }
-
-    if (cont.type === 'objective') {
-      // P1 (RFC): the done-check IS the workflow's scoped Objective. Verify the
-      // iteration output against the spec's acceptance checks through the SAME
-      // world-probe path the run-settle verdict uses — no self-report trusted.
-      const spec = this.#specForRun(ctx);
-      if (!spec || !spec.acceptance?.length) {
-        this.deps.logger.warn('pursuit.objective.no_spec', { nodeId: node.id });
-        // No scoped Objective to verify against — stop honestly rather than spin.
-        return { continue: false, verdict: 'no_objective_spec' };
-      }
-      const nodeOutputs: Record<string, Record<string, unknown>> = {};
-      for (const [nid, ns] of Object.entries(ctx.state.nodeStates)) {
-        if (ns?.outputData && typeof ns.outputData === 'object') nodeOutputs[nid] = ns.outputData as Record<string, unknown>;
-      }
-      const verdict = await evaluateRunVerdict({
-        spec,
-        graphHash: graphContentHash(ctx.graph),
-        output: unwrapReturnEnvelope(output),
-        nodeOutputs,
-        mode: 'full',
-        deps: this.#verdictProbeDeps(ctx, spec),
-      });
-      const total = verdict.checks.length || 1;
-      const passed = verdict.checks.filter((c) => c.passed).length;
-      const accomplished = verdict.outcome === 'accomplished';
-      return {
-        continue: !accomplished,
-        verdict: verdict.outcome,
-        // Progress = fraction of acceptance checks passing → a real distance-to-goal (0..10).
-        score: Math.round((passed / total) * 100) / 10,
-        critique: accomplished ? undefined : verdict.deficiencies.map((d) => d.detail).join('; ').slice(0, 400) || undefined,
-      };
-    }
-
-    // judge
-    const resolved = this.#resolveEvaluationRuntime(ctx, node, cont.targetPath);
-    const evaluator = resolved?.runtime;
-    if (!evaluator) {
-      this.deps.logger.warn('converge.continuation.no_evaluator', { nodeId: node.id });
-      // Without a judge we cannot assess convergence — stop to avoid an unbounded loop.
-      return { continue: false, verdict: 'no_evaluator' };
-    }
-    const target = readDotPath(output, cont.targetPath) ?? output;
-    const verdict = await evaluator.evaluate({
-      workspaceId: ctx.workspaceId,
-      target,
-      criteria: cont.criteria,
-      rubric: cont.rubric,
-      passThreshold: cont.passThreshold,
-    });
-    // Meter + attribute the convergence judge's model spend.
-    this.#recordEvaluationTokens(ctx, node.id, evaluator.lastUsage, resolved?.agentId ?? null);
-    try {
-      this.deps.sharedIntelligence?.applyEvaluatorVerdict({
-        workspaceId: ctx.workspaceId,
-        runId: ctx.runId,
-        scopeId: null,
-        agentId: null,
-        verdict: verdict.passed ? 'pass' : 'fail',
-        evaluatorConfidence: verdict.score,
-      });
-    } catch {
-      /* best-effort brain feedback */
-    }
-    return {
-      continue: !verdict.passed,
-      verdict: verdict.passed ? 'pass' : 'fail',
-      score: verdict.score,
-      critique: verdict.critique,
-    };
-  }
-
-  /** Acquire the cohort's shared isolated worktree (or none for `isolation: 'shared'`). */
-  async #acquireConvergeWorktree(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    config: ConvergeNodeConfig,
-  ): Promise<WorktreeHandle | undefined> {
-    if (config.isolation === 'shared') return undefined;
-    if (!this.deps.worktrees) return undefined;
-    const baseCwd = this.#resolveConvergeBaseCwd();
-    if (!baseCwd) return undefined;
-    const preserve = config.preserve ?? 'discard';
-    try {
-      const handle = await this.deps.worktrees.acquire({
-        baseCwd,
-        taskId: `run-${ctx.runId.slice(0, 8)}-${node.id}`,
-        preserve,
-        branchName: preserve !== 'discard' ? `agentis/run-${ctx.runId.slice(0, 8)}` : undefined,
-        commitMessage: `Agentis cooperative loop — ${node.title ?? node.id}`,
-      });
-      if (!handle.path) {
-        await handle.release().catch(() => {});
-        return undefined;
-      }
-      this.deps.logger.info('converge.worktree.acquired', {
-        runId: ctx.runId,
-        nodeId: node.id,
-        mode: handle.mode,
-      });
-      return handle;
-    } catch (err) {
-      this.deps.logger.warn('converge.worktree.acquire_failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
-      return undefined;
-    }
-  }
-
-  /** Pick a base repo cwd from any registered local adapter (single-operator OSS). */
-  #resolveConvergeBaseCwd(): string | undefined {
-    for (const reg of this.deps.adapters.list()) {
-      const wd = this.deps.adapters.workdirOf(reg.agentId);
-      if (wd) return wd;
-    }
-    return undefined;
-  }
-
-  /** Persist iteration state so a crash-recovery re-dispatch resumes mid-loop. */
-  async #persistConvergeState(ctx: RunningContext, node: WorkflowNode, state: ConvergeRunState): Promise<void> {
-    const ns = ctx.state.nodeStates[node.id];
-    if (!ns) return;
-    ns.outputData = {
-      ...(ns.outputData ?? {}),
-      _convergeState: state,
-      _convergeProgress: {
-        iterations: state.history?.length ?? 0,
-        lastVerdict: state.history?.at(-1)?.verdict,
-      },
-    };
-    await this.#persistRun(ctx);
-  }
-
-  /**
-   * Whether the loop has crossed any budget limit. Wall-clock is always enforced;
-   * cost (cents) and tokens are enforced against REAL recorded spend across this
-   * run and its descendant cohort runs when a spend resolver is wired.
-   */
-  #convergeBudgetExceeded(
-    ctx: RunningContext,
-    budget: ConvergeNodeConfig['budget'],
-    startedAt: number,
-  ): boolean {
-    if (!budget) return false;
-    if (budget.ms !== undefined && Date.now() - startedAt > budget.ms) return true;
-    if (budget.usd === undefined && budget.tokens === undefined) return false;
-    const spend = this.deps.resolveRunSpend?.(ctx.runId);
-    if (!spend) return false; // No real signal → don't fabricate enforcement.
-    if (budget.usd !== undefined && spend.costCents / 100 > budget.usd) return true;
-    if (budget.tokens !== undefined && spend.tokens > budget.tokens) return true;
-    return false;
-  }
-
-  /**
-   * Promote a converged loop's surviving claims (and final result) from the
-   * run-scoped blackboard into durable workspace memory, via the Brain's
-   * formation gate (which rejects garbage). Best-effort: never blocks the run.
-   */
-  async #promoteConvergedKnowledge(
-    ctx: RunningContext,
-    node: WorkflowNode,
-    stateKey: string,
-    lastOutput: Record<string, unknown>,
-  ): Promise<void> {
-    if (!this.deps.sharedIntelligence) return;
-    try {
-      const entries = this.deps.scratchpad.listEntries(ctx.runId, { namespace: stateKey });
-      const claimEntries = entries.filter((e) => e.kind === 'claim');
-      // Drop disputed/revised claims — keep only the surviving truth.
-      const superseded = new Set(claimEntries.map((e) => e.supersedes).filter((id): id is string => Boolean(id)));
-      const survivingClaims = claimEntries
-        .filter((e) => !superseded.has(e.id))
-        .map((e) => String(e.value ?? ''))
-        .filter((s) => s.trim());
-      if (survivingClaims.length === 0 && Object.keys(lastOutput).length === 0) return;
-      await this.deps.sharedIntelligence.promote({
-        workspaceId: ctx.workspaceId,
-        runId: ctx.runId,
-        nodeId: node.id,
-        taskTitle: `Converged: ${node.title ?? node.id}`,
-        taskOutput: { convergedClaims: survivingClaims, result: lastOutput },
-      });
-    } catch (err) {
-      this.deps.logger.warn('converge.promote.failed', { runId: ctx.runId, nodeId: node.id, err: (err as Error).message });
-    }
-  }
-
   async #executeCheckpoint(
     ctx: RunningContext,
     node: WorkflowNode,
@@ -8781,7 +5889,7 @@ export class WorkflowEngine {
       // fail the node honestly (no silent bad apply).
       const node = ctx.graph.nodes.find((candidate) => candidate.id === pending.targetId);
       if (args.decision === 'approve' && pending.healAction === 'retry_with_repair_context' && node) {
-        const retried = await this.#retryWithRepairContext(
+        const retried = await this.#selfHeal.retryWithRepairContext(
           ctx,
           node,
           pending.retryError ?? 'Previous attempt failed.',
@@ -8793,10 +5901,10 @@ export class WorkflowEngine {
         this.#audit(ctx, { nodeId: pending.targetId, action: 'self_heal.retry_approved', actorType: 'user', actorId: 'operator', outputSummary: retried ? 'approved and retried' : 'approved but retry failed' });
         if (!retried) void this.#tick(ctx);
       } else if (args.decision === 'approve' && pending.healPatch) {
-        const applied = await this.#applyHealAndRedispatch(ctx, pending.healResumeNodeId ?? pending.targetId, pending.healPatch, pending.repairPlanId);
+        const applied = await this.#selfHeal.applyHealAndRedispatch(ctx, pending.healResumeNodeId ?? pending.targetId, pending.healPatch, pending.repairPlanId);
         if (node) {
-          if (pending.repairPlanId) this.#completeRepairPlan(ctx, node, pending.repairPlanId, applied ? 'applied' : 'blocked');
-          this.#recordSelfHealIncident(ctx, node, {
+          if (pending.repairPlanId) this.#selfHeal.completeRepairPlan(ctx, node, pending.repairPlanId, applied ? 'applied' : 'blocked');
+          this.#selfHeal.recordSelfHealIncident(ctx, node, {
             status: applied ? 'APPLIED' : 'BLOCKED',
             outcome: applied ? 'graph_patch_applied' : 'blocked',
             reason: applied ? 'Operator approved the self-healing fix.' : 'Approved self-healing patch could not be applied.',
@@ -8807,8 +5915,8 @@ export class WorkflowEngine {
         this.#audit(ctx, { nodeId: pending.targetId, action: 'self_heal.approved', actorType: 'user', actorId: 'operator', outputSummary: applied ? 'approved and applied' : 'approved but apply failed' });
       } else {
         if (node) {
-          if (pending.repairPlanId) this.#completeRepairPlan(ctx, node, pending.repairPlanId, 'rejected');
-          this.#recordSelfHealIncident(ctx, node, {
+          if (pending.repairPlanId) this.#selfHeal.completeRepairPlan(ctx, node, pending.repairPlanId, 'rejected');
+          this.#selfHeal.recordSelfHealIncident(ctx, node, {
             status: 'BLOCKED',
             outcome: 'blocked',
             reason: 'Self-healing fix was rejected by the operator.',
@@ -9171,7 +6279,7 @@ export class WorkflowEngine {
     try {
       normalizedOutput = completedNode ? normalizeDeclaredNodeOutput(completedNode, output) : output;
     } catch (err) {
-      const heal = completedNode ? await this.#runSelfHeal(ctx, completedNode, output, (err as Error).message) : { kind: 'none' as const };
+      const heal = completedNode ? await this.#selfHeal.runSelfHeal(ctx, completedNode, output, (err as Error).message) : { kind: 'none' as const };
       if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return null;
       if (heal.kind !== 'output_fixed') throw new Error(selfHealFailureMessage((err as Error).message, heal));
       normalizedOutput = completedNode ? normalizeDeclaredNodeOutput(completedNode, heal.output) : heal.output;
@@ -9198,7 +6306,7 @@ export class WorkflowEngine {
     }
     if (completedNode && normalization.missingKeys.length > 0) {
       const missingMessage = missingDeclaredOutputMessage(completedNode, normalization.missingKeys);
-      const heal = await this.#runSelfHeal(
+      const heal = await this.#selfHeal.runSelfHeal(
         ctx,
         completedNode,
         output,
@@ -9268,7 +6376,7 @@ export class WorkflowEngine {
       const violation = this.#sufficiencyViolation(ctx, completedNode, normalizedOutput);
       if (violation) {
         const message = `SUFFICIENCY_FLOOR: ${violation} — downstream steps (and the acceptance checks) need real content here, not a hollow payload.`;
-        const heal = await this.#runSelfHeal(ctx, completedNode, normalizedOutput, message);
+        const heal = await this.#selfHeal.runSelfHeal(ctx, completedNode, normalizedOutput, message);
         if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return null;
         if (heal.kind === 'output_fixed' && !this.#sufficiencyViolation(ctx, completedNode, heal.output)) {
           normalizedOutput = heal.output;
@@ -9594,7 +6702,7 @@ export class WorkflowEngine {
     const policyBlock = isPolicyBlockError(error);
     if (!isSelfHealTerminalError(error) && !policyBlock) {
       if (node && isSelfHealableNode(node)) {
-        const heal = await this.#runSelfHeal(ctx, node, {}, error);
+        const heal = await this.#selfHeal.runSelfHeal(ctx, node, {}, error);
         if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return;
         if (heal.kind === 'output_fixed') {
           try {
@@ -9620,11 +6728,11 @@ export class WorkflowEngine {
       return;
     }
     if (!isSelfHealTerminalError(error) && !policyBlock && node?.config.kind === 'agent_task') {
-      const retried = await this.#tryLegacyAgentTaskSelfHealRetry(ctx, node, error);
+      const retried = await this.#selfHeal.tryLegacyAgentTaskSelfHealRetry(ctx, node, error);
       if (retried) return;
     }
     if (node?.config.kind === 'agent_task') {
-      this.#reflectHardNodeFailure(ctx, node, error);
+      this.#selfHeal.reflectHardNodeFailure(ctx, node, error);
     }
     // Learn from EVERY hard node failure (any kind) — "fail-forward, don't
     // dead-end". The wiring keeps only instructive failures (guard / precondition
@@ -10009,7 +7117,7 @@ export class WorkflowEngine {
     const node = anchorId ? ctx.graph.nodes.find((n) => n.id === anchorId) : undefined;
     if (!node || !isSelfHealableNode(node)) return false;
     this.deps.logger.info('engine.self_heal.run_dead_end', { runId: ctx.runId, anchorNodeId: node.id });
-    const heal = await this.#runSelfHeal(
+    const heal = await this.#selfHeal.runSelfHeal(
       ctx,
       node,
       {},
@@ -10618,7 +7726,7 @@ export class WorkflowEngine {
       'Re-do this step so its output SATISFIES the acceptance evidence above — real content, no placeholders, no advisory text.',
     ].join('\n');
     this.deps.logger.info('engine.run.outcome_rework', { runId: ctx.runId, nodeId: target.node.id, attempt: attempts + 1, budget });
-    const heal = await this.#runSelfHeal(ctx, target.node, {}, briefing);
+    const heal = await this.#selfHeal.runSelfHeal(ctx, target.node, {}, briefing);
     if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval' || heal.kind === 'output_fixed') {
       holder.outcomeRework = { attempts: attempts + 1, nodesReworked: [...(holder.outcomeRework?.nodesReworked ?? []), target.node.id] };
       verdict.rework = holder.outcomeRework;
@@ -10695,7 +7803,7 @@ export class WorkflowEngine {
   }
 }
 
-interface RunningContext {
+export interface RunningContext {
   runId: string;
   workflowId: string;
   planId: string | null;
@@ -10774,7 +7882,7 @@ interface RunningContext {
 }
 
 /** Resume target for a pending approval. `session` carries the wake bookkeeping. */
-interface PendingApproval {
+export interface PendingApproval {
   kind: 'checkpoint' | 'phase_gate' | 'session' | 'self_heal';
   targetId: string;
   sessionId?: string;
@@ -10911,49 +8019,13 @@ function hydrateSelfHealAttempts(state: WorkflowRunState): Map<string, number> {
   return attempts;
 }
 
-function selfHealAttemptCount(ctx: RunningContext, nodeId: string): number {
-  const current = ctx.selfHealAttempts.get(nodeId);
-  if (typeof current === 'number') return current;
-  const persisted = ctx.state.selfHealAttempts?.[nodeId];
-  const normalized = typeof persisted === 'number' && Number.isFinite(persisted) && persisted > 0
-    ? Math.floor(persisted)
-    : 0;
-  if (normalized > 0) ctx.selfHealAttempts.set(nodeId, normalized);
-  return normalized;
-}
 
-function recordSelfHealAttempt(ctx: RunningContext, nodeId: string): number {
-  const next = selfHealAttemptCount(ctx, nodeId) + 1;
-  ctx.selfHealAttempts.set(nodeId, next);
-  ctx.state.selfHealAttempts = { ...(ctx.state.selfHealAttempts ?? {}), [nodeId]: next };
-  return next;
-}
 
-/**
- * Which node kinds self-healing may repair. Output-recovery and runtime-rebind
- * are agent-specific, but the STRUCTURAL repair path (diagnose → patch node
- * config → re-dispatch) is generic, so any re-dispatchable node qualifies. Only
- * `trigger` (the run's entry, not a runtime step) is excluded — a failure there
- * is not something a graph patch can fix.
- */
-function isSelfHealableNode(node: WorkflowNode): boolean {
-  return node.config.kind !== 'trigger';
-}
 
 function isSelfHealTerminalError(error: string): boolean {
   return /Self-healing stopped:|self-healing patch could not be applied|self-healing fix was rejected/i.test(error);
 }
 
-/**
- * A node failed because its agent has no working runtime (the most common
- * long-run failure: a CLI/process dropped, a pinned agent was never connected,
- * the adapter is offline). This class is repaired DETERMINISTICALLY — rebind the
- * runtime or reroute to the healer — never by an LLM graph patch, so it costs no
- * tokens.
- */
-function isRuntimeBindingFailure(error: string): boolean {
-  return /no connected runtime|has no connected runtime|ADAPTER_UNAVAILABLE|adapter is (?:not connected|offline)|agent is offline|no runtime|runtime not connected/i.test(error);
-}
 
 /**
  * Capability-aware self-heal (AGENT-WORKFLOW-CAPABILITY-10X E4). A failure that
@@ -10981,37 +8053,7 @@ const WORKFLOW_AGENT_TOOL_BLOCKLIST = new Set<string>([
   'agentis.approval.resolve',
 ]);
 
-export function capabilityGapReason(error: string): string | null {
-  const matched =
-    /(provider is not configured|is not configured|is not wired(?: in this runtime)?|are not enabled in this runtime|is not (?:available|enabled) in this runtime|requires (?:a |an )?[\w.+-]+ (?:interpreter|binary|runtime)(?: on PATH)?|requires [\w.+-]+ on PATH)/i.test(
-      error,
-    );
-  if (!matched) return null;
-  return error.replace(/\s+/g, ' ').trim().slice(0, 180);
-}
 
-/**
- * A CONFIG gap — the step failed because required CONFIGURATION isn't set (an
- * environment variable, a working directory, a credential/token), NOT because
- * the graph is wrong. Like a capability gap, no graph edit or agent swap can
- * supply it, so structural self-heal is pointless (it just burns replans and
- * emits "could not derive a grounded repair" — the exact mush the operator saw
- * on the store_factory `AGENTIS_STORES_DIR` failure). The failing extension's own
- * message usually carries the remedy verbatim ("set AGENTIS_STORES_DIR … or pass
- * workingDir/storesDir"), so we surface it as the fix. Returns the trimmed
- * reason+remedy, or null when the failure may genuinely be graph/data-class.
- */
-export function configGapReason(error: string): string | null {
-  const e = (error ?? '').replace(/\s+/g, ' ').trim();
-  const matched =
-    /requires (?:a |an )?(?:working directory|environment variable|configuration|config|credential|directory|api key|token)/i.test(e)
-    || /\bset [A-Z][A-Z0-9_]{3,}\b/.test(e)                                  // "set AGENTIS_STORES_DIR"
-    || /\bpass (?:workingDir|storesDir|working directory)\b/i.test(e)
-    || /environment variable [\w.$-]+ (?:is )?(?:not set|missing|required|undefined|empty)/i.test(e)
-    || /(?:credential|api key|token|secret|env(?:ironment)? var(?:iable)?) (?:is )?(?:missing|not set|not configured|required|undefined)/i.test(e);
-  if (!matched) return null;
-  return e.slice(0, 240);
-}
 
 function selfHealFailureMessage(error: string, heal: SelfHealEngineResult | null): string {
   if (!heal || heal.kind !== 'none' || !heal.reason) return error;
@@ -11035,26 +8077,6 @@ function selfHealPatchFromPayload(payload: unknown): WorkflowGraphPatch | null {
   return candidate as WorkflowGraphPatch;
 }
 
-/** Shared full-graph diff used by recovery application and rollback. */
-function graphDiffPatch(base: WorkflowGraph, target: WorkflowGraph, baseGraphRevision: number): WorkflowGraphPatch {
-  const beforeNodes = new Map(base.nodes.map((node) => [node.id, node] as const));
-  const afterNodes = new Map(target.nodes.map((node) => [node.id, node] as const));
-  const beforeEdges = new Map(base.edges.map((edge) => [edge.id, edge] as const));
-  const afterEdges = new Map(target.edges.map((edge) => [edge.id, edge] as const));
-  return {
-    patchId: randomUUID(),
-    reason: 'self_heal',
-    baseGraphRevision,
-    addNodes: target.nodes.filter((node) => !beforeNodes.has(node.id)),
-    updateNodes: target.nodes.filter((node) => {
-      const before = beforeNodes.get(node.id);
-      return Boolean(before && JSON.stringify(before) !== JSON.stringify(node));
-    }),
-    removeNodeIds: base.nodes.filter((node) => !afterNodes.has(node.id)).map((node) => node.id),
-    addEdges: target.edges.filter((edge) => !beforeEdges.has(edge.id)),
-    removeEdgeIds: base.edges.filter((edge) => !afterEdges.has(edge.id)).map((edge) => edge.id),
-  };
-}
 
 function mergeGraphPatch(base: WorkflowGraph, patch: WorkflowGraphPatch): WorkflowGraph {
   const removeIds = new Set(patch.removeNodeIds);
@@ -11346,122 +8368,14 @@ function validateAgainstContract(
   return violations;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    t.unref?.();
-  });
-}
 
-function backoffMs(attempt: number): number {
-  // Exponential with jitter, capped at 4s.
-  const base = Math.min(4000, 200 * 2 ** (attempt - 1));
-  return base + Math.floor(Math.random() * 100);
-}
 
-function redactUrl(url: string): string {
-  // Strip query params from the executor reference for activity feeds; keep
-  // host + path so operators can still recognize the call.
-  try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    return url.length > 60 ? `${url.slice(0, 60)}â€¦` : url;
-  }
-}
 
-function asString(value: unknown): string {
-  if (value == null) return '';
-  if (typeof value === 'string') return value;
-  try { return JSON.stringify(value); } catch { return String(value); }
-}
 
-/** Best-effort JSON coercion for templated GraphQL variable strings. */
-function coerceJson(value: string): unknown {
-  const t = value.trim();
-  if (t === 'true') return true;
-  if (t === 'false') return false;
-  if (t === 'null') return null;
-  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
-  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
-    try { return JSON.parse(t); } catch { return value; }
-  }
-  return value;
-}
 
-/** Parse a CSV string into row objects (when headers) or string arrays. */
-function parseCsv(text: string, hasHeaders: boolean): Array<Record<string, string>> | string[][] {
-  const rows = parseCsvRows(text);
-  if (rows.length === 0) return hasHeaders ? [] : [];
-  if (!hasHeaders) return rows;
-  const headers = rows[0]!;
-  return rows.slice(1).map((cells) => {
-    const rec: Record<string, string> = {};
-    headers.forEach((h, i) => { rec[h] = cells[i] ?? ''; });
-    return rec;
-  });
-}
 
-/** RFC-4180-ish CSV tokenizer (quotes, escaped quotes, embedded newlines). */
-function parseCsvRows(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  const src = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i]!;
-    if (inQuotes) {
-      if (ch === '"') {
-        if (src[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
-      } else { field += ch; }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ',') {
-      row.push(field); field = '';
-    } else if (ch === '\n') {
-      row.push(field); field = ''; rows.push(row); row = [];
-    } else {
-      field += ch;
-    }
-  }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
-  return rows.filter((r) => !(r.length === 1 && r[0] === ''));
-}
 
-/** Build a CSV string from row objects. */
-function buildCsv(records: Array<Record<string, unknown>>, hasHeaders: boolean): string {
-  if (records.length === 0) return '';
-  const headers = Object.keys(records[0]!);
-  const escape = (v: unknown): string => {
-    const s = v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const lines: string[] = [];
-  if (hasHeaders) lines.push(headers.map(escape).join(','));
-  for (const rec of records) lines.push(headers.map((h) => escape(rec[h])).join(','));
-  return lines.join('\n');
-}
 
-/** Convert an exceljs worksheet to row objects/arrays. */
-function worksheetToRows(ws: unknown, hasHeaders: boolean): Array<Record<string, unknown>> | unknown[][] {
-  if (!ws) return [];
-  const raw: unknown[][] = [];
-  const sheet = ws as { eachRow(cb: (row: { values: unknown }, n: number) => void): void };
-  sheet.eachRow((r) => {
-    // exceljs row.values is 1-indexed (values[0] is undefined).
-    const cells = Array.isArray(r.values) ? (r.values as unknown[]).slice(1) : [];
-    raw.push(cells.map((c) => (c && typeof c === 'object' && 'text' in (c as object) ? (c as { text: unknown }).text : c)));
-  });
-  if (raw.length === 0) return [];
-  if (!hasHeaders) return raw;
-  const headers = (raw[0] ?? []).map((h) => asString(h));
-  return raw.slice(1).map((cells) => {
-    const rec: Record<string, unknown> = {};
-    headers.forEach((h, i) => { rec[h] = cells[i] ?? null; });
-    return rec;
-  });
-}
 
 /** The phase id (if any) a node belongs to â€” for audit + SLA/budget attribution. */
 /**
@@ -11804,21 +8718,6 @@ function safeJson(value: unknown): string {
   }
 }
 
-function toolInputSchemaToChatParameters(schemaValue: unknown): ToolDefinition['parameters'] {
-  if (schemaValue && typeof schemaValue === 'object' && !Array.isArray(schemaValue)) {
-    const schemaRecord = schemaValue as Record<string, unknown>;
-    const properties = schemaRecord.properties && typeof schemaRecord.properties === 'object' && !Array.isArray(schemaRecord.properties)
-      ? schemaRecord.properties as ToolDefinition['parameters']['properties']
-      : {};
-    const required = Array.isArray(schemaRecord.required) ? schemaRecord.required.map(String) : undefined;
-    return {
-      type: 'object',
-      properties,
-      ...(required && required.length > 0 ? { required } : {}),
-    };
-  }
-  return { type: 'object', properties: {} };
-}
 
 /**
  * Build the PROCESS BRIEFING appended to an agent_task's prompt — the structural
@@ -12139,13 +9038,6 @@ function resolveAgentTaskTools(def: SpecialistDefinition, config: AgentTaskNodeC
   return [...set];
 }
 
-function declaredOutputKeys(node: WorkflowNode): string[] {
-  const config = node.config as { kind?: string; outputKeys?: unknown };
-  if (config.kind !== 'agent_task' && config.kind !== 'agent_session' && config.kind !== 'planner') return [];
-  return Array.isArray(config.outputKeys)
-    ? config.outputKeys.filter((key): key is string => typeof key === 'string' && key.trim().length > 0)
-    : [];
-}
 
 function parseStructuredOutputEnvelope(output: Record<string, unknown>): Record<string, unknown> | null {
   const objectEnvelope = objectOutputEnvelope(output);
@@ -12326,9 +9218,6 @@ function agentConfiguredModel(agent: { runtimeModel?: string | null; config?: un
   return stringValue(config?.model);
 }
 
-function stringValue(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
 
 function evaluationAgentBindingFromNode(
   node: WorkflowNode | undefined,
@@ -12418,14 +9307,6 @@ function parseTaskList(text: string, max: number): string[] {
   return lines.slice(0, max);
 }
 
-/** Pull an HTML string out of a node input: a string, or `{content|html|body}`. */
-function extractInputHtml(inputData: Record<string, unknown>): string {
-  for (const key of ['content', 'html', 'body']) {
-    const v = inputData[key];
-    if (typeof v === 'string' && v.trim()) return v;
-  }
-  return '';
-}
 
 /** Best-effort artifact class from a filename + content shape. */
 function inferArtifactType(name: string, content: string): 'html' | 'image' | 'document' | 'code' | 'data' {
@@ -12500,140 +9381,12 @@ function implicitConditionEdgeResult(output: Record<string, unknown> | unknown):
   return true;
 }
 
-function readDotPath(obj: unknown, path: string): unknown {
-  if (!path) return obj;
-  let cursor: unknown = obj;
-  for (const segment of path.split('.')) {
-    if (cursor == null || typeof cursor !== 'object') return undefined;
-    cursor = (cursor as Record<string, unknown>)[segment];
-  }
-  return cursor;
-}
 
-function parseJsonOrString(input: string): unknown {
-  if (typeof input !== 'string') return input;
-  const trimmed = input.trim();
-  if (!trimmed) return '';
-  // Best-effort JSON parse for values authored as templates â€” fall back to the
-  // literal string when the result isn't valid JSON.
-  if (
-    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
-    (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
-    trimmed === 'true' ||
-    trimmed === 'false' ||
-    trimmed === 'null' ||
-    /^-?\d+(\.\d+)?$/.test(trimmed)
-  ) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return input;
-    }
-  }
-  return input;
-}
 
-function checkGuardrail(
-  type: string,
-  value: unknown,
-  rule: { value?: string; limit?: number },
-): boolean {
-  const asString = (v: unknown): string => {
-    if (v == null) return '';
-    if (typeof v === 'string') return v;
-    try {
-      return JSON.stringify(v);
-    } catch {
-      return String(v);
-    }
-  };
-  switch (type) {
-    case 'not_empty':
-      if (value == null) return false;
-      if (typeof value === 'string') return value.trim().length > 0;
-      if (Array.isArray(value)) return value.length > 0;
-      if (typeof value === 'object') return Object.keys(value as object).length > 0;
-      return Boolean(value);
-    case 'min_length':
-      return asString(value).length >= (rule.limit ?? 0);
-    case 'max_length':
-      return asString(value).length <= (rule.limit ?? Number.POSITIVE_INFINITY);
-    case 'contains':
-      return !!rule.value && asString(value).includes(rule.value);
-    case 'not_contains':
-      return !!rule.value && !asString(value).includes(rule.value);
-    case 'regex':
-      if (!rule.value) return true;
-      try {
-        return new RegExp(rule.value).test(asString(value));
-      } catch {
-        return false;
-      }
-    case 'json_schema':
-      // Lightweight check â€” full JSON Schema validation lives in the contract
-      // pipeline. For inline guardrails we just verify the value parses as JSON
-      // and (optionally) has the declared required top-level keys.
-      if (!rule.value) return true;
-      try {
-        const schema = JSON.parse(rule.value) as { required?: string[] };
-        if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-        if (Array.isArray(schema.required)) {
-          for (const key of schema.required) {
-            if (!(key in (value as Record<string, unknown>))) return false;
-          }
-        }
-        return true;
-      } catch {
-        return false;
-      }
-    default:
-      return true;
-  }
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Convergence loop (`converge`) — module-scope helpers (AGENT-COOPERATION-10X).
 // ───────────────────────────────────────────────────────────────────────────
-
-/** Honest terminal verdicts — never a fake green. */
-type ConvergeVerdict = 'goal_met' | 'stalled' | 'budget_exhausted' | 'max_iterations';
-
-/** The system identity stamped on controller-authored blackboard entries. */
-const CONVERGE_IDENTITY = { runtime: 'system', label: 'Converge controller' } as const;
-
-interface ConvergeIterationRecord {
-  iteration: number;
-  durationMs: number;
-  /** Whether the controller decided to run another pass after this one. */
-  continue: boolean;
-  /** Continuation verdict: open | converged | pass | fail | signalled_done | … */
-  verdict: string;
-  score?: number;
-  critique?: string;
-  /** Consecutive no-change iterations leading up to (and including) this one. */
-  stallStreak: number;
-  /** ASSESS — distance-to-goal progress 0..1 for this iteration (graded checks only). */
-  progress?: number;
-  /** Which stagnation signals fired this iteration (RFC §6). */
-  stallReasons?: string[];
-}
-
-/** Persisted controller state — enough to resume a loop mid-flight after a crash. */
-interface ConvergeRunState {
-  history?: ConvergeIterationRecord[];
-  accumulated?: Record<string, unknown>;
-  lastSignature?: string;
-  lastOutput?: Record<string, unknown>;
-  stallStreak?: number;
-  /** ASSESS — progress 0..1 per iteration (the PRM-style trajectory). */
-  deltaTrajectory?: number[];
-  /** REFLECT — verbal self-critiques generated on stalls, fed forward. */
-  reflections?: string[];
-  /** REFLECT — pivots spent, so a resume respects the pivot budget. */
-  pivotsUsed?: string[];
-  /** Recent-K output signatures, for oscillation detection. */
-  signatureRing?: string[];
-}
 
 /**
  * Normalize a friendly `pursue` config into the internal `converge` shape so the
@@ -12658,40 +9411,4 @@ function pursueConfigToConverge(cfg: PursueNodeConfig): ConvergeNodeConfig {
     assess: cfg.assess ?? true,
     maxPivots: cfg.maxPivots ?? 2,
   };
-}
-
-/**
- * Remove the reserved `converge` control envelope from a body's output so it
- * never re-enters accumulated state (a body that echoes its inputs would create
- * a `state → converge → state` cycle).
- */
-function stripConvergeEnvelope(output: Record<string, unknown>): Record<string, unknown> {
-  if (!output || typeof output !== 'object' || !('converge' in output)) return output;
-  const { converge: _omit, ...rest } = output;
-  return rest;
-}
-
-/**
- * Order-independent structural signature of an iteration's output, used for
- * stall detection. Two iterations with the same signature made no material
- * progress.
- */
-function convergeStableSignature(value: unknown): string {
-  const seen = new WeakSet<object>();
-  const norm = (v: unknown): unknown => {
-    if (v === null || typeof v !== 'object') return v;
-    if (seen.has(v as object)) return '[circular]';
-    seen.add(v as object);
-    if (Array.isArray(v)) return v.map(norm);
-    return Object.fromEntries(
-      Object.keys(v as Record<string, unknown>)
-        .sort()
-        .map((k) => [k, norm((v as Record<string, unknown>)[k])]),
-    );
-  };
-  try {
-    return JSON.stringify(norm(value));
-  } catch {
-    return String(value);
-  }
 }

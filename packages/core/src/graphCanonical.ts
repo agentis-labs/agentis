@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Deterministic graph canonicalization (NATIVE-ADVANCEMENT Proposal 6d, rescoped).
  *
  * Produces a stable string for a workflow graph so two representations of the
@@ -6,9 +6,9 @@
  * (viewport, node positions) are stripped, and object keys are sorted, so a
  * pure drag-on-canvas does NOT change the fingerprint.
  *
- * The fingerprint is used for *divergence detection* — telling whether the
+ * The fingerprint is used for *divergence detection* â€” telling whether the
  * graph being run is the graph that was saved, and letting the canvas detect
- * unsaved local edits — NOT as a security/tamper boundary (a self-hosted
+ * unsaved local edits â€” NOT as a security/tamper boundary (a self-hosted
  * instance's threat model does not warrant that; see NATIVE-ADVANCEMENT Q2).
  *
  * This module is pure and browser-safe (no `node:` imports). The actual hash is
@@ -70,3 +70,6 @@ export function canonicalizeGraph(graph: WorkflowGraph): string {
 
   return JSON.stringify(sortValue(canonical));
 }
+
+
+

@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { SessionMomentService } from '../../src/services/sessionMomentService.js';
-import type { EmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import type { EmbeddingProvider } from '../../src/services/embedding/embeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

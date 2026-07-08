@@ -13,9 +13,9 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
-import { HarnessMemoryIngestionService } from '../../src/services/harnessMemoryIngestion.js';
+import { HarnessMemoryIngestionService } from '../../src/services/harness/harnessMemoryIngestion.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { SkillService } from '../../src/services/skillService.js';
 import {
@@ -25,8 +25,8 @@ import {
   checkImportUpdates,
   syncImportedAgents,
   type HarnessImportDeps,
-} from '../../src/services/harnessAgentImport.js';
-import type { FormationPromoter, IngestibleAgent } from '../../src/services/harnessMemoryIngestion.js';
+} from '../../src/services/harness/harnessAgentImport.js';
+import type { FormationPromoter, IngestibleAgent } from '../../src/services/harness/harnessMemoryIngestion.js';
 import type { ImportMemoryFile } from '../../src/services/harnessImport/types.js';
 import { claudeProjectSlug } from '../../src/services/harnessImport/fsScan.js';
 import { discoverAgents } from '../../src/services/harnessImport/registry.js';

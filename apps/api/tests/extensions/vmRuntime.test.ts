@@ -3,6 +3,7 @@
  * native dependencies (isolated-vm is not installed on CI / this host).
  */
 
+import http from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
 import { runNodeWorkerExtension } from '../../src/extensions/nodeWorkerRuntime.js';
 import { createLogger } from '../../src/logger.js';
@@ -44,14 +45,17 @@ describe('vm fallback runtime', () => {
   });
 
   it('exposes a standards-compatible fetch response to generated extensions', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ title: 'Agentis' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json', 'x-agentis': 'ready' },
-      }),
-    );
+    // safeFetch pins the connection to the validated IP via node:http (defeating
+    // DNS rebinding) rather than calling global fetch — so we exercise it against
+    // a REAL loopback server (allowPrivateNetwork lets it reach 127.0.0.1).
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'x-agentis': 'ready' });
+      res.end(JSON.stringify({ title: 'Agentis' }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as import('node:net').AddressInfo).port;
     const src = `export async function run() {
-      const response = await fetch('http://127.0.0.1:43119/feed');
+      const response = await fetch('http://127.0.0.1:${port}/feed');
       return {
         ok: response.ok,
         status: response.status,
@@ -84,7 +88,7 @@ describe('vm fallback runtime', () => {
         });
       }
     } finally {
-      fetchMock.mockRestore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

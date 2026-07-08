@@ -13,7 +13,7 @@
  * "KnowledgeSource" (= the Grounding external-source system) — different domains.
  */
 
-import type { V1HarnessAdapterType } from '../harnessProbe.js';
+import type { V1HarnessAdapterType } from '../harness/harnessProbe.js';
 
 /** Where imported knowledge applies. A *hint* — the formation gate may override. */
 export type ImportScopeHint = 'workspace' | 'agent';

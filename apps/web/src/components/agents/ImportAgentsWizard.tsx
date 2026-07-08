@@ -1,9 +1,9 @@
-/**
- * ImportAgentsWizard — "Bring your agents" full transition (AGENT-TRANSITION B9/P7).
+﻿/**
+ * ImportAgentsWizard â€” "Bring your agents" full transition (AGENT-TRANSITION B9/P7).
  *
  * Master/detail: a grouped, searchable roster (left) + a per-agent transition
- * manifest (right). One transition brings an agent's whole self — identity +
- * harness logo + runtime + memories + skills(→abilities) — pre-connected. Scales
+ * manifest (right). One transition brings an agent's whole self â€” identity +
+ * harness logo + runtime + memories + skills(â†’abilities) â€” pre-connected. Scales
  * to dozens; one clear primary CTA. Imported agents land online and complete.
  */
 
@@ -66,7 +66,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
       try {
         const up = await checkImportUpdates();
         setUpdates(new Map(up.updates.map((u) => [u.externalId, (u.pendingMemory ?? u.pendingNew ?? 0) + (u.pendingSkills ?? 0)])));
-      } catch { /* best-effort */ }
+      } catch {  }
     } catch (e) {
       setError(apiErrorMessage(e));
     } finally {
@@ -118,12 +118,12 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
       width="xl"
       title={<span className="flex items-center gap-2"><Sparkles size={16} className="text-accent" /> Bring your agents</span>}
       subtitle={agents && agents.length > 0
-        ? `Found ${totals.count} agent${totals.count === 1 ? '' : 's'} · ${totals.memories} memories · ${totals.skills} skills → abilities`
-        : 'Import agents you already run outside Agentis — identity, memory and skills.'}
+        ? `Found ${totals.count} agent${totals.count === 1 ? '' : 's'} Â· ${totals.memories} memories Â· ${totals.skills} skills â†’ abilities`
+        : 'Import agents you already run outside Agentis â€” identity, memory and skills.'}
       footer={done ? (
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-[13px] text-success">
-            <Check size={14} /> Transitioned {done.agents} agent{done.agents === 1 ? '' : 's'} · {done.atoms} memories · {done.abilities} abilities.
+            <Check size={14} /> Transitioned {done.agents} agent{done.agents === 1 ? '' : 's'} Â· {done.atoms} memories Â· {done.abilities} abilities.
           </span>
           <Button size="sm" onClick={onClose}>Done</Button>
         </div>
@@ -140,7 +140,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
       )}
     >
       {error && <p className="mb-3 flex items-center gap-1 text-[12px] text-danger"><AlertCircle size={13} /> {error}</p>}
-      {scanning && !agents && <p className="flex items-center gap-2 text-[13px] text-text-muted"><Loader2 size={14} className="animate-spin" /> Scanning this machine for agents…</p>}
+      {scanning && !agents && <p className="flex items-center gap-2 text-[13px] text-text-muted"><Loader2 size={14} className="animate-spin" /> Scanning this machine for agentsâ€¦</p>}
       {agents && agents.length === 0 && !scanning && (
         <div className="rounded-lg border border-line bg-surface p-6 text-center">
           <FolderTree size={28} className="mx-auto text-text-muted" />
@@ -156,7 +156,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
             <div className="border-b border-line p-2.5">
               <div className="flex items-center gap-1.5 rounded-md border border-line px-2 py-1.5">
                 <Search size={13} className="text-text-muted" />
-                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`Search ${agents.length} agents…`}
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`Search ${agents.length} agentsâ€¦`}
                   className="w-full bg-transparent text-[12.5px] outline-none placeholder:text-text-muted" aria-label="Search agents" />
               </div>
             </div>
@@ -168,7 +168,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
                   <div key={type}>
                     <div className="flex items-center justify-between px-2.5 py-1.5">
                       <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                        <Icon className="h-3.5 w-3.5" /> {label} · {list.length}
+                        <Icon className="h-3.5 w-3.5" /> {label} Â· {list.length}
                       </span>
                       <button type="button" className="text-[11px] text-accent" onClick={() => setSelected((prev) => {
                         const next = new Set(prev);
@@ -189,7 +189,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
                 <div className="border-t border-line">
                   <button type="button" onClick={() => setShowImported((v) => !v)}
                     className="flex w-full items-center gap-1.5 px-2.5 py-2 text-[12px] text-text-muted">
-                    {showImported ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Already in Agentis · {imported.length}
+                    {showImported ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Already in Agentis Â· {imported.length}
                   </button>
                   {showImported && imported.map((a) => {
                     const { Icon } = harnessOf(a.adapterType);
@@ -200,7 +200,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
                         <span className="min-w-0 flex-1 truncate text-[12.5px]">{a.name}</span>
                         {pending > 0
                           ? <button type="button" onClick={() => void runImport(a.externalId)} disabled={importing}
-                              className="flex items-center gap-1 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">{pending} new · pull</button>
+                              className="flex items-center gap-1 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">{pending} new Â· pull</button>
                           : <Check size={13} className="text-success" />}
                       </div>
                     );
@@ -236,7 +236,7 @@ function RosterRow({ agent, Icon, checked, active, onToggle, onFocus }: {
   agent: DiscoveredAgentRow; Icon: HarnessIcon; checked: boolean; active: boolean; onToggle: () => void; onFocus: () => void;
 }) {
   const s = agent.summary;
-  const chips = [s.memoryFiles > 0 ? `${s.memoryFiles} mem` : null, s.skills > 0 ? `${s.skills} skills` : null, s.workspaceFiles > 0 ? `${s.workspaceFiles} rules` : null].filter(Boolean).join(' · ');
+  const chips = [s.memoryFiles > 0 ? `${s.memoryFiles} mem` : null, s.skills > 0 ? `${s.skills} skills` : null, s.workspaceFiles > 0 ? `${s.workspaceFiles} rules` : null].filter(Boolean).join(' Â· ');
   return (
     <div className={`flex items-center gap-2.5 px-2.5 py-2 ${active ? 'border-l-2 border-accent bg-surface' : 'border-l-2 border-transparent'}`}>
       <input type="checkbox" checked={checked} onChange={onToggle} aria-label={`Transition ${agent.name}`} />
@@ -314,13 +314,13 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
         </div>
         {agent.alreadyImported
           ? <span className="rounded bg-surface px-2 py-0.5 text-[11px] text-success">imported</span>
-          : <span className="rounded bg-success/15 px-2 py-0.5 text-[11px] text-success">→ online</span>}
+          : <span className="rounded bg-success/15 px-2 py-0.5 text-[11px] text-success">â†’ online</span>}
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-2">
-        <Metric label="Identity" value={agent.persona ? '✓ persona' : '—'} />
+        <Metric label="Identity" value={agent.persona ? 'âœ“ persona' : 'â€”'} />
         <Metric label="Memories" value={String(memoryCount)} />
-        <Metric label="Skills → abilities" value={String(skillCount)} />
+        <Metric label="Skills â†’ abilities" value={String(skillCount)} />
       </div>
 
       <div className="mt-3 grid gap-2 md:grid-cols-2">
@@ -335,15 +335,15 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
       <Section label="Runtime">
         <div className="flex items-center gap-2 rounded-md border border-line px-2.5 py-2">
           <Icon className="h-4 w-4" />
-          <span className="text-[12.5px]">{label}{agent.detectedModel ? ` · ${agent.detectedModel}` : ''}</span>
+          <span className="text-[12.5px]">{label}{agent.detectedModel ? ` Â· ${agent.detectedModel}` : ''}</span>
           <span className="ml-auto text-[11px] text-accent">swappable</span>
         </div>
       </Section>
 
-      {loading && <p className="mt-3 flex items-center gap-1.5 text-[12px] text-text-muted"><Loader2 size={12} className="animate-spin" /> Distilling memory + skills…</p>}
+      {loading && <p className="mt-3 flex items-center gap-1.5 text-[12px] text-text-muted"><Loader2 size={12} className="animate-spin" /> Distilling memory + skillsâ€¦</p>}
 
       {preview && (ws.length > 0 || ag.length > 0) && (
-        <Section label={`Memories · ${ws.length + ag.length}`}>
+        <Section label={`Memories Â· ${ws.length + ag.length}`}>
           <div className="max-h-[280px] space-y-1.5 overflow-y-auto pr-1">
             {[...ag, ...ws].map((c) => (
               <label key={c.hash} className="flex items-start gap-2 rounded border border-line bg-bg p-2">
@@ -363,7 +363,7 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
       )}
 
       {preview && preview.skills.length > 0 && (
-        <Section label={`Skills → abilities · ${preview.skills.length}`}>
+        <Section label={`Skills â†’ abilities Â· ${preview.skills.length}`}>
           <div className="max-h-[300px] space-y-1.5 overflow-y-auto pr-1">
             {preview.skills.map((s) => (
               <label key={s.path} className="flex items-start gap-2 rounded border border-line bg-bg p-2">
@@ -425,3 +425,6 @@ function sumTotals(agents: DiscoveredAgentRow[]) {
     skills: acc.skills + a.summary.skills,
   }), { count: 0, memories: 0, skills: 0 });
 }
+
+
+

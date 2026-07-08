@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Check, FileText, Scissors, Sparkles, Network, BookOpenCheck, Loader2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -17,7 +17,7 @@ const NEW_BASE = '__new__';
 const INGEST_STEPS: Array<{ icon: LucideIcon; label: string; detail: string }> = [
   { icon: FileText, label: 'Reading the document', detail: 'Extracting clean text from the file.' },
   { icon: Scissors, label: 'Splitting into passages', detail: 'Chunking into semantically coherent pieces.' },
-  { icon: Sparkles, label: 'Generating embeddings', detail: 'Encoding each passage with the on-device multilingual model — the first upload also warms the model, which can take a moment.' },
+  { icon: Sparkles, label: 'Generating embeddings', detail: 'Encoding each passage with the on-device multilingual model â€” the first upload also warms the model, which can take a moment.' },
   { icon: Network, label: 'Grounding & linking', detail: 'Summarizing passages and wiring them into the Brain graph.' },
   { icon: BookOpenCheck, label: 'Indexing', detail: 'Making the knowledge retrievable for this Brain.' },
 ];
@@ -50,7 +50,7 @@ function IngestProgress() {
           <span key={i} className={clsx('h-1 flex-1 rounded-full transition-colors', i <= step ? 'bg-accent' : 'bg-line')} />
         ))}
       </div>
-      <p className="mt-2 text-[11px] text-text-muted">You can keep working — this finishes in the background.</p>
+      <p className="mt-2 text-[11px] text-text-muted">You can keep working â€” this finishes in the background.</p>
     </div>
   );
 }
@@ -225,7 +225,7 @@ export function WorkspaceDocDropZone({
             >
               {bases.length === 0 && <option value="">{emptySelectionLabel}</option>}
               {bases.map((base) => <option key={base.id} value={base.id}>{labelForBase(base)}</option>)}
-              <option value={NEW_BASE}>+ New collection…</option>
+              <option value={NEW_BASE}>+ New collectionâ€¦</option>
             </select>
             <Button variant="primary" size="md" loading={uploading} onClick={() => inputRef.current?.click()}>
               Browse files
@@ -263,3 +263,6 @@ function mimeFromName(name: string): string {
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
   return 'text/plain';
 }
+
+
+

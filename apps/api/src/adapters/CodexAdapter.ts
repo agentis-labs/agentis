@@ -28,7 +28,7 @@ import type {
 import type { Logger } from '../logger.js';
 import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt, formatToolManifestAwareness, stripProcessNoise } from './markerToolProtocol.js';
-import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
+import { harnessMcpArgs, type McpHarnessServer } from '../services/mcp/mcpHarnessSession.js';
 import { codexServiceTierArgs } from './codexServiceTier.js';
 import { linkAbortSignal } from './abort.js';
 import {
@@ -39,7 +39,7 @@ import {
   type CliChatPart,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
-import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 15_000;
 const DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS = 30_000;

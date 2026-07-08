@@ -1,4 +1,4 @@
-export interface ConnectorExecuteOptions {
+﻿export interface ConnectorExecuteOptions {
   operation: string;
   params: Record<string, unknown>;
   credential: Record<string, unknown> | null;
@@ -59,3 +59,6 @@ export interface IntegrationManifest {
   builtin: boolean;
   runtime: 'implemented' | 'manifest_only';
 }
+
+
+

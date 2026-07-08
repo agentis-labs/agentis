@@ -50,6 +50,35 @@ export interface ExtensionExecuteArgs {
   signal?: AbortSignal;
 }
 
+/**
+ * Process-global cap on concurrent SANDBOX extension executions (node_worker /
+ * docker_sandbox). Without it, a prompt-injected agent that fires many
+ * `extension.test`/`invoke` calls in a loop can exhaust host memory/CPU/PIDs
+ * (fork-bomb via the sandbox). Builtins are trusted + have their own budgets and
+ * are not gated. Bound is generous by default and operator-tunable.
+ */
+const MAX_CONCURRENT_SANDBOX = Math.max(
+  1,
+  Number(process.env.AGENTIS_EXTENSION_MAX_CONCURRENT ?? '8') || 8,
+);
+let activeSandboxCount = 0;
+const sandboxWaiters: Array<() => void> = [];
+
+async function acquireSandboxSlot(): Promise<() => void> {
+  if (activeSandboxCount >= MAX_CONCURRENT_SANDBOX) {
+    await new Promise<void>((resolve) => sandboxWaiters.push(resolve));
+  }
+  activeSandboxCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeSandboxCount -= 1;
+    const next = sandboxWaiters.shift();
+    if (next) next();
+  };
+}
+
 export class ExtensionRuntime {
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -166,6 +195,11 @@ export class ExtensionRuntime {
       });
     };
 
+    // Bound concurrent sandbox executions (node_worker/docker) to prevent
+    // resource exhaustion from a runaway/injected extension loop. Builtins are
+    // trusted and excluded so a long deploy never starves the sandbox pool.
+    const needsSandboxSlot = manifest.runtime === 'node_worker' || manifest.runtime === 'docker_sandbox';
+    const releaseSandboxSlot = needsSandboxSlot ? await acquireSandboxSlot() : null;
     try {
       if (args.signal?.aborted) throw new Error('__ABORTED__');
       switch (manifest.runtime) {
@@ -252,6 +286,8 @@ export class ExtensionRuntime {
         durationMs: Date.now() - startedAt,
         operationName,
       };
+    } finally {
+      releaseSandboxSlot?.();
     }
 
     try {

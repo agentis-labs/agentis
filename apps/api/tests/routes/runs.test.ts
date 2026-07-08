@@ -536,7 +536,7 @@ describe('POST /v1/runs/:id/resume', () => {
 describe('GET /v1/runs/:id/scratchpad', () => {
   it('returns a stable entries array for the drawer', async () => {
     const { runId } = seedRun();
-    scratchpad.write(runId, 'message', { subject: 'Hi Robson', body: 'Hi Robson' });
+    scratchpad.write(runId, 'message', { subject: 'Hi Alex', body: 'Hi Alex' });
     const res = await app().request(`/v1/runs/${runId}/scratchpad`, { headers: ctx.authHeaders });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { scratchpad: Record<string, unknown>; entries: Array<{ key: string; value: unknown }> };
@@ -544,7 +544,7 @@ describe('GET /v1/runs/:id/scratchpad', () => {
     expect(body.entries).toEqual([
       expect.objectContaining({
         key: 'message',
-        value: { subject: 'Hi Robson', body: 'Hi Robson' },
+        value: { subject: 'Hi Alex', body: 'Hi Alex' },
       }),
     ]);
   });

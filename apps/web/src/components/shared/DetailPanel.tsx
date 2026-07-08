@@ -1,5 +1,5 @@
-/**
- * DetailPanel — right-side slide-in panel for inline detail viewing.
+﻿/**
+ * DetailPanel â€” right-side slide-in panel for inline detail viewing.
  *
  * Lighter alternative to Drawer for "click row to inspect" patterns.
  * No overlay; main content stays interactive.
@@ -63,3 +63,6 @@ export function DetailPanel({
     </aside>
   );
 }
+
+
+

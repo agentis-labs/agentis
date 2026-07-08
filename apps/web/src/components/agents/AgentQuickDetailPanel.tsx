@@ -1,11 +1,4 @@
-/**
- * AgentQuickDetailPanel — the daily check-in surface (AGENTS-PAGE-REDESIGN.md §2).
- *
- * A right-anchored slide-over that opens when an operator clicks an agent card
- * in Fleet view. Shows live status, channel connections, and meaningful quick
- * stats — without navigating away from the fleet. For changing configuration,
- * the operator uses "Open agent config →" to reach the full config page.
- */
+﻿
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -176,7 +169,7 @@ export function AgentQuickDetailPanel({
         return;
       }
       if (env.event === REALTIME_EVENTS.AGENT_PRESENCE_THINKING) {
-        setLiveLine('thinking…');
+        setLiveLine('thinkingâ€¦');
         return;
       }
       if (env.event === REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL) {
@@ -242,7 +235,7 @@ export function AgentQuickDetailPanel({
       <aside
         role="dialog"
         aria-modal="true"
-        aria-label={`${agent.name} — agent details`}
+        aria-label={`${agent.name} â€” agent details`}
         className="animate-slide-in-right fixed right-0 top-12 z-40 flex h-[calc(100vh-3rem)] w-[400px] flex-col border-l border-line bg-surface shadow-card"
       >
         <div className="flex items-start gap-3 border-b border-line px-5 py-4">
@@ -261,8 +254,8 @@ export function AgentQuickDetailPanel({
               <span className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', dotClass, (readiness === 'running' || readiness === 'setting_up') && 'animate-pulse')} />
             </div>
             <div className="mt-0.5 truncate text-[12px] capitalize text-text-muted">
-              {agent.role ?? 'agent'} · {harnessLabel(agent.adapterType)}
-              {agent.runtimeModel ? ` · ${agent.runtimeModel}` : ''}
+              {agent.role ?? 'agent'} Â· {harnessLabel(agent.adapterType)}
+              {agent.runtimeModel ? ` Â· ${agent.runtimeModel}` : ''}
             </div>
           </div>
           <button
@@ -312,7 +305,7 @@ export function AgentQuickDetailPanel({
                   </div>
                   <div className="flex items-center gap-2 text-[12px] text-text-secondary">
                     <Loader2 size={12} className="animate-spin text-warn" />
-                    {liveLine ?? 'running…'}
+                    {liveLine ?? 'runningâ€¦'}
                   </div>
                   {agent.currentTaskId && (
                     <button
@@ -321,7 +314,7 @@ export function AgentQuickDetailPanel({
                       disabled={cancelling}
                       className="rounded-btn border border-danger px-2.5 py-1 text-[12px] font-medium text-danger transition-colors hover:bg-danger-soft disabled:opacity-50"
                     >
-                      {cancelling ? 'Cancelling…' : 'Cancel task'}
+                      {cancelling ? 'Cancellingâ€¦' : 'Cancel task'}
                     </button>
                   )}
                 </div>
@@ -431,7 +424,7 @@ function SetupPendingPanel() {
 }
 
 /**
- * InstallProgressPanel — live install log shown inside the quick-detail panel
+ * InstallProgressPanel â€” live install log shown inside the quick-detail panel
  * when an agent is in the "setting up" state. Shows steps, progress bar, and
  * a scrollable log of install output.
  */
@@ -460,7 +453,7 @@ function InstallProgressPanel({ session, agentId }: { session: InstallSession; a
           <Download size={14} className="animate-pulse text-cyan-400" />
         )}
         <span className={clsx('text-[13px] font-medium', isComplete ? 'text-accent' : hasError ? 'text-danger' : 'text-text-primary')}>
-          {isComplete ? 'Runtime installed — agent is live' : hasError ? 'Installation failed' : 'Installing runtime…'}
+          {isComplete ? 'Runtime installed â€” agent is live' : hasError ? 'Installation failed' : 'Installing runtimeâ€¦'}
         </span>
       </div>
 
@@ -548,3 +541,6 @@ function Stat({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+
+

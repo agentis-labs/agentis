@@ -1,13 +1,8 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
 import { api } from '../../lib/api';
 
-/**
- * Per-scope "Surface in Workspace Brain" toggle. A scope's (App / Agent /
- * Workflow) memory + knowledge is shown in the Workspace Brain by default,
- * labeled + connected to its owner; this lets the operator hide a scope's
- * atoms from the workspace view (they stay in the scope's own brain).
- */
+
 export function ScopeVisibilityToggle({ scopeId }: { scopeId: string }) {
   const [surfaced, setSurfaced] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
@@ -41,7 +36,7 @@ export function ScopeVisibilityToggle({ scopeId }: { scopeId: string }) {
       type="button"
       onClick={() => void toggle()}
       disabled={surfaced === null || saving}
-      title={shown ? 'This scope’s memory + knowledge appears in the Workspace Brain (labeled to its owner). Click to hide.' : 'Hidden from the Workspace Brain — lives only in this scope’s brain. Click to show.'}
+      title={shown ? 'This scopeâ€™s memory + knowledge appears in the Workspace Brain (labeled to its owner). Click to hide.' : 'Hidden from the Workspace Brain â€” lives only in this scopeâ€™s brain. Click to show.'}
       className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors ${
         shown ? 'border-amber-400/30 bg-amber-400/10 text-amber-300' : 'border-line bg-surface-2 text-text-muted hover:text-text-primary'
       } disabled:opacity-60`}
@@ -51,3 +46,5 @@ export function ScopeVisibilityToggle({ scopeId }: { scopeId: string }) {
     </button>
   );
 }
+
+

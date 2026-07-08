@@ -1,10 +1,10 @@
-/**
- * AgentConfigPanel — Config tab content for AgentDetailPage.
+﻿/**
+ * AgentConfigPanel â€” Config tab content for AgentDetailPage.
  *
  * Two sections:
- *   1. Runtime — swappable binding (Track R: switch runtime without losing
+ *   1. Runtime â€” swappable binding (Track R: switch runtime without losing
  *      identity/memory), model picker first, advanced config collapsed
- *   2. Operations — budget, standby, reporting chain
+ *   2. Operations â€” budget, standby, reporting chain
  *
  * Identity (name, role, appearance, tags) is managed on the Identity tab.
  * Instructions (playbook) is managed on the Instructions tab.
@@ -36,7 +36,7 @@ interface RuntimeRepairState {
   message?: string;
 }
 
-// ── Component ────────────────────────────────────────────────────────────────
+// â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function AgentConfigPanel({
   agent,
@@ -130,7 +130,7 @@ export function AgentConfigPanel({
         config: runtimeConfigToAdapterConfig(next, runtimeConfig),
         runtimeModel: runtimeModelFor(next, runtimeConfig),
       });
-      toast.success('Runtime switched', `${runtimeDisplayName(next)} is now this agent's runtime — identity and memory are unchanged.`);
+      toast.success('Runtime switched', `${runtimeDisplayName(next)} is now this agent's runtime â€” identity and memory are unchanged.`);
       onSaved();
     } catch (err) {
       toast.error('Switch failed', apiErrorMessage(err));
@@ -149,7 +149,6 @@ export function AgentConfigPanel({
       });
       onSaved();
     } catch {
-      // Best-effort cleanup: the visible panel state still stops showing setup.
     }
   }
 
@@ -274,7 +273,7 @@ export function AgentConfigPanel({
 
   return (
     <div className="space-y-8">
-      {/* ── Runtime ─────────────────────────────────────────────────── */}
+      {/* â”€â”€ Runtime â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <section className="rounded-xl border border-line bg-surface p-5">
         <div className="mb-4 flex items-center justify-between">
           <div>
@@ -330,7 +329,7 @@ export function AgentConfigPanel({
         )}
       </section>
 
-      {/* ── Operations ──────────────────────────────────────────────── */}
+      {/* â”€â”€ Operations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <section className="rounded-xl border border-line bg-surface p-5">
         <div className="mb-4 flex items-center justify-between">
           <div>
@@ -342,7 +341,7 @@ export function AgentConfigPanel({
             disabled={savingOperations}
             className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-canvas disabled:opacity-50"
           >
-            {savingOperations ? 'Saving…' : 'Save operations'}
+            {savingOperations ? 'Savingâ€¦' : 'Save operations'}
           </button>
         </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -571,3 +570,6 @@ function hasConnectableRuntimeConfig(adapterType: AdapterType, config: RuntimeCo
 }
 
 const inputCls = 'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm outline-none focus:border-accent';
+
+
+

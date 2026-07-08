@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ChannelIdentityService } from '../../src/services/channelIdentityService.js';
+import { ChannelIdentityService } from '../../src/services/conversation/channelIdentityService.js';
 
 describe('ChannelIdentityService', () => {
   let ctx: TestContext;

@@ -12,11 +12,11 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { validateWorkflowGraph } from '../engine/validateGraph.js';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import type { MemoryStore } from './memoryStore.js';
+import type { MemoryStore } from './memory/memoryStore.js';
 import type { IssueService } from './issues.js';
 import type { SkillService } from './skillService.js';
-import { analyzeRunFailure } from './runFailureAnalysis.js';
-import type { RunVerdict } from './workflowVerdict.js';
+import { analyzeRunFailure } from './run/runFailureAnalysis.js';
+import type { RunVerdict } from './workflow/workflowVerdict.js';
 
 export interface InstinctProposal {
   workspaceId: string;

@@ -1,5 +1,5 @@
-/**
- * useBackgroundInstall — React hook for subscribing to background install progress.
+﻿/**
+ * useBackgroundInstall â€” React hook for subscribing to background install progress.
  *
  * Uses useSyncExternalStore to efficiently react to the module-level store
  * without context providers or re-renders of unrelated trees.
@@ -41,3 +41,6 @@ export function useAllInstallSessions(): InstallSession[] {
   const _version = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   return getAllInstallSessions();
 }
+
+
+

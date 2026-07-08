@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../../src/logger.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
-import { parseModeCommand, PLAN_MODE_SYSTEM_ADDENDUM } from '../../src/services/chatPermissionMode.js';
+import { parseModeCommand, PLAN_MODE_SYSTEM_ADDENDUM } from '../../src/services/chat/chatPermissionMode.js';
 
 describe('Plan mode', () => {
   it('blocks mutating registry tools before their handler can run', async () => {

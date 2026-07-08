@@ -1,5 +1,5 @@
-/**
- * Logger interface — V1-SPEC §3.3 lives in @agentis/core so packages
+﻿/**
+ * Logger interface â€” V1-SPEC Â§3.3 lives in @agentis/core so packages
  * (adapters, extensions, db) can depend on it without pulling apps/api.
  *
  * The interface is what consumers code against. The concrete `createLogger`
@@ -16,3 +16,6 @@ export interface Logger {
   error(msg: string, ctx?: Record<string, unknown>): void;
   child(ctx: Record<string, unknown>): Logger;
 }
+
+
+

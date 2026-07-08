@@ -1,5 +1,5 @@
 import type { Logger } from '../logger.js';
-import type { AgentMemoryService } from './agentMemory.js';
+import type { AgentMemoryService } from './agent/agentMemory.js';
 
 export class FailureReflectionService {
   constructor(

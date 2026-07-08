@@ -1,5 +1,5 @@
-/**
- * RoomCreateDialog — modal for creating a new chat room with optional agent selection.
+﻿/**
+ * RoomCreateDialog â€” modal for creating a new chat room with optional agent selection.
  *
  * Replaces the previous window.prompt() flow. Allows adding agents at
  * creation time so users don't have to chase down a separate "add member" step.
@@ -183,10 +183,13 @@ export function RoomCreateDialog({ open, onClose, onCreated }: RoomCreateDialogP
             disabled={!name.trim() || creating}
             className="inline-flex h-9 items-center justify-center rounded-btn bg-accent px-3 text-[13px] font-medium text-canvas transition-all hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {creating ? 'Creating…' : 'Create'}
+            {creating ? 'Creatingâ€¦' : 'Create'}
           </button>
         </footer>
       </form>
     </div>
   );
 }
+
+
+

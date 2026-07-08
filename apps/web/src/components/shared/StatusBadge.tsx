@@ -1,5 +1,5 @@
-/**
- * StatusBadge — shared status pill with semantic tone.
+﻿/**
+ * StatusBadge â€” shared status pill with semantic tone.
  *
  * Same pill = same meaning everywhere. Supports both legacy string-based
  * status (auto-mapped to a tone) and the new rich semantic API with
@@ -134,3 +134,6 @@ export function StatusDot({
     />
   );
 }
+
+
+

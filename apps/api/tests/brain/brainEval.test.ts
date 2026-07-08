@@ -10,7 +10,7 @@ import { schema } from '@agentis/db/sqlite';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
-import { BrainAskService } from '../../src/services/brainAskService.js';
+import { BrainAskService } from '../../src/services/brain/brainAskService.js';
 import { runBrainEval, BRAIN_EVAL_CASES } from '../../eval/brain/brainEvalHarness.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

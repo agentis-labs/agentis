@@ -20,13 +20,13 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { detectHarnesses, testHarnessConfig, type V1HarnessAdapterType } from '../services/harnessProbe.js';
+import { detectHarnesses, testHarnessConfig, type V1HarnessAdapterType } from '../services/harness/harnessProbe.js';
 import {
   installHarness,
   isAutoInstallableAdapter,
   listHarnessInstallOptions,
-} from '../services/harnessInstall.js';
-import { listRuntimeModels } from '../services/runtimeModels.js';
+} from '../services/harness/harnessInstall.js';
+import { listRuntimeModels } from '../services/runtime/runtimeModels.js';
 
 export interface HarnessRoutesDeps {
   db: AgentisSqliteDb;

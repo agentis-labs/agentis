@@ -1,5 +1,5 @@
-/**
- * Typewriter — V1-SPEC §13.5.
+﻿/**
+ * Typewriter â€” V1-SPEC Â§13.5.
  *
  * Streams a string character-by-character at TYPEWRITER_CHAR_DELAY_MS
  * (28ms/char). When `text` changes mid-stream we restart from zero so the
@@ -49,3 +49,6 @@ export function Typewriter({
 
   return <span className={className}>{shown}</span>;
 }
+
+
+

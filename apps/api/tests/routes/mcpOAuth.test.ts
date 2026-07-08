@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildMcpOAuthRoutes } from '../../src/routes/mcpOAuth.js';
-import { McpOAuthService } from '../../src/services/mcpOAuthService.js';
+import { McpOAuthService } from '../../src/services/mcp/mcpOAuthService.js';
 import { CredentialVault } from '../../src/services/credentialVault.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

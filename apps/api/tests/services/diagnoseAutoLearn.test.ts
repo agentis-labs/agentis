@@ -9,8 +9,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolContext } from '@agentis/core';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerRunTools } from '../../src/services/agentisToolHandlers/run.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
-import { recallWorkflowLessons } from '../../src/services/workflowPlaybook.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
+import { recallWorkflowLessons } from '../../src/services/workflow/workflowPlaybook.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

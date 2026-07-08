@@ -15,13 +15,13 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { buildAgentMutationRoutes } from '../../src/routes/agentMutations.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { defaultInstructionsForRole } from '../../src/data/playbook-library.js';
 import {
   listAgentInstructionFiles,
   resolveWritableInstructionFile,
   writeInstructionFile,
-} from '../../src/services/agentInstructionFiles.js';
+} from '../../src/services/agent/agentInstructionFiles.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

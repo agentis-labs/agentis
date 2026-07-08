@@ -3,7 +3,7 @@ import { schemas, type WorkflowGraph } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { startEphemeralWorkflow } from '../ephemeralWorkflowService.js';
-import { compassForRun } from '../workflowCompass.js';
+import { compassForRun } from '../workflow/workflowCompass.js';
 
 const ephemeralRunArgsSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),

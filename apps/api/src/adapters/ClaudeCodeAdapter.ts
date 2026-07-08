@@ -31,7 +31,7 @@ import type { Logger } from '../logger.js';
 import { resolveClaudeBinary, resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { buildMarkerToolPrompt, formatToolManifestAwareness } from './markerToolProtocol.js';
 import { toolActivityLabel } from './runtimeProgress.js';
-import { harnessMcpArgs, type McpHarnessServer } from '../services/mcpHarnessSession.js';
+import { harnessMcpArgs, type McpHarnessServer } from '../services/mcp/mcpHarnessSession.js';
 import { linkAbortSignal } from './abort.js';
 import {
   chatHardCeilingMs,
@@ -40,7 +40,7 @@ import {
   runCliChatTurn,
   type CliChatPart,
 } from './cliChatRuntime.js';
-import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 
 export interface ClaudeCodeAdapterOptions {
@@ -229,12 +229,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       '--dangerously-skip-permissions',
       ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
-      // Headless isolation — the Codex `--ignore-user-config` parity. Use ONLY the
-      // Agentis-mounted MCP server below and IGNORE the operator's personal
-      // `~/.claude` / project `.mcp.json` MCP servers (e.g. Gmail/Drive/Calendar or
-      // a browser server). Those often need interactive auth or aren't reachable in
-      // a headless spawn, so the agent hangs forever at "Using a tool" waiting on
-      // one. Agent tools flow ONLY through Agentis, never the operator's own config.
       '--strict-mcp-config',
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
@@ -417,12 +411,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
       ...(storedSession ? ['--resume', storedSession] : []),
-      // Headless isolation — the Codex `--ignore-user-config` parity. Use ONLY the
-      // Agentis-mounted MCP server below and IGNORE the operator's personal
-      // `~/.claude` / project `.mcp.json` MCP servers (e.g. Gmail/Drive/Calendar or
-      // a browser server). Those often need interactive auth or aren't reachable in
-      // a headless spawn, so the agent hangs forever at "Using a tool" waiting on
-      // one. Agent tools flow ONLY through Agentis, never the operator's own config.
       '--strict-mcp-config',
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),

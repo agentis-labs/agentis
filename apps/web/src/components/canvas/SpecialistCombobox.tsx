@@ -1,17 +1,4 @@
-/**
- * SpecialistCombobox — replaces the old hardcoded 10-role `<select>`. Roles
- * are an OPEN vocabulary (packages/core/src/types/specialist.ts): any
- * non-empty string is a legal `agentRole`, resolved on-demand via the
- * workspace specialist system. This combobox fetches the live specialist
- * roster (`GET /v1/specialists` — platform + custom + generated + community),
- * lets the operator pick one, or type a role that doesn't exist yet and
- * author it on the spot (`POST /v1/specialists`) — mirroring how
- * `SpecialistDemandRouter` already auto-creates specialists at runtime, just
- * done explicitly from the canvas instead of implicitly at dispatch.
- *
- * Modeled on ExtensionCombobox's fetch-backed combobox + create-new pattern
- * for visual/behavioral consistency within the inspector.
- */
+﻿
 
 import { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -117,7 +104,7 @@ export function SpecialistCombobox({
               void createSpecialist(query);
             }
           }}
-          placeholder={loading ? 'Loading specialists…' : 'Search or type a new role…'}
+          placeholder={loading ? 'Loading specialistsâ€¦' : 'Search or type a new roleâ€¦'}
           className="w-full rounded border border-line bg-surface-2 py-1 px-2 text-[12px]"
         />
       </div>
@@ -128,7 +115,7 @@ export function SpecialistCombobox({
             {selected && <span className={clsx('inline-block h-1.5 w-1.5 shrink-0 rounded-full', STATUS_DOT[selected.status])} />}
             <span className="truncate">Selected: {selected?.name ?? value}</span>
           </span>
-          <button type="button" onClick={() => onChange('')} className="shrink-0 text-text-muted hover:text-danger">×</button>
+          <button type="button" onClick={() => onChange('')} className="shrink-0 text-text-muted hover:text-danger">Ã—</button>
         </div>
       )}
 
@@ -162,7 +149,7 @@ export function SpecialistCombobox({
       )}
 
       {!loading && specialists.length === 0 && !query && (
-        <p className="text-center text-[11px] text-text-muted">No specialists yet — type a role name to author one.</p>
+        <p className="text-center text-[11px] text-text-muted">No specialists yet â€” type a role name to author one.</p>
       )}
 
       {canCreate && (
@@ -173,9 +160,11 @@ export function SpecialistCombobox({
           className="inline-flex w-full items-center justify-center gap-1.5 rounded border border-dashed border-accent/40 bg-accent/5 py-1 text-[11px] text-accent hover:bg-accent/10 disabled:opacity-60"
         >
           <Wand2 size={11} />
-          {creating ? 'Authoring…' : `Author "${query.trim()}" as a new specialist`}
+          {creating ? 'Authoringâ€¦' : `Author "${query.trim()}" as a new specialist`}
         </button>
       )}
     </div>
   );
 }
+
+

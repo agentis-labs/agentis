@@ -10,8 +10,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { CredentialVault } from '../../src/services/credentialVault.js';
-import { McpToolBridge } from '../../src/services/mcpToolBridge.js';
-import { resolveMcpServerHeaders, saveMcpServers, type McpServerConfig } from '../../src/services/mcpServerStore.js';
+import { McpToolBridge } from '../../src/services/mcp/mcpToolBridge.js';
+import { resolveMcpServerHeaders, saveMcpServers, type McpServerConfig } from '../../src/services/mcp/mcpServerStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

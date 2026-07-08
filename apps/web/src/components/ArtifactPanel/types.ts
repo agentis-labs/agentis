@@ -1,4 +1,4 @@
-import type { ArtifactType } from '@agentis/core';
+﻿import type { ArtifactType } from '@agentis/core';
 
 export type { ArtifactType };
 export type ArtifactOrigin = 'agent' | 'app' | 'workflow' | 'channel' | 'manual';
@@ -24,3 +24,6 @@ export interface Artifact {
 }
 
 export type PanelState = 'closed' | 'floating' | 'docked' | 'fullscreen';
+
+
+

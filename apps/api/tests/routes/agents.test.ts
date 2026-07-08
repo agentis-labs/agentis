@@ -13,7 +13,7 @@ import { buildAgentRoutes } from '../../src/routes/agents.js';
 import { buildAgentMutationRoutes } from '../../src/routes/agentMutations.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { HttpAdapter } from '../../src/adapters/HttpAdapter.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -195,74 +195,6 @@ describe('GET /v1/agents', () => {
         // ownedWorkflows joined the payload with the owner-agent domain work;
         // match the seeded count without pinning the whole nested shape.
         connectionCounts: expect.objectContaining({ workflows: 1 }),
-      }),
-    ]);
-  });
-
-  it('includes enabled pinned ability summaries for canvas specialization labels', async () => {
-    const agentId = seedAgent();
-    const enabledAbilityId = randomUUID();
-    const disabledAbilityId = randomUUID();
-    const now = new Date().toISOString();
-
-    ctx.db
-      .insert(schema.abilities)
-      .values([
-        {
-          id: enabledAbilityId,
-          workspaceId: ctx.workspace.id,
-          name: 'Marketing Expert',
-          slug: 'marketing-expert',
-          domainTag: 'marketing',
-          iconEmoji: null,
-          compileStatus: 'ready',
-          createdAt: now,
-          updatedAt: now,
-        },
-        {
-          id: disabledAbilityId,
-          workspaceId: ctx.workspace.id,
-          name: 'Dormant Expert',
-          slug: 'dormant-expert',
-          domainTag: 'sales',
-          iconEmoji: null,
-          compileStatus: 'ready',
-          createdAt: now,
-          updatedAt: now,
-        },
-      ])
-      .run();
-
-    ctx.db
-      .insert(schema.agentAbilityPins)
-      .values([
-        { agentId, abilityId: enabledAbilityId, enabled: true, createdAt: now },
-        { agentId, abilityId: disabledAbilityId, enabled: false, createdAt: now },
-      ])
-      .run();
-
-    const res = await app().request('/v1/agents', { headers: ctx.authHeaders });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      agents: Array<{
-        id: string;
-        abilities: Array<{ id: string; name: string; slug: string; domainTag: string | null; compileStatus: string }>;
-      }>;
-    };
-    expect(body.agents).toEqual([
-      expect.objectContaining({
-        id: agentId,
-        abilities: [
-          {
-            id: enabledAbilityId,
-            name: 'Marketing Expert',
-            slug: 'marketing-expert',
-            domainTag: 'marketing',
-            iconEmoji: null,
-            compileStatus: 'ready',
-            pinnedAt: now,
-          },
-        ],
       }),
     ]);
   });

@@ -1,5 +1,5 @@
-/**
- * BrainStage — the living Map view of the intelligence topology.
+﻿/**
+ * BrainStage â€” the living Map view of the intelligence topology.
  *
  * A bespoke <canvas> renderer driven by a continuously running d3-force
  * simulation. Built for scale: idle graphs cost zero CPU (the render loop
@@ -46,7 +46,7 @@ interface SimNode extends SimulationNodeDatum {
   node: BrainNode;
   degree: number;
   baseRadius: number;
-  /** Eased render radius — lerps toward the interaction target each frame. */
+  /** Eased render radius â€” lerps toward the interaction target each frame. */
   radius: number;
   color: string;
   isCore: boolean;
@@ -119,7 +119,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
     [allEdges, visibleNodeIds],
   );
 
-  // ---- mutable render state (refs — never trigger React re-renders) ------
+  // ---- mutable render state (refs â€” never trigger React re-renders) ------
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
   const nodeMapRef = useRef<Map<string, SimNode>>(new Map());
   const linksRef = useRef<SimLink[]>([]);
@@ -262,7 +262,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
         .alphaMin(0.0016)
         .stop();
       simRef.current = sim;
-      // Warm fewer ticks on large graphs — they finish settling live, which
+      // Warm fewer ticks on large graphs â€” they finish settling live, which
       // also gives a pleasant "bloom" animation instead of a blocking freeze.
       const warm = simNodes.length > 180 ? 70 : 130;
       for (let i = 0; i < warm; i += 1) sim.tick();
@@ -424,7 +424,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       const sx = n.x * t.k + t.x;
       const sy = n.y * t.k + t.y;
       const r = Math.max(1.5, n.radius * t.k);
-      // viewport cull — skip anything well outside the visible area
+      // viewport cull â€” skip anything well outside the visible area
       if (sx < -80 || sy < -80 || sx > w + 80 || sy > h + 80) continue;
 
       const dim = Boolean(neighbourhood && !isNeighbour && !isFocus);
@@ -439,7 +439,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       ctx.drawImage(sprite, sx - glowSize / 2, sy - glowSize / 2, glowSize, glowSize);
       ctx.globalAlpha = dim ? 0.12 : 1;
 
-      // spherical body — offset radial gradient gives depth instead of a flat disc
+      // spherical body â€” offset radial gradient gives depth instead of a flat disc
       const body = ctx.createRadialGradient(
         sx - r * 0.42, sy - r * 0.46, r * 0.12,
         sx, sy, r * 1.04,
@@ -665,7 +665,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       {graph && (
         <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-md border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-cyan-200 backdrop-blur-sm">
           <span className={['mr-1 inline-block h-1.5 w-1.5 rounded-full bg-cyan-300', livePulse > 0 ? 'animate-pulse' : ''].join(' ')} />
-          {graph.meta.atomCount} atoms · {graph.meta.linkCount} links
+          {graph.meta.atomCount} atoms Â· {graph.meta.linkCount} links
         </div>
       )}
 
@@ -751,7 +751,7 @@ function darken(hex: string, amount: number): string {
   return `rgb(${Math.round(r * m)},${Math.round(g * m)},${Math.round(b * m)})`;
 }
 
-// Cached soft-glow sprites — one offscreen canvas per colour, reused every
+// Cached soft-glow sprites â€” one offscreen canvas per colour, reused every
 // frame so a dense graph never allocates hundreds of gradients per paint.
 const glowCache = new Map<string, HTMLCanvasElement>();
 function glowSprite(color: string): HTMLCanvasElement {
@@ -819,7 +819,7 @@ function dotColor(node: BrainNode): string {
 
 function shortLabel(label: string): string {
   const clean = label.replace(/\.md$/i, '').trim();
-  return clean.length > 26 ? `${clean.slice(0, 25)}…` : clean;
+  return clean.length > 26 ? `${clean.slice(0, 25)}â€¦` : clean;
 }
 
 function edgeStroke(edge: BrainEdge): string {
@@ -855,3 +855,6 @@ function hashUnit(input: string): number {
   }
   return (hash >>> 0) / 4294967295;
 }
+
+
+

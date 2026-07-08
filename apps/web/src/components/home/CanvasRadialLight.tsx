@@ -1,4 +1,4 @@
-import type { Vec2 } from './homeCanvasTypes';
+﻿import type { Vec2 } from './homeCanvasTypes';
 
 export function CanvasRadialLight({
   orchestratorCanvasPos,
@@ -21,3 +21,5 @@ export function CanvasRadialLight({
     />
   );
 }
+
+

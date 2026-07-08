@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { REALTIME_EVENTS } from '@agentis/core';
 import clsx from 'clsx';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
@@ -121,3 +121,5 @@ function stringField(source: Record<string, unknown>, keys: string[]): string | 
   }
   return undefined;
 }
+
+

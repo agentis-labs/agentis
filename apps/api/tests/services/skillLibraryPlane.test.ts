@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';

@@ -7,10 +7,10 @@ import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { AppStore } from '@agentis/app';
 import { eq } from 'drizzle-orm';
-import { AppContactService } from '../../src/services/appContacts.js';
+import { AppContactService } from '../../src/services/app/appContacts.js';
 import { ProactiveFollowupService } from '../../src/services/proactiveFollowups.js';
 import { OutboundPolicyService } from '../../src/services/outboundPolicy.js';
-import type { ChannelTurnInput } from '../../src/services/channelTurnDispatcher.js';
+import type { ChannelTurnInput } from '../../src/services/conversation/channelTurnDispatcher.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

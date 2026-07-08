@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, CircleDashed, ShieldCheck } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
@@ -20,7 +20,7 @@ interface HealthReport {
   issues: HealthIssue[];
 }
 
-/** PAVED-ROAD P5 — the workflow's position on the build loop (see /loop-status). */
+/** PAVED-ROAD P5 â€” the workflow's position on the build loop (see /loop-status). */
 interface LoopStatus {
   stage: 'authored' | 'dry_run_red' | 'dry_run_green' | 'suite_red' | 'suite_green'
     | 'debug_failed' | 'debug_completed_unverified' | 'debug_accomplished' | 'hardened' | 'production';
@@ -62,12 +62,12 @@ const STAGE_TONE: Record<LoopStatus['stage'], string> = {
 const STAGE_SHORT: Record<LoopStatus['stage'], string> = {
   authored: 'Untested',
   dry_run_red: 'Dry-run red',
-  dry_run_green: 'Dry-run ✓',
+  dry_run_green: 'Dry-run âœ“',
   suite_red: 'Suite red',
-  suite_green: 'Suite ✓',
+  suite_green: 'Suite âœ“',
   debug_failed: 'Debug failed',
   debug_completed_unverified: 'Unverified',
-  debug_accomplished: 'Accomplished ✓',
+  debug_accomplished: 'Accomplished âœ“',
   hardened: 'Hardened',
   production: 'Proven',
 };
@@ -119,7 +119,7 @@ export function WorkflowHealthIndicator({
   const nodeCount = report ? Object.keys(report.nodes).length : 0;
   const errorCount = report?.issues.filter((issue) => issue.severity === 'error').length ?? 0;
   // Steps that could NOT be verified statically (external/agentic/extension
-  // boundaries that were mocked) — only a real run proves them.
+  // boundaries that were mocked) â€” only a real run proves them.
   const unverifiedCount = report
     ? Object.values(report.nodes).filter((node) => node.status === 'mocked' || node.status === 'unverified').length
     : 0;
@@ -127,18 +127,17 @@ export function WorkflowHealthIndicator({
   const summary = checking
     ? 'Checking workflow'
     : tone === 'healthy'
-      ? `Healthy · ${nodeCount} nodes checked`
+      ? `Healthy Â· ${nodeCount} nodes checked`
       : tone === 'blocked'
-        // Blocked is a hard stop — name it as a problem, never "Ready".
-        ? `Blocked · ${errorCount} ${errorCount === 1 ? 'issue' : 'issues'} to fix`
-        : `Unverified · ${unverifiedCount || nodeCount} ${unverifiedCount === 1 ? 'step needs' : 'steps need'} a real run`;
+        // Blocked is a hard stop â€” name it as a problem, never "Ready".
+        ? `Blocked Â· ${errorCount} ${errorCount === 1 ? 'issue' : 'issues'} to fix`
+        : `Unverified Â· ${unverifiedCount || nodeCount} ${unverifiedCount === 1 ? 'step needs' : 'steps need'} a real run`;
   const Icon = checking ? CircleDashed : tone === 'healthy' ? ShieldCheck : tone === 'blocked' ? AlertCircle : CheckCircle2;
   // SWIFT "warn previously": a divergence from a PROVEN version dominates the
-  // header — a green "Healthy" preflight must NOT mask that the operator edited a
   // proven graph, which is now UNVERIFIED until it is re-verified.
   const diverged = !checking && !!loop?.divergence;
   const HeaderIcon = diverged ? AlertTriangle : Icon;
-  const headerSummary = diverged ? `Unverified · diverged from the proven ${loop!.divergence!.source}` : summary;
+  const headerSummary = diverged ? `Unverified Â· diverged from the proven ${loop!.divergence!.source}` : summary;
 
   return (
     <div className="pointer-events-auto w-full max-w-[28rem] overflow-hidden rounded-card border border-line bg-surface shadow-dropdown">
@@ -165,7 +164,7 @@ export function WorkflowHealthIndicator({
             className="shrink-0 rounded-full border border-danger/50 bg-danger/10 px-2 py-0.5 text-[10px] font-semibold text-danger"
             title={loop!.divergence!.warning}
           >
-            ⚠ Re-verify
+            âš  Re-verify
           </span>
         )}
         {loop && !checking && (
@@ -190,10 +189,10 @@ export function WorkflowHealthIndicator({
                   <p className="text-[11px] font-semibold text-danger">Diverged from the proven {loop.divergence.source}</p>
                   <p className="mt-0.5 text-[10px] leading-4 text-text-secondary">{loop.divergence.warning}</p>
                   <p className="mt-1 text-[10px] leading-4 text-text-muted">
-                    → Re-verify: <span className="font-mono">{loop.divergence.reverify.tool}</span> — {loop.divergence.reverify.why}
+                    â†’ Re-verify: <span className="font-mono">{loop.divergence.reverify.tool}</span> â€” {loop.divergence.reverify.why}
                   </p>
                   <p className="mt-0.5 text-[10px] leading-4 text-text-muted">
-                    → Roll back: <span className="font-mono">{loop.divergence.restore.tool}</span> — {loop.divergence.restore.why}
+                    â†’ Roll back: <span className="font-mono">{loop.divergence.restore.tool}</span> â€” {loop.divergence.restore.why}
                   </p>
                 </div>
               </div>
@@ -204,7 +203,7 @@ export function WorkflowHealthIndicator({
               <div className="text-[11px] font-medium text-text-primary">{loop.stageLabel}</div>
               {loop.compass.next[0] && (
                 <p className="mt-0.5 text-[10px] leading-4 text-text-secondary">
-                  → Next: <span className="font-mono">{loop.compass.next[0].tool}</span> — {loop.compass.next[0].why}
+                  â†’ Next: <span className="font-mono">{loop.compass.next[0].tool}</span> â€” {loop.compass.next[0].why}
                 </p>
               )}
               <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-text-muted">
@@ -223,12 +222,12 @@ export function WorkflowHealthIndicator({
                   {loop.evidence.debugRun
                     ? loop.evidence.debugRun.stale
                       ? 'stale (graph changed)'
-                      : `${loop.evidence.debugRun.status}${loop.evidence.debugRun.verdict ? ` · ${loop.evidence.debugRun.verdict.toUpperCase()}` : ' · unverified'}`
+                      : `${loop.evidence.debugRun.status}${loop.evidence.debugRun.verdict ? ` Â· ${loop.evidence.debugRun.verdict.toUpperCase()}` : ' Â· unverified'}`
                     : 'never'}
                 </span>
                 {loop.outcomeHealth && loop.outcomeHealth.recent.length > 0 && (
                   <span
-                    title={`Production accomplishment over the last ${loop.outcomeHealth.recent.length} run(s) — world-verified, not just completed`}
+                    title={`Production accomplishment over the last ${loop.outcomeHealth.recent.length} run(s) â€” world-verified, not just completed`}
                     className={clsx(
                       'font-medium',
                       loop.outcomeHealth.recent[0] === 1 ? 'text-success' : 'text-danger',
@@ -262,7 +261,7 @@ export function WorkflowHealthIndicator({
               </div>
               <p className="mt-0.5 text-[10px] leading-4 text-text-muted">{issue.message}</p>
               {issue.remediation && (
-                <p className="mt-0.5 text-[10px] leading-4 text-text-secondary">→ {issue.remediation}</p>
+                <p className="mt-0.5 text-[10px] leading-4 text-text-secondary">â†’ {issue.remediation}</p>
               )}
             </button>
           ))}
@@ -271,3 +270,5 @@ export function WorkflowHealthIndicator({
     </div>
   );
 }
+
+

@@ -13,7 +13,7 @@ import { schema } from '@agentis/db/sqlite';
 import { buildDomainRoutes } from '../../src/routes/domains.js';
 import { buildAgentRoutes } from '../../src/routes/agents.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

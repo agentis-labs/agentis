@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
-import { RuntimeSessionStore } from '../../src/services/runtimeSessionStore.js';
+import { RuntimeSessionStore } from '../../src/services/runtime/runtimeSessionStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

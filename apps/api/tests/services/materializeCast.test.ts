@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { isSpecialistRole, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
-import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
+import { SpecialistAgentService } from '../../src/services/specialist/specialistAgents.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { materializeCast } from '../../src/services/agentisToolHandlers/build.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';

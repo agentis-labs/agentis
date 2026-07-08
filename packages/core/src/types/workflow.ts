@@ -1,10 +1,10 @@
-/**
+﻿/**
  * Workflow graph & run-state types.
  *
  * The shape of these types is the contract between the canvas, the engine,
  * and the persistence layer. Touch them here, then propagate.
  *
- * Mirrors V1-SPEC §6.2 and §6.3.
+ * Mirrors V1-SPEC Â§6.2 and Â§6.3.
  */
 
 import type { AgentRole } from './specialist.js';
@@ -20,7 +20,7 @@ export type WorkflowNodeType =
   | 'wait'
   | 'loop'
   | 'parallel'
-  // Data & logic — deterministic, zero LLM tokens
+  // Data & logic â€” deterministic, zero LLM tokens
   | 'transform'
   | 'filter'
   | 'integration'
@@ -32,7 +32,7 @@ export type WorkflowNodeType =
   | 'workflow_store'
   | 'workspace_store'
   | 'scratchpad'
-  // Intelligence — LLM-powered
+  // Intelligence â€” LLM-powered
   | 'agent_task'
   | 'agent_session'
   | 'extension_task'
@@ -45,36 +45,33 @@ export type WorkflowNodeType =
   | 'knowledge'
   | 'knowledge_ingest'     // write upstream content into the workspace Brain (KnowledgeBaseService)
   | 'artifact_collect'
-  // Output surface — Layer 6
+  // Output surface â€” Layer 6
   | 'return_output'
   | 'artifact_save'
-  // Native browser control — Layer 3 §3.2
+  // Native browser control â€” Layer 3 Â§3.2
   | 'browser'
   // Human interaction
   | 'checkpoint'
   | 'human_input'
-  // Utility & data primitives (WORKFLOW-UPDATE — n8n-inspired) — deterministic
+  // Utility & data primitives (WORKFLOW-UPDATE â€” n8n-inspired) â€” deterministic
   | 'error_trigger'        // fires a workflow on another workflow's failure
   | 'stop_error'           // terminate the run with a custom error
-  | 'code'                 // sandboxed JS (and best-effort Python) execution
+  | 'code'
   | 'datetime'             // date/time parse, format, diff, add/subtract
   | 'crypto_util'          // hash, HMAC, base64 encode/decode, uuid
-  | 'xml_parse'            // XML ↔ JSON
-  | 'markdown'             // Markdown ↔ HTML
+  | 'xml_parse'            // XML â†” JSON
+  | 'markdown'             // Markdown â†” HTML
   | 'json_schema_validate' // validate data against a JSON Schema
   | 'sticky_note'          // canvas annotation; no execution
   | 'spreadsheet'          // parse/build .csv / .xlsx
   | 'html_extract'         // CSS-selector extraction from an HTML string
   | 'graphql';             // structured GraphQL query
 
-/**
- * How a node's output should be rendered on the operator-facing Output Surface
- * (WORKFLOW-10X-MASTERPLAN §6). Drives viewer selection in the web Output tab.
- */
+
 export type OutputRenderAs = 'html' | 'markdown' | 'table' | 'json' | 'text';
 
 // UI surfaces now live on the Agentic App, not the workflow graph
-// (AGENTIC-APPS-10X §4 — the legacy fixed-block "Studio" was replaced by the
+// (AGENTIC-APPS-10X Â§4 â€” the legacy fixed-block "Studio" was replaced by the
 // AG-UI ViewNode protocol + app_surfaces). See packages/core/src/types/view.ts.
 
 export interface WorkflowGraph {
@@ -82,7 +79,7 @@ export interface WorkflowGraph {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   viewport: { x: number; y: number; zoom: number };
-  /** Optional input/output contracts — declared shape of what triggers this workflow + what it produces. */
+  /** Optional input/output contracts â€” declared shape of what triggers this workflow + what it produces. */
   inputContract?: WorkflowContract;
   outputContract?: WorkflowContract;
   /** Named phase groups for large graphs. */
@@ -113,8 +110,8 @@ export interface WorkflowFile {
 /**
  * Generic per-node retry policy. Applies to deterministic / integration / IO
  * node kinds (transform, code, http_request, integration, browser, graphql,
- * extension_task, …). Agent-like nodes (`agent_task`/`agent_swarm`/
- * `agent_session`) are EXCLUDED — they run through self-heal / their own
+ * extension_task, â€¦). Agent-like nodes (`agent_task`/`agent_swarm`/
+ * `agent_session`) are EXCLUDED â€” they run through self-heal / their own
  * `AgentRetryPolicy`, and double-retrying them would re-bill model calls.
  */
 export interface NodeRetryPolicy {
@@ -153,9 +150,9 @@ export interface WorkflowEdge {
   condition?: string;
   /**
    * Edge semantics. Defaults to `'default'`.
-   * - `'default'`  → normal success edge.
-   * - `'error'`    → only traversed when the source node fails. Replaces run termination.
-   * - `'condition'`→ traversed when the (already-evaluated) condition is truthy. Hint for renderer.
+   * - `'default'`  â†’ normal success edge.
+   * - `'error'`    â†’ only traversed when the source node fails. Replaces run termination.
+   * - `'condition'`â†’ traversed when the (already-evaluated) condition is truthy. Hint for renderer.
    */
   type?: 'default' | 'error' | 'condition';
 }
@@ -210,7 +207,7 @@ export interface WorkflowPhase {
 }
 
 export interface WorkflowOutputConfig {
-  /** Marks this node as part of the workflow's operator-facing output surface. */
+  
   isOutput?: boolean;
   /**
    * Declared cost estimate (cents) for this node. Accumulated per-phase by the
@@ -335,7 +332,7 @@ export interface RssFeedTriggerConfig {
 }
 
 /**
- * Retry / self-healing policy for an agent task (AGENTIS-PLATFORM-10X §A9).
+ * Retry / self-healing policy for an agent task (AGENTIS-PLATFORM-10X Â§A9).
  * When `selfHeal` is on, a failed agent task is re-dispatched with the error
  * context appended to its prompt so the agent can correct itself.
  */
@@ -362,7 +359,7 @@ export interface AgentTaskNodeConfig {
   agentId?: string;
   /**
    * Reference a specialist by role; the engine resolves it to the workspace's
-   * agent carrying that role at dispatch time (Layer 2 §2.2). `agentId` wins
+   * agent carrying that role at dispatch time (Layer 2 Â§2.2). `agentId` wins
    * when both are set.
    */
   agentRole?: AgentRole;
@@ -374,7 +371,7 @@ export interface AgentTaskNodeConfig {
   inputKeys: string[];
   outputKeys: string[];
   retryPolicy?: AgentRetryPolicy;
-  /** Legacy/operator-facing protocol hints preserved for imported graphs. Prefer `extensions` for new runtime behavior. */
+  
   skills?: string[];
   /** Optional behavioral protocol names injected into the prompt at dispatch. */
   extensions?: string[];
@@ -383,7 +380,7 @@ export interface AgentTaskNodeConfig {
   /** One-sentence rationale for the chosen specialist role (shown in the inspector). */
   castingReason?: string;
   /**
-   * Run this task in-process via the agentic tool-use loop (§2.2) instead of
+   * Run this task in-process via the agentic tool-use loop (Â§2.2) instead of
    * dispatching to an external adapter. Requires `agentRole` + a configured LLM
    * runtime; the loop is bounded by the role's tool manifest and `maxToolSteps`.
    */
@@ -391,7 +388,7 @@ export interface AgentTaskNodeConfig {
   /** Cap on tool-use loop steps when `useRoleTools` is set (default 6, max 12). */
   maxToolSteps?: number;
   /**
-   * Memory write-policy override (Brain Memory Formation §4.1). Controls what
+   * Memory write-policy override (Brain Memory Formation Â§4.1). Controls what
    * this task may write to the Brain: `form` (may form durable memory),
    * `episodic_only` (one decaying outcome marker), or `none`. When unset, the
    * engine resolves a policy from the task's role and output shape.
@@ -404,7 +401,7 @@ export interface AgentTaskNodeConfig {
    */
   artifactPolicy?: AgentArtifactPolicy;
   /**
-   * Run this task as a persistent AgentSession (SMARTER-AGENTS-10X §VI) instead
+   * Run this task as a persistent AgentSession (SMARTER-AGENTS-10X Â§VI) instead
    * of a one-shot dispatch: working memory, suspend/wake yield points, and
    * context compaction. Requires a configured session adapter. `agent_session`
    * nodes are the explicit form; this flag is the compat bridge for existing
@@ -414,8 +411,8 @@ export interface AgentTaskNodeConfig {
 }
 
 /**
- * A persistent agent session node (SMARTER-AGENTS-10X §VI). The engine drives a
- * thinking⇄doing loop with working memory and yield points (delegate, await
+ * A persistent agent session node (SMARTER-AGENTS-10X Â§VI). The engine drives a
+ * thinkingâ‡„doing loop with working memory and yield points (delegate, await
  * event, sleep, request approval) until the agent calls `complete_task`. Between
  * steps the session is a DB row, so a node can suspend for hours at zero cost.
  */
@@ -423,7 +420,7 @@ export interface AgentSessionNodeConfig {
   kind: 'agent_session';
   agentId?: string;
   agentRole?: AgentRole;
-  /** The objective handed to the agent — seeds its `task` memory block. */
+  /** The objective handed to the agent â€” seeds its `task` memory block. */
   prompt: string;
   /** Optional persona override; the specialist role's system prompt is used otherwise. */
   persona?: string;
@@ -442,9 +439,9 @@ export interface AgentSessionNodeConfig {
 }
 
 /**
- * Dynamic swarm (SMARTER-AGENTS-10X §VII). A planner agent decides the task list
+ * Dynamic swarm (SMARTER-AGENTS-10X Â§VII). A planner agent decides the task list
  * at runtime from a goal, then the engine fans those tasks out across worker
- * agents — bounded by `maxTasks`/`maxParallel`. Unlike `agent_swarm`, the task
+ * agents â€” bounded by `maxTasks`/`maxParallel`. Unlike `agent_swarm`, the task
  * set is not a static input array; it is synthesized per run.
  */
 export interface DynamicSwarmNodeConfig {
@@ -466,7 +463,7 @@ export interface DynamicSwarmNodeConfig {
 }
 
 /**
- * Planner node (SMARTER-AGENTS-10X §VII). A planner agent decomposes a goal into
+ * Planner node (SMARTER-AGENTS-10X Â§VII). A planner agent decomposes a goal into
  * a subgraph of `agent_session` steps and splices them into the live run via a
  * validated graph patch. The determinism cage bounds how many nodes one pass may
  * add.
@@ -492,14 +489,14 @@ export interface PlannerNodeConfig {
  */
 export interface AgentSwarmNodeConfig {
   kind: 'agent_swarm';
-  /** Template prompt — applied to each input element. */
+  /** Template prompt â€” applied to each input element. */
   prompt: string;
   /** JSONPath to the input array; each element becomes one agent task. */
   inputArrayPath: string;
   maxParallel: number;
   mergeStrategy: 'collect_all' | 'first_success' | 'majority_vote';
   capabilityTags: string[];
-  /** Optional explicit agent — otherwise resolved by capability tags. */
+  /** Optional explicit agent â€” otherwise resolved by capability tags. */
   agentId?: string;
   /** Optional specialist role; resolved to a workspace agent at dispatch (Layer 2). */
   agentRole?: AgentRole;
@@ -523,7 +520,7 @@ export interface ArtifactCollectNodeConfig {
   acceptTypes?: Array<'html' | 'image' | 'document' | 'code' | 'data'>;
   /** Whether to version the collection (increment on each run). Default true. */
   versioned?: boolean;
-  /** Optional approval gate — if true, artifacts are held for operator review. */
+  
   requireApproval?: boolean;
 }
 
@@ -550,8 +547,8 @@ export interface KnowledgeNodeConfig {
 }
 
 /**
- * knowledge_ingest — the write-side twin of the `knowledge` node, into the
- * Knowledge Base (`KnowledgeBaseService`, RAG docs — NOT the Brain memory).
+ * knowledge_ingest â€” the write-side twin of the `knowledge` node, into the
+ * Knowledge Base (`KnowledgeBaseService`, RAG docs â€” NOT the Brain memory).
  *
  * @deprecated For AUTHORING. Writing knowledge/memory should not be a hand-wired
  * graph node: the Brain (memory) fills automatically from chat + completed runs,
@@ -590,7 +587,7 @@ export interface MergeNodeConfig {
    * Explicitly bind this merge to the `parallel` node whose fan-out it joins.
    * When set, the engine reads join policy (waitFor / onBranchError /
    * mergeStrategy) from THAT parallel instead of guessing the nearest upstream
-   * one — removes the ambiguity in diamond / nested fan-ins. Falls back to the
+   * one â€” removes the ambiguity in diamond / nested fan-ins. Falls back to the
    * nearest-upstream heuristic when unset or unresolvable.
    */
   parallelSourceId?: string;
@@ -602,13 +599,7 @@ export interface CheckpointNodeConfig {
   timeoutMs?: number;
 }
 
-/**
- * Pause the run and collect STRUCTURED input from a human via a form, then
- * continue. Unlike `checkpoint` (approve/reject), the operator submits field
- * values which become the node's output — e.g. "draft → I fill in the subject &
- * send-date → publish". Resumes through the same approval-resume path; the
- * submitted values arrive as the resolution payload.
- */
+
 export interface HumanInputNodeConfig {
   kind: 'human_input';
   /** Prompt shown above the form. */
@@ -639,18 +630,18 @@ export interface ScratchpadNodeConfig {
   valuePath?: string;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Control-flow & deterministic primitives
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Time-based delay. Resumes the downstream chain after `delayMs`. */
 export interface WaitNodeConfig {
   kind: 'wait';
-  /** Delay in milliseconds. ≤0 completes instantly. */
+  /** Delay in milliseconds. â‰¤0 completes instantly. */
   delayMs: number;
   /**
    * Absolute wake time (ISO 8601, e.g. "2026-07-01T09:00:00Z"). When set, the
-   * engine waits until then instead of for `delayMs` — enabling "send Monday 9am"
+   * engine waits until then instead of for `delayMs` â€” enabling "send Monday 9am"
    * / SLA-style schedules. A time already in the past completes instantly.
    * Supports `{{variable}}` templates (resolved before this handler).
    */
@@ -668,7 +659,7 @@ export interface TransformNodeConfig {
   timeoutMs?: number;
 }
 
-/** Boolean gate. Truthy → `pass` handle; falsy → `skip` handle. */
+/** Boolean gate. Truthy â†’ `pass` handle; falsy â†’ `skip` handle. */
 export interface FilterNodeConfig {
   kind: 'filter';
   /** Boolean JS expression. Receives `input`. */
@@ -679,14 +670,14 @@ export interface FilterNodeConfig {
   timeoutMs?: number;
 }
 
-/** Call a registered integration connector (Slack / Gmail / GitHub / Sheets / HTTP …). */
+/** Call a registered integration connector (Slack / Gmail / GitHub / Sheets / HTTP â€¦). */
 export interface IntegrationNodeConfig {
   kind: 'integration';
   /** Connector slug from `ConnectorRegistry.list()`. */
   integrationId: string;
   /** Operation slug from the connector's manifest. */
   operationId: string;
-  /** Resolved at dispatch time — values may contain `{{variable}}` templates. */
+  /** Resolved at dispatch time â€” values may contain `{{variable}}` templates. */
   inputs: Record<string, string>;
   /** Credential ID from the workspace credential store. Optional for connectors that don't require auth. */
   credentialId?: string;
@@ -694,7 +685,7 @@ export interface IntegrationNodeConfig {
 
 /**
  * Call a tool on a registered MCP server (masterplan 2.3). The workspace's MCP
- * servers (`mcp:servers`) become callable from a workflow — the same bridge that
+ * servers (`mcp:servers`) become callable from a workflow â€” the same bridge that
  * exposes them to agents. `toolId` is the server-prefixed bridged tool id.
  */
 export interface McpNodeConfig {
@@ -725,11 +716,7 @@ export interface DataQueryNodeConfig {
   op?: 'count' | 'sum' | 'avg' | 'min' | 'max';
   field?: string;
   groupBy?: string;
-  /**
-   * Pagination (masterplan 1.7): when true the node follows the keyset cursor
-   * internally and returns EVERY matching row (up to `maxRows`), so a workflow
-   * doesn't have to loop pages itself. Only applies to `mode: 'query'`.
-   */
+  
   paginate?: boolean;
   /** Hard cap on rows when `paginate` is set (default 1000, max 10000). */
   maxRows?: number;
@@ -754,7 +741,7 @@ export interface DataMutateNodeConfig {
 
 /**
  * Batch events across runs (masterplan 1.7). Each run appends its input to a
- * persistent buffer; downstream only fires once the window CLOSES — when the
+ * persistent buffer; downstream only fires once the window CLOSES â€” when the
  * buffered count hits `maxCount` or `windowMs` has elapsed since the first item.
  * Until then the node "holds" (completes without firing downstream), so a
  * high-frequency trigger collapses into periodic batches (digests, lead batching).
@@ -775,7 +762,7 @@ export interface AggregateWindowNodeConfig {
 export interface HttpRequestNodeConfig {
   kind: 'http_request';
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  /** URL template — supports `{{variable}}`. */
+  /** URL template â€” supports `{{variable}}`. */
   url: string;
   /** Header templates. */
   headers?: Record<string, string>;
@@ -805,7 +792,7 @@ export interface HttpRequestNodeConfig {
  * Workflow-scoped persistent KV.
  *
  * Distinct from `scratchpad` (run-scoped, disposed on completion). `workflow_store`
- * survives run boundaries — a daily workflow can accumulate state across 30+ runs.
+ * survives run boundaries â€” a daily workflow can accumulate state across 30+ runs.
  * The Brain will index these entries as structured facts; the schema carries
  * `workspaceId` to support that without later migration.
  */
@@ -813,9 +800,9 @@ export interface WorkflowStoreNodeConfig {
   kind: 'workflow_store';
   operations: Array<{
     op: 'get' | 'set' | 'delete' | 'increment' | 'append' | 'get_all';
-    /** Key template — supports `{{variable}}`. Required for everything except `get_all`. */
+    /** Key template â€” supports `{{variable}}`. Required for everything except `get_all`. */
     key?: string;
-    /** Value template — supports `{{variable}}`. Required for `set` / `append`. */
+    /** Value template â€” supports `{{variable}}`. Required for `set` / `append`. */
     value?: string;
     /** Result is stored under this key in the node's output. Defaults to the key name. */
     outputKey?: string;
@@ -840,9 +827,9 @@ export interface WorkspaceStoreNodeConfig {
   }>;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Intelligence
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** LLM-as-judge: scores an upstream output and routes pass/fail. */
 export interface EvaluatorNodeConfig {
@@ -851,7 +838,7 @@ export interface EvaluatorNodeConfig {
   targetPath: string;
   /** Natural-language acceptance criteria. */
   criteria: string;
-  /** Minimum score (0–10) to pass. Default 7. */
+  /** Minimum score (0â€“10) to pass. Default 7. */
   passThreshold?: number;
   /** Max times the FAIL edge may cycle back before terminating. Default 3. */
   maxRetries?: number;
@@ -859,7 +846,7 @@ export interface EvaluatorNodeConfig {
   rubric?: Array<{ dimension: string; weight: number }>;
 }
 
-/** Deterministic policy enforcement — rule-based, no LLM. */
+/** Deterministic policy enforcement â€” rule-based, no LLM. */
 export interface GuardrailsNodeConfig {
   kind: 'guardrails';
   rules: Array<{
@@ -877,18 +864,18 @@ export interface GuardrailsNodeConfig {
   onViolation: 'block' | 'flag';
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Loop / Parallel
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Array iteration. Each item dispatches a child subflow with `{{loop.item}}` / `{{loop.index}}` bound. */
 export interface LoopNodeConfig {
   kind: 'loop';
   /** Template expression resolving to the array (e.g. `{{nodes.step1.results}}`). */
   itemsExpression: string;
-  /** Concurrency cap — 1 is sequential, >1 fans out in parallel. */
+  /** Concurrency cap â€” 1 is sequential, >1 fans out in parallel. */
   maxConcurrency: number;
-  /** Body workflow ID — invoked once per item via SubflowExecutor. */
+  /** Body workflow ID â€” invoked once per item via SubflowExecutor. */
   bodyWorkflowId: string;
   /** What happens when a single iteration fails. */
   onIterationError: 'stop_all' | 'continue' | 'collect_errors';
@@ -910,13 +897,12 @@ export interface ParallelNodeConfig {
   mergeStrategy: 'merge_keys' | 'collect_all' | 'first_non_null';
 }
 
-// ────────────────────────────────────────────────────────────
-// Convergence loop — iterate a cohort until a goal is met
-// (AGENT-COOPERATION-10X §Pillar 1). The general agentic loop primitive:
-// stateful across iterations (via the blackboard), runs a whole sub-graph as
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Convergence loop â€” iterate a cohort until a goal is met
+// (AGENT-COOPERATION-10X Â§Pillar 1). The general agentic loop primitive:
 // the body (not one node), governed by a pluggable continuation policy, and
 // protected by a hard iteration ceiling + budget + stall detection.
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** How a convergence loop decides whether to run another iteration. */
 export type ConvergeContinuation =
@@ -932,24 +918,24 @@ export type ConvergeContinuation =
       /** Dot path into the body output to evaluate. */
       targetPath: string;
       criteria: string;
-      /** Minimum score (0–10) that counts as converged. Default 7. */
+      /** Minimum score (0â€“10) that counts as converged. Default 7. */
       passThreshold?: number;
       rubric?: Array<{ dimension: string; weight: number }>;
     }
   | {
-      /** Agents declare convergence by posting a done-signal to the blackboard. */
+      
       type: 'signal';
-      /** Blackboard channel the done-signal is read from. Default 'converge'. */
+      
       channel?: string;
     }
   | {
       /**
        * OBJECTIVE (COGNITIVE-LOOPING-RFC P1). The done-check IS the workflow's
-       * scoped Objective — its `WorkflowSpec` acceptance checks, run against the
+       * scoped Objective â€” its `WorkflowSpec` acceptance checks, run against the
        * WORLD (http/data/file/expr/judge) by the SWIFT verdict engine. The Pursuit
        * is done when the verdict is `accomplished`; progress = the fraction of
        * acceptance checks passing, so distance-to-goal is real, not guessed.
-       * No hand-written predicate — the objective and its verification are one.
+       * No hand-written predicate â€” the objective and its verification are one.
        */
       type: 'objective';
     };
@@ -962,7 +948,7 @@ export interface ConvergeNodeConfig {
   continuation: ConvergeContinuation;
   /** Hard ceiling on iterations (safety net). Default 8. */
   maxIterations?: number;
-  /** Circuit breaker — abort the loop when any limit is crossed. */
+  /** Circuit breaker â€” abort the loop when any limit is crossed. */
   budget?: { usd?: number; ms?: number; tokens?: number };
   /** Early-stop when iterations stop making progress (the efficiency guard). */
   stallPolicy?: {
@@ -970,24 +956,24 @@ export interface ConvergeNodeConfig {
     window?: number;
     on?: 'no_progress' | 'oscillation';
   };
-  /** Blackboard namespace carried across iterations. Defaults to the node id. */
+  
   stateKey?: string;
   /** How iteration N sees N-1's output. Default 'accumulate'. */
   carryStrategy?: 'accumulate' | 'replace' | 'diff';
-  /** Filesystem isolation for the cohort (AGENT-COOPERATION-10X §Pillar 3). Default 'auto'. */
+  /** Filesystem isolation for the cohort (AGENT-COOPERATION-10X Â§Pillar 3). Default 'auto'. */
   isolation?: 'auto' | 'shared' | 'worktree' | 'tempdir';
   /** What to do with the isolated worktree when the loop settles. Default 'discard'. */
   preserve?: 'discard' | 'branch' | 'pr';
   /**
-   * ASSESS (COGNITIVE-LOOPING-RFC §3.2/§6). Measure distance-to-goal (progress
+   * ASSESS (COGNITIVE-LOOPING-RFC Â§3.2/Â§6). Measure distance-to-goal (progress
    * 0..1) each iteration and record the trajectory, so a stall can be detected
-   * as a progress *plateau/regression* — not only an identical-output repeat.
+   * as a progress *plateau/regression* â€” not only an identical-output repeat.
    * Cheap when `continuation` is a `judge` (reuses its 0..10 score). Default
    * false for `converge` (behavioural parity); a `pursue` node defaults it true.
    */
   assess?: boolean;
   /**
-   * REFLECT (RFC §8). Max reflective pivots before settling `stalled`. On a
+   * REFLECT (RFC Â§8). Max reflective pivots before settling `stalled`. On a
    * detected stall the loop feeds a verbal self-critique (the judge's own
    * critique, or a synthesized hint) into the NEXT iteration and tries again,
    * instead of stopping. `0` = stop-on-stall (converge parity). A `pursue` node
@@ -996,15 +982,15 @@ export interface ConvergeNodeConfig {
   maxPivots?: number;
 }
 
-// ────────────────────────────────────────────────────────────
-// Pursuit — the cognitive-loop primitive (COGNITIVE-LOOPING-RFC).
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Pursuit â€” the cognitive-loop primitive (COGNITIVE-LOOPING-RFC).
 // A forward-reading rename of `converge`: "pursue an Objective until done".
 // It is normalized to a ConvergeNodeConfig at dispatch (see
 // pursueConfigToConverge in WorkflowEngine), so the engine loop, worktree,
-// realtime events, durable resume, and knowledge promotion are all SHARED — no
+// realtime events, durable resume, and knowledge promotion are all SHARED â€” no
 // fork. Existing stored `converge` graphs keep working unchanged and keep their
-// content hash (hash-safe, RFC §10.1); new work authors `pursue`.
-// ────────────────────────────────────────────────────────────
+// content hash (hash-safe, RFC Â§10.1); new work authors `pursue`.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export interface PursueNodeConfig {
   kind: 'pursue';
   /** The cohort sub-graph, invoked once per iteration via SubflowExecutor. */
@@ -1013,7 +999,7 @@ export interface PursueNodeConfig {
   doneWhen: ConvergeContinuation;
   /** Hard ceiling on iterations (safety net). Default 8. */
   maxIterations?: number;
-  /** Circuit breaker — abort the Pursuit when any limit is crossed. */
+  /** Circuit breaker â€” abort the Pursuit when any limit is crossed. */
   budget?: { usd?: number; ms?: number; tokens?: number };
   /** Early-stop when iterations stop advancing. (Rename of `stallPolicy`.) */
   stopWhenStalled?: {
@@ -1021,7 +1007,7 @@ export interface PursueNodeConfig {
     after?: number;
     on?: 'no_progress' | 'oscillation';
   };
-  /** Blackboard namespace carried across iterations. Defaults to the node id. */
+  
   stateKey?: string;
   /** How iteration N sees N-1's output. (Rename of `carryStrategy`.) Default 'keep'. */
   carry?: 'keep' | 'latest' | 'delta';
@@ -1029,25 +1015,17 @@ export interface PursueNodeConfig {
   isolation?: 'auto' | 'shared' | 'worktree' | 'tempdir';
   /** What to do with the isolated worktree when the Pursuit settles. Default 'discard'. */
   preserve?: 'discard' | 'branch' | 'pr';
-  /** ASSESS — measure distance-to-goal each iteration. Default true for a Pursuit. */
+  /** ASSESS â€” measure distance-to-goal each iteration. Default true for a Pursuit. */
   assess?: boolean;
-  /** REFLECT — max reflective pivots before settling `stalled`. Default 2. */
+  /** REFLECT â€” max reflective pivots before settling `stalled`. Default 2. */
   maxPivots?: number;
 }
 
-// ────────────────────────────────────────────────────────────
-// Output surface — Layer 6
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Output surface â€” Layer 6
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * Terminal output node. Declares the run's operator-facing result and how to
- * render it. Always part of the output surface (treated as `isOutput`). The
- * resolved value is what the Output tab renders via the viewer registry.
- *
- * This replaces the older "transform + isOutput" idiom for declaring output —
- * a `return_output` node makes the intent explicit and carries `renderAs` so
- * the Output Surface picks the right viewer (iframe for html, table for rows…).
- */
+
 export interface ReturnOutputNodeConfig {
   kind: 'return_output';
   /** Viewer hint for the Output Surface. Defaults to `'json'`. */
@@ -1079,21 +1057,21 @@ export interface ArtifactSaveNodeConfig {
   titlePath?: string;
 }
 
-// ────────────────────────────────────────────────────────────
-// Native browser control — Layer 3 §3.2
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Native browser control â€” Layer 3 Â§3.2
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Native Playwright-backed browser node. Renders HTML / navigates URLs and
- * produces artifacts (screenshot PNG, PDF) — no external screenshot service.
+ * produces artifacts (screenshot PNG, PDF) â€” no external screenshot service.
  * Runs in the engine's BrowserPool (headless Chromium, capped concurrency).
  */
 export interface BrowserNodeConfig {
   kind: 'browser';
   operation:
     | 'serve_html'      // render an HTML string, screenshot it, emit html + image artifact
-    | 'screenshot'      // screenshot a URL (or inline html) → image artifact
-    | 'pdf'             // print a URL (or inline html) to PDF → document artifact
+    | 'screenshot'      // screenshot a URL (or inline html) â†’ image artifact
+    | 'pdf'             // print a URL (or inline html) to PDF â†’ document artifact
     | 'navigate'        // load a URL, return { title, text, html }
     | 'extract_text'    // load a URL/html, return visible text under selector
     | 'fill_form'       // fill fields by selector, optionally submit
@@ -1106,13 +1084,13 @@ export interface BrowserNodeConfig {
   htmlPath?: string;
   /** CSS selector for extract_text / extract_table (defaults to body / first table). */
   selector?: string;
-  /** For fill_form: selector → value map. Supports `{{variable}}` in values. */
+  /** For fill_form: selector â†’ value map. Supports `{{variable}}` in values. */
   formData?: Record<string, string>;
   /** For fill_form: optional element to click after filling (submit). */
   submitSelector?: string;
   /** Full-page screenshot (default true). */
   fullPage?: boolean;
-  /** Open a visible browser window on the operator's desktop (default false → headless). */
+  
   headless?: boolean;
   viewport?: { width: number; height: number };
   /** Per-op timeout (default 30000ms). */
@@ -1121,14 +1099,14 @@ export interface BrowserNodeConfig {
   artifactName?: string;
 }
 
-// ────────────────────────────────────────────────────────────
-// Utility & data primitives (WORKFLOW-UPDATE — n8n-inspired)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Utility & data primitives (WORKFLOW-UPDATE â€” n8n-inspired)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Error-trigger entry node. A workflow whose entry is an `error_trigger` is run
  * when a *target* workflow reaches a terminal failure state. `targetWorkflowId`
- * undefined → any workflow in this workspace (except error-handler workflows
+ * undefined â†’ any workflow in this workspace (except error-handler workflows
  * themselves, to prevent trigger loops).
  */
 export interface ErrorTriggerNodeConfig {
@@ -1144,11 +1122,7 @@ export interface StopErrorNodeConfig {
   errorCode?: string;
 }
 
-/**
- * Sandboxed code execution. JavaScript runs in the engine's guarded VM realm
- * (no Node globals, no require/import). Python is best-effort via a child
- * `python3` process when available on the host; absent → a clean error.
- */
+
 export interface CodeNodeConfig {
   kind: 'code';
   language: 'javascript' | 'python';
@@ -1189,7 +1163,7 @@ export interface CryptoUtilNodeConfig {
   outputKey?: string;
 }
 
-/** XML ↔ JSON. */
+/** XML â†” JSON. */
 export interface XmlParseNodeConfig {
   kind: 'xml_parse';
   operation: 'parse' | 'build';
@@ -1197,7 +1171,7 @@ export interface XmlParseNodeConfig {
   outputKey?: string;
 }
 
-/** Markdown ↔ HTML. */
+/** Markdown â†” HTML. */
 export interface MarkdownNodeConfig {
   kind: 'markdown';
   operation: 'to_html' | 'from_html';
@@ -1211,7 +1185,7 @@ export interface JsonSchemaValidateNodeConfig {
   /** JSON Schema as a JSON string. */
   schema: string;
   inputPath?: string;
-  /** `block` → throw on violation (routes to error edge); `flag` → add `violations` and continue. */
+  /** `block` â†’ throw on violation (routes to error edge); `flag` â†’ add `violations` and continue. */
   onViolation: 'block' | 'flag';
 }
 
@@ -1260,21 +1234,21 @@ export interface GraphQlNodeConfig {
   timeoutMs?: number;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Run state
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type WorkflowRunStatus =
   | 'CREATED'
   | 'PLANNING'
   | 'RUNNING'
-  /** Operator-paused execution. The run can be resumed from its preserved frontier. */
+  
   | 'PAUSED'
   | 'WAITING'
   | 'COMPLETED'
   /** The graph ran to completion but the final output did not match the declared outputContract. */
   | 'COMPLETED_WITH_CONTRACT_VIOLATION'
-  /** The graph reached the end but a node errored (even if "handled" by an error edge) — NOT a clean success. Treated as a failure for surfacing + diagnosis. */
+  /** The graph reached the end but a node errored (even if "handled" by an error edge) â€” NOT a clean success. Treated as a failure for surfacing + diagnosis. */
   | 'COMPLETED_WITH_ERRORS'
   | 'FAILED'
   | 'CANCELLED';
@@ -1414,12 +1388,7 @@ export interface WorkflowNodeState {
   /** Immutable presentation-safe snapshot of a message delivered by an integration. */
   deliveryReceipt?: IntegrationDeliveryReceipt;
   error?: string;
-  /**
-   * Set when the node is PAUSED (status WAITING) on a recoverable infrastructure
-   * failure — e.g. the agent's model ran out of credits. Carries a plain-language
-   * reason; cleared on resume. Distinguishes an operator-actionable pause from a
-   * scheduled/approval WAITING.
-   */
+  
   blockedReason?: string;
 }
 
@@ -1465,9 +1434,9 @@ export interface ActiveExecution {
   heartbeatAt?: string;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Graph patches (dynamic edits during a run)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface WorkflowGraphPatch {
   patchId: string;
@@ -1479,3 +1448,6 @@ export interface WorkflowGraphPatch {
   addEdges: WorkflowEdge[];
   removeEdgeIds: string[];
 }
+
+
+

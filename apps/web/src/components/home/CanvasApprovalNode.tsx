@@ -1,4 +1,4 @@
-import { AlertTriangle, Wrench } from 'lucide-react';
+﻿import { AlertTriangle, Wrench } from 'lucide-react';
 
 export function CanvasApprovalNodeBadge({ source, title }: { source?: string; title?: string }) {
   const selfHeal = source === 'self_heal';
@@ -13,3 +13,6 @@ export function CanvasApprovalNodeBadge({ source, title }: { source?: string; ti
     </span>
   );
 }
+
+
+

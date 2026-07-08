@@ -15,10 +15,10 @@ import { eq } from 'drizzle-orm';
 import { AgentisError } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { WorkspaceModelConfigService } from '../services/workspaceModelConfigService.js';
-import type { OrchestratorModelRouter } from '../services/orchestratorModelRouter.js';
-import { ORCHESTRATOR_MODEL_ROLES, type OrchestratorModelRole } from '../services/orchestratorModelRouter.js';
-import type { WorkspaceHarnessRuntimeResolver } from '../services/workspaceHarnessRuntime.js';
+import type { WorkspaceModelConfigService } from '../services/workspace/workspaceModelConfigService.js';
+import type { OrchestratorModelRouter } from '../services/orchestrator/orchestratorModelRouter.js';
+import { ORCHESTRATOR_MODEL_ROLES, type OrchestratorModelRole } from '../services/orchestrator/orchestratorModelRouter.js';
+import type { WorkspaceHarnessRuntimeResolver } from '../services/workspace/workspaceHarnessRuntime.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 

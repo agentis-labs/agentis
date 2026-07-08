@@ -1,5 +1,5 @@
-/**
- * Toast — ephemeral feedback notifications.
+﻿/**
+ * Toast â€” ephemeral feedback notifications.
  *
  * Position: top-right, max 3 visible, slide-in animation. Supports
  * undo variant with action button + countdown for destructive operations.
@@ -63,7 +63,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       const tone = t.tone ?? 'info';
       const duration = t.durationMs ?? DURATIONS[tone];
       setItems((arr) => {
-        // Cap at 3 visible — drop oldest
+        // Cap at 3 visible â€” drop oldest
         const next = [...arr, { ...t, tone, id }];
         return next.length > 3 ? next.slice(next.length - 3) : next;
       });
@@ -184,3 +184,6 @@ export function useToast() {
   };
   return api;
 }
+
+
+

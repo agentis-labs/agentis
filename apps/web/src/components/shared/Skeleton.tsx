@@ -1,5 +1,5 @@
-/**
- * Skeleton — shimmer placeholder for loading states.
+﻿/**
+ * Skeleton â€” shimmer placeholder for loading states.
  *
  * Use to keep layout stable while data loads. Always render skeletons
  * for at least 150ms to prevent flashing on fast loads.
@@ -70,3 +70,6 @@ export function SkeletonRow({ className }: { className?: string }) {
     </div>
   );
 }
+
+
+

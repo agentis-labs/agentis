@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openSqlite, type AgentisSqliteDb } from '@agentis/db/sqlite';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createInProcessEventBus, type EventBus } from '../../src/event-bus.js';
 
 let db: AgentisSqliteDb;

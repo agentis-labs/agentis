@@ -21,12 +21,12 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
+import { AgentToolRuntime } from '../../src/services/agent/agentToolRuntime.js';
 import { EvaluatorRuntime } from '../../src/services/evaluatorRuntime.js';
-import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
-import { AgentSessionService } from '../../src/services/agentSession.js';
-import { AgentSessionRuntime } from '../../src/services/agentSessionRuntime.js';
+import { SpecialistAgentService } from '../../src/services/specialist/specialistAgents.js';
+import { AgentSessionService } from '../../src/services/agent/agentSession.js';
+import { AgentSessionRuntime } from '../../src/services/agent/agentSessionRuntime.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

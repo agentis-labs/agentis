@@ -1,12 +1,12 @@
-/**
- * McpConnectionsPanel — bilateral MCP + A2A surface (UNIVERSAL-HARNESS §5/§8;
+﻿/**
+ * McpConnectionsPanel â€” bilateral MCP + A2A surface (UNIVERSAL-HARNESS Â§5/Â§8;
  * MCP-CAPABILITY-PLANE wave 2: mounts ARE integrations).
  *
- *  • Consume: mount / list / remove external MCP servers, with VAULT-held
- *    secrets (pick an existing credential — incl. OAuth-minted ones — or
+ *  â€¢ Consume: mount / list / remove external MCP servers, with VAULT-held
+ *    secrets (pick an existing credential â€” incl. OAuth-minted ones â€” or
  *    create one inline; never plaintext) and a per-tool ALLOWLIST manager
  *    (least privilege: only checked tools reach agents, `mcp` nodes, REST).
- *  • Expose:  show the endpoints external agents use to reach Agentis
+ *  â€¢ Expose:  show the endpoints external agents use to reach Agentis
  *             (MCP JSON-RPC + A2A Agent Card), copyable.
  *
  * Self-contained (no Toast/Confirm context) so it renders in isolation tests.
@@ -68,8 +68,7 @@ export function McpConnectionsPanel() {
 
   useEffect(() => { void refresh(); }, []);
 
-  // Verify every mounted server on load — no server shows "connected" without
-  // a real handshake. (The truthful state the operator asked for.)
+  // Verify every mounted server on load â€” no server shows "connected" without
   useEffect(() => {
     for (const s of servers) {
       if (verify[s.id]) continue;
@@ -140,7 +139,7 @@ export function McpConnectionsPanel() {
       if ((authType === 'token' || authType === 'header' || authType === 'custom') && secretValue.trim()) {
         const created = await api<{ id: string }>('/v1/credentials', {
           method: 'POST',
-          body: JSON.stringify({ name: `MCP — ${name.trim()}`, credentialType: `mcp_${authType}`, value: secretValue }),
+          body: JSON.stringify({ name: `MCP â€” ${name.trim()}`, credentialType: `mcp_${authType}`, value: secretValue }),
         });
         credentialId = created.id;
       }
@@ -206,8 +205,8 @@ export function McpConnectionsPanel() {
           </Button>
         </div>
         <p className="mb-3 text-[12px] text-text-muted">
-          Mount MCP servers (Supabase, Context7, Playwright, GitHub…). Their tools become deterministic <span className="font-mono">mcp</span> workflow
-          nodes AND live tools in every agent&apos;s own loop. Secrets stay in the encrypted vault — never in prompts or node configs.
+          Mount MCP servers (Supabase, Context7, Playwright, GitHubâ€¦). Their tools become deterministic <span className="font-mono">mcp</span> workflow
+          nodes AND live tools in every agent&apos;s own loop. Secrets stay in the encrypted vault â€” never in prompts or node configs.
         </p>
 
         {/* Pre-defined catalog: pick a provider (URL + auth prefilled) instead
@@ -222,7 +221,7 @@ export function McpConnectionsPanel() {
                   type="button"
                   onClick={() => pickCatalog(entry)}
                   className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-[12px] text-text-secondary transition-colors hover:border-accent/50 hover:text-text-primary"
-                  title={`${entry.description} · ${entry.authHint}`}
+                  title={`${entry.description} Â· ${entry.authHint}`}
                 >
                   <Plug size={12} className="text-accent" /> {entry.name}
                   <span className="text-[10px] text-text-muted">
@@ -262,13 +261,13 @@ export function McpConnectionsPanel() {
               </div>
             )}
 
-            {/* PER-PROVIDER AUTH — the form the operator actually needs. */}
+            {}
             {authType === 'oauth' ? (
               <p className="text-[12px] leading-4 text-text-muted">
-                {pending?.authHint ?? 'Sign in with the provider — no secret to paste.'} You&apos;ll approve access in a popup after mounting.
+                {pending?.authHint ?? 'Sign in with the provider â€” no secret to paste.'} You&apos;ll approve access in a popup after mounting.
               </p>
             ) : authType === 'none' ? (
-              <p className="text-[12px] text-text-muted">{pending?.authHint ?? 'Public server — no authentication needed.'}</p>
+              <p className="text-[12px] text-text-muted">{pending?.authHint ?? 'Public server â€” no authentication needed.'}</p>
             ) : (
               <label className="block text-caption text-text-muted">
                 {pending ? tokenFieldLabel(pending) : 'Secret (token, or a JSON header map)'}
@@ -277,11 +276,11 @@ export function McpConnectionsPanel() {
                   className="mt-1 w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[13px] text-text-primary"
                   value={secretValue}
                   onChange={(e) => setSecretValue(e.target.value)}
-                  placeholder={pending?.authType === 'header' ? '{"x-api-key":"…"}' : 'paste the token'}
+                  placeholder={pending?.authType === 'header' ? '{"x-api-key":"â€¦"}' : 'paste the token'}
                 />
                 {pending?.docsUrl && (
                   <a href={pending.docsUrl} target="_blank" rel="noreferrer" className="mt-1 inline-block text-[11px] text-accent hover:underline">
-                    Where do I get this? →
+                    Where do I get this? â†’
                   </a>
                 )}
               </label>
@@ -389,23 +388,23 @@ export function McpConnectionsPanel() {
   );
 }
 
-/** The truthful connection state — a real tools/list handshake, or the error. */
+/** The truthful connection state â€” a real tools/list handshake, or the error. */
 function VerifyBadge({ state, onRecheck }: { state?: VerifyState; onRecheck: () => void }) {
   if (!state || state.status === 'idle') return null;
   if (state.status === 'checking') {
-    return <div className="mt-0.5 flex items-center gap-1 text-[11px] text-text-muted"><Loader2 size={11} className="animate-spin" /> Verifying connection…</div>;
+    return <div className="mt-0.5 flex items-center gap-1 text-[11px] text-text-muted"><Loader2 size={11} className="animate-spin" /> Verifying connectionâ€¦</div>;
   }
   if (state.status === 'ok') {
     return (
       <button type="button" onClick={onRecheck} className="mt-0.5 flex items-center gap-1 text-[11px] text-success hover:underline" title="Re-verify">
-        <Check size={11} /> Connected · {state.toolCount ?? 0} tool{state.toolCount === 1 ? '' : 's'}
+        <Check size={11} /> Connected Â· {state.toolCount ?? 0} tool{state.toolCount === 1 ? '' : 's'}
       </button>
     );
   }
   return (
     <button type="button" onClick={onRecheck} className="mt-0.5 flex items-start gap-1 text-left text-[11px] text-danger hover:underline" title="Re-verify">
       <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-      <span className="min-w-0">Not connected — {state.error ?? 'handshake failed'}</span>
+      <span className="min-w-0">Not connected â€” {state.error ?? 'handshake failed'}</span>
     </button>
   );
 }
@@ -428,3 +427,6 @@ function CopyRow({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+
+

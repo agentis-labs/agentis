@@ -1,18 +1,4 @@
-/**
- * designLanguage — STRUCTURE bundles for the Agentis App design system.
- *
- * INTERFACE-OVERHAUL-10X replaced the five parallel "look" languages with ONE
- * flagship system (`agentis`): the palette + card paint live in `styles.css`
- * under the `.s-surface` scope (theme-responsive — designed light AND dark),
- * and this file contributes only STRUCTURE — radius, padding, gap, and the
- * type scale — as `--s-*` CSS vars applied to the surface root.
- *
- * The legacy ids (`operations` / `aurora` / `soft` / `editorial` / `console`)
- * stay schema-valid forever: they resolve to structural VARIANTS of the
- * flagship so every stored surface upgrades in place with zero migration.
- * Agents never write CSS; they may pick a variant id, and the operator can
- * override it.
- */
+﻿
 import type { CSSProperties } from 'react';
 import type { DesignLanguage } from '@agentis/core';
 
@@ -20,7 +6,7 @@ import type { DesignLanguage } from '@agentis/core';
 export interface ResolvedDesign {
   id: DesignLanguage;
   label: string;
-  /** One-line description for the operator picker. */
+  
   hint: string;
   /** CSS custom properties scoped to the surface root (consumed as `var(--s-*)`). */
   vars: CSSProperties;
@@ -33,7 +19,7 @@ export interface ResolvedDesign {
 }
 
 /**
- * `--s-*` contract (structure only — paint comes from `.s-surface`'s `--app-*`):
+ * `--s-*` contract (structure only â€” paint comes from `.s-surface`'s `--app-*`):
  *   --s-radius        card/control corner radius
  *   --s-pad           default panel padding
  *   --s-gap           default stack/grid gap
@@ -45,8 +31,8 @@ export interface ResolvedDesign {
  *                     delegate to the appearance-aware `--app-*` paint tokens
  *   --s-accent-glow   focus/active glow
  *
- * TYPE SCALE DOCTRINE (frontend-design skill): the scale must JUMP — 11px
- * tracked labels → 13.5px body → 15px titles → 26px page titles → 32-40px
+ * TYPE SCALE DOCTRINE (frontend-design skill): the scale must JUMP â€” 11px
+ * tracked labels â†’ 13.5px body â†’ 15px titles â†’ 26px page titles â†’ 32-40px
  * numerals. Color belongs to DATA (status pills, charts, pulses); chrome quiet.
  */
 const FLAGSHIP_VARS: CSSProperties = {
@@ -75,33 +61,33 @@ interface VariantDef {
 const VARIANTS: Record<DesignLanguage, VariantDef> = {
   agentis: {
     label: 'Agentis',
-    hint: 'The flagship system — premium cards, real type scale, light & dark.',
+    hint: 'The flagship system â€” premium cards, real type scale, light & dark.',
   },
-  // Legacy ids → structural variants of the flagship (zero-migration upgrades).
+  // Legacy ids â†’ structural variants of the flagship (zero-migration upgrades).
   operations: {
     label: 'Operations (variant)',
-    hint: 'Flagship structure, single-accent charts — dense command centers.',
+    hint: 'Flagship structure, single-accent charts â€” dense command centers.',
     policy: { multiPalette: false },
   },
   aurora: {
     label: 'Aurora (variant)',
-    hint: 'Bigger numerals, rounder cards — executive dashboards.',
+    hint: 'Bigger numerals, rounder cards â€” executive dashboards.',
     vars: { '--s-radius': '16px', '--s-pad': '22px', '--s-kpi-size': '38px', '--s-heading-size': '28px' } as CSSProperties,
   },
   soft: {
     label: 'Soft (variant)',
-    hint: 'Rounder, friendlier spacing — consumer/CRM products.',
+    hint: 'Rounder, friendlier spacing â€” consumer/CRM products.',
     vars: { '--s-radius': '18px', '--s-pad': '22px', '--s-gap': '16px', '--s-body-size': '14px' } as CSSProperties,
   },
   editorial: {
     label: 'Editorial (variant)',
-    hint: 'Big type, generous whitespace, flat color — content & reports.',
+    hint: 'Big type, generous whitespace, flat color â€” content & reports.',
     vars: { '--s-radius': '10px', '--s-pad': '26px', '--s-gap': '22px', '--s-kpi-size': '40px', '--s-heading-size': '30px', '--s-title-size': '16px', '--s-body-size': '15px' } as CSSProperties,
     policy: { gradientCharts: false, multiPalette: false },
   },
   console: {
     label: 'Console (variant)',
-    hint: 'Tight grid, compact scale — ops/SRE monitors.',
+    hint: 'Tight grid, compact scale â€” ops/SRE monitors.',
     vars: { '--s-radius': '10px', '--s-pad': '14px', '--s-gap': '10px', '--s-kpi-size': '26px', '--s-heading-size': '20px', '--s-title-size': '13.5px', '--s-body-size': '12.5px' } as CSSProperties,
   },
 };
@@ -124,3 +110,6 @@ export const DESIGN_LANGUAGES: ResolvedDesign[] = (Object.keys(VARIANTS) as Desi
 export function resolveDesign(id?: DesignLanguage): ResolvedDesign {
   return build(id && VARIANTS[id] ? id : DEFAULT_DESIGN);
 }
+
+
+

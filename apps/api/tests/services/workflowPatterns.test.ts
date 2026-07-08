@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
-import { WORKFLOW_PATTERNS, getWorkflowPattern, suggestPatterns } from '../../src/services/workflowPatterns.js';
+import { WORKFLOW_PATTERNS, getWorkflowPattern, suggestPatterns } from '../../src/services/workflow/workflowPatterns.js';
 import { evalCondition } from '../../src/engine/SafeConditionParser.js';
 import { validateGraphExpressions } from '../../src/engine/validateExpressions.js';
 

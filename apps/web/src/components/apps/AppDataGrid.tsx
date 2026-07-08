@@ -1,10 +1,4 @@
-/**
- * AppDataGrid — the App's datastore browser (the "Data" facet), Supabase-style:
- * a left rail of collections and a live, editable record grid. The API already
- * exposes full CRUD (`/v1/apps/:id/collections/:name/query|records`); this is the
- * operator surface over it. Records appear live as agents/runs write them
- * (DATA_CHANGED), so the operator watches the datastore fill in realtime.
- */
+﻿
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Database, Loader2, Plus, RefreshCw, Table2, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -32,7 +26,7 @@ export function AppDataGrid({ appId, collections }: { appId: string; collections
       <div className="flex h-full flex-col items-center justify-center px-6 text-center text-text-muted">
         <Database size={30} className="mb-3 text-text-secondary" />
         <div className="text-[14px] font-medium text-text-secondary">No collections yet</div>
-        <p className="mt-1 max-w-md text-[12px] leading-relaxed">Collections defined by agents or app actions appear here as typed, editable tables — and fill in live as runs write records.</p>
+        <p className="mt-1 max-w-md text-[12px] leading-relaxed">Collections defined by agents or app actions appear here as typed, editable tables â€” and fill in live as runs write records.</p>
       </div>
     );
   }
@@ -96,7 +90,6 @@ function CollectionGrid({ appId, collection }: { appId: string; collection: Coll
   }, [load]);
 
   // Live: refetch the first page when this collection changes under us (a run or
-  // agent wrote a record) — the datastore fills in front of the operator.
   // DATA_CHANGED is dual-published to the workspace room (appStores.ts), so a
   // workspace subscription delivers it (with SSE fallback + reconnect for free).
   useEffect(() => rtSubscribe('workspace', {}), []);
@@ -126,7 +119,7 @@ function CollectionGrid({ appId, collection }: { appId: string; collection: Coll
       <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
         <div className="min-w-0">
           <div className="truncate font-mono text-[13px] font-semibold text-text-primary">{collection.name}</div>
-          <div className="text-[11px] text-text-muted">{rows.length}{cursor ? '+' : ''} row{rows.length === 1 ? '' : 's'} · {fields.length} fields</div>
+          <div className="text-[11px] text-text-muted">{rows.length}{cursor ? '+' : ''} row{rows.length === 1 ? '' : 's'} Â· {fields.length} fields</div>
         </div>
         <div className="ml-auto flex items-center gap-1.5">
           <button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line px-2.5 text-[12px] text-text-secondary hover:bg-surface-2 disabled:opacity-50">
@@ -215,17 +208,17 @@ function CollectionGrid({ appId, collection }: { appId: string; collection: Coll
 /** Compact cell rendering: json as a mono snippet, everything else via the format kit. */
 function CellValue({ value, field }: { value: unknown; field: CollectionField }) {
   if (field.type === 'json') {
-    if (value == null) return <span className="text-text-disabled">—</span>;
+    if (value == null) return <span className="text-text-disabled">â€”</span>;
     return <span className="font-mono text-[11px] text-text-secondary">{clip(JSON.stringify(value))}</span>;
   }
   return <>{formatDisplay(value, field.type === 'date' ? { format: 'date' } : {})}</>;
 }
 
 function clip(s: string, n = 60): string {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
+  return s.length > n ? `${s.slice(0, n)}â€¦` : s;
 }
 
-/** Edit/insert one record — a field per schema column, typed inputs, json as text. */
+/** Edit/insert one record â€” a field per schema column, typed inputs, json as text. */
 function RecordEditor({
   appId,
   collection,
@@ -274,7 +267,7 @@ function RecordEditor({
             <label key={f.key} className="block">
               <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-text-secondary">
                 <span className="font-mono text-text-primary">{f.key}</span>
-                <span className="text-[10px] text-text-muted">{f.type}{f.required ? ' · required' : ''}</span>
+                <span className="text-[10px] text-text-muted">{f.type}{f.required ? ' Â· required' : ''}</span>
               </div>
               <FieldInput field={f} value={draft[f.key] ?? ''} onChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))} />
               {f.description ? <div className="mt-0.5 text-[10px] text-text-muted">{f.description}</div> : null}
@@ -326,7 +319,7 @@ function initialDraft(fields: CollectionField[], record: CollectionRecord | null
   return out;
 }
 
-/** Turn the string draft back into typed values; only include fields the operator set. */
+
 function coerce(fields: CollectionField[], draft: Record<string, string>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const f of fields) {
@@ -334,8 +327,11 @@ function coerce(fields: CollectionField[], draft: Record<string, string>): Recor
     if (raw === '' && !f.required) continue; // leave unset rather than write empties
     if (f.type === 'number') out[f.key] = Number(raw);
     else if (f.type === 'boolean') out[f.key] = raw === 'true';
-    else if (f.type === 'json') out[f.key] = raw === '' ? null : JSON.parse(raw); // throws → surfaced as error
+    else if (f.type === 'json') out[f.key] = raw === '' ? null : JSON.parse(raw); // throws â†’ surfaced as error
     else out[f.key] = raw;
   }
   return out;
 }
+
+
+

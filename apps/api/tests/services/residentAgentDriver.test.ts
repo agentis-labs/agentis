@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { DurableEntityService, DurableEntityDispatcher } from '../../src/services/durableEntities.js';
-import { AgentSessionService } from '../../src/services/agentSession.js';
+import { AgentSessionService } from '../../src/services/agent/agentSession.js';
 import { ResidentAgentDriver, AGENT_ENTITY_KIND } from '../../src/services/residentAgentDriver.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

@@ -9,7 +9,7 @@ import {
   ROLE_TIER_MANUAL,
   getWorkspaceManual,
   setWorkspaceManual,
-} from '../../src/services/agentOperatingManual.js';
+} from '../../src/services/agent/agentOperatingManual.js';
 import { getSelfHealConfig, setSelfHealConfig, DEFAULT_SELF_HEAL } from '../../src/services/selfHealSettings.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

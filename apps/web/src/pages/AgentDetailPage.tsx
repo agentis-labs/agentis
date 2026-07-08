@@ -1,5 +1,5 @@
-/**
- * AgentDetailPage — restructured tabs (Overview / Instructions / Memory / Connections / History).
+﻿/**
+ * AgentDetailPage â€” restructured tabs (Overview / Instructions / Memory / Connections / History).
  *
  * No more playground tab. Avatar uses image fallback to initials.
  * Instructions renders files discovered from the real runtime profile and
@@ -226,7 +226,7 @@ export function AgentDetailPage() {
             )}
             <div className="mt-2 flex flex-wrap gap-3 text-[12px] text-text-muted">
               {agent.spaceName && <span>{agent.spaceName}</span>}
-              <span>{harnessLabel(agentHarnessType(agent))}{agentRuntimeModel(agent) ? ` · ${agentRuntimeModel(agent)}` : ''}</span>
+              <span>{harnessLabel(agentHarnessType(agent))}{agentRuntimeModel(agent) ? ` Â· ${agentRuntimeModel(agent)}` : ''}</span>
               {agent.createdAt && <span>Created {relativeTime(agent.createdAt)}</span>}
             </div>
           </div>
@@ -294,8 +294,8 @@ const IDENTITY_INPUT_CLS =
   'w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none';
 
 /**
- * Identity tab — who the agent is: name, role, avatar, description, and the
- * chain-of-command placement (AGENTS-PAGE-REDESIGN.md §3.2). Technical harness
+ * Identity tab â€” who the agent is: name, role, avatar, description, and the
+ * chain-of-command placement (AGENTS-PAGE-REDESIGN.md Â§3.2). Technical harness
  * and model fields live in the Runtime tab.
  */
 function IdentityTab({
@@ -504,7 +504,7 @@ function IdentityTab({
               <option value="">No domain</option>
               {spaces.map((space) => {
                 const parent = space.parentDomainId ? spaces.find((d) => d.id === space.parentDomainId) : null;
-                return <option key={space.id} value={space.id}>{parent ? `${parent.name} › ${space.name}` : space.name}</option>;
+                return <option key={space.id} value={space.id}>{parent ? `${parent.name} â€º ${space.name}` : space.name}</option>;
               })}
               <option value="__create__">Create new domain...</option>
             </select>
@@ -513,7 +513,7 @@ function IdentityTab({
       )}
 
       <Button variant="primary" size="md" iconLeft={<Save size={13} />} disabled={saving || !dirty} onClick={() => void save()}>
-        {saving ? 'Saving…' : 'Save identity'}
+        {saving ? 'Savingâ€¦' : 'Save identity'}
       </Button>
       <DomainEditorSheet
         open={domainEditorOpen}
@@ -535,7 +535,7 @@ function IdentityField({ label, hint, children }: { label: string; hint?: string
     <label className="block">
       <span className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
         {label}
-        {hint && <span className="font-normal normal-case tracking-normal text-text-muted">· {hint}</span>}
+        {hint && <span className="font-normal normal-case tracking-normal text-text-muted">Â· {hint}</span>}
       </span>
       {children}
     </label>
@@ -543,8 +543,8 @@ function IdentityField({ label, hint, children }: { label: string; hint?: string
 }
 
 /**
- * Runtime tab — how the agent connects to a harness, its model, capability
- * tags, budget, and supervisor (AGENTS-PAGE-REDESIGN.md §3.4).
+ * Runtime tab â€” how the agent connects to a harness, its model, capability
+ * tags, budget, and supervisor (AGENTS-PAGE-REDESIGN.md Â§3.4).
  */
 function RuntimeTab({ agent, allAgents, onChange }: { agent: AgentDetail; allAgents: AgentSummary[]; onChange: () => void }) {
   return (
@@ -649,9 +649,9 @@ function HistoryTab({ agent }: { agent: AgentDetail }) {
   );
 }
 
-// ────────────────────────────────────────────────────────────
-// Memory tab — the agent's personal Brain (§G11)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Memory tab â€” the agent's personal Brain (Â§G11)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface AgentMemoryRow {
   id: string;
@@ -663,7 +663,7 @@ interface AgentMemoryRow {
 
 /**
  * The agent's own memory: findings and decisions it has accumulated across every
- * workflow and chat it has run — separate from the shared workspace memory log.
+ * workflow and chat it has run â€” separate from the shared workspace memory log.
  */
 function MemoryTab({ agent }: { agent: AgentDetail }) {
   const toast = useToast();
@@ -716,7 +716,7 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
       <EmptyState
         icon={<FileText size={48} />}
         title="No memories yet"
-        body={`As ${agent.name} runs tasks, the findings and decisions it chooses to remember will accumulate here — its personal expertise, separate from the shared workspace memory.`}
+        body={`As ${agent.name} runs tasks, the findings and decisions it chooses to remember will accumulate here â€” its personal expertise, separate from the shared workspace memory.`}
       />
     );
   }
@@ -760,4 +760,7 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
     </div>
   );
 }
+
+
+
 

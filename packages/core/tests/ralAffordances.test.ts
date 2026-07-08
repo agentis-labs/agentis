@@ -10,9 +10,9 @@ import {
   normalizeAgentRequirements,
   potentialAffordances,
   requiredAffordanceKeys,
-} from '../src/halAffordances.js';
+} from '../src/ralAffordances.js';
 
-describe('HAL affordances', () => {
+describe('RAL affordances', () => {
   it('labels browser as native browser for operator-facing surfaces', () => {
     expect(affordanceLabel('browser')).toBe('Native browser');
     expect(affordanceLabel('computerUse')).toBe('Computer use');
@@ -51,7 +51,7 @@ describe('HAL affordances', () => {
   });
 });
 
-describe('HAL supply view (configured / potential affordances)', () => {
+describe('RAL supply view (configured / potential affordances)', () => {
   it('reflects Codex native-browser opt-in from config', () => {
     expect(configuredAffordances('codex', null)).toEqual({ fileSystem: true, terminal: true });
     expect(configuredAffordances('codex', { browser: true })).toEqual({
@@ -71,7 +71,7 @@ describe('HAL supply view (configured / potential affordances)', () => {
   });
 });
 
-describe('HAL requirement match states', () => {
+describe('RAL requirement match states', () => {
   const requirements = normalizeAgentRequirements({ browser: true });
 
   it('ranks ready > offline_capable > enablable > incapable and classifies each', () => {

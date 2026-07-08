@@ -16,7 +16,7 @@ import { FirePolicyController } from '../../src/engine/listener/firePolicy.js';
 import { ListenerCursor } from '../../src/engine/listener/cursor.js';
 import { ListenerHealthStore } from '../../src/engine/listener/health.js';
 import { ListenerRuntime } from '../../src/engine/ListenerRuntime.js';
-import type { WorkflowStoreService } from '../../src/services/workflowStore.js';
+import type { WorkflowStoreService } from '../../src/services/workflow/workflowStore.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { ActiveTrigger } from '../../src/engine/ActiveWorkflowRegistry.js';

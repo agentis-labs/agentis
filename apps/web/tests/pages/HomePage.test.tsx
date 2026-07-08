@@ -269,7 +269,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
         // A deliberately wide direct-workflows branch — center-out packing must
         // still keep the middle manager (hermes) directly under the orchestrator
         // rather than letting the heavy right branch drag it left.
-        { id: 'wf-direct', title: 'Send Hi Robson Email', status: 'idle' },
+        { id: 'wf-direct', title: 'Send Hi Alex Email', status: 'idle' },
         { id: 'wf-direct2', title: 'AI News Email Digest', status: 'idle' },
         { id: 'wf-direct3', title: '24/7 Site Monitor', status: 'idle' },
         { id: 'wf-direct4', title: 'Fashion Store Factory', status: 'idle' },

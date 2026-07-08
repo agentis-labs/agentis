@@ -4,7 +4,7 @@ import type { ChatDelta } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildRoomRoutes } from '../../src/routes/rooms.js';
 import { BroadcastDispatcher } from '../../src/services/broadcastDispatcher.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 function seedAgent(ctx: TestContext, name: string): string {
@@ -82,7 +82,7 @@ describe('Global Chat (broadcast room)', () => {
     const runTurn = (async function* (): AsyncIterable<ChatDelta> {
       yield { type: 'text', delta: '👋 Hey, joining in!' };
       yield { type: 'done', finishReason: 'stop' };
-    }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn;
+    }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn;
 
     const dispatcher = new BroadcastDispatcher({
       db: ctx.db, adapters: fakeAdapters(), conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
@@ -118,7 +118,7 @@ describe('Global Chat (broadcast room)', () => {
     const runTurn = (async function* (): AsyncIterable<ChatDelta> {
       yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: 'hermes runtime is unavailable' };
       yield { type: 'done', finishReason: 'error' };
-    }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn;
+    }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn;
 
     const dispatcher = new BroadcastDispatcher({
       db: ctx.db, adapters: fakeAdapters(), conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),

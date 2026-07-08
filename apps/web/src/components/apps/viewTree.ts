@@ -1,9 +1,9 @@
-/**
- * viewTree — pure structural helpers for the AG-UI `ViewNode` tree.
+﻿/**
+ * viewTree â€” pure structural helpers for the AG-UI `ViewNode` tree.
  *
  * Shared by the WYSIWYG builder (`SurfaceCanvas`, `AppEditorPage`) so the page
  * and the canvas mutate one tree the same way. A "path" is the list of child
- * indices from the root to a node (`[]` is the root). Everything here is pure —
+ * indices from the root to a node (`[]` is the root). Everything here is pure â€”
  * it returns a new tree and never mutates its input.
  */
 import type { ViewNode } from '@agentis/core';
@@ -135,3 +135,6 @@ export function duplicateNodeAtPath(root: ViewNode, path: number[]): ViewNode {
 function cloneNode(node: ViewNode): ViewNode {
   return JSON.parse(JSON.stringify(node)) as ViewNode;
 }
+
+
+

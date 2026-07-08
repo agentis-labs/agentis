@@ -1,11 +1,11 @@
-/**
- * SelfHealConsole — the immersive face of self-healing.
+﻿/**
+ * SelfHealConsole â€” the immersive face of self-healing.
  *
  * Self-healing is the feature that makes Agentis a serious workflow platform, so
  * it must FEEL different from a normal failure: you watch the agent think, repair,
- * and resolve in real time. The design is deliberately minimal (less is more) —
+ * and resolve in real time. The design is deliberately minimal (less is more) â€”
  * one glyph with a breathing aura, the agent's live diagnosis revealed like a
- * thought, a three-beat phase line (Diagnose · Repair · Resolve), and only the
+ * thought, a three-beat phase line (Diagnose Â· Repair Â· Resolve), and only the
  * action the moment needs. Everything is driven by the durable incident state, so
  * it stays truthful across refresh/restart.
  */
@@ -200,7 +200,7 @@ export function SelfHealConsole({
         </div>
       )}
 
-      {/* Phase line — Diagnose · Repair · Resolve */}
+      {/* Phase line â€” Diagnose Â· Repair Â· Resolve */}
       {repairActivity.length > 0 && (
         <div className="mx-3 mt-2 border-t border-white/10 pt-2">
           <div className="mb-1.5 text-[9.5px] font-medium uppercase tracking-wider text-text-muted">Live orchestration</div>
@@ -244,7 +244,7 @@ export function SelfHealConsole({
         </ol>
       </div>
 
-      {/* Action — only what the moment needs */}
+      {/* Action â€” only what the moment needs */}
       {isAwaiting && onResolve && (
         <div className="flex gap-2 border-t border-white/10 px-3 py-2.5">
           <button
@@ -300,3 +300,6 @@ export function SelfHealConsole({
     </div>
   );
 }
+
+
+

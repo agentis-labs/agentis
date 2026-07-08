@@ -4,8 +4,8 @@
  * tools under namespaced ids, and routes calls to the right server.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { McpToolBridge, computerUseServerFromEnv, type McpClientLike } from '../../src/services/mcpToolBridge.js';
-import { saveMcpServers } from '../../src/services/mcpServerStore.js';
+import { McpToolBridge, computerUseServerFromEnv, type McpClientLike } from '../../src/services/mcp/mcpToolBridge.js';
+import { saveMcpServers } from '../../src/services/mcp/mcpServerStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

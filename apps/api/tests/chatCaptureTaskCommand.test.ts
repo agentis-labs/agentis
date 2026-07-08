@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeTaskCommand } from '../src/services/chatMemoryCapture.js';
+import { looksLikeTaskCommand } from '../src/services/chat/chatMemoryCapture.js';
 
 /**
  * §B7.1 — the narrow-write guard. A one-shot task command must NOT be captured as

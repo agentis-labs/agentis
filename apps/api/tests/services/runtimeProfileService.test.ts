@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@agentis/db/sqlite';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { RuntimeProfileService } from '../../src/services/runtimeProfileService.js';
+import { RuntimeProfileService } from '../../src/services/runtime/runtimeProfileService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

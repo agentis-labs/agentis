@@ -1,15 +1,4 @@
-/**
- * StepTrack — the one progress primitive shown everywhere an agent is working
- * (chat messages, the Live Workspace active-work rows, the floating task chip).
- *
- * Collapsed it reads `▸ <current step> · x/x` with a thin bar; on hover OR click
- * it expands to the ordered checklist with per-step status. Click pins the
- * expansion open so the operator can read it without holding the mouse still.
- *
- * Fed by a structured {@link WorkStepTrack} (projected from the agent's task
- * spine — the first-class path) and degrades to a single current-step line +
- * progress bar when only derived signals exist.
- */
+﻿
 
 import { useState } from 'react';
 import { CheckCircle2, ChevronRight, Circle, Loader2, XCircle } from 'lucide-react';
@@ -76,7 +65,7 @@ export function StepTrack({
           />
         )}
         <span className={clsx('min-w-0 flex-1 truncate text-[11px]', active ? 'text-text-secondary' : 'text-text-muted')}>
-          {currentLabel ?? 'Working…'}
+          {currentLabel ?? 'Workingâ€¦'}
         </span>
         {total > 0 && (
           <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">{current}/{total}</span>
@@ -130,3 +119,6 @@ function StepStatusIcon({ status }: { status: WorkStepStatus }) {
   if (status === 'failed') return <XCircle size={12} className="mt-0.5 shrink-0 text-danger" />;
   return <Circle size={12} className="mt-0.5 shrink-0 text-text-muted" />;
 }
+
+
+

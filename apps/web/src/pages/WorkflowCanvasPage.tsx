@@ -1,5 +1,5 @@
-/**
- * WorkflowCanvasPage — visual workflow editor.
+﻿/**
+ * WorkflowCanvasPage â€” visual workflow editor.
  *
  * Phase-first workflow editor:
  *   - Slim workflow header with title, transient save feedback, Engine, and Activate
@@ -200,7 +200,7 @@ interface SpaceSummary {
 type SaveState = 'saved' | 'saving' | 'dirty' | 'error';
 type EnginePage = 'overview' | 'inputs' | 'settings' | 'contracts' | 'chains' | 'activation';
 
-/** Canvas tabs. UI surfaces moved to the Agentic App (AGENTIC-APPS-10X §4/§6). */
+/** Canvas tabs. UI surfaces moved to the Agentic App (AGENTIC-APPS-10X Â§4/Â§6). */
 type WorkflowTab = 'canvas' | 'brain';
 
 const WORKFLOW_TAB_SEGMENTS = [
@@ -309,7 +309,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       // A brand-new build can mount this page a beat before its workflow row
       // is committed (e.g. a caller that reveals the canvas on the first build
       // phase rather than the first placed node). Retry once instead of
-      // leaving `wf` null forever, which pins the page on "Loading workflow…"
+      // leaving `wf` null forever, which pins the page on "Loading workflowâ€¦"
       // with an unhandled rejection and no way to recover without a refresh.
       window.setTimeout(() => {
         void api<{ workflow: WorkflowDetail }>(`/v1/workflows/${id}`).then((d) => {
@@ -332,7 +332,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       .then((d) => setSpaces(d.data ?? []))
       .catch(() => setSpaces([]));
     // The Brain overview reports both base count and total indexed chunks, so the
-    // canvas callout can fire when a Brain node has no content to retrieve (§G5).
+    // canvas callout can fire when a Brain node has no content to retrieve (Â§G5).
     void api<{ stats: { knowledgeBases: number; chunks: number } }>('/v1/brain')
       .then((d) => {
         setKnowledgeBaseCount(d.stats.knowledgeBases);
@@ -352,7 +352,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
 
   // Keep the workspace room subscription alive while editing so run
   // lifecycle events reach the Runs/Output tabs and drive the post-run
-  // hand-off (live drawer → Output tab) without a page navigation.
+  // hand-off (live drawer â†’ Output tab) without a page navigation.
   useEffect(() => {
     const ws = workspaceStore.get();
     if (!ws) return;
@@ -361,7 +361,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
 
   // Per-node run events (NODE_STARTED/COMPLETED/FAILED/WAITING_FOR_INPUT) are
   // emitted to the RUN room, not the workspace room. Without subscribing to
-  // the active run's room the canvas never receives them — the cause of the
+  // the active run's room the canvas never receives them â€” the cause of the
   // "black screen during a run." Subscribe whenever we have an active run.
   useEffect(() => {
     if (!activeRunId) return;
@@ -387,13 +387,13 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     return () => { cancelled = true; };
   }, [id]);
 
-  // ROBUST continuous resolution — the workspace's LIVE active-run list (kept fresh
+  // ROBUST continuous resolution â€” the workspace's LIVE active-run list (kept fresh
   // by the workspace room on EVERY RUN_* lifecycle event) is the source of truth,
   // so a run of THIS workflow started by ANY path (the App, the orchestrator,
-  // deliver, a schedule — not only a RUN_CREATED event that happens to reach the
+  // deliver, a schedule â€” not only a RUN_CREATED event that happens to reach the
   // canvas with a matching workflowId) resolves the run room and paints node/phase
   // status live. The mount fetch only catches runs active at open; RUN_CREATED only
-  // catches events it directly hears — this covers the rest (the "black canvas
+  // catches events it directly hears â€” this covers the rest (the "black canvas
   // during an App/orchestrator run" gap). Never CLEARS here: RUN_END owns clearing,
   // so a transient snapshot gap can't drop a live subscription mid-run.
   useEffect(() => {
@@ -445,7 +445,6 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   }, [nav]);
 
   // Load data the command palette needs: integration connectors + reusable
-  // workflows. Both are best-effort — failures collapse to empty lists so
   // the palette still surfaces built-in nodes.
   useEffect(() => {
     void api<{
@@ -493,7 +492,6 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   }, [wf, extensions]);
 
   // React Flow owns the node/edge state so it can manage selection,
-  // dragging, and multi-select internally. We sync changes back to
   // wf.graph (for saves) inside the change handlers.
   const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState<Node>([]);
   const [flowEdges, setFlowEdges, onFlowEdgesChange] = useEdgesState<Edge>([]);
@@ -512,7 +510,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   const flowInstanceRef = useRef<import('../components/canvas/CanvasEngine').CanvasEngineInstance | null>(null);
 
   // Stable edge-delete handle threaded into each edge's `data.onDelete` so the
-  // hover × affordance in AgentisEdge can remove a connection. The concrete
+  // hover Ã— affordance in AgentisEdge can remove a connection. The concrete
   // implementation is installed once queueSave exists (see below); routing it
   // through a ref keeps the callback identity stable across renders, which lets
   // us thread it at hydration time without re-running that effect.
@@ -552,7 +550,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     [flowNodes, wf],
   );
 
-  // ── Live per-node status overlay ──────────────────────────────────────
+  // â”€â”€ Live per-node status overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The engine fires NODE_STARTED/COMPLETED/FAILED/RETRY_SCHEDULED on the
   // run room for EVERY kind. Project them onto the canvas as a `liveStatus`
   // field that AgentisNode reads to paint pulsing rings, checkmarks, and
@@ -593,7 +591,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         ),
       );
       // Light up the edges feeding the running node so the flow is visible in
-      // motion — the connection lights up and its dashes march toward the step.
+      // motion â€” the connection lights up and its dashes march toward the step.
       const active = status === 'running';
       setFlowEdges((prev) =>
         prev.map((e) => {
@@ -738,8 +736,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     };
     if (env.event === REALTIME_EVENTS.WORKFLOW_GRAPH_PATCHED) {
       // Mid-run self-evolution (evolve_plan / evolveGraph) merges nodes straight
-      // into the persisted graph with no per-node stream — refetch and briefly
-      // halo whatever node IDs weren't there before, so the operator sees the
+      // into the persisted graph with no per-node stream â€” refetch and briefly
       // patch land instead of the canvas silently going stale.
       if (!id || payload.workflowId !== id) return;
       const previousNodeIds = new Set((wfRef.current?.graph.nodes ?? []).map((n) => n.id));
@@ -803,7 +800,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         const kind = node.data?.kind ?? node.type ?? 'transform';
         if (prev.some((existing) => existing.id === node.id)) {
           // A rebuild that edits an existing node (not just adds a new one)
-          // republishes CANVAS_NODE_PLACED for it too — re-halo it instead of
+          // republishes CANVAS_NODE_PLACED for it too â€” re-halo it instead of
           // silently no-op'ing, otherwise "touch/edit" never shows a reveal.
           return prev.map((existing) =>
             existing.id === node.id
@@ -879,7 +876,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           type: n.type,
           operationName: (n.config as { operationName?: string }).operationName,
           // Provider identity for the card subtitle (reference-builder parity):
-          // an mcp node names its server·tool, an integration its service·op.
+          // an mcp node names its serverÂ·tool, an integration its serviceÂ·op.
           toolId: (n.config as { toolId?: string }).toolId,
           integrationId: (n.config as { integrationId?: string }).integrationId,
           operationId: (n.config as { operationId?: string }).operationId,
@@ -945,10 +942,10 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   // Auto-save: debounce 1.2s for snappy feedback, save on unmount.
   //
   // saveNow reads the *live* React Flow state through refs rather than a
-  // captured closure. The previous design synced flow→graph inside a
+  // captured closure. The previous design synced flowâ†’graph inside a
   // requestAnimationFrame whose closure captured a one-render-stale `syncAndSave`,
   // so every mutation persisted the *previous* mutation's graph (1st edit lost,
-  // 2nd saved the 1st, …). Reading from refs at fire time means a handler can
+  // 2nd saved the 1st, â€¦). Reading from refs at fire time means a handler can
   // setFlowNodes/setFlowEdges and queueSave() in the same tick and still persist
   // its own change.
   const wfRef = useRef<WorkflowDetail | null>(null);
@@ -1033,7 +1030,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     }, 1200);
   }, [saveNow]);
 
-  // Tidy — re-run the shared layered layout over the current graph, persist the
+  // Tidy â€” re-run the shared layered layout over the current graph, persist the
   // new positions, and frame the result. Makes any graph (AI-built or
   // hand-edited) instantly readable.
   const handleTidy = useCallback(() => {
@@ -1058,7 +1055,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         : prev,
     );
     queueSave();
-    // Fit after the new positions have painted — same legibility floor as the
+    // Fit after the new positions have painted â€” same legibility floor as the
     // entry framing so Tidy never lands on an unreadable whole-graph view.
     window.setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.1, duration: 400, maxZoom: 1, minZoom: 0.55 }), 60);
   }, [queueSave, setFlowNodes]);
@@ -1086,17 +1083,16 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
 
   const clearPhaseFocus = useCallback(() => {
     setSelectedPhaseId(null);
-    // Frame the whole flow, but never below a legible floor — a wide multi-phase
+    // Frame the whole flow, but never below a legible floor â€” a wide multi-phase
     // graph stays readable (centered, pan for the edges) instead of collapsing to
     // illegible slivers. The minimap/rail carry the bird's-eye view.
     flowInstanceRef.current?.fitView({ padding: 0.16, duration: 420, maxZoom: 1, minZoom: 0.5 });
   }, []);
 
-  // ── Initial framing ───────────────────────────────────────────────────
-  // Open framing the WHOLE workflow (every phase) so the operator sees the full
+  // â”€â”€ Initial framing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // shape at a glance, then zooms in where they want. We still own the framing
   // (rather than React Flow's auto-fit) because the embedded App facet mounts the
-  // canvas on tab select, and auto-fit runs after node measurement — without this
+  // canvas on tab select, and auto-fit runs after node measurement â€” without this
   // the first frame lands at the default viewport instead of fit-to-graph.
   const frameWorkflowEntry = useCallback((animate = true) => {
     const inst = flowInstanceRef.current;
@@ -1104,12 +1100,11 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     if (inst.getNodes().length === 0) return;
     // Readable-first framing: never open below the legibility floor. A big
     // workflow opens on its first phases at a zoom where cards can be read,
-    // and the operator pans/uses the phase rail for the rest — instead of
     // framing everything as illegible confetti.
     inst.fitView({ padding: 0.1, duration: animate ? 460 : 0, maxZoom: 1, minZoom: 0.55 });
   }, []);
 
-  // Run the entry framing once per workflow — but only after the canvas is
+  // Run the entry framing once per workflow â€” but only after the canvas is
   // actually visible (the embedded App facet mounts it on tab select) AND React
   // Flow has measured node sizes. Framing earlier would either no-op (zero-size
   // host) or be computed against unmeasured nodes. We mark the workflow framed
@@ -1140,7 +1135,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     };
 
     raf = window.requestAnimationFrame(attempt);
-    // A tab reveal resizes the host from 0 → full; retry framing when that happens.
+    // A tab reveal resizes the host from 0 â†’ full; retry framing when that happens.
     const observer = new ResizeObserver(() => {
       if (cancelled || framedWorkflowIdRef.current === wfId) return;
       tries = 0;
@@ -1411,7 +1406,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activateOpen, wf?.id]);
 
-  // Manual save with ⌘S / Ctrl+S
+  // Manual save with âŒ˜S / Ctrl+S
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
@@ -1631,7 +1626,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     }
   }
 
-  if (!wf) return <div className="p-6 text-[13px] text-text-muted">Loading workflow…</div>;
+  if (!wf) return <div className="p-6 text-[13px] text-text-muted">Loading workflowâ€¦</div>;
 
   const headerTrigger = workflowTriggerConfig(wf);
   const headerIsManualRun = headerTrigger?.triggerType === 'manual';
@@ -1645,9 +1640,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     && ['pending', 'running', 'waiting', 'paused'].includes(activeRunStatus);
 
   return (
-    <div className="relative flex h-full flex-col">
+    <div className="workflow-scope relative flex h-full flex-col">
       {/* Embedded (App Workflow facet) hides the header below, which is where Run
-          lives — so surface a first-class Run control on the canvas itself. It
+          lives â€” so surface a first-class Run control on the canvas itself. It
           opens the same inputs-aware run dialog and live run inspector. */}
       {embedded && wf ? (
         <button
@@ -1657,10 +1652,10 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           className="absolute bottom-4 right-4 z-30 inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[12px] font-semibold text-white shadow-lg transition-colors hover:bg-accent/90 disabled:opacity-60"
           title="Run this workflow"
         >
-          <Play size={14} /> {running ? 'Running…' : 'Run workflow'}
+          <Play size={14} /> {running ? 'Runningâ€¦' : 'Run workflow'}
         </button>
       ) : null}
-      {/* Header — one slim command strip above the canvas. Hidden when embedded
+      {/* Header â€” one slim command strip above the canvas. Hidden when embedded
           in the App editor, which provides its own header + facet tabs. */}
       <div className={clsx('flex shrink-0 items-center gap-2 border-b border-line bg-surface px-4 py-2', embedded && 'hidden')}>
         <button
@@ -1882,7 +1877,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         </div>
       </div>
 
-      {/* Canvas + side panels — kept mounted across tab switches so React
+      {/* Canvas + side panels â€” kept mounted across tab switches so React
           Flow state and the agent-focus overlay survive. */}
       <div className={clsx('flex min-h-0 flex-1 overflow-hidden', tab !== 'canvas' && 'hidden')}>
         <CanvasLeftRail
@@ -1905,8 +1900,8 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
             edges={flowEdges}
             // Initial framing is owned by frameWorkflowEntry (see the canvasReady
             // effect), NOT React Flow's auto-fit. Auto-fit frames the whole wide
-            // multi-phase graph at an illegible zoom and — because it runs after
-            // node measurement — would override our readable entry framing.
+            // multi-phase graph at an illegible zoom and â€” because it runs after
+            // node measurement â€” would override our readable entry framing.
             minZoom={0.12}
             maxZoom={1.75}
             minimapNodeColor={(n) => nodeKindColor((n.data as { kind?: string } | undefined)?.kind)}
@@ -2447,9 +2442,9 @@ export function WorkflowBrainTab({
           <KnowledgeTab scopeId={workflow.id} scopeName={workflow.title} />
         ) : (
           // Episodes are written scoped to the owning App's id (kind='app', where
-          // workflow.id IS the app id — scopeId already matches). A plain workflow's
+          // workflow.id IS the app id â€” scopeId already matches). A plain workflow's
           // runs are written scoped to the executing agent instead, but every episode
-          // still records its own workflowId column — filter on that instead of the
+          // still records its own workflowId column â€” filter on that instead of the
           // (never-matching) scopeId so this tab isn't structurally always empty.
           <InsightsTab scopeId={workflow.id} episodeWorkflowId={kind === 'workflow' ? workflow.id : undefined} />
         )}
@@ -2460,7 +2455,7 @@ export function WorkflowBrainTab({
 
 /**
  * Project the live React Flow node/edge state back into a persistable workflow
- * graph. Node *config* (kind, extensionId, …) lives only in `prevGraph`, so we
+ * graph. Node *config* (kind, extensionId, â€¦) lives only in `prevGraph`, so we
  * merge each flow node onto its original config and take position/existence
  * from the flow state. Transient edge `data` such as the `onDelete` handle is
  * intentionally dropped so it never ends up in the persisted payload.
@@ -2476,7 +2471,7 @@ function buildGraphFromFlow(
     if (orig) {
       return { ...orig, position: fn.position };
     }
-    // New node that hasn't been mirrored into prev.graph yet — synthesize a
+    // New node that hasn't been mirrored into prev.graph yet â€” synthesize a
     // minimal node from the flow data as a safety net.
     const data = (fn.data ?? {}) as { type?: string; kind?: string; label?: string };
     return {
@@ -2887,7 +2882,7 @@ function DeploymentPanel({
             {deployment?.triggerType === 'cron' && (
               <DeploymentValue
                 label="Schedule"
-                value={`${String(deployment.config.expression ?? '')} · ${String(deployment.config.timezone ?? 'UTC')}`}
+                value={`${String(deployment.config.expression ?? '')} Â· ${String(deployment.config.timezone ?? 'UTC')}`}
               />
             )}
             {deployment?.triggerType === 'webhook' && deployment.webhookUrl && (
@@ -3141,7 +3136,7 @@ function RunInputDialog({
         <div className="space-y-4 px-5 py-5">
           {variables.length === 0 ? (
             <p className="text-[13px] text-text-secondary">
-              Ready to run — this workflow doesn't need any inputs.
+              Ready to run â€” this workflow doesn't need any inputs.
             </p>
           ) : (
             <>
@@ -3163,7 +3158,7 @@ function RunInputDialog({
                       placeholder={
                         v.default != null
                           ? String(v.default)
-                          : `Enter ${displayLabel.toLowerCase()}…`
+                          : `Enter ${displayLabel.toLowerCase()}â€¦`
                       }
                       className="h-9 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
                     />
@@ -3187,7 +3182,7 @@ function RunInputDialog({
             disabled={running}
             className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
           >
-            {running ? 'Starting…' : 'Run'}
+            {running ? 'Startingâ€¦' : 'Run'}
           </button>
         </footer>
       </form>
@@ -3361,9 +3356,9 @@ function WorkflowSettingsDialog({
 /** Convert a snake_case or camelCase identifier into a human-readable label. */
 function humanizeInputName(name: string): string {
   if (!name) return name;
-  // snake_case / kebab-case → spaces
+  // snake_case / kebab-case â†’ spaces
   const spaced = name.replace(/[_-]+/g, ' ');
-  // camelCase → spaces
+  // camelCase â†’ spaces
   const split = spaced.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
   // Capitalize first letter, leave the rest as-is so acronyms survive.
   return split.charAt(0).toUpperCase() + split.slice(1);
@@ -3595,3 +3590,6 @@ function KnowledgeCanvasCallout({ onOpen }: { onOpen: () => void }) {
     </div>
   );
 }
+
+
+

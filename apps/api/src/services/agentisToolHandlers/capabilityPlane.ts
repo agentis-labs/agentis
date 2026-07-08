@@ -20,10 +20,10 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolContext, WorkflowGraph } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { CapabilityRouter } from '../capabilityRouter.js';
-import { parseCapabilityUrn } from '../capabilityUrn.js';
-import type { CapabilityKind } from '../capabilityUrn.js';
-import { resolveCommandScope } from '../commandScope.js';
+import { CapabilityRouter } from '../capability/capabilityRouter.js';
+import { parseCapabilityUrn } from '../capability/capabilityUrn.js';
+import type { CapabilityKind } from '../capability/capabilityUrn.js';
+import { resolveCommandScope } from '../command/commandScope.js';
 
 const CAPABILITY_KINDS: CapabilityKind[] = ['app', 'workflow', 'node', 'phase', 'agent', 'skill', 'mcp_tool', 'collection'];
 

@@ -2,7 +2,7 @@
   "name": "agentis",
   "version": "0.1.0",
   "private": true,
-  "description": "Agentis - the proactive ambient dashboard OpenClaw should have had from day one.",
+  "description": "Agentis — the operating system for agentic software.",
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.12.0",
   "engines": {
@@ -17,7 +17,10 @@
     "agentis:up": "pnpm --filter @agentis-ai/cli start up",
     "doctor": "tsx scripts/agentis-doctor.ts",
     "workflow:audit": "tsx scripts/workflow-reliability-audit.ts --write",
-    "lint": "pnpm -r lint",
+    "lint": "node scripts/check-boundaries.mjs && node scripts/check-security-invariants.mjs && node scripts/check-file-budget.mjs && pnpm -r lint",
+    "lint:boundaries": "node scripts/check-boundaries.mjs",
+    "lint:security": "node scripts/check-security-invariants.mjs",
+    "lint:budget": "node scripts/check-file-budget.mjs --warn",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "test:e2e": "playwright test",
@@ -30,6 +33,7 @@
     "@playwright/test": "^1.59.1",
     "@types/node": "^20.14.10",
     "concurrently": "^9.0.1",
+    "knip": "^6.25.0",
     "prettier": "^3.3.3",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"

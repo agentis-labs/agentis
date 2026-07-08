@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { BookOpen, ExternalLink, Info, Plus, Save, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
@@ -94,7 +94,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
 
   // A freshly uploaded document indexes in the background (embedding + grounding)
   // and reports `indexing` until ready. Poll quietly while that's true so it
-  // flips to `ready` on its own — no manual refresh, no frozen screen.
+  // flips to `ready` on its own â€” no manual refresh, no frozen screen.
   const anyIndexing = useMemo(() => documents.some((document) => document.status === 'indexing'), [documents]);
   useEffect(() => {
     if (!anyIndexing) return;
@@ -429,7 +429,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
               />
               {isGenericWorkflowBaseName(inspectedBase.name) && inspectedBase.ownerWorkflow?.title && (
                 <span className="mt-1 block text-[11px] text-text-muted">
-                  Displayed as “{inspectedBase.ownerWorkflow.title}” in Workspace Brain until renamed.
+                  Displayed as â€œ{inspectedBase.ownerWorkflow.title}â€ in Workspace Brain until renamed.
                 </span>
               )}
             </label>
@@ -496,14 +496,14 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
               <Fact label="Collection" value={inspectedDocument.knowledgeBaseName ?? 'Collection'} />
               <Fact label="Status" value={inspectedDocument.status} />
               <Fact label="Type" value={inspectedDocument.mimeType} />
-              <Fact label="Tokens" value={inspectedDocument.tokenCount != null ? String(inspectedDocument.tokenCount) : '—'} />
-              <Fact label="Chunks" value={inspectedDocument.chunks != null ? String(inspectedDocument.chunks) : String(documentChunks.length || '—')} />
+              <Fact label="Tokens" value={inspectedDocument.tokenCount != null ? String(inspectedDocument.tokenCount) : 'â€”'} />
+              <Fact label="Chunks" value={inspectedDocument.chunks != null ? String(inspectedDocument.chunks) : String(documentChunks.length || 'â€”')} />
               <Fact label="Created" value={formatDate(inspectedDocument.createdAt)} />
             </div>
             <section>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-[12px] font-semibold uppercase tracking-wide text-text-muted">Chunks</h3>
-                {documentLoading && <span className="text-[11px] text-text-muted">Loading…</span>}
+                {documentLoading && <span className="text-[11px] text-text-muted">Loadingâ€¦</span>}
               </div>
               <div className="space-y-2">
                 {documentChunks.length === 0 && !documentLoading ? (
@@ -569,7 +569,7 @@ function pickerLabel(base: KnowledgeBaseView, viewingScoped: boolean, fallbackWo
   const primary = baseTitle(base, viewingScoped, fallbackWorkflowName);
   const secondary = baseSubtitle(base, viewingScoped, fallbackWorkflowName);
   if (!secondary || secondary === 'Shared workspace knowledge') return primary;
-  return `${primary} · ${secondary}`;
+  return `${primary} Â· ${secondary}`;
 }
 
 function baseTitle(base: KnowledgeBaseView, viewingScoped: boolean, fallbackWorkflowName: string): string {
@@ -603,8 +603,11 @@ function isGenericWorkflowBaseName(name: string): boolean {
 }
 
 function formatDate(value?: string): string {
-  if (!value) return '—';
+  if (!value) return 'â€”';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
 }
+
+
+

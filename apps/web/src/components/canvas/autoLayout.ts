@@ -1,5 +1,5 @@
-/**
- * autoLayout — tidies React-Flow nodes with the shared layered layout from
+﻿/**
+ * autoLayout â€” tidies React-Flow nodes with the shared layered layout from
  * @agentis/core, so the canvas "Tidy" action and the build pipeline produce the
  * exact same arrangement. Pure: returns a new node array with fresh positions.
  */
@@ -19,3 +19,6 @@ export function autoLayout(nodes: Node[], edges: Edge[], opts?: LayoutOptions): 
     return p ? { ...n, position: p } : n;
   });
 }
+
+
+

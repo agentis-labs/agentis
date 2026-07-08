@@ -1,13 +1,3 @@
-/**
- * Agentis-native KnowledgeSource — the first-party organizational event
- * stream (RFC §7.6 "Agentis native", §3.2). Agents, workflows, runs, and
- * abilities are evidence of how the operation actually works; they are NOT
- * automatically authoritative (invariant 11) — formation gating still applies.
- *
- * Zero-credential: it reads the workspace's own tables. Boundary defaults are
- * agentis_native / internal / delegated_agents, never customer-safe by default.
- */
-
 import { and, eq, gt } from 'drizzle-orm';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { schema } from '@agentis/db/sqlite';
@@ -182,3 +172,4 @@ export class AgentisNativeSource implements KnowledgeSource {
     yield { objects: [], deletions: [], cursor: maxSeen || cursor, done: true };
   }
 }
+

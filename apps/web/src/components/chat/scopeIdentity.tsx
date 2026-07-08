@@ -1,4 +1,4 @@
-import clsx from 'clsx';
+﻿import clsx from 'clsx';
 
 export type ChatScopeRole = 'orchestrator' | 'manager' | 'worker';
 
@@ -99,3 +99,6 @@ export function ChatScopeBadge({
     </span>
   );
 }
+
+
+

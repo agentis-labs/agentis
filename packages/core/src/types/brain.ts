@@ -1,5 +1,5 @@
-/**
- * Brain UX types — the high-level intelligence surface contract.
+﻿/**
+ * Brain UX types â€” the high-level intelligence surface contract.
  *
  * The Brain is a *composed* surface. The backend assembles a single
  * BrainResponse from many sources (knowledge, memory, evaluators, baselines,
@@ -7,15 +7,15 @@
  * directly to assemble it.
  *
  * Visual model = four strata:
- *   - core      → workspace identity + health
- *   - knowledge → seeds, datasets, indexed clusters
- *   - memory    → promoted episodes + patterns
- *   - judgment  → evaluators + baselines
+ *   - core      â†’ workspace identity + health
+ *   - knowledge â†’ seeds, datasets, indexed clusters
+ *   - memory    â†’ promoted episodes + patterns
+ *   - judgment  â†’ evaluators + baselines
  *
  * Three view modes:
- *   - Map     → spatial knowledge map
- *   - Flow    → directional intelligence-flow graph
- *   - Ledger  → temporal table of memories / evaluators / baselines
+ *   - Map     â†’ spatial knowledge map
+ *   - Flow    â†’ directional intelligence-flow graph
+ *   - Ledger  â†’ temporal table of memories / evaluators / baselines
  */
 
 export type BrainNodeType =
@@ -47,7 +47,7 @@ export interface BrainNode {
   /** Suggested layout positions (server-side hint, optional). */
   x?: number;
   y?: number;
-  /** Visual emphasis weight 0..1 — drives node size + glow. */
+  /** Visual emphasis weight 0..1 â€” drives node size + glow. */
   weight?: number;
   /** 0..1 evaluator/baseline confidence; null when unknown. */
   confidence?: number | null;
@@ -59,7 +59,7 @@ export interface BrainNode {
   status?: BrainStatus | null;
   /**
    * Free-form metadata used by the inspector (sample counts, last-used,
-   * provenance, sparkline points, etc). The shape is intentionally open —
+   * provenance, sparkline points, etc). The shape is intentionally open â€”
    * the rail component switches on `type` to render it.
    */
   metadata: Record<string, unknown>;
@@ -83,7 +83,7 @@ export interface BrainEdge {
   source: string;
   target: string;
   kind: BrainEdgeKind;
-  /** Edge strength 0..1 — used for line opacity and selection priority. */
+  /** Edge strength 0..1 â€” used for line opacity and selection priority. */
   weight?: number;
   label?: string;
 }
@@ -216,7 +216,7 @@ export interface BrainGraphEventPayload {
 }
 
 /**
- * Default polar layout — `core` at center, three concentric rings for each
+ * Default polar layout â€” `core` at center, three concentric rings for each
  * remaining stratum. Used by both server hints and the client fallback when
  * a node has no explicit (x, y).
  */
@@ -240,3 +240,6 @@ export const BRAIN_NODE_TYPES: ReadonlyArray<BrainNodeType> = [
   'warning',
   'gap',
 ];
+
+
+

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+﻿import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import {
   AlertTriangle,
@@ -344,7 +344,7 @@ export function BrainDetailRail({
               </div>
               <HealthCard icon={<Gauge size={13} />} label="Context Coverage" value={pct(health.metrics.atomCoverageScore)} />
               <HealthCard icon={<Sparkles size={13} />} label="Evaluator Signal" value={pct(health.metrics.evaluatorSignalRate)} />
-              <HealthCard icon={trendIcon(health.metrics.qualityTrend)} label="Quality" value={capitalize(health.metrics.qualityTrend)} detail={`${health.metrics.averageConfidenceDelta >= 0 ? '+' : ''}${health.metrics.averageConfidenceDelta.toFixed(3)} avg Δ`} />
+              <HealthCard icon={trendIcon(health.metrics.qualityTrend)} label="Quality" value={capitalize(health.metrics.qualityTrend)} detail={`${health.metrics.averageConfidenceDelta >= 0 ? '+' : ''}${health.metrics.averageConfidenceDelta.toFixed(3)} avg Î”`} />
               <HealthCard icon={<AlertTriangle size={13} />} label="Disputes" value={String(health.metrics.disputedAtomCount)} detail={`${health.metrics.staleAtomCount} stale atoms`} />
             </div>
           </div>
@@ -398,7 +398,7 @@ export function BrainDetailRail({
                 !contentExpanded && contentCanExpand && 'max-h-[9.5rem] overflow-hidden',
               )}
             >
-              {loading ? <span className="text-text-muted">Loading atom content…</span> : content}
+              {loading ? <span className="text-text-muted">Loading atom contentâ€¦</span> : content}
               {!loading && !contentExpanded && contentCanExpand && (
                 <span className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-bg-base to-transparent" />
               )}
@@ -595,7 +595,7 @@ export function BrainDetailRail({
             className="inline-flex items-center gap-1.5 text-[11px] text-text-muted transition-colors hover:text-rose-300 disabled:opacity-50"
           >
             <Archive size={12} />
-            {archiving ? 'Archiving…' : 'Archive this atom'}
+            {archiving ? 'Archivingâ€¦' : 'Archive this atom'}
           </button>
         </div>
       )}
@@ -609,7 +609,7 @@ function Metric({ label, ratio, tone }: { label: string; ratio: number | null; t
   return (
     <div className="rounded-card border border-line bg-bg-base px-2 py-1.5">
       <div className="text-[14px] font-semibold leading-none text-text-primary">
-        {pct == null ? '—' : `${pct}%`}
+        {pct == null ? 'â€”' : `${pct}%`}
       </div>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface-2">
         <div className={clsx('h-full rounded-full', bar)} style={{ width: `${pct ?? 0}%` }} />
@@ -796,11 +796,11 @@ function pacerClass(node: BrainNode): string | null {
 
 function pacerLabel(cls: string): string {
   const map: Record<string, string> = {
-    procedural: 'Procedural — execution rule',
-    analogical: 'Analogical — similarity',
-    conceptual: 'Conceptual — generalized lesson',
-    evidence: 'Evidence — grounded observation',
-    reference: 'Reference — stable lookup',
+    procedural: 'Procedural â€” execution rule',
+    analogical: 'Analogical â€” similarity',
+    conceptual: 'Conceptual â€” generalized lesson',
+    evidence: 'Evidence â€” grounded observation',
+    reference: 'Reference â€” stable lookup',
   };
   return map[cls] ?? cls;
 }
@@ -829,7 +829,7 @@ function formationLabel(mode: string): string {
   return map[mode] ?? mode;
 }
 
-/** Staged (decay-eligible) vs consolidated (durable) — read from tags. */
+/** Staged (decay-eligible) vs consolidated (durable) â€” read from tags. */
 function consolidationState(node: BrainNode): string {
   const tags = nodeTags(node);
   if (tags.includes('graduated')) return 'Consolidated (graduated by reuse)';
@@ -849,7 +849,7 @@ function relativeTime(iso: string): string {
   return new Date(at).toLocaleDateString();
 }
 
-// ─── Health snapshot (for core-node panel) ────────────────────────────────────
+// â”€â”€â”€ Health snapshot (for core-node panel) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface HealthSnapshot {
   healthScore: number;
@@ -898,3 +898,6 @@ function trendIcon(trend: 'rising' | 'flat' | 'falling'): ReactNode {
   if (trend === 'falling') return <TrendingDown size={13} className="text-rose-300" />;
   return <Gauge size={13} />;
 }
+
+
+

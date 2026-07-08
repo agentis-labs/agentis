@@ -4,7 +4,7 @@ import type { AgentAdapter, AdapterHealthStatus, ChatDelta, ChatMessage, Normali
 import { schema } from '@agentis/db/sqlite';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { buildConversationRoutes } from '../../src/routes/conversations.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ViewportStore } from '../../src/services/viewportStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

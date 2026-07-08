@@ -7,7 +7,7 @@ import {
   TranscriptionService,
   resolveTranscriptionsUrl,
 } from '../../src/services/transcriptionService.js';
-import type { ModelProfile } from '../../src/services/orchestratorModelRouter.js';
+import type { ModelProfile } from '../../src/services/orchestrator/orchestratorModelRouter.js';
 
 const profile: ModelProfile = { baseUrl: 'https://api.example.com/v1', model: 'whisper-1', apiKey: 'k' };
 

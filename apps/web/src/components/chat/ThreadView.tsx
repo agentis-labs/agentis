@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
@@ -50,7 +50,7 @@ type AgentMsg = {
   deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
 };
 
-/** A message sent while a turn was already streaming — durably queued
+/** A message sent while a turn was already streaming â€” durably queued
  * server-side and auto-dispatched, oldest first, once the turn ends. */
 type QueuedItem = {
   id: string;
@@ -159,8 +159,8 @@ function streamErrorMessage(data: unknown): string {
 function taskLabel(message: string): string {
   const firstLine = message.trim().split('\n')[0] ?? '';
   const clean = firstLine.replace(/\s+/g, ' ').trim();
-  if (!clean) return 'Working…';
-  return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean;
+  if (!clean) return 'Workingâ€¦';
+  return clean.length > 48 ? `${clean.slice(0, 47)}â€¦` : clean;
 }
 
 function createClientTurnId(): string {
@@ -233,10 +233,10 @@ function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
 
   // Transform A2A messages into conversational slack-like text
   if (event.kind === 'message') {
-    // "Actor → Target: Message" or similar
+    // "Actor â†’ Target: Message" or similar
     // We just want it to look like it naturally flows.
     // If it has an arrow indicating a target, let's try to extract it.
-    const parts = text.split('→');
+    const parts = text.split('â†’');
     if (parts.length > 1) {
       const rightSide = parts[1]!.trim();
       const colonIdx = rightSide.indexOf(':');
@@ -339,14 +339,12 @@ export function ThreadView({
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
   const [agentTyping, setAgentTyping] = useState(false);
   // Global Chat loading state: which @mentioned agents we're still waiting on for
-  // a reply. Set when the operator posts a mention; an agent is cleared once its
   // reply (posted after the mention) shows up. A safety timer caps the wait.
   const [pendingResponders, setPendingResponders] = useState<string[]>([]);
   const broadcastPostAtRef = useRef<string | null>(null);
   const broadcastPendingTimerRef = useRef<number | null>(null);
   const [composerInitialText, setComposerInitialText] = useState(initialDraft ?? '');
   // Per-conversation permission mode (ask | plan | auto). Sticky locally so the
-  // composer reflects the operator's choice across reloads; also persisted
   // server-side so channels and the next turn agree (default ask).
   const permissionModeKey = `agentis:permission-mode:${id}:${conversationId ?? 'active'}`;
   const [permissionMode, setPermissionModeState] = useState<ChatPermissionMode>('ask');
@@ -684,13 +682,13 @@ export function ThreadView({
     void loadQueue();
     // Reload recovery: if the tab (re)loaded mid-queue with no turn actively
     // streaming, atomically claim the oldest still-pending message so it
-    // keeps going as a fresh turn — a reload must never silently strand a
+    // keeps going as a fresh turn â€” a reload must never silently strand a
     // queued send. The backend only hands it back if no turn is in flight.
     (async () => {
       try {
         const res = await api<{ item: QueuedItem | null }>(`/v1/conversations/${id}/queue/resume${querySuffix}`, { method: 'POST' });
         if (!cancelled && res.item) handleQueueDispatch(res.item);
-      } catch { /* best-effort recovery */ }
+      } catch {  }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -712,7 +710,7 @@ export function ThreadView({
     setLoadedConversationId(conversationId ?? null);
   }, [kind, id, conversationId]);
 
-  // Reset the Global Chat "responding…" indicator when switching threads, and
+  // Reset the Global Chat "respondingâ€¦" indicator when switching threads, and
   // clear its safety timer on unmount.
   useEffect(() => {
     setPendingResponders([]);
@@ -757,7 +755,7 @@ export function ThreadView({
       : rtSubscribe('conversation', { agentId: id });
   }, [kind, id]);
 
-  // Live task-spine steps for this conversation — the same StepTrack the Live
+  // Live task-spine steps for this conversation â€” the same StepTrack the Live
   // Workspace shows, so progress is visible right in the chat. Task spine events
   // are published to the workspace room, so we subscribe to it explicitly.
   const [stepTrack, setStepTrack] = useState<WorkStepTrack | null>(null);
@@ -847,7 +845,7 @@ export function ThreadView({
 
   // Global Chat (__broadcast__) is a virtual view over a real backing room, so a
   // posted agent reply only renders through the primary room-message handler if
-  // the backing room id has resolved AND matches — a fragile, race-prone path that
+  // the backing room id has resolved AND matches â€” a fragile, race-prone path that
   // left agent @mention replies invisible. These same room.message.* events DO
   // reach this workspace-scoped handler reliably, so here we authoritatively
   // REFETCH the room's own messages (the agent replies the broadcast dispatcher
@@ -862,8 +860,7 @@ export function ThreadView({
       listInteractions({ limit: 10 }).then((res) => res.events ?? []).catch(() => []),
     ]).then(([roomMessages, events]) => {
       const roomMsgIds = new Set(roomMessages.map((m) => m.id));
-      // Clear the "responding…" indicator for any mentioned agent whose reply has
-      // now landed (an agent room message dated after the operator's mention).
+      // Clear the "respondingâ€¦" indicator for any mentioned agent whose reply has
       const postAt = broadcastPostAtRef.current;
       if (postAt) {
         const replied = new Set(
@@ -880,7 +877,7 @@ export function ThreadView({
         }
         for (const event of events) {
           // Skip interaction 'message' events that ARE these room messages (same
-          // id) — they'd render a duplicate bubble. Keep agent chatter elsewhere.
+          // id) â€” they'd render a duplicate bubble. Keep agent chatter elsewhere.
           if (event.kind === 'message' && !roomMsgIds.has(event.id)) {
             updated = mergeMessage(updated, normalizeInteractionMessage(event));
           }
@@ -917,7 +914,7 @@ export function ThreadView({
   });
 
   // Open the canvas as soon as the FIRST node streams in, not only once the
-  // build finishes — otherwise a bare chat thread never shows the node-by-node
+  // build finishes â€” otherwise a bare chat thread never shows the node-by-node
   // build reveal (it only ever saw the graph after it was already complete).
   // CANVAS_NODE_PLACED only ever fires once the workflow row is persisted, so
   // the canvas mount below can always fetch it successfully.
@@ -943,7 +940,7 @@ export function ThreadView({
     if (payload?.agentId && payload.agentId !== id) return;
     if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
     openedCanvasWorkflowIdsRef.current.add(workflowId);
-    // Agentis ships Apps — open the owning App, not the bare workflow canvas.
+    // Agentis ships Apps â€” open the owning App, not the bare workflow canvas.
     const appId = payload?.appId ?? null;
     window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, appId, runId: payload?.runId ?? null } }));
     navigate(appId ? `/apps/${appId}` : `/apps/workflows/${workflowId}`);
@@ -1052,7 +1049,7 @@ export function ThreadView({
   }
 
   /** Durably queue a message sent while this conversation's turn is already
-   * streaming (§ChatComposerQueue). The backend re-checks the in-flight-turn
+   * streaming (Â§ChatComposerQueue). The backend re-checks the in-flight-turn
    * guard itself, so this is correct even if `streamingAgentActive` is a beat
    * stale. */
   async function enqueueMessage(text: string) {
@@ -1090,7 +1087,7 @@ export function ThreadView({
     const value = text.trim();
     if (!value) return;
     // ChatGPT/Gemini-style queue-then-auto-continue: a turn is already
-    // streaming in this thread, so don't race a second live turn — queue this
+    // streaming in this thread, so don't race a second live turn â€” queue this
     // send. `streamConversationTurnReply` auto-dispatches it, oldest first,
     // once the in-flight turn ends (see the CONVERSATION_QUEUE_UPDATED
     // realtime subscription above).
@@ -1106,7 +1103,7 @@ export function ThreadView({
         });
         const message = res.message;
         if (message) setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(message)));
-        // Global Chat: show a "responding…" indicator for each @mentioned agent
+        // Global Chat: show a "respondingâ€¦" indicator for each @mentioned agent
         // until its reply lands (the dispatch is async and can take a while).
         if (id === '__broadcast__') {
           const responders = resolveMentionedAgentIds(value, agentMap);
@@ -1571,7 +1568,7 @@ export function ThreadView({
     ? runtimeCapabilityWarning(agentRuntime)
     : null;
   // When an assistant bubble is mid-stream it shows its own in-bubble typing
-  // indicator, so the standalone "is thinking…" footer would be a duplicate.
+  // indicator, so the standalone "is thinkingâ€¦" footer would be a duplicate.
   const streamingAgentActive = messages.some(
     (message) => message.authorKind === 'agent' && message.deliveryStatus === 'sending',
   );
@@ -1641,7 +1638,7 @@ export function ThreadView({
         {agentTyping && kind === 'agent' && !streamingAgentActive && (
           <div className="mt-2 flex items-center gap-2 px-1 text-[11px] italic text-text-muted">
             <TypingDots />
-            <span>{name} is thinking…</span>
+            <span>{name} is thinkingâ€¦</span>
           </div>
         )}
         {kind === 'room' && pendingResponders.length > 0 && (
@@ -1649,7 +1646,7 @@ export function ThreadView({
             <TypingDots />
             <span>
               {pendingResponders.map((agentId) => agentMap[agentId]?.name ?? 'agent').join(', ')}
-              {pendingResponders.length > 1 ? ' are responding…' : ' is responding…'}
+              {pendingResponders.length > 1 ? ' are respondingâ€¦' : ' is respondingâ€¦'}
             </span>
           </div>
         )}
@@ -1718,7 +1715,7 @@ export function ThreadView({
 
 /** Queue-then-auto-continue composer: a message sent while the turn was
  * already streaming, rendered like a real outbound bubble but dimmed with a
- * "Queued" label — and cancelable before it dispatches. */
+ * "Queued" label â€” and cancelable before it dispatches. */
 function QueuedMessageBubble({ item, onCancel }: { item: QueuedItem; onCancel?: () => void }) {
   return (
     <li className="group flex min-w-0 max-w-full flex-col items-end gap-0.5">
@@ -2174,3 +2171,6 @@ function MessageActions({
     </div>
   );
 }
+
+
+

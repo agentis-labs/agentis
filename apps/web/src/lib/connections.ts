@@ -1,11 +1,11 @@
-/**
+﻿/**
  * Typed client for the MCP / A2A / governance / interaction surfaces
  * (UNIVERSAL-HARNESS Pillars 4-6). Thin wrappers over the shared `api()` client.
  */
 
 import { api } from './api';
 
-// ─── MCP: consume (external servers) ────────────────────────────────────────
+// â”€â”€â”€ MCP: consume (external servers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface McpServer {
   id: string;
@@ -45,7 +45,7 @@ export function listMcpServerTools(id: string) {
   return api<{ serverId: string; tools: McpTool[] }>(`/v1/mcp-servers/${id}/tools`);
 }
 
-/** Actually handshake a mounted server — the truthful "is it connected?" check. */
+/** Actually handshake a mounted server â€” the truthful "is it connected?" check. */
 export function verifyMcpServer(id: string) {
   return api<{ ok: boolean; serverId: string; toolCount?: number; tools?: string[]; error?: string }>(
     `/v1/mcp-servers/${id}/verify`, { method: 'POST' },
@@ -75,7 +75,7 @@ export function beginMcpOAuth(serverId: string, origin: string) {
   });
 }
 
-// ─── MCP: expose (Agentis as a server) ──────────────────────────────────────
+// â”€â”€â”€ MCP: expose (Agentis as a server) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface McpServerCard {
   protocolVersion: string;
@@ -88,7 +88,7 @@ export function getMcpServerCard() {
   return api<McpServerCard>('/v1/mcp/server-card');
 }
 
-// ─── A2A: agent cards ───────────────────────────────────────────────────────
+// â”€â”€â”€ A2A: agent cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface AgentCardSkill { id: string; name: string; description: string; tags: string[] }
 export interface AgentCard {
@@ -108,7 +108,7 @@ export function listAgentCards() {
   return api<{ agents: AgentCard[] }>('/v1/a2a/agents');
 }
 
-// ─── Governance / fleet ─────────────────────────────────────────────────────
+// â”€â”€â”€ Governance / fleet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface GovernanceSummary {
   fleet: {
@@ -125,7 +125,7 @@ export function getGovernanceSummary() {
   return api<GovernanceSummary>('/v1/governance/summary');
 }
 
-// ─── Agent interaction feed ─────────────────────────────────────────────────
+// â”€â”€â”€ Agent interaction feed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface InteractionEvent {
   id: string;
@@ -152,7 +152,6 @@ export function centsToUsd(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-// ─── Harness memory ingestion (the agent's "transition into Agentis") ─────────
 
 export interface IngestCandidate {
   hash: string;
@@ -189,3 +188,6 @@ export function commitHarnessMemory(agentId: string, acceptHashes: string[]) {
     body: JSON.stringify({ acceptHashes }),
   });
 }
+
+
+

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildCapabilityRoutes } from '../../src/routes/capabilities.js';
-import { appCapabilityId, CapabilityRegistry } from '../../src/services/capabilityRegistry.js';
+import { appCapabilityId, CapabilityRegistry } from '../../src/services/capability/capabilityRegistry.js';
 import { AppDatastore, AppStore, AppSurfaceStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

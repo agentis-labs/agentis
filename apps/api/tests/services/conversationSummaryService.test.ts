@@ -11,7 +11,7 @@ import {
   ConversationSummaryService,
   CONVERSATION_SUMMARY_RESUMMARIZE_EVERY,
   type SummaryMessage,
-} from '../../src/services/conversationSummaryService.js';
+} from '../../src/services/conversation/conversationSummaryService.js';
 import type { StructuredCompleter } from '../../src/services/structuredCompleter.js';
 
 function seedConversation(ctx: TestContext): string {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tiny REST + auth client.
  *
  * Stores the access/refresh tokens in localStorage. On 401 we attempt one
@@ -134,7 +134,7 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
 /**
  * Stale-while-revalidate cache for GET responses.
  *
- * Agentis GETs are still `no-store` and still revalidate on every page mount —
+ * Agentis GETs are still `no-store` and still revalidate on every page mount â€”
  * operational state must never be served stale. This cache only removes the
  * blank-spinner flash on *revisits*: a page seeds its initial render from the
  * last-known value (via `peekCached`) so navigation feels immediate, then the
@@ -276,3 +276,6 @@ function emitSseEvent(raw: string, onEvent?: (event: string, data: unknown) => v
     onEvent(event, dataText);
   }
 }
+
+
+

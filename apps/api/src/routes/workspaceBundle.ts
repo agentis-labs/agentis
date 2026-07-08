@@ -18,7 +18,7 @@ import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { WorkspacePackager } from '../services/workspacePackager.js';
+import { WorkspacePackager } from '../services/workspace/workspacePackager.js';
 import { createBackup, restoreBackup } from '../services/backup.js';
 import { join } from 'node:path';
 

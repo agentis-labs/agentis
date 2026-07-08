@@ -25,8 +25,8 @@ import type { ChatMessage, ChatTurnContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
-import type { ConversationStore } from './conversationStore.js';
-import { ChatSessionExecutor } from './chatSessionExecutor.js';
+import type { ConversationStore } from './conversation/conversationStore.js';
+import { ChatSessionExecutor } from './chat/chatSessionExecutor.js';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
 

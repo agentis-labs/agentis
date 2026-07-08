@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { detectHarnesses, testHarnessConfig } from '../../src/services/harnessProbe.js';
+import { detectHarnesses, testHarnessConfig } from '../../src/services/harness/harnessProbe.js';
 import { resolveCommandPath, resolveSpawnTarget } from '../../src/services/pathExpander.js';
 
 describe('runtime command resolution', () => {

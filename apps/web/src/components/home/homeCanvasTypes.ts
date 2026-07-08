@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+﻿import type { ReactNode } from 'react';
 import type {
   WorkspaceActiveRun,
   WorkspaceAgent,
@@ -88,7 +88,7 @@ export interface HomeSpace {
 
 export interface EcosystemData {
   workflows: HomeWorkflow[];
-  /** Agentic Apps — the org primitive. Optional so partial callers/tests omit it. */
+  /** Agentic Apps â€” the org primitive. Optional so partial callers/tests omit it. */
   apps?: HomeApp[];
   knowledgeBases: HomeKnowledgeBase[];
   spaces: HomeSpace[];
@@ -208,3 +208,6 @@ export type ComposerContextAgent = WorkspaceAgent & {
 };
 
 export type ComposerContextRun = WorkspaceActiveRun;
+
+
+

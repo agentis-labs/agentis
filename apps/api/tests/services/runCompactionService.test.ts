@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { RunCompactionService } from '../../src/services/runCompactionService.js';
+import { RunCompactionService } from '../../src/services/run/runCompactionService.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
 
 function isoDaysAgo(days: number): string {

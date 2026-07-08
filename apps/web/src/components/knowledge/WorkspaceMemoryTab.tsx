@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { FileText } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -81,3 +81,6 @@ export function WorkspaceMemoryTab({ scopeId }: { scopeId?: string }) {
 
 const activeFilter = 'inline-flex h-7 items-center rounded-pill border border-accent-muted bg-accent-soft px-2.5 text-[11px] font-medium capitalize text-accent';
 const idleFilter = 'inline-flex h-7 items-center rounded-pill border border-line bg-surface-2 px-2.5 text-[11px] font-medium capitalize text-text-muted hover:text-text-primary';
+
+
+

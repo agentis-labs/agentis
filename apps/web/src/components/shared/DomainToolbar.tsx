@@ -1,4 +1,4 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import clsx from 'clsx';
 import { Check, ChevronDown, Plus, Settings as SettingsIcon } from 'lucide-react';
 
@@ -6,7 +6,7 @@ export type DomainToolbarSelection = 'all' | 'unassigned' | string;
 
 /**
  * Order domains so each Subdomain follows its parent, and label subdomains
- * "Parent › Sub". Shared by the domain `<select>`s (workflows, agent detail) so
+ * "Parent â€º Sub". Shared by the domain `<select>`s (workflows, agent detail) so
  * subdomains read consistently everywhere.
  */
 export function nestedDomainOptions<T extends { id: string; name: string; parentDomainId?: string | null }>(
@@ -20,7 +20,7 @@ export function nestedDomainOptions<T extends { id: string; name: string; parent
   const out: Array<{ id: string; label: string; depth: number }> = [];
   for (const top of domains.filter((d) => !d.parentDomainId)) {
     out.push({ id: top.id, label: top.name, depth: 0 });
-    for (const sub of byParent.get(top.id) ?? []) out.push({ id: sub.id, label: `${top.name} › ${sub.name}`, depth: 1 });
+    for (const sub of byParent.get(top.id) ?? []) out.push({ id: sub.id, label: `${top.name} â€º ${sub.name}`, depth: 1 });
   }
   return out;
 }
@@ -174,3 +174,6 @@ export function DomainToolbar<TDomain extends DomainToolbarDomain>({
     </div>
   );
 }
+
+
+

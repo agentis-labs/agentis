@@ -36,7 +36,7 @@ import {
   type WorkflowRunState,
 } from '@agentis/core';
 import { buildInitialRunState } from '../engine/initialRunState.js';
-import { collectFailedNodeIds } from './runStateFailures.js';
+import { collectFailedNodeIds } from './run/runStateFailures.js';
 
 export type ReplayMode =
   | 'replay-from-node'

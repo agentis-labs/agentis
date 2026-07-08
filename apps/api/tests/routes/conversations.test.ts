@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { buildConversationRoutes } from '../../src/routes/conversations.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

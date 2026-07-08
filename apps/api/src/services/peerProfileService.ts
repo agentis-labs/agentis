@@ -5,9 +5,9 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { embedText, selectEmbeddingProvider, type EmbeddingProvider } from './embeddingProvider.js';
+import { embedText, selectEmbeddingProvider, type EmbeddingProvider } from './embedding/embeddingProvider.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
-import { normalizeTextKey, safeJson, scoreText, tokenize } from './brainText.js';
+import { normalizeTextKey, safeJson, scoreText, tokenize } from './brain/brainText.js';
 
 export type PeerType = 'user' | 'agent';
 export type PeerCardCategory = 'INSTRUCTION' | 'PREFERENCE' | 'TRAIT' | 'IDENTITY' | 'CONTEXT' | 'BELIEF';

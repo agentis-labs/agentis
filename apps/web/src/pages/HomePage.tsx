@@ -1,4 +1,4 @@
-import { WorkspaceEcosystemCanvas } from '../components/home/WorkspaceEcosystemCanvas';
+﻿import { WorkspaceEcosystemCanvas } from '../components/home/WorkspaceEcosystemCanvas';
 import { useWorkspaceData } from '../lib/workspaceData';
 
 export function HomePage() {
@@ -21,3 +21,6 @@ export function HomePage() {
     </div>
   );
 }
+
+
+

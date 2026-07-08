@@ -1,9 +1,9 @@
-/**
- * Agent session step contract — SMARTER-AGENTS-10X §VI/§VII.
+﻿/**
+ * Agent session step contract â€” SMARTER-AGENTS-10X Â§VI/Â§VII.
  *
- * An AgentSession runs as a loop owned by the WorkflowEngine: WAKE → THINK →
- * PARSE → EXECUTE → INJECT → SAVE → DECIDE. The single point where the engine
- * needs an LLM is THINK — one inference per step. A `SessionAdapter` exposes
+ * An AgentSession runs as a loop owned by the WorkflowEngine: WAKE â†’ THINK â†’
+ * PARSE â†’ EXECUTE â†’ INJECT â†’ SAVE â†’ DECIDE. The single point where the engine
+ * needs an LLM is THINK â€” one inference per step. A `SessionAdapter` exposes
  * exactly that: `executeStep(input)` runs one inference and returns the model's
  * text plus any tool calls. The adapter is stateless; all durable state lives in
  * the session row, so the engine can suspend between steps for free.
@@ -51,3 +51,6 @@ export interface SessionAdapter {
   readonly id: string;
   executeStep(input: SessionStepInput): Promise<SessionStepResult>;
 }
+
+
+

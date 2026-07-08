@@ -8,10 +8,10 @@ import type { WorkflowGraph, WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { InstinctEngine } from '../../src/services/instinctEngine.js';
 import { IssueService } from '../../src/services/issues.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { LedgerService } from '../../src/services/ledger.js';
 import type { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
-import type { ConversationStore } from '../../src/services/conversationStore.js';
+import type { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

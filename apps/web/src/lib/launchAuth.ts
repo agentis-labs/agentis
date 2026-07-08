@@ -1,4 +1,4 @@
-import { tokens } from './api';
+﻿import { tokens } from './api';
 
 const LAUNCH_TOKEN_STORAGE_KEY = 'agentis.launchToken';
 export const LOCAL_BYPASS_LAUNCH_TOKEN = 'local-bypass';
@@ -49,7 +49,6 @@ export function setStoredLaunchToken(token: string): void {
   try {
     localStorage.setItem(LAUNCH_TOKEN_STORAGE_KEY, token);
   } catch {
-    // Best effort; auth still works without persistence.
   }
 }
 
@@ -69,3 +68,6 @@ export function isLocalLaunchOrigin(): boolean {
   const host = window.location.hostname.toLowerCase();
   return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
 }
+
+
+

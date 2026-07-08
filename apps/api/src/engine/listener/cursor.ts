@@ -9,7 +9,7 @@
  */
 
 import type { CursorConfig } from '@agentis/core';
-import type { WorkflowStoreService } from '../../services/workflowStore.js';
+import type { WorkflowStoreService } from '../../services/workflow/workflowStore.js';
 import { getPath } from './jsonpath.js';
 
 const CURSOR_NAMESPACE = '__listener_cursor__';

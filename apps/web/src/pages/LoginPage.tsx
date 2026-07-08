@@ -1,6 +1,7 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { login } from '../lib/api';
 import { isPersistableLaunchToken, loginWithLaunchToken, setStoredLaunchToken } from '../lib/launchAuth';
+import { BrandMark } from '../components/shared/BrandMark';
 
 export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
   const [username, setUsername] = useState('operator');
@@ -21,7 +22,6 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
           onSuccess();
           return;
         } catch {
-          // Server deployments still use the operator password fallback.
         }
       }
       await login(username, credential);
@@ -39,9 +39,9 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
         onSubmit={submit}
         className="w-[360px] rounded-2xl border border-line bg-surface p-6 shadow-card"
       >
-        <div className="mb-5 flex items-center gap-2">
-          <span className="inline-block h-2.5 w-2.5 rounded-full bg-accent shadow-glow" />
-          <h1 className="text-base font-medium">Agentis</h1>
+        <div className="mb-6 flex flex-col items-center gap-3 text-center">
+          <BrandMark variant="full" size={30} className="text-text-primary" />
+          <p className="text-[12px] text-text-muted">Sign in to your command center</p>
         </div>
         <label className="mb-3 block">
           <span className="mb-1 block text-xs text-text-muted">Username</span>
@@ -66,9 +66,12 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
           disabled={busy}
           className="w-full rounded-lg bg-accent px-3 py-2 text-sm font-medium text-canvas transition hover:opacity-90 disabled:opacity-60"
         >
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? 'Signing inâ€¦' : 'Sign in'}
         </button>
       </form>
     </div>
   );
 }
+
+
+

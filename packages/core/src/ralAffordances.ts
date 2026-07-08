@@ -1,22 +1,22 @@
-import {
+﻿import {
   AGENT_AFFORDANCES,
   type AdapterCapabilities,
   type AgentAffordance,
   type AgentRequirements,
 } from './types/adapter.js';
 
-export type HalAffordanceCategory = 'runtime' | 'workspace' | 'control' | 'protocol';
+export type RalAffordanceCategory = 'runtime' | 'workspace' | 'control' | 'protocol';
 
-export interface HalAffordanceMetadata {
+export interface RalAffordanceMetadata {
   key: AgentAffordance;
   label: string;
   shortLabel: string;
   description: string;
-  category: HalAffordanceCategory;
+  category: RalAffordanceCategory;
   warning: string;
 }
 
-export const HAL_AFFORDANCE_METADATA: Record<AgentAffordance, HalAffordanceMetadata> = {
+export const RAL_AFFORDANCE_METADATA: Record<AgentAffordance, RalAffordanceMetadata> = {
   browser: {
     key: 'browser',
     label: 'Native browser',
@@ -67,14 +67,14 @@ export const HAL_AFFORDANCE_METADATA: Record<AgentAffordance, HalAffordanceMetad
   },
 };
 
-export const HAL_AFFORDANCES = AGENT_AFFORDANCES.map((key) => HAL_AFFORDANCE_METADATA[key]);
+export const RAL_AFFORDANCES = AGENT_AFFORDANCES.map((key) => RAL_AFFORDANCE_METADATA[key]);
 
 /**
  * Supply-side affordances a runtime advertises for a given stored config WITHOUT
  * a live connection. Mirrors each adapter's `capabilities().affordances`, so the
  * canvas, readiness, and routing can reason about an agent's powers even while it
  * is offline. This MUST mirror each adapter's `capabilities().affordances`
- * (apps/api/src/adapters/*Adapter.ts) — change both together when a runtime's
+ * (apps/api/src/adapters/*Adapter.ts) â€” change both together when a runtime's
  * advertised affordances change.
  */
 export function configuredAffordances(
@@ -85,7 +85,6 @@ export function configuredAffordances(
     case 'openclaw':
       return { browser: true, computerUse: true, terminal: true };
     case 'codex':
-      // Native browser / computer-use only when the operator opts the agent into
       // loading the Codex browser config (CodexAdapterConfig.browser).
       return config?.browser === true
         ? { fileSystem: true, terminal: true, browser: true, computerUse: true }
@@ -104,7 +103,7 @@ export function configuredAffordances(
 }
 
 /**
- * The ceiling of affordances a runtime COULD advertise with the right config —
+ * The ceiling of affordances a runtime COULD advertise with the right config â€”
  * lets the UI tell "this runtime can be ENABLED for X" apart from "this runtime
  * can NEVER do X". Only Codex has a latent affordance (native browser/computer-
  * use via its `browser` opt-in); every other runtime's ceiling equals its
@@ -115,7 +114,7 @@ export function potentialAffordances(adapterType: string | null | undefined): Pa
   return configuredAffordances(adapterType, null);
 }
 
-export interface HalAgentCapabilityRow {
+export interface RalAgentCapabilityRow {
   id: string;
   name: string;
   status?: string | null;
@@ -128,26 +127,26 @@ export interface HalAgentCapabilityRow {
 }
 
 /**
- * How an agent relates to a node's HAL requirement:
- * - `ready`          — connected AND its live runtime advertises everything required.
- * - `offline_capable`— its configured runtime would satisfy it, but it isn't connected now.
- * - `enablable`      — a config change (e.g. Codex native browser) could satisfy it.
- * - `incapable`      — this runtime can never provide a required affordance.
+ * How an agent relates to a node's RAL requirement:
+ * - `ready`          â€” connected AND its live runtime advertises everything required.
+ * - `offline_capable`â€” its configured runtime would satisfy it, but it isn't connected now.
+ * - `enablable`      â€” a config change (e.g. Codex native browser) could satisfy it.
+ * - `incapable`      â€” this runtime can never provide a required affordance.
  */
-export type HalMatchState = 'ready' | 'offline_capable' | 'enablable' | 'incapable';
+export type RalMatchState = 'ready' | 'offline_capable' | 'enablable' | 'incapable';
 
-export interface HalAgentMatchSummary {
+export interface RalAgentMatchSummary {
   id: string;
   name: string;
   status?: string | null;
   adapterType?: string | null;
   satisfied: boolean;
-  state: HalMatchState;
+  state: RalMatchState;
   provided: string[];
   providedKeys: AgentAffordance[];
   missing: string[];
   missingKeys: AgentAffordance[];
-  /** Affordances this agent could gain via a config change (drives "Enable …" actions). */
+  /** Affordances this agent could gain via a config change (drives "Enable â€¦" actions). */
   enablable: string[];
   enablableKeys: AgentAffordance[];
 }
@@ -172,11 +171,11 @@ export function hasAgentRequirements(requirements: AgentRequirements | undefined
 }
 
 export function affordanceLabel(key: AgentAffordance): string {
-  return HAL_AFFORDANCE_METADATA[key]?.label ?? key;
+  return RAL_AFFORDANCE_METADATA[key]?.label ?? key;
 }
 
 export function affordanceDescription(key: AgentAffordance): string {
-  return HAL_AFFORDANCE_METADATA[key]?.description ?? key;
+  return RAL_AFFORDANCE_METADATA[key]?.description ?? key;
 }
 
 export function describeAgentRequirements(requirements: AgentRequirements | undefined): string {
@@ -204,27 +203,27 @@ export function withAgentRequirement(
   return hasAgentRequirements(next) ? next : undefined;
 }
 
-export function isConnectedAgent(agent: HalAgentCapabilityRow): boolean {
+export function isConnectedAgent(agent: RalAgentCapabilityRow): boolean {
   const status = String(agent.status ?? '').toLowerCase();
   return status === 'online' || status === 'busy' || status === 'active' || status === 'running';
 }
 
-function rowConfiguredAffordances(agent: HalAgentCapabilityRow): Partial<Record<AgentAffordance, boolean>> {
+function rowConfiguredAffordances(agent: RalAgentCapabilityRow): Partial<Record<AgentAffordance, boolean>> {
   if (agent.configuredAffordances) return agent.configuredAffordances;
   if (agent.adapterType) return configuredAffordances(agent.adapterType, agent.config ?? null);
   return agent.adapterCapabilities?.affordances ?? {};
 }
 
-function rowPotentialAffordances(agent: HalAgentCapabilityRow): Partial<Record<AgentAffordance, boolean>> {
+function rowPotentialAffordances(agent: RalAgentCapabilityRow): Partial<Record<AgentAffordance, boolean>> {
   if (agent.potentialAffordances) return agent.potentialAffordances;
   if (agent.adapterType) return potentialAffordances(agent.adapterType);
   return rowConfiguredAffordances(agent);
 }
 
 export function agentMatchSummary(
-  agent: HalAgentCapabilityRow,
+  agent: RalAgentCapabilityRow,
   requirements: AgentRequirements,
-): HalAgentMatchSummary {
+): RalAgentMatchSummary {
   const required = requiredAffordanceKeys(requirements);
   const live = agent.adapterCapabilities?.affordances ?? {};
   const configured = rowConfiguredAffordances(agent);
@@ -234,14 +233,14 @@ export function agentMatchSummary(
   const providedKeys = required.filter((key) => live[key] === true);
   const missingKeys = required.filter((key) => live[key] !== true);
   // Affordances the agent doesn't have configured but could turn on (e.g. Codex
-  // native browser) — only the ones this requirement actually needs.
+  // native browser) â€” only the ones this requirement actually needs.
   const enablableKeys = required.filter((key) => configured[key] !== true && potential[key] === true);
 
   const liveSatisfied = connected && missingKeys.length === 0;
   const configuredSatisfied = required.every((key) => configured[key] === true);
   const potentialSatisfied = required.every((key) => potential[key] === true);
 
-  let state: HalMatchState;
+  let state: RalMatchState;
   if (liveSatisfied) state = 'ready';
   else if (configuredSatisfied) state = 'offline_capable';
   else if (potentialSatisfied) state = 'enablable';
@@ -263,7 +262,7 @@ export function agentMatchSummary(
   };
 }
 
-const HAL_MATCH_STATE_RANK: Record<HalMatchState, number> = {
+const RAL_MATCH_STATE_RANK: Record<RalMatchState, number> = {
   ready: 0,
   offline_capable: 1,
   enablable: 2,
@@ -272,23 +271,26 @@ const HAL_MATCH_STATE_RANK: Record<HalMatchState, number> = {
 
 /**
  * Match a requirement against ALL workspace agents (not just connected ones),
- * ranked by how readily each could satisfy it: ready → offline_capable →
- * enablable → incapable. This is what lets the canvas show a real path to a
+ * ranked by how readily each could satisfy it: ready â†’ offline_capable â†’
+ * enablable â†’ incapable. This is what lets the canvas show a real path to a
  * green node (connect this one, or enable native browser on that one) instead of
  * a dead "no connected runtime advertises X".
  */
 export function agentRequirementMatches(
-  agents: HalAgentCapabilityRow[],
+  agents: RalAgentCapabilityRow[],
   requirements: AgentRequirements,
-): HalAgentMatchSummary[] {
+): RalAgentMatchSummary[] {
   return agents
     .map((agent) => agentMatchSummary(agent, requirements))
-    .sort((a, b) => HAL_MATCH_STATE_RANK[a.state] - HAL_MATCH_STATE_RANK[b.state] || a.name.localeCompare(b.name));
+    .sort((a, b) => RAL_MATCH_STATE_RANK[a.state] - RAL_MATCH_STATE_RANK[b.state] || a.name.localeCompare(b.name));
 }
 
 export function connectedAgentMatches(
-  agents: HalAgentCapabilityRow[],
+  agents: RalAgentCapabilityRow[],
   requirements: AgentRequirements,
-): HalAgentMatchSummary[] {
+): RalAgentMatchSummary[] {
   return agents.filter(isConnectedAgent).map((agent) => agentMatchSummary(agent, requirements));
 }
+
+
+

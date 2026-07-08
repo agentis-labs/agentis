@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { AgentisError, type BrainGraph } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
-import { cosineSimilarity, embedText, type EmbeddingProvider } from './embeddingProvider.js';
+import { cosineSimilarity, embedText, type EmbeddingProvider } from './embedding/embeddingProvider.js';
 
 export interface PersonalNoteInput {
   title?: string | null;

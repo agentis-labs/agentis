@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ChatPage is a compatibility shim.
  *
  * The real chat surface is the persistent ChatPanel mounted by App. Visiting
@@ -84,3 +84,6 @@ export function ChatPage() {
     </main>
   );
 }
+
+
+

@@ -9,9 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { AgentToolRuntime, type PlatformToolCallContext } from '../../src/services/agentToolRuntime.js';
-import type { McpToolBridge } from '../../src/services/mcpToolBridge.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
+import { AgentToolRuntime, type PlatformToolCallContext } from '../../src/services/agent/agentToolRuntime.js';
+import type { McpToolBridge } from '../../src/services/mcp/mcpToolBridge.js';
 
 const WS = 'ws-e2';
 let dataDir: string;

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+﻿import { useMemo, useState } from 'react';
 import { Check, X } from 'lucide-react';
 import type { WorkspaceApproval } from '../../lib/workspaceData';
 
@@ -18,11 +18,7 @@ export interface HumanInputFormSpec {
   blocked?: string;
 }
 
-/**
- * Extract the persisted human_input form spec from an approval, if it is one.
- * The engine stores it on `approval.payload.humanInputForm` so the operator UI
- * can render the fields and submit real `data` (an empty approve re-parks).
- */
+
 export function humanInputFormOf(approval: WorkspaceApproval | null | undefined): HumanInputFormSpec | null {
   const form = approval?.payload && typeof approval.payload === 'object'
     ? (approval.payload as { humanInputForm?: unknown }).humanInputForm
@@ -90,7 +86,7 @@ export function HumanInputApprovalForm({
                 onChange={(e) => set(field.key, e.target.value || undefined)}
                 className="s-input"
               >
-                <option value="">Choose…</option>
+                <option value="">Chooseâ€¦</option>
                 {field.options.map((opt) => (
                   <option key={opt.value} value={opt.value}>{opt.label ?? opt.value}</option>
                 ))}
@@ -132,3 +128,5 @@ export function HumanInputApprovalForm({
     </div>
   );
 }
+
+

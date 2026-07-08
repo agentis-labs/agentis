@@ -16,9 +16,9 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentAdapter, ChatDelta } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
-import { ChannelTurnQueue, type ChannelTurnRunner } from '../../src/services/channelTurnQueue.js';
-import { ChannelTurnDispatcher, type ChannelTurnInput } from '../../src/services/channelTurnDispatcher.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ChannelTurnQueue, type ChannelTurnRunner } from '../../src/services/conversation/channelTurnQueue.js';
+import { ChannelTurnDispatcher, type ChannelTurnInput } from '../../src/services/conversation/channelTurnDispatcher.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 
 function seedAgent(ctx: TestContext): string {

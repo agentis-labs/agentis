@@ -33,7 +33,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
-import { AGENTIS_MCP_SERVER_INSTRUCTIONS } from '../services/orchestratorPrompt.js';
+import { AGENTIS_MCP_SERVER_INSTRUCTIONS } from '../services/orchestrator/orchestratorPrompt.js';
 import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWorkflow.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';

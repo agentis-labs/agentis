@@ -6,11 +6,11 @@ import { randomUUID } from 'node:crypto';
 import type { AgentAdapter } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { WorkspaceModelConfigService } from '../../src/services/workspaceModelConfigService.js';
-import { OrchestratorModelRouter } from '../../src/services/orchestratorModelRouter.js';
+import { WorkspaceModelConfigService } from '../../src/services/workspace/workspaceModelConfigService.js';
+import { OrchestratorModelRouter } from '../../src/services/orchestrator/orchestratorModelRouter.js';
 import { buildOrchestratorModelRoutes } from '../../src/routes/orchestratorModels.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from '../../src/services/workspaceHarnessRuntime.js';
+import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from '../../src/services/workspace/workspaceHarnessRuntime.js';
 
 let ctx: TestContext;
 let config: WorkspaceModelConfigService;

@@ -1,16 +1,16 @@
-/**
- * useAutoScroll — smart auto-scroll hook for chat threads.
+﻿/**
+ * useAutoScroll â€” smart auto-scroll hook for chat threads.
  *
  * Pins the scroll container to the bottom unless the user has manually
- * scrolled up (≥100px from the bottom edge). Re-locks when a new agent
+ * scrolled up (â‰¥100px from the bottom edge). Re-locks when a new agent
  * message arrives. Uses a ResizeObserver so scroll tracking works even
  * when message content grows during streaming.
  *
  * Returns:
- *   scrollRef  — attach to the scrollable container div
- *   isAtBottom — whether we're currently pinned to the bottom
- *   scrollToBottom — imperatively scroll to the bottom
- *   suppressNextScroll — call before prepending older messages to prevent
+ *   scrollRef  â€” attach to the scrollable container div
+ *   isAtBottom â€” whether we're currently pinned to the bottom
+ *   scrollToBottom â€” imperatively scroll to the bottom
+ *   suppressNextScroll â€” call before prepending older messages to prevent
  *                        the auto-scroll from jumping to the bottom
  */
 
@@ -149,3 +149,6 @@ export function useAutoScroll(
 
   return { scrollRef, isAtBottom, scrollToBottom, suppressNextScroll };
 }
+
+
+

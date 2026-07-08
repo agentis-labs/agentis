@@ -6,7 +6,7 @@ import {
   CapabilityRegistry,
   nativeCapabilityId,
   pluginCapabilityId,
-} from '../../src/services/capabilityRegistry.js';
+} from '../../src/services/capability/capabilityRegistry.js';
 import { AppDatastore, AppStore, AppSurfaceStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

@@ -56,7 +56,7 @@ function maybeBindBundledWebDist(): void {
   }
 }
 
-const HELP = `agentis — proactive ambient dashboard
+const HELP = `agentis — the operating system for agentic software
 
 Usage:
   agentis up                              Start Agentis (default if no command given).

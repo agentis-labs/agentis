@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import type { WorkflowGraph } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ConversationService } from '../../src/services/conversationService.js';
+import { ConversationService } from '../../src/services/conversation/conversationService.js';
 
 const SCRIPT = {
   contactCollection: 'contacts',

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 
 export const jsonSchemaLikeSchema = z.record(z.unknown()).default({ type: 'object' });
 export type JsonSchemaLike = z.infer<typeof jsonSchemaLikeSchema>;
@@ -62,3 +62,6 @@ export interface CapabilityInvocationRecord {
   errorCode?: string;
   errorMessage?: string;
 }
+
+
+

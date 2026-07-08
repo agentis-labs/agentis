@@ -35,13 +35,13 @@ describe('<ChatApprovalStrip />', () => {
   it('shows a rich card with the action summary and resolves on approve', async () => {
     state.approvals = [{
       id: 'ap_1',
-      workflowName: 'Send Hi Robson Email',
-      summary: 'Approve running Send Email (agentmail). to: robson@example.com. subject: Hi Robson.',
+      workflowName: 'Send Hi Alex Email',
+      summary: 'Approve running Send Email (agentmail). to: alex@example.com. subject: Hi Alex.',
       createdAt: new Date().toISOString(),
     }];
     render(<ChatApprovalStrip />);
 
-    expect(screen.getByText('Send Hi Robson Email')).toBeTruthy();
+    expect(screen.getByText('Send Hi Alex Email')).toBeTruthy();
     expect(screen.getByText(/Approve running Send Email/)).toBeTruthy();
 
     await act(async () => {

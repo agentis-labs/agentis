@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 import { appManifestSchema } from './manifest.js';
 
 export const appEnvironmentKindSchema = z.enum(['dev', 'staging', 'production']);
@@ -31,3 +31,6 @@ export const promoteAppEnvironmentSchema = z.object({
   applyToRuntime: z.boolean().default(false),
 });
 export type PromoteAppEnvironmentInput = z.infer<typeof promoteAppEnvironmentSchema>;
+
+
+

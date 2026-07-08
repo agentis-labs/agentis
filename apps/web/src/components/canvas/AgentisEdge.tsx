@@ -1,5 +1,5 @@
-/**
- * AgentisEdge — NEW-WORKFLOW.md Part 2 §P3.
+﻿/**
+ * AgentisEdge â€” NEW-WORKFLOW.md Part 2 Â§P3.
  *
  * Custom edge renderer that paints a small label badge on the edge midpoint
  * and supports double-click inline rename. The label is persisted on the
@@ -141,7 +141,7 @@ export function AgentisEdge(props: EdgeProps) {
             <span
               role="button"
               tabIndex={0}
-              title={label ? `${label} · ${xray.tokenLabel} · ${xray.costLabel}` : `${xray.tokenLabel} · ${xray.costLabel}`}
+              title={label ? `${label} Â· ${xray.tokenLabel} Â· ${xray.costLabel}` : `${xray.tokenLabel} Â· ${xray.costLabel}`}
               className={clsx(
                 'inline-flex max-w-[12rem] items-center gap-1 rounded-full border bg-surface px-2 py-0.5 font-mono text-[10px] transition',
                 selected
@@ -151,7 +151,7 @@ export function AgentisEdge(props: EdgeProps) {
             >
               {label && <span className="max-w-[4rem] truncate text-text-muted">{label}</span>}
               <span>{xray.tokenLabel}</span>
-              <span className="text-text-muted">·</span>
+              <span className="text-text-muted">Â·</span>
               <span>{xray.costLabel}</span>
             </span>
           ) : label ? (
@@ -195,7 +195,7 @@ export function AgentisEdge(props: EdgeProps) {
                   : 'border-line text-text-muted opacity-0 group-hover:opacity-100 hover:border-danger hover:text-danger',
               )}
             >
-              ×
+              Ã—
             </button>
           )}
         </div>
@@ -203,3 +203,6 @@ export function AgentisEdge(props: EdgeProps) {
     </>
   );
 }
+
+
+

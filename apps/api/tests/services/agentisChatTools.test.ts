@@ -8,9 +8,9 @@ import { registerBuildTools } from '../../src/services/agentisToolHandlers/build
 import { registerCapabilityTools } from '../../src/services/agentisToolHandlers/capability.js';
 import { registerChannelTools } from '../../src/services/agentisToolHandlers/channel.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
-import { ChannelBridge } from '../../src/services/channelBridge.js';
-import type { PersistentChannelTransport } from '../../src/services/channelBridge.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ChannelBridge } from '../../src/services/conversation/channelBridge.js';
+import type { PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

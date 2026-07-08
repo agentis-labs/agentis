@@ -1,10 +1,10 @@
-/**
- * ChannelIdentitiesPanel — cross-surface peer identity (OMNICHANNEL §5.2).
+﻿/**
+ * ChannelIdentitiesPanel â€” cross-surface peer identity (OMNICHANNEL Â§5.2).
  *
  * Lists every human who has reached the workspace's agents over a channel, with
  * a message count per (channel, handle). Linking a handle to the current user
  * assigns a stable peer key so the same person is recognized across WhatsApp,
- * Telegram, and Slack — the orchestrator then greets them with that continuity.
+ * Telegram, and Slack â€” the orchestrator then greets them with that continuity.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -107,7 +107,7 @@ export function ChannelIdentitiesPanel() {
                         <Link2 size={12} /> linked
                       </span>
                     ) : (
-                      <span className="text-[12px] text-text-muted">—</span>
+                      <span className="text-[12px] text-text-muted">â€”</span>
                     )}
                   </td>
                   <td className="px-3 py-2 text-right">
@@ -137,5 +137,8 @@ export function ChannelIdentitiesPanel() {
 }
 
 function truncate(value: string): string {
-  return value.length > 24 ? `${value.slice(0, 21)}…` : value;
+  return value.length > 24 ? `${value.slice(0, 21)}â€¦` : value;
 }
+
+
+

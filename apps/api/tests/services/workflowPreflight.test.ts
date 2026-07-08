@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { ExtensionManifest, WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { preflightWorkflow } from '../../src/services/workflowPreflight.js';
+import { preflightWorkflow } from '../../src/services/workflow/workflowPreflight.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
 
 /** Insert a node_worker extension row and return its id. */

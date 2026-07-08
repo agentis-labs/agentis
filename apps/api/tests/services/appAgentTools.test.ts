@@ -7,9 +7,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AppDatastore, AppStore, AppSurfaceStore } from '@agentis/app';
-import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
-import type { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
+import { AgentToolRuntime } from '../../src/services/agent/agentToolRuntime.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
+import type { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

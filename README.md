@@ -1,220 +1,229 @@
 # Agentis
 
-**Self-hostable, multi-agent orchestration with a workflow canvas, a ledger,
-and an inbox.** Agentis runs on your laptop or your server with zero external
-dependencies. It speaks to OpenClaw fleets, Claude Code sessions, Codex,
-Cursor, Hermes Agent, and local HTTP models through the same NormalizedTask
-contract.
+**The operating system for agentic software.** Agents don't just answer — they build,
+run, and operate real applications, and the platform gets measurably smarter every time
+they do. Self-hostable, local-first, and harness-agnostic: it drives Claude Code, Codex,
+Cursor, Antigravity, Hermes, OpenClaw fleets, and local HTTP models through one contract.
 
-> Status: **V1 — pre-release (0.1.x).** Spec 1.4.0 implementation is complete
-> and typechecks cleanly across the workspace. The CLI is published as
-> [`@agentis-ai/cli`](https://www.npmjs.com/package/@agentis-ai/cli). 1.0.0
-> ships after the full test pass. See [DECISIONS.md](docs/DECISIONS.md) for
-> the design ledger.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20.10-brightgreen.svg)](https://nodejs.org)
+[![pnpm](https://img.shields.io/badge/pnpm-9.12-orange.svg)](https://pnpm.io)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org)
+![Status](https://img.shields.io/badge/status-pre--release%200.1.x-yellow.svg)
+
+> **Status: pre-release (0.1.x).** APIs may still change before 1.0.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fnexseed%2Fagentis)
 
+---
+
+## Table of contents
+
+- [Quickstart](#quickstart)
+- [Concepts](#concepts)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Repository layout](#repository-layout)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
 ## Quickstart
 
-### 60-second local start
+### Run it (operator)
 
 ```bash
-# macOS / Linux / WSL
-curl -fsSL https://get.agentis.dev/install.sh | sh
+# npm (global)
+npm install -g @agentis-ai/cli
+agentis up
 
-# Windows PowerShell
-iwr -useb https://get.agentis.dev/install.ps1 | iex
+# or without installing
+npx @agentis-ai/cli up
 
-# Or, with Docker
+# or with Docker
 docker compose up
 ```
 
-Both flows boot the API on `127.0.0.1:3737` and print the seeded operator
-password **once** to the console.
+The API boots on `http://127.0.0.1:3737` and prints the seeded operator password **once** —
+copy it. First boot is self-contained:
 
-### As an operator (npm)
+1. Generates an RSA-2048 JWT keypair and an AES-256 credential-vault key, written to
+   `.agentis/secrets.json` (`chmod 0600`).
+2. Initialises an embedded SQLite database at `.agentis/agentis.db` (WAL mode, foreign keys
+   on).
+3. Seeds an `operator` user, a `Personal` workspace, and a `Local` ambient.
+4. Starts the HTTP + WebSocket server.
 
-Install once, run anywhere:
+Everything runtime — database, secrets, per-agent home directories, generated assets — lives
+under `AGENTIS_DATA_DIR` (default `./.agentis`, git-ignored). Nothing personal is ever
+written into the source tree.
 
-```bash
-npm install -g @agentis-ai/cli
-agentis up
-```
-
-Then open <http://127.0.0.1:3737>. The first boot prints the operator
-username and password **once** — copy them now.
-
-Or try without installing:
-
-```bash
-npx @agentis-ai/cli up
-```
-
-From a clone:
+### Develop it (contributor)
 
 ```bash
 pnpm install
-pnpm --filter @agentis-ai/cli start up
+pnpm -r typecheck        # tsc across every package
+pnpm -r test             # vitest across every package
+pnpm doctor              # preflight: Node, ports, sqlite, secrets
+pnpm dev:full            # api on :3737 + web on :5173
 ```
 
-The first boot:
+Requires **Node ≥ 20.10** and **pnpm 9.12** (`packageManager` is pinned).
 
-1. Generates an RSA-2048 keypair for JWTs and an AES-256 key for the credential
-   vault. Both are written to `.agentis/secrets.json` with `chmod 0o600`.
-2. Initialises an embedded SQLite database in `.agentis/agentis.db` with WAL
-   mode and foreign keys enabled.
-3. Seeds an `operator` user (random base64url password, **printed once** to
-   the console — copy it now), a `Personal` workspace, a `Local` ambient,
-   and the `echo` + `http_fetch` builtin skills.
-4. Starts the HTTP + WebSocket server on `127.0.0.1:3737`.
+---
 
-Open the dashboard at `http://127.0.0.1:5173` (in dev) and sign in.
+## Concepts
 
-### As a contributor
+Agentis is organised around seven gravitational concepts. The full technical guide lives in
+[`docs/`](./docs/00-foundation.md):
 
-```bash
-pnpm install
-pnpm -r typecheck             # validates every package
-pnpm -r test                  # vitest across packages
-pnpm doctor                   # preflight: Node, ports, sqlite, secrets
-pnpm dev:full                 # api on :3737 + web on :5173 in one terminal
-```
+| Concept | What it is |
+|---------|-----------|
+| [The Durable Spine & Six Primitives](./docs/00-foundation.md) | One restart-durable entity model; six primitives (Agent · Subject · Connection · Orchestration · Experiment · Interface). |
+| [The Brain](./docs/01-the-brain.md) | Durable, local semantic memory with formation gating, grounding, knowledge/RAG, and living skills. |
+| [Agentic Applications](./docs/02-agentic-applications.md) | Apps with typed data + agent-authored interfaces that agents both build and operate. |
+| [Self-Healing Orchestration](./docs/03-orchestration.md) | A 47-node workflow engine with self-repair, objectives, and replay. |
+| [The Agent Fabric (RAL)](./docs/04-agent-fabric.md) | A Runtime Abstraction Layer: any agent runtime behind one contract, matched by capability. |
+| [Sovereignty](./docs/05-sovereignty.md) | Own the agents, data, and intelligence; swap runtimes/models; portable, self-hosted, governed. |
+| [Omni-Reach](./docs/06-omni-reach.md) | Channels, MCP, integrations, and agent-to-agent messaging. |
+| [Agent-Native Core](./docs/07-agent-native-core.md) | The 132-tool `agentis.*` SDK and code-mode: the platform is operable by agents as code. |
 
-## Architecture map
+---
+
+## Architecture
 
 ```
 apps/
-  api/            Headless backend (Hono + socket.io + WorkflowEngine)
-  web/            React + Vite SPA (canvas + ledger + inbox)
+  api/     Headless backend — Hono (HTTP) + socket.io (realtime) + WorkflowEngine
+  web/     React + Vite SPA — canvas, brain, apps, chat, ledger, inbox
 packages/
-  core/           Shared types, error codes, Zod schemas, constants
-  db/             Drizzle schema (sqlite + pg dialects), embedded init SQL
-  cli/            `agentis up` entrypoint
-docs/
-  V1-SPEC.md            The contract this code implements
-  AGENTISHUB-SPEC.md    Future Hub product (separate codebase)
-  DECISIONS.md          Design ledger
-  researches/           Background research that informed the spec
+  core/          Shared types, Zod schemas, error codes, event names, RAL affordances
+  db/            Drizzle schema (SQLite + Postgres dialects) + embedded init SQL
+  runtime/       Shared runtime primitives
+  integrations/  Connector manifests + templated HTTP connectors
+  app/           App package format (pack/validate/install)
+  app-client/    Client for embedding App surfaces
+  sdk/           @agentis/sdk — programmatic build/validate/test
+  cli/           @agentis-ai/cli — `agentis up`, bootstrap, backup/restore
 ```
 
-### The engine in one paragraph
+**The engine.** `WorkflowEngine` owns a `ReadyQueue` and a `WaitingInputBuffer` per active
+run. Each tick drains the ready queue up to a configured parallelism, dispatches each node by
+its `config.kind` (one of 47 node types), and either completes it synchronously
+(deterministic/data nodes) or registers an async execution record (agent tasks, checkpoints,
+subflows). Every transition appends a monotonic **ledger** event and publishes a realtime
+envelope on the `EventBus`; run state is snapshotted periodically so partial replay can resume
+from a recent point.
 
-`WorkflowEngine` owns a `ReadyQueue` and a `WaitingInputBuffer` per active run.
-Each tick drains the ready queue up to a configurable parallelism, dispatches
-each node by its `config.kind` (skill, agent, router, merge, checkpoint,
-scratchpad, subflow, trigger), and either completes the node synchronously
-(builtin skills, scratchpad ops, routers) or registers an active-execution
-record for asynchronous completion (agent tasks, checkpoints). Every state
-transition appends a monotonic ledger event and publishes a realtime envelope
-on the `EventBus`. The engine snapshots run state every 50 events so partial
-replay can resume from a recent point — see D16.
+**Realtime.** `EventBus` (`publish(room, event, payload)` + `subscribe`) wraps Node's
+`EventEmitter`; a WebSocket bridge forwards envelopes to socket.io rooms. Clients subscribe to
+`workspace`, `run`, or `workflow` rooms after handshake-time JWT validation, with ownership
+re-checked server-side.
 
-### The realtime spine
+**Validation.** Every external boundary parses through Zod. Workflow node configs are a
+discriminated union on `kind`, making the engine's dispatch switch exhaustive at the type
+level. Conditional expressions parse through a hand-written recursive-descent grammar — never
+`eval`.
 
-`EventBus` is a single interface (`publish(room, event, payload)` +
-`subscribe(listener)`). The default implementation wraps Node's `EventEmitter`.
-A WebSocket bridge subscribes once and forwards envelopes to socket.io rooms.
-Clients subscribe to `subscribe:workspace`, `subscribe:run`, or
-`subscribe:workflow` after handshake-time JWT validation; ownership is
-re-checked server-side before any room is joined.
+**Persistence.** Embedded SQLite by default (single-writer, WAL). All state — runs, ledger,
+memory, apps, durable entities — lives on one spine, so agents and workflows can see and reach
+each other. A hosted Postgres dialect exists but is a stub; SQLite is the supported target.
 
-### The validation contract
+---
 
-Every external boundary parses through Zod. Workflow node configs are a
-discriminated union on `kind`, which makes the engine's dispatch switch
-exhaustive at the type level. Conditional expressions (router branches,
-checkpoint guards) parse through a hand-written recursive-descent grammar —
-not `eval`, not `expr-eval`. See D07.
+## Configuration
 
-## What's in V1
+All configuration is via environment variables; every value has a sane default. See
+[`.env.example`](./.env.example) for the complete set. Common ones:
 
-- ✅ Multi-tenant data layer with workspace/ambient isolation enforced at
-  every route via `requireWorkspace` middleware.
-- ✅ Auth: bcrypt passwords, RS256 JWTs (access + refresh, with `kind`
-  claim), credential vault with AES-256-GCM.
-- ✅ Workflow engine: ready queue, waiting buffer, snapshots, ledger,
-  realtime, eight node kinds, live graph patches, partial replay.
-- ✅ Skill runtime: `builtin` (echo + http_fetch), `node_isolate`
-  (vm sandbox), `docker_sandbox` (opt-in).
-- ✅ Adapters: OpenClaw, Claude Code, Codex, Cursor, Hermes Agent, and HTTP — normalised through
-  `AdapterManager` + `CircuitBreaker`.
-- ✅ Trigger runtime: manual, cron, webhook, persistent listener.
-- ✅ Subflows, conversation continuity, channel bridge
-  (Discord + webhook + HTTP).
-- ✅ Approval inbox, activity feed, dashboard fleet overview, command
-  palette (Cmd/Ctrl-K), conversations dock, onboarding strip.
-- ✅ React Flow canvas with the design-locked node card styling.
-- ✅ Static-serve dashboard from the backend in production builds (D21).
-- ✅ Skill registry: scan, install, hash + permission gating (D18).
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AGENTIS_DATA_DIR` | `./.agentis` | Data root: SQLite DB, secrets, agent homes, backups. |
+| `AGENTIS_ASSETS_DIR` | `{DATA_DIR}/assets` | Content-addressed blob store (deduped by SHA-256). Point it off-repo. |
+| `AGENTIS_HTTP_PORT` | `3737` | API port. |
+| `AGENTIS_HTTP_HOST` | `127.0.0.1` | API bind host. |
+| `AGENTIS_EXTENSION_REQUIRE_ISOLATE` | unset | Fail closed instead of using the weak `node:vm` fallback for untrusted extension code. |
+| `AGENTIS_EXTENSION_DOCKER` | unset | Enable the Docker extension sandbox. |
+| `AGENTIS_ORCHESTRATOR_BASE_URL` / `_API_KEY` / `_MODEL` | unset | Optional OpenAI-compatible model endpoint for the orchestrator. |
 
-## Roadmap (post-V1)
+---
 
-Tracked in [DECISIONS.md](docs/DECISIONS.md):
-
-- Distributed run sharding for horizontally-scaled deployments
-- AgentisHub: external skill + workflow registry product (separate codebase)
-- Optional managed control plane
-
-## Storage & generated assets
-
-Agentis keeps **all** runtime data out of the source tree so the repo stays clean
-and nothing personal is ever committed:
-
-- **Data root** — `AGENTIS_DATA_DIR` (default `./.agentis`, git-ignored). Holds the
-  SQLite DB, generated secrets, the per-agent managed homes, and backups.
-- **Asset store** — `AGENTIS_ASSETS_DIR` (default `{AGENTIS_DATA_DIR}/assets`). A
-  **content-addressed** blob store: every agent/app/workflow-generated file is
-  stored once by its SHA-256 (identical media dedups automatically) and registered
-  as an artifact so it shows up in the Assets library. Point this at an external
-  drive, OneDrive, or a NAS if you generate a lot of media — it never has to live
-  on the system disk, and it must never be inside the repo.
-
-Agents run with their working directory defaulting to a managed home under the data
-root — never the repo — so a stray relative write can't scatter files into your
-source tree. To persist a file they produced, agents call `agentis.assets.save`
-(dedup + register) instead of writing to disk.
-
-Migrating older, scattered media into the store (dry-run by default):
+## Development
 
 ```bash
-node scripts/import-assets-into-store.mjs            # dry run — reports dedup savings
-node scripts/import-assets-into-store.mjs --apply    # copy uniques in + register
+pnpm -r typecheck        # type-check all packages
+pnpm -r test             # unit tests (vitest)
+pnpm test:e2e            # Playwright e2e (Playwright must be installed)
+pnpm lint                # import-boundary + security-invariant + file-budget checks, then per-package lint
+pnpm build               # build packages, then web, then api
+pnpm db:generate         # regenerate Drizzle migrations
+pnpm db:migrate          # apply migrations
 ```
 
-See `.env.example` for the full set of storage/config variables.
+The API is the composition root (`apps/api/src/bootstrap.ts`). Routes live under
+`apps/api/src/routes/*` and mount at `/v1/*`. The web SPA is served statically by the backend
+in production builds.
 
-## Security posture
+---
 
-- OWASP A01: workspace isolation re-checked on every authenticated request.
-- OWASP A02: AES-256-GCM with auth-tag verification on the credential vault.
-- OWASP A03: discriminated-union validation on every workflow node; safe
-  expression parser with no `eval`.
-- OWASP A05: secrets file is `chmod 0o600` on first write; no secrets in
-  logs.
-- OWASP A07: bcrypt cost 12; refresh tokens carry a `kind` claim that
-  rejects refresh-as-access replay (D04).
-- OWASP A09: structured logger with JSON output in production; no stack
-  traces leak from the error middleware.
-- OWASP A10: `http_fetch` enforces a `http`/`https` protocol allowlist
-  (host allowlist is DEBT — see D11).
-
-## Layout of this repo
+## Repository layout
 
 ```
-agentis/
-  apps/api/src/
-    bootstrap.ts         Composition root
-    engine/              WorkflowEngine + SafeConditionParser + graph validator
-    services/            Auth, ledger, scratchpad, activity, approvals, skills, vault
-    routes/              /v1/{auth,workspaces,workflows,runs,...}
-    middleware/          requireAuth, requireWorkspace, errorHandler
-    websocket/           socket.io bridge over the in-process EventBus
-  apps/web/src/
-    pages/               LoginPage, FleetOverviewPage, WorkflowCanvasPage, ...
-    lib/                 api.ts (auth-aware fetch), realtime.ts (socket hook)
-  packages/core/         Types, schemas, errors, constants, event names
-  packages/db/sqlite/    Drizzle schema + embedded init SQL
-  packages/cli/          `agentis up`
+apps/api/src/
+  bootstrap.ts     Composition root
+  engine/          WorkflowEngine, ReadyQueue, self-heal, triggers, executors, validators
+  adapters/        Runtime adapters (Claude Code, Codex, Cursor, Antigravity, Hermes, …) + channels
+  services/        Brain, grounding, apps, agentis.* tool registry, MCP, media, budgets, …
+  grounding/       Claims, evidence ledger, identity, investigations
+  routes/          /v1/{agents,workflows,runs,brain,apps,channels,mcp,…}
+  middleware/      requireAuth, requireWorkspace, error handler
+  websocket/       socket.io bridge over the in-process EventBus
+apps/web/src/
+  pages/           Canvas, Brain, Apps, Chat, Home, Knowledge, Artifacts, …
+  components/      Canvas, brain, apps, chat, settings, shared
+  lib/             api.ts (auth-aware fetch), realtime.ts (socket hook)
+packages/core/     Types, schemas, errors, constants, event names, RAL affordances
+packages/db/       Drizzle schema (sqlite + pg) + embedded init SQL
 ```
 
-See `docs/V1-SPEC.md` for the full product contract this code is built to.
+---
+
+## Security
+
+- **Isolation** — every authenticated request re-checks workspace/user ownership
+  (`requireWorkspace`).
+- **Secrets** — AES-256-GCM credential vault with auth-tag verification; secrets file is
+  `chmod 0600` on first write; no secrets in logs.
+- **Auth** — bcrypt passwords, RS256 JWTs with a `kind` claim that rejects refresh-as-access
+  replay.
+- **Injection** — discriminated-union validation on every node; safe expression parser (no
+  `eval`).
+- **SSRF** — outbound HTTP from agents/extensions is IP-pinned and blocks private ranges by
+  default.
+- **Sandboxing** — extension code runs in `node:vm` (a capability surface, not a hard
+  boundary); install `isolated-vm` or enable Docker for untrusted code, and set
+  `AGENTIS_EXTENSION_REQUIRE_ISOLATE=true` to fail closed.
+
+Report vulnerabilities per [SECURITY.md](./SECURITY.md).
+
+---
+
+## Contributing
+
+Issues and PRs welcome. Before opening a PR:
+
+```bash
+pnpm -r typecheck && pnpm -r test && pnpm lint
+```
+
+The technical guide in [`docs/`](./docs/00-foundation.md) is the reference for how the
+platform is structured.
+
+---
+
+## License
+
+Agentis is licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE).

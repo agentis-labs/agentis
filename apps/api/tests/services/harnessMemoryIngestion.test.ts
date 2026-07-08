@@ -7,7 +7,7 @@ import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import {
   HarnessMemoryIngestionService,
   type IngestibleAgent,
-} from '../../src/services/harnessMemoryIngestion.js';
+} from '../../src/services/harness/harnessMemoryIngestion.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

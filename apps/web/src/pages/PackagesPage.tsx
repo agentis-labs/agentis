@@ -1,10 +1,4 @@
-/**
- * PackagesPage - unified library for apps, agents, workflows, and extensions.
- *
- * Extensions are first-class deterministic runtime units here: operators can
- * inspect installed extensions and create local node-worker extensions without
- * leaving the library surface.
- */
+﻿
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -337,14 +331,14 @@ export function PackagesPage() {
 
   /** Detect the package kind from its envelope shape (or extension) and import via the right route. */
   async function routeImport(fileName: string, json: Record<string, unknown>) {
-    // Agentic App — `.agentisapp` envelope carries a discriminating `format`.
+    // Agentic App â€” `.agentisapp` envelope carries a discriminating `format`.
     if (json.format === '.agentisapp' || fileName.endsWith('.agentisapp')) {
       const envelope = json as unknown as AppManifestEnvelope;
       const preview = await appsApi.previewImport(envelope);
       await appsApi.importApp(envelope, preview.permissions ?? []);
       return;
     }
-    // Extension — a raw node-worker manifest with operations + permissions.
+    // Extension â€” a raw node-worker manifest with operations + permissions.
     if (fileName.endsWith('.agentisext') || isExtensionManifest(json)) {
       await api('/v1/extensions/install-local', {
         method: 'POST',
@@ -352,7 +346,7 @@ export function PackagesPage() {
       });
       return;
     }
-    // Workflow / agent package (default) — `.agentiswf` / `.agentisagt` / legacy `.agentis`.
+    // Workflow / agent package (default) â€” `.agentiswf` / `.agentisagt` / legacy `.agentis`.
     const manifest = 'manifest' in json
       ? json.manifest
       : 'packageManifest' in json
@@ -384,7 +378,7 @@ export function PackagesPage() {
 
   function handleExportExtension(extension: WorkspaceExtension) {
     try {
-      // The manifest (incl. source, operations, permissions) is already on the record —
+      // The manifest (incl. source, operations, permissions) is already on the record â€”
       // serialize it directly as a portable, re-importable `.agentisext`.
       downloadJson(extension.manifest, `${extension.slug || slugify(extension.name)}.agentisext`);
       toast.success('Exported', extension.name);
@@ -417,7 +411,6 @@ export function PackagesPage() {
       const detail = await api<PackageDetail>(`/v1/packages/${pkg.id}`);
       manifestSnapshot = detail.package.manifest;
     } catch {
-      // best effort
     }
 
     try {
@@ -1050,7 +1043,7 @@ function ExtensionDetailDrawer({
                     <div className="flex items-center justify-between gap-2">
                       <div className="font-mono text-[12px] font-semibold text-text-primary">{operation.name}</div>
                       <span className="rounded-pill border border-line bg-surface px-2 py-0.5 text-[10px] text-text-muted">
-                        {schemaType(JSON.stringify(operation.inputSchema))} → {schemaType(JSON.stringify(operation.outputSchema))}
+                        {schemaType(JSON.stringify(operation.inputSchema))} â†’ {schemaType(JSON.stringify(operation.outputSchema))}
                       </span>
                     </div>
                     {operation.description && (
@@ -1445,3 +1438,6 @@ const TEXTAREA_CLS =
 
 const CODE_TEXTAREA_CLS =
   'w-full resize-none rounded-input border border-line bg-canvas px-3 py-2 font-mono text-[12px] leading-5 text-text-primary placeholder:text-text-muted outline-none focus:border-accent';
+
+
+

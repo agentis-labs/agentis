@@ -55,7 +55,7 @@ describe('<ContextInspector /> agent requirements', () => {
       />,
     );
 
-    expect(await screen.findByText('HAL runtime requirements')).toBeInTheDocument();
+    expect(await screen.findByText('RAL runtime requirements')).toBeInTheDocument();
     await user.click(screen.getByLabelText('Native browser'));
 
     await waitFor(() => expect(screen.getAllByText('Browser Agent').length).toBeGreaterThan(0));

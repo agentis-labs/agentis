@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultModelFor, listRuntimeModels } from '../../src/services/runtimeModels.js';
+import { defaultModelFor, listRuntimeModels } from '../../src/services/runtime/runtimeModels.js';
 
 describe('runtimeModels', () => {
   it('uses a balanced Claude Code fallback default', () => {

@@ -1,5 +1,5 @@
-/**
- * WhatsAppSession — one live baileys WhatsApp Web connection.
+﻿/**
+ * WhatsAppSession â€” one live baileys WhatsApp Web connection.
  *
  * This is a focused port of OpenClaw's WhatsApp socket handling
  * (`openclaw/extensions/whatsapp/src/session.ts` + `reconnect.ts`), reduced to
@@ -10,11 +10,11 @@
  *   - `makeWASocket(...)` with `markOnlineOnConnect:false`, `syncFullHistory:false`.
  *   - QR is surfaced (raw + PNG data URL) for the linked-devices scan.
  *   - `connection.close` triggers backoff reconnect unless we were logged out.
- *   - inbound `messages.upsert` text → `onInbound` (→ ChannelTurnDispatcher).
- *   - `sendText(jid, text)` → `sock.sendMessage`.
+ *   - inbound `messages.upsert` text â†’ `onInbound` (â†’ ChannelTurnDispatcher).
+ *   - `sendText(jid, text)` â†’ `sock.sendMessage`.
  *
  * baileys is loaded lazily so an install without it (or on an unsupported
- * platform) still boots the rest of Agentis — the connection just reports
+ * platform) still boots the rest of Agentis â€” the connection just reports
  * `error` instead of crashing the process. Same pattern as OpenClawAdapter's
  * `ws` loader.
  */
@@ -58,7 +58,7 @@ export interface WhatsAppSessionOptions {
   loadAuthState?: () => Promise<{ state: any; saveCreds: () => Promise<void> }>;
 }
 
-// A minimal pino-compatible logger — baileys only needs `.child()` + levels.
+// A minimal pino-compatible logger â€” baileys only needs `.child()` + levels.
 // Avoids pulling pino into the dependency graph.
 function silentBaileysLogger(): unknown {
   const noop = () => {};
@@ -108,7 +108,7 @@ export class WhatsAppSession {
   #reconnectAttempts = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #startPromise: Promise<void> | undefined;
-  // Set during connect — downloads media for the current socket/baileys module.
+  // Set during connect â€” downloads media for the current socket/baileys module.
   #downloadMedia: ((msg: unknown) => Promise<Buffer>) | undefined;
 
   constructor(private readonly opts: WhatsAppSessionOptions) {}
@@ -155,12 +155,12 @@ export class WhatsAppSession {
       throw new Error(`whatsapp session ${this.opts.connectionId} is not open (status=${this.#status})`);
     }
     // Reply to the exact JID the message came from (baileys threads it back to the
-    // same chat — including `@lid` chats). Do NOT remap LID→PN: that resolves to a
+    // same chat â€” including `@lid` chats). Do NOT remap LIDâ†’PN: that resolves to a
     // different identity and lands the reply in a phantom chat.
     await this.#sock.sendMessage(jid, { text });
   }
 
-  /** Show/clear the "typing…" presence in a chat (best-effort). */
+  /** Show/clear the "typingâ€¦" presence in a chat (best-effort). */
   async setTyping(jid: string, on: boolean): Promise<void> {
     if (!this.#sock || this.#status !== 'open') return;
     try {
@@ -170,7 +170,6 @@ export class WhatsAppSession {
     }
   }
 
-  // ── internals ───────────────────────────────────────────
 
   async #connect(): Promise<void> {
     const loaded = await loadBaileys();
@@ -268,7 +267,7 @@ export class WhatsAppSession {
     // baileys 7.x addresses many 1:1 chats by a hidden LID (`<id>@lid`). The same
     // message carries the sender's real phone-number JID in `remoteJidAlt` (from
     // the stanza's sender_pn). Key the chat off the PN so the conversation uses a
-    // real number and replies thread back to the user's normal WhatsApp chat —
+    // real number and replies thread back to the user's normal WhatsApp chat â€”
     // replying to the raw @lid lands in a phantom chat. Non-LID chats are
     // unchanged, and we fall back to the LID if no PN alt is present.
     const remoteJidAlt: string | undefined = key.remoteJidAlt;
@@ -278,7 +277,7 @@ export class WhatsAppSession {
     if (chatJid !== remoteJid) {
       this.opts.logger.info('whatsapp.lid_mapped_to_pn', { connectionId: this.opts.connectionId, lid: remoteJid, repliesTo: chatJid });
     } else if (remoteJid.endsWith('@lid')) {
-      // LID chat with no phone-number alt in the stanza — we can only reply to the
+      // LID chat with no phone-number alt in the stanza â€” we can only reply to the
       // LID, which may not thread. Surface it so the cause is visible if it recurs.
       this.opts.logger.warn('whatsapp.lid_no_pn_alt', { connectionId: this.opts.connectionId, lid: remoteJid });
     }
@@ -287,7 +286,7 @@ export class WhatsAppSession {
 
     let body = extractWhatsAppText(msg.message);
 
-    // Voice note → transcribe to text (OMNICHANNEL §3.3). Only when a
+    // Voice note â†’ transcribe to text (OMNICHANNEL Â§3.3). Only when a
     // transcription model is configured; otherwise the voice note is skipped.
     if (!body) {
       const audio = unwrapAudioMessage(msg.message);
@@ -295,14 +294,14 @@ export class WhatsAppSession {
         try {
           const bytes = await this.#downloadMedia(msg);
           const transcript = await this.opts.transcribeAudio(bytes, String(audio.mimetype ?? 'audio/ogg'));
-          if (transcript) body = `🎤 ${transcript}`;
+          if (transcript) body = `ðŸŽ¤ ${transcript}`;
         } catch (err) {
           this.opts.logger.warn('whatsapp.transcribe_failed', { err: (err as Error).message });
         }
       }
     }
 
-    // Image → describe via the vision model (OMNICHANNEL §3.3 media ingestion).
+    // Image â†’ describe via the vision model (OMNICHANNEL Â§3.3 media ingestion).
     if (!body) {
       const image = unwrapImageMessage(msg.message);
       if (image && this.opts.describeImage && this.#downloadMedia) {
@@ -310,14 +309,14 @@ export class WhatsAppSession {
           const bytes = await this.#downloadMedia(msg);
           const caption = typeof image.caption === 'string' ? image.caption : undefined;
           const description = await this.opts.describeImage(bytes, String(image.mimetype ?? 'image/jpeg'), caption);
-          if (description) body = `🖼️ ${description}`;
+          if (description) body = `ðŸ–¼ï¸ ${description}`;
         } catch (err) {
           this.opts.logger.warn('whatsapp.describe_image_failed', { err: (err as Error).message });
         }
       }
     }
 
-    // Document (PDF / text) → extract text so the orchestrator can read it.
+    // Document (PDF / text) â†’ extract text so the orchestrator can read it.
     if (!body) {
       const doc = unwrapDocumentMessage(msg.message);
       if (doc && this.opts.extractDocument && this.#downloadMedia) {
@@ -326,7 +325,7 @@ export class WhatsAppSession {
           const fileName = typeof doc.fileName === 'string' ? doc.fileName : undefined;
           const text = await this.opts.extractDocument(bytes, String(doc.mimetype ?? 'application/octet-stream'), fileName);
           if (text) {
-            const label = fileName ? `📄 ${fileName}\n` : '📄 ';
+            const label = fileName ? `ðŸ“„ ${fileName}\n` : 'ðŸ“„ ';
             body = `${label}${text}`;
           }
         } catch (err) {
@@ -451,7 +450,7 @@ export function unwrapImageMessage(message: any): { mimetype?: string; caption?:
   return undefined;
 }
 
-/** Return a non-image documentMessage (PDF, text, …), unwrapping envelopes. */
+/** Return a non-image documentMessage (PDF, text, â€¦), unwrapping envelopes. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function unwrapDocumentMessage(message: any): { mimetype?: string; fileName?: string; caption?: string } | undefined {
   let m = message;

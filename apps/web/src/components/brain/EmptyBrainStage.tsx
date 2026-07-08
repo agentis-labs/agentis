@@ -1,4 +1,4 @@
-import { Brain, ArrowRight } from 'lucide-react';
+﻿import { Brain, ArrowRight } from 'lucide-react';
 import { Button } from '../shared/Button';
 
 export function EmptyBrainStage({
@@ -28,3 +28,5 @@ export function EmptyBrainStage({
     </div>
   );
 }
+
+

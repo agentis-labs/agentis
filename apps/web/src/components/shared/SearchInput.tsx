@@ -1,5 +1,5 @@
-/**
- * SearchInput — standardized search input with icon, clear button, and `/` shortcut focus.
+﻿/**
+ * SearchInput â€” standardized search input with icon, clear button, and `/` shortcut focus.
  */
 
 import { forwardRef, useEffect, useRef } from 'react';
@@ -14,7 +14,7 @@ interface SearchInputProps extends Omit<React.InputHTMLAttributes<HTMLInputEleme
 }
 
 export const SearchInput = forwardRef<HTMLInputElement, SearchInputProps>(function SearchInput(
-  { value, onChange, onClear, bindSlashShortcut, placeholder = 'Search…', className, ...rest },
+  { value, onChange, onClear, bindSlashShortcut, placeholder = 'Searchâ€¦', className, ...rest },
   ref,
 ) {
   const innerRef = useRef<HTMLInputElement | null>(null);
@@ -64,3 +64,6 @@ export const SearchInput = forwardRef<HTMLInputElement, SearchInputProps>(functi
     </div>
   );
 });
+
+
+

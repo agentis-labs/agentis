@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, ArrowUpFromLine, Search, Trash2 } from 'lucide-react';
 import { api } from '../lib/api';
@@ -145,7 +145,7 @@ export function KnowledgeBasePage() {
               <div className="mt-4 space-y-2">
                 {results.map((result) => (
                   <div key={result.id} className="rounded-card border border-line bg-surface-2 p-3">
-                    <div className="mb-1 text-[11px] text-text-muted">score {Math.round(result.score * 100)}% · chunk {result.chunkIndex + 1}</div>
+                    <div className="mb-1 text-[11px] text-text-muted">score {Math.round(result.score * 100)}% Â· chunk {result.chunkIndex + 1}</div>
                     <p className="text-[12px] leading-relaxed text-text-secondary">{result.content}</p>
                   </div>
                 ))}
@@ -158,3 +158,6 @@ export function KnowledgeBasePage() {
     </div>
   );
 }
+
+
+

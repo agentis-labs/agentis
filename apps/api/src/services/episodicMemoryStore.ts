@@ -30,8 +30,8 @@ import type {
   RuntimeEpisodeOutcome,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { type EmbeddingProvider, cosineSimilarity, providerIdentity, vectorIsComparable } from './embeddingProvider.js';
-import type { EmbeddingProviderResolver } from './embeddingProviderRegistry.js';
+import { type EmbeddingProvider, cosineSimilarity, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
+import type { EmbeddingProviderResolver } from './embedding/embeddingProviderRegistry.js';
 
 /** Accept either a bound resolver (preferred) or a fixed instance (tests). */
 type EmbeddingProviderInput = EmbeddingProvider | EmbeddingProviderResolver;

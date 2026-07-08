@@ -5,8 +5,8 @@
  * the doctrine that the agent's self-report is never consulted.
  */
 import { describe, expect, it } from 'vitest';
-import { evaluateRunVerdict, type VerdictProbeDeps } from '../../src/services/workflowVerdict.js';
-import type { WorkflowSpec } from '../../src/services/workflowSpec.js';
+import { evaluateRunVerdict, type VerdictProbeDeps } from '../../src/services/workflow/workflowVerdict.js';
+import type { WorkflowSpec } from '../../src/services/workflow/workflowSpec.js';
 
 function spec(overrides: Partial<WorkflowSpec> = {}): WorkflowSpec {
   return {

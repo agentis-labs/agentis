@@ -11,12 +11,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ChatToolCall, SessionAdapter, SessionStepResult, ToolDefinition } from '@agentis/core';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
-import { AgentSessionService } from '../../src/services/agentSession.js';
-import { AgentSessionRuntime, type SessionRunContext } from '../../src/services/agentSessionRuntime.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
+import { AgentToolRuntime } from '../../src/services/agent/agentToolRuntime.js';
+import { AgentSessionService } from '../../src/services/agent/agentSession.js';
+import { AgentSessionRuntime, type SessionRunContext } from '../../src/services/agent/agentSessionRuntime.js';
 import { ScratchpadService } from '../../src/services/scratchpad.js';
-import type { McpToolBridge } from '../../src/services/mcpToolBridge.js';
+import type { McpToolBridge } from '../../src/services/mcp/mcpToolBridge.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

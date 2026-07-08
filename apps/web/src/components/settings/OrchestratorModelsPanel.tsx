@@ -1,8 +1,8 @@
-/**
- * OrchestratorModelsPanel — per-workspace orchestrator model-role config
- * (OMNICHANNEL-ORCHESTRATOR-10X §4.4).
+﻿/**
+ * OrchestratorModelsPanel â€” per-workspace orchestrator model-role config
+ * (OMNICHANNEL-ORCHESTRATOR-10X Â§4.4).
  *
- * Each cognition role (conversation, planning, …) can target a different model,
+ * Each cognition role (conversation, planning, â€¦) can target a different model,
  * or you can point them all at one high model (e.g. claude-opus-4-8). Roles with
  * no override inherit the server's env default. The conversation role takes
  * effect immediately for chat and channels.
@@ -43,7 +43,7 @@ const ROLE_LABELS: Record<string, { title: string; blurb: string }> = {
   synthesis: { title: 'Synthesis', blurb: 'Workflow graph generation.' },
   evaluation: { title: 'Evaluation', blurb: 'Judge / quality gates / routing.' },
   vision: { title: 'Vision', blurb: 'Image understanding.' },
-  transcription: { title: 'Transcription', blurb: 'Voice notes → text.' },
+  transcription: { title: 'Transcription', blurb: 'Voice notes â†’ text.' },
 };
 
 export function OrchestratorModelsPanel() {
@@ -103,10 +103,10 @@ export function OrchestratorModelsPanel() {
         <span className="rounded-pill border border-line bg-surface-2 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-text-muted">Optional</span>
       </div>
       <p className="mb-3 text-[13px] text-text-secondary">
-        By default every cognition role — chat, planning, synthesis, evaluation — runs on
+        By default every cognition role â€” chat, planning, synthesis, evaluation â€” runs on
         <strong className="text-text-primary"> your agent's harness</strong>, the model you already set up.
         Nothing to configure here. Override a role only if you want a different or stronger model for it
-        (e.g. a sharper model just for <span className="text-text-primary">synthesis</span>) — a power-user plus,
+        (e.g. a sharper model just for <span className="text-text-primary">synthesis</span>) â€” a power-user plus,
         not a required step.
       </p>
       <div className="mb-3 flex items-center justify-between gap-3 rounded-card border border-line bg-surface px-4 py-3">
@@ -132,7 +132,7 @@ export function OrchestratorModelsPanel() {
           <Sparkles size={15} className="mt-0.5 shrink-0 text-warn" />
           <div className="text-[13px] text-text-secondary">
             <span className="font-medium text-text-primary">No autonomy model is configured for this workspace.</span>{' '}
-            Specialists fall back to a single-shot text completion — no tool use, delegation, memory, or multi-step reasoning.
+            Specialists fall back to a single-shot text completion â€” no tool use, delegation, memory, or multi-step reasoning.
             Connect an agent runtime, or set a <span className="text-text-primary">Conversation</span> or{' '}
             <span className="text-text-primary">Evaluation</span> model below, to switch agents into full tool-using mode.
           </div>
@@ -180,7 +180,6 @@ function RoleCard({ row, onChanged, toast }: { row: RoleRow; onChanged: () => Pr
         body: JSON.stringify({
           model: model.trim(),
           baseUrl: baseUrl.trim() || null,
-          // Only send apiKey when the operator typed one (otherwise keep existing).
           ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
         }),
       });
@@ -220,7 +219,7 @@ function RoleCard({ row, onChanged, toast }: { row: RoleRow; onChanged: () => Pr
           {row.override
             ? row.override.model
             : row.envModel
-              ? `${row.envModel} · server default`
+              ? `${row.envModel} Â· server default`
               : 'Uses your harness'}
         </span>
         {!editing && (
@@ -241,7 +240,7 @@ function RoleCard({ row, onChanged, toast }: { row: RoleRow; onChanged: () => Pr
               className={INPUT_CLS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional — inherits the server default endpoint when blank">
+          <Field label="Base URL" hint="Optional â€” inherits the server default endpoint when blank">
             <input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
@@ -249,12 +248,12 @@ function RoleCard({ row, onChanged, toast }: { row: RoleRow; onChanged: () => Pr
               className={INPUT_CLS}
             />
           </Field>
-          <Field label="API key" hint={row.override?.hasApiKey ? 'A key is set — leave blank to keep it' : 'Optional — inherits the server default key when blank'}>
+          <Field label="API key" hint={row.override?.hasApiKey ? 'A key is set â€” leave blank to keep it' : 'Optional â€” inherits the server default key when blank'}>
             <input
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               type="password"
-              placeholder={row.override?.hasApiKey ? '•••••• (unchanged)' : 'Paste an API key'}
+              placeholder={row.override?.hasApiKey ? 'â€¢â€¢â€¢â€¢â€¢â€¢ (unchanged)' : 'Paste an API key'}
               className={INPUT_CLS}
             />
           </Field>
@@ -264,7 +263,7 @@ function RoleCard({ row, onChanged, toast }: { row: RoleRow; onChanged: () => Pr
             </Button>
             {row.override && (
               <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void reset()}>
-                {busy === 'reset' ? 'Resetting…' : 'Reset to default'}
+                {busy === 'reset' ? 'Resettingâ€¦' : 'Reset to default'}
               </Button>
             )}
             <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setEditing(false)}>
@@ -289,3 +288,6 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
     </label>
   );
 }
+
+
+

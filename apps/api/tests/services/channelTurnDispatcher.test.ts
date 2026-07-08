@@ -12,11 +12,11 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS, REALTIME_ROOMS, type AgentAdapter, type ChatDelta, type ChatMessage } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
-import { ChannelBridge } from '../../src/services/channelBridge.js';
-import { ChannelTurnDispatcher, interpretConfirmation } from '../../src/services/channelTurnDispatcher.js';
-import { ConversationSummaryService } from '../../src/services/conversationSummaryService.js';
-import { AppContactService } from '../../src/services/appContacts.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ChannelBridge } from '../../src/services/conversation/channelBridge.js';
+import { ChannelTurnDispatcher, interpretConfirmation } from '../../src/services/conversation/channelTurnDispatcher.js';
+import { ConversationSummaryService } from '../../src/services/conversation/conversationSummaryService.js';
+import { AppContactService } from '../../src/services/app/appContacts.js';
 import { AppStore } from '@agentis/app';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
@@ -115,7 +115,7 @@ describe('ChannelTurnDispatcher', () => {
         yield { type: 'tool_result', id: 'tool-1', name: 'agentis.lookup', result: { ok: true } } as ChatDelta;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -181,7 +181,7 @@ describe('ChannelTurnDispatcher', () => {
         yield { type: 'activity', id: 'a3', phase: 'complete', status: 'success', label: 'Response ready' } as ChatDelta;
         yield { type: 'text', delta: 'final answer' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const result = await dispatcher.dispatch({
@@ -218,7 +218,7 @@ describe('ChannelTurnDispatcher', () => {
         capturedHistory = history;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
     await dispatcher2.dispatch({
       workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
@@ -249,7 +249,7 @@ describe('ChannelTurnDispatcher', () => {
         yield { type: 'activity', id: 'a1', phase: 'tool', status: 'success', label: 'Used quick_lookup' } as ChatDelta;
         yield { type: 'text', delta: 'quick answer' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -284,7 +284,7 @@ describe('ChannelTurnDispatcher', () => {
       fallbackAdapter: () => chatStub('unused'),
       runTurn: async function* () {
         throw new Error('insufficient_quota: out of credits');
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const result = await dispatcher.dispatch({
@@ -334,7 +334,7 @@ describe('ChannelTurnDispatcher', () => {
         captured = history;
         yield { type: 'text', delta: 'ok' };
         yield { type: 'done', finishReason: 'stop' };
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -372,7 +372,7 @@ describe('ChannelTurnDispatcher', () => {
         captured = history;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -422,7 +422,7 @@ describe('ChannelTurnDispatcher', () => {
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
       deliver: async () => {}, fallbackAdapter: () => chatStub('should not run'),
-      runTurn: async function* () { turnRan = true; yield { type: 'done', finishReason: 'stop' } as ChatDelta; } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      runTurn: async function* () { turnRan = true; yield { type: 'done', finishReason: 'stop' } as ChatDelta; } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const result = await dispatcher.dispatch({
@@ -470,7 +470,7 @@ describe('ChannelTurnDispatcher', () => {
         capturedOptions = (o ?? null) as { systemAddendum?: string } | null;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -518,7 +518,7 @@ describe('ChannelTurnDispatcher', () => {
       runTurn: async function* () {
         yield { type: 'text', delta: replyText } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     // 1) A blocked-claim reply is WITHHELD — nothing reaches the channel.
@@ -582,7 +582,7 @@ describe('ChannelTurnDispatcher', () => {
         yield { type: 'thinking', delta: 'weighing the discount' } as ChatDelta;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -624,7 +624,7 @@ describe('ChannelTurnDispatcher', () => {
         yield { type: 'thinking', delta: 'hmm' } as ChatDelta;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
     await dispatcher.dispatch({
       workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
@@ -654,12 +654,12 @@ describe('ChannelTurnDispatcher', () => {
       runTurn: async function* () {
         yield { type: 'confirmation_required', turnId: 't-99', toolCall: { id: 'x', name: 'agentis.run.cancel', args: {} }, title: 'Cancel run?', body: 'This stops run r1.', confirmLabel: 'Cancel run', cancelLabel: 'Cancel', expiresAt: new Date(Date.now() + 60000).toISOString() } as unknown as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
       runConfirm: async function* (_adapter, turnId, confirmed) {
         confirmCalls.push({ turnId, confirmed });
         yield { type: 'text', delta: confirmed ? 'Run cancelled.' : 'Left it running.' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.confirm,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.confirm,
     });
 
     const base = {
@@ -702,7 +702,7 @@ describe('ChannelTurnDispatcher', () => {
         turns.push({ text: userMessage as string, history });
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const base = {
@@ -799,7 +799,7 @@ describe('ChannelTurnDispatcher', () => {
         capturedAddendum = (o as { systemAddendum?: string } | undefined)?.systemAddendum ?? '';
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -840,7 +840,7 @@ describe('ChannelTurnDispatcher', () => {
         capturedCtx = c as { recallScopeIds?: string[] };
         yield { type: 'text', delta: 'ok' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({

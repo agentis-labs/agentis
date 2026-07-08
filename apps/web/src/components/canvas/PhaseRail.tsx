@@ -1,10 +1,10 @@
-import { useMemo } from 'react';
+﻿import { useMemo } from 'react';
 import clsx from 'clsx';
 import { AlertTriangle, Check, LoaderCircle } from 'lucide-react';
 import { derivePhaseStatus, stripPhasePrefix, type PhaseNode, type PhaseSpec } from './PhaseLayer';
 
 /**
- * PhaseRail — the workflow's structure, read as a quiet list.
+ * PhaseRail â€” the workflow's structure, read as a quiet list.
  *
  * The primary way to comprehend and navigate a multi-phase workflow. Monochrome
  * and minimal: a muted number, the phase name, a small status glyph, and a thin
@@ -77,7 +77,7 @@ export function PhaseRail({ phases, nodes, focusedPhaseId, onFocusPhase, onClear
               active ? 'bg-surface-2' : 'hover:bg-surface-2',
             )}
             style={active ? { boxShadow: `inset 2px 0 0 ${phase.color}` } : undefined}
-            title={phase.description ? `${stripPhasePrefix(phase.name)} — ${phase.description}` : stripPhasePrefix(phase.name)}
+            title={phase.description ? `${stripPhasePrefix(phase.name)} â€” ${phase.description}` : stripPhasePrefix(phase.name)}
           >
             <span className="w-3.5 shrink-0 text-[11px] tabular-nums text-text-muted">{index + 1}</span>
             <span
@@ -122,3 +122,6 @@ function PhaseStatusGlyph({
   if (status === 'completed') return <Check size={12} className="shrink-0 text-success" />;
   return <span className="text-[10px] tabular-nums text-text-muted">{count}</span>;
 }
+
+
+

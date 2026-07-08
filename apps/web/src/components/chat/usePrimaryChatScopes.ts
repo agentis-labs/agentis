@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { api, workspace as workspaceStore } from '../../lib/api';
 
 export interface ChatPrimaryScope {
@@ -7,7 +7,7 @@ export interface ChatPrimaryScope {
   role: 'orchestrator' | 'manager';
   status?: string | null;
   colorHex?: string | null;
-  /** Space/domain a manager governs — its secondary label in the scope switcher. */
+  /** Space/domain a manager governs â€” its secondary label in the scope switcher. */
   spaceName?: string | null;
 }
 
@@ -129,3 +129,6 @@ export function usePrimaryChatScopes() {
     refresh: () => setReloadKey((current) => current + 1),
   };
 }
+
+
+

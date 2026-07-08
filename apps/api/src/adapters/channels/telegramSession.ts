@@ -118,7 +118,6 @@ export class TelegramSession {
     }
   }
 
-  // ── internals ───────────────────────────────────────────
 
   async #attemptStart(): Promise<void> {
     if (this.#stopped) return;

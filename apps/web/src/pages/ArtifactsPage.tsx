@@ -1,14 +1,14 @@
-/**
- * AssetsPage — the workspace asset library (Assets 10x).
+﻿/**
+ * AssetsPage â€” the workspace asset library (Assets 10x).
  *
  * Every structured output an agent, app, or workflow produces lands here:
  * screenshots, generated docs, code, data exports, HTML. Browsed on two clearly
- * separated axes — Source on the left rail (what generated it) × Type along the
- * top — with search. Reachable from the sidebar (route `/assets`, legacy alias
+ * separated axes â€” Source on the left rail (what generated it) Ã— Type along the
+ * top â€” with search. Reachable from the sidebar (route `/assets`, legacy alias
  * `/artifacts`). Opens artifacts in the shared ArtifactPanel.
  *
  * Note: the asset *type* set is fixed by the `artifacts.type` DB enum
- * (html | image | document | code | data) — every producer maps into one of these.
+ * (html | image | document | code | data) â€” every producer maps into one of these.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -151,7 +151,7 @@ export function ArtifactsPage() {
       setArtifacts((prev) => prev.filter((a) => a.id !== id));
       if (selected?.id === id) setSelected(null);
     } catch {
-      /* best-effort */
+      
     }
   }
 
@@ -171,7 +171,7 @@ export function ArtifactsPage() {
         <div>
           <h1 className="text-base font-medium text-text">Assets</h1>
           <p className="text-[11px] text-text-muted">
-            Everything your agents, apps, and workflows produce — screenshots, docs, code, and data.
+            Everything your agents, apps, and workflows produce â€” screenshots, docs, code, and data.
           </p>
         </div>
         <div className="relative">
@@ -179,14 +179,14 @@ export function ArtifactsPage() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search assets…"
+            placeholder="Search assetsâ€¦"
             className="w-56 rounded-md border border-line bg-surface-2 py-1.5 pl-8 pr-2 text-[12px] text-text placeholder:text-text-muted focus:border-accent/50 focus:outline-none"
           />
         </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* Source axis — vertical rail. */}
+        {/* Source axis â€” vertical rail. */}
         <aside className="w-48 shrink-0 overflow-y-auto border-r border-line p-3">
           <div className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Source</div>
           <div className="flex flex-col gap-0.5">
@@ -212,7 +212,7 @@ export function ArtifactsPage() {
           </div>
         </aside>
 
-        {/* Type axis — top tabs — then the grid. */}
+        {/* Type axis â€” top tabs â€” then the grid. */}
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-1 border-b border-line px-6 py-2">
             {TYPE_FILTERS.map((f) => {
@@ -237,7 +237,7 @@ export function ArtifactsPage() {
 
           <div className="flex-1 overflow-y-auto p-6">
             {loading ? (
-              <div className="text-center text-[12px] text-text-muted">Loading…</div>
+              <div className="text-center text-[12px] text-text-muted">Loadingâ€¦</div>
             ) : filtered.length === 0 ? (
               <EmptyState searching={query.trim().length > 0 || typeFilter !== 'all' || originFilter !== 'all'} />
             ) : groups ? (
@@ -333,7 +333,7 @@ function ArtifactCard({
         <button type="button" onClick={() => onOpen(a)} className="min-w-0 flex-1 text-left">
           <div className="truncate text-[11px] font-medium text-text">{a.title}</div>
           <div className="mt-0.5 text-[9px] uppercase tracking-wider text-text-muted">
-            {a.type} · {new Date(a.createdAt).toLocaleDateString()}
+            {a.type} Â· {new Date(a.createdAt).toLocaleDateString()}
           </div>
         </button>
         <button
@@ -363,3 +363,6 @@ function EmptyState({ searching }: { searching: boolean }) {
     </div>
   );
 }
+
+
+

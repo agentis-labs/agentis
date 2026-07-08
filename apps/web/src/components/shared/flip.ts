@@ -1,5 +1,5 @@
-/**
- * FLIP utility — V1-SPEC §13.5.
+﻿/**
+ * FLIP utility â€” V1-SPEC Â§13.5.
  *
  * "First, Last, Invert, Play" animation pattern for status transitions on
  * canvas nodes. Capture geometry before a layout change, capture again
@@ -54,3 +54,6 @@ export function playFlip(
     },
   );
 }
+
+
+

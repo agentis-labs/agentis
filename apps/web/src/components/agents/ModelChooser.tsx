@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Check, ChevronDown, Search } from 'lucide-react';
 import { api } from '../../lib/api';
@@ -291,3 +291,6 @@ function tierLabel(tier: RuntimeModelOption['tier']): string | undefined {
   if (tier === 'custom') return 'Custom';
   return undefined;
 }
+
+
+

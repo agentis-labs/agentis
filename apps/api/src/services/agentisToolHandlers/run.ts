@@ -11,10 +11,10 @@ import { schema } from '@agentis/db/sqlite';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type WorkflowRunState } from '@agentis/core';
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
-import { collectFailedNodeIds, failedNodeCount } from '../runStateFailures.js';
-import { analyzeRunFailure } from '../runFailureAnalysis.js';
-import { recordWorkflowLesson, recallWorkflowLessons } from '../workflowPlaybook.js';
-import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop, type CompassStep } from '../workflowCompass.js';
+import { collectFailedNodeIds, failedNodeCount } from '../run/runStateFailures.js';
+import { analyzeRunFailure } from '../run/runFailureAnalysis.js';
+import { recordWorkflowLesson, recallWorkflowLessons } from '../workflow/workflowPlaybook.js';
+import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop, type CompassStep } from '../workflow/workflowCompass.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {

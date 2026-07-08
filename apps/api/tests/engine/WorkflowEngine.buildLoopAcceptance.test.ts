@@ -37,7 +37,7 @@ import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
-import { preflightWorkflow } from '../../src/services/workflowPreflight.js';
+import { preflightWorkflow } from '../../src/services/workflow/workflowPreflight.js';
 import { analyzeInputReachability } from '../../src/engine/validateExpressions.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

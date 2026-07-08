@@ -1,8 +1,8 @@
-/**
- * HistoryPage — unified events: workflow runs + agent activity + audit.
+﻿/**
+ * HistoryPage â€” unified events: workflow runs + agent activity + audit.
  *
  * Replaces /runs (list), /activity, and the legacy ledger surfaces.
- * Click any event row → detail panel slides in from the right.
+ * Click any event row â†’ detail panel slides in from the right.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -180,7 +180,7 @@ export function HistoryPage() {
 
       <div className="flex flex-wrap items-center gap-3 border-b border-line px-6 py-3">
         <div className="ml-auto w-full sm:w-72">
-          <SearchInput value={search} onChange={setSearch} placeholder="Search history…" bindSlashShortcut />
+          <SearchInput value={search} onChange={setSearch} placeholder="Search historyâ€¦" bindSlashShortcut />
         </div>
       </div>
 
@@ -211,7 +211,7 @@ export function HistoryPage() {
           Array.from(grouped.entries()).map(([bucket, list]) => (
             <div key={bucket} className="mb-6 last:mb-0">
               <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-                {bucket} · {list.length}
+                {bucket} Â· {list.length}
               </div>
               <div className="space-y-1">
                 {list.map((e) => (
@@ -244,7 +244,7 @@ export function HistoryPage() {
         open={!!selected}
         onClose={() => setSelected(null)}
         title={selected?.title ?? 'Event'}
-        subtitle={selected ? `${new Date(selected.timestamp).toLocaleString()} · ${selected.type}` : undefined}
+        subtitle={selected ? `${new Date(selected.timestamp).toLocaleString()} Â· ${selected.type}` : undefined}
         width="md"
       >
         {selected && (
@@ -296,3 +296,6 @@ function KV({ k, v }: { k: string; v: React.ReactNode }) {
     </div>
   );
 }
+
+
+

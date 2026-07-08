@@ -1,10 +1,10 @@
-/**
+﻿/**
  * Tiny cron parser for canvas preview.
  *
  * Supports the standard 5-field cron syntax (minute hour day-of-month month
  * day-of-week) with `*`, comma lists (`1,3,5`), ranges (`1-5`), and step values
- * (`*​/15`). Used purely for showing a human-readable description and the next
- * few firing times in the TriggerForm — the real scheduling runs on the server
+ * (`*â€‹/15`). Used purely for showing a human-readable description and the next
+ * few firing times in the TriggerForm â€” the real scheduling runs on the server
  * via `node-cron`.
  *
  * This is intentionally permissive: malformed expressions return `null` and the
@@ -29,7 +29,7 @@ const FIELD_RANGES = {
   hour: [0, 23] as const,
   dayOfMonth: [1, 31] as const,
   month: [1, 12] as const,
-  dayOfWeek: [0, 6] as const, // 0 or 7 = Sunday; we collapse 7→0
+  dayOfWeek: [0, 6] as const, // 0 or 7 = Sunday; we collapse 7â†’0
 };
 
 function parseField(token: string, range: readonly [number, number]): ParsedField | null {
@@ -176,7 +176,7 @@ function formatList<T>(values: T[], unit?: string): string {
   if (values.length === 1) return String(values[0]);
   if (values.length === 2) return `${values[0]} and ${values[1]}`;
   if (values.length <= 5) return `${values.slice(0, -1).join(', ')}, and ${values[values.length - 1]}`;
-  return `${values.slice(0, 4).join(', ')}, … (+${values.length - 4} more)`;
+  return `${values.slice(0, 4).join(', ')}, â€¦ (+${values.length - 4} more)`;
 }
 
 /** Common presets users can pick from to seed the field. */
@@ -185,7 +185,10 @@ export const CRON_PRESETS: Array<{ label: string; expression: string; descriptio
   { label: 'Every 5 minutes', expression: '*/5 * * * *', description: 'Every 5 minutes' },
   { label: 'Every hour', expression: '0 * * * *', description: 'At the top of every hour' },
   { label: 'Every day 09:00 UTC', expression: '0 9 * * *', description: 'Every day at 09:00 UTC' },
-  { label: 'Weekdays 09:00 UTC', expression: '0 9 * * 1-5', description: 'Mon–Fri at 09:00 UTC' },
+  { label: 'Weekdays 09:00 UTC', expression: '0 9 * * 1-5', description: 'Monâ€“Fri at 09:00 UTC' },
   { label: 'Every Monday 09:00 UTC', expression: '0 9 * * 1', description: 'Every Monday at 09:00 UTC' },
   { label: 'First of the month 00:00 UTC', expression: '0 0 1 * *', description: 'First day of every month at 00:00 UTC' },
 ];
+
+
+

@@ -26,7 +26,7 @@ import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { SubflowExecutor } from '../../src/services/subflowExecutor.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import type { WorkflowSpec } from '../../src/services/workflowSpec.js';
+import type { WorkflowSpec } from '../../src/services/workflow/workflowSpec.js';
 
 let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });

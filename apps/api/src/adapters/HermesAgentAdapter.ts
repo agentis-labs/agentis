@@ -15,8 +15,8 @@ import type {
   ToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import type { McpHarnessServer } from '../services/mcpHarnessSession.js';
-import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import type { McpHarnessServer } from '../services/mcp/mcpHarnessSession.js';
+import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { linkAbortSignal } from './abort.js';
 import { buildMarkerToolPrompt } from './markerToolProtocol.js';
@@ -420,10 +420,6 @@ export class HermesAgentAdapter implements AgentAdapter {
       // killed long runs mid-task. Pass it ONLY when explicitly set (env via
       // agentCommission.nativeTurnCap); otherwise let Hermes run to completion.
       ...(this.opts.maxTurns && this.opts.maxTurns > 0 ? ['--max-turns', String(this.opts.maxTurns)] : []),
-      // Don't let Hermes auto-inject AGENTS.md / SOUL.md / .cursorrules / memory
-      // from the working directory — Agentis supplies the agent's identity and
-      // instructions. Without this, a Hermes running inside a repo adopts that
-      // repo's coding-agent identity and rejects/ignores the Agentis persona.
       '--ignore-rules',
       '--yolo',
       ...(this.opts.extraArgs ?? []),

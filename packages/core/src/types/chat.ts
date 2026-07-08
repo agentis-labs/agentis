@@ -1,7 +1,7 @@
-import type { ChatPlan, PlanLifecycleEvent } from './plan.js';
+﻿import type { ChatPlan, PlanLifecycleEvent } from './plan.js';
 
 /**
- * Chat-agent loop types — CHAT-AGENT-LOOP.md §2.
+ * Chat-agent loop types â€” CHAT-AGENT-LOOP.md Â§2.
  *
  * Shared between the API (HermesAdapter, chatToolCatalog, chatToolExecutor)
  * and the web app (ChatPanel SSE consumer, future streaming hooks).
@@ -11,10 +11,10 @@ export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
 /**
  * Per-conversation permission mode (Claude-Code style), sticky per thread.
- * - `ask`  — confirm before any mutating tool runs (default).
- * - `plan` — propose a plan and block mutations this turn (maps to
+ * - `ask`  â€” confirm before any mutating tool runs (default).
+ * - `plan` â€” propose a plan and block mutations this turn (maps to
  *            executionMode 'plan', enforced at the tool registry).
- * - `auto` — run everything without confirmation (bypass).
+ * - `auto` â€” run everything without confirmation (bypass).
  */
 export type ChatPermissionMode = 'ask' | 'plan' | 'auto';
 
@@ -148,10 +148,10 @@ export interface ChatTurnContext {
    */
   appId?: string | null;
   /**
-   * Brain-recall scope union for this turn (LIVING-APPS-10X · G11). When set, the
+   * Brain-recall scope union for this turn (LIVING-APPS-10X Â· G11). When set, the
    * turn's `buildDispatchContext` recalls the UNION of these scopes instead of the
-   * agent's scope alone — e.g. `[appId, agentId]` so a resident App turn sees both
-   * the App's relationship brain and the operating agent's own memory. Omitted →
+   * agent's scope alone â€” e.g. `[appId, agentId]` so a resident App turn sees both
+   * the App's relationship brain and the operating agent's own memory. Omitted â†’
    * the agent's own scope (back-compat).
    */
   recallScopeIds?: string[];
@@ -174,12 +174,7 @@ export interface ChatTurnContext {
    */
   permissionMode?: ChatPermissionMode;
   viewport?: ViewportContext | null;
-  /**
-   * Cancellation signal for the whole turn, wired from the HTTP request. When the
-   * operator disconnects (closes the SSE stream / navigates away) it aborts, and
-   * the chat loop + any model-backed tool work (notably workflow synthesis) stops
-   * instead of spending model credits on a turn nobody is listening to.
-   */
+  
   signal?: AbortSignal;
 }
 
@@ -237,9 +232,9 @@ export interface AgentisToolCallResult {
   output?: unknown;
   errorCode?: string;
   errorMessage?: string;
-  /** Directive remediation from an AgentisError — what the agent should DO next. Surfaced over MCP (§F7). */
+  /** Directive remediation from an AgentisError â€” what the agent should DO next. Surfaced over MCP (Â§F7). */
   remediation?: string;
-  /** Structured error details from an AgentisError (offending field, candidates, …). Surfaced over MCP. */
+  /** Structured error details from an AgentisError (offending field, candidates, â€¦). Surfaced over MCP. */
   details?: Record<string, unknown>;
   nextActions?: Array<{ toolId: string; rationale: string }>;
   costCents?: number;
@@ -256,11 +251,7 @@ export interface AgentisToolDefinition {
   inputSchema: unknown;
   outputSchema?: unknown;
   mutating: boolean;
-  /**
-   * Mutating tools default to confirmation in chat. Set autoExecute for
-   * reversible, operator-requested creation/build actions that should happen
-   * immediately, with the result still visible in the execution feed.
-   */
+  
   autoExecute?: boolean;
   mcpExposed?: boolean;
   requires?: string[];
@@ -283,7 +274,7 @@ export interface AgentisToolContext {
   /**
    * Ambient Agentic App for this turn (Living Apps Phase 0). When set, App-scoped
    * tools (`agentis.appData.*` / `data_insert`) resolve to it without an explicit
-   * `appId` — so a resident channel agent persists to its App's datastore.
+   * `appId` â€” so a resident channel agent persists to its App's datastore.
    */
   appId?: string | null;
   /**
@@ -309,3 +300,6 @@ export interface AgentisToolCatalog {
   hash: string;
   generatedAt: string;
 }
+
+
+

@@ -1,4 +1,4 @@
-import { ConnectorRegistry } from './ConnectorRegistry.js';
+﻿import { ConnectorRegistry } from './ConnectorRegistry.js';
 import { httpRequestConnector, webhookSendConnector } from './connectors/http.js';
 import {
   agentMailConnector,
@@ -37,7 +37,7 @@ const manifestOnlyConnectors: ConnectorModule[] = builtinIntegrationManifests
 export const builtinConnectors: ConnectorModule[] = [...implementedConnectors, ...manifestOnlyConnectors];
 export const defaultConnectorRegistry = new ConnectorRegistry(builtinConnectors);
 
-// ── Honest catalog (masterplan 2.2) ──────────────────────────────────────────
+// â”€â”€ Honest catalog (masterplan 2.2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The platform advertises ~95 connectors but only the hand-written + templated
 // ones run out of the box; the rest fall back to a generic HTTP connector that
 // THROWS unless the caller supplies a URL. Surfacing that distinction stops the
@@ -47,10 +47,7 @@ export type ConnectorReadiness = 'runnable' | 'needs_setup';
 
 const IMPLEMENTED_SERVICES = new Set(implementedConnectors.map((connector) => connector.service));
 
-/**
- * Whether a connector runs out of the box (hand-written or per-service template)
- * or needs operator setup first (generic HTTP fallback — requires a URL/baseUrl).
- */
+
 export function connectorReadiness(service: string): ConnectorReadiness {
   if (IMPLEMENTED_SERVICES.has(service) || Boolean(SERVICE_TEMPLATES[service])) return 'runnable';
   return 'needs_setup';
@@ -78,3 +75,6 @@ export function connectorCatalog(): ConnectorCatalogEntry[] {
     }))
     .sort((a, b) => a.service.localeCompare(b.service));
 }
+
+
+

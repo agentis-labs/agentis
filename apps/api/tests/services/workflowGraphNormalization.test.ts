@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
-import { normalizeWorkflowGraph } from '../../src/services/workflowGraphNormalization.js';
+import { normalizeWorkflowGraph } from '../../src/services/workflow/workflowGraphNormalization.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

@@ -10,7 +10,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { firstFailedNodeId } from '../services/runStateFailures.js';
+import { firstFailedNodeId } from '../services/run/runStateFailures.js';
 
 type HistoryType = 'all' | 'runs' | 'activity' | 'audit';
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;

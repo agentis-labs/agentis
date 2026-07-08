@@ -10,7 +10,7 @@ import {
   hashValue,
   stopReasonMessage,
   type RoundObservation,
-} from '../../src/services/chatProgressMonitor.js';
+} from '../../src/services/chat/chatProgressMonitor.js';
 
 const PROGRESS: ProgressThresholdsLike = {
   maxIdenticalCalls: 3,

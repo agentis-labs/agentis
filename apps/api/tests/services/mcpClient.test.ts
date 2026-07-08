@@ -4,7 +4,7 @@
  * JSON + SSE response framing, tools/list, tools/call, and SSRF refusal.
  */
 import { describe, expect, it } from 'vitest';
-import { McpClient } from '../../src/services/mcpClient.js';
+import { McpClient } from '../../src/services/mcp/mcpClient.js';
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });

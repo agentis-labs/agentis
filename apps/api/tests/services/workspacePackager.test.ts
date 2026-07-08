@@ -12,7 +12,7 @@ import { randomUUID, generateKeyPairSync, createHash } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { AppStore, AppDatastore, AppSurfaceStore } from '@agentis/app';
-import { WorkspacePackager } from '../../src/services/workspacePackager.js';
+import { WorkspacePackager } from '../../src/services/workspace/workspacePackager.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 const SECRET_VALUE = 'cipher-AKIAEXAMPLE-do-not-travel';

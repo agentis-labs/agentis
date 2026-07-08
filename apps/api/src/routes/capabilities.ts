@@ -10,7 +10,7 @@ import { Hono } from 'hono';
 import { AgentisError } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { CapabilityRegistry } from '../services/capabilityRegistry.js';
+import type { CapabilityRegistry } from '../services/capability/capabilityRegistry.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 

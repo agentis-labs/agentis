@@ -12,9 +12,9 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { WorkflowGraph, WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
-import { deliverWorkflow, type DeliverCtx } from '../../src/services/workflowDeliveryOrchestrator.js';
+import { deliverWorkflow, type DeliverCtx } from '../../src/services/workflow/workflowDeliveryOrchestrator.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
-import type { RunVerdict } from '../../src/services/workflowVerdict.js';
+import type { RunVerdict } from '../../src/services/workflow/workflowVerdict.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

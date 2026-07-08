@@ -14,7 +14,7 @@ npm whoami
 ### 2) Publish 0.1.2
 
 ```powershell
-cd c:\Users\antar\OneDrive\Documentos\nexseed\agentis\packages\cli
+cd packages\cli
 npm publish --access public
 ```
 

@@ -31,7 +31,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { buildAppStores, type AppStores } from '@agentis/app';
-import { publishAgentCreation } from '../agentWorkProgress.js';
+import { publishAgentCreation } from '../agent/agentWorkProgress.js';
 import { generateSurfaceView, generateSurfacePatch } from '../surfaceGenerator.js';
 import { resolveSynthesisCompleter } from './build.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';

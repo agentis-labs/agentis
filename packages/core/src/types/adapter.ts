@@ -1,5 +1,5 @@
-/**
- * Adapter contract — V1-SPEC §10.
+﻿/**
+ * Adapter contract â€” V1-SPEC Â§10.
  *
  * Adapters are how Agentis dispatches NormalizedTask payloads to V1 harnesses
  * and how those harnesses stream
@@ -61,7 +61,7 @@ export interface ChatInvocationOptions {
   toolMode?: 'adapter_native' | 'caller_loop';
   /**
    * Per-call output-token ceiling. Overrides the adapter's configured default for
-   * this one invocation — used by the turn loop to retry a starved/truncated turn
+   * this one invocation â€” used by the turn loop to retry a starved/truncated turn
    * with more room. Adapters that don't support it simply ignore it.
    */
   maxTokens?: number;
@@ -220,13 +220,13 @@ export interface AdapterCapabilities {
   toolCalling: boolean;
   /**
    * How tool calls are transported from the runtime back into Agentis.
-   * - `native`         — streaming function-calling in one connection (HTTP adapters).
-   * - `marker_protocol`— CLI emits tool markers in text; the platform parses,
+   * - `native`         â€” streaming function-calling in one connection (HTTP adapters).
+   * - `marker_protocol`â€” CLI emits tool markers in text; the platform parses,
    *                      executes, and RE-SPAWNS the CLI per round (slow).
-   * - `mcp_native`     — the harness reaches Agentis tools directly over MCP and
+   * - `mcp_native`     â€” the harness reaches Agentis tools directly over MCP and
    *                      runs its OWN agentic loop in a single invocation. No
    *                      platform-driven re-spawn; the harness stays the brain.
-   * - `http_contract` / `session_event` / `none` — see the respective adapters.
+   * - `http_contract` / `session_event` / `none` â€” see the respective adapters.
    */
   toolForwarding: 'native' | 'marker_protocol' | 'mcp_native' | 'http_contract' | 'session_event' | 'none';
   /** Human-readable caveats shown in settings/diagnostics. */
@@ -328,7 +328,7 @@ export interface AntigravityAdapterConfig {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
-  /** Auto-approve all tool calls (`--yolo`). On by default — Agentis drives the
+  /** Auto-approve all tool calls (`--yolo`). On by default â€” Agentis drives the
    *  CLI headlessly, so there is never a human to answer an approval prompt. */
   yolo?: boolean;
 }
@@ -374,7 +374,7 @@ export interface AdapterHealthStatus {
   error?: string;
   /**
    * True when the probe could NOT reach a verdict in time (the binary spawned but
-   * did not respond within the deadline) — as opposed to a definitive failure
+   * did not respond within the deadline) â€” as opposed to a definitive failure
    * (spawn error, non-zero exit). Callers should treat this as "unknown", not
    * "down": a slow-to-probe runtime (e.g. a Python harness cold-starting under
    * load) is often fully able to serve a turn.
@@ -409,12 +409,7 @@ export interface NormalizedTask {
   capabilityTags: string[];
   timeoutMs: number;
   callbackUrl?: string;
-  /**
-   * Run-scoped cancellation signal. When the operator stops the run, the engine
-   * aborts this so the adapter's in-flight model call is cancelled instead of
-   * running to completion after Stop. Adapters fold it into their per-task
-   * controller; omitted = no external cancellation (timeout still applies).
-   */
+  
   signal?: AbortSignal;
   /**
    * Isolated working directory for THIS task, allocated by the engine for
@@ -427,9 +422,9 @@ export interface NormalizedTask {
   /**
    * Awareness manifest of the Agentis platform tools available in this
    * workspace, injected by AdapterManager.dispatchTask so an agent running a
-   * workflow node knows the platform surface exists (CHAT-10X-VISION §4.4.2).
+   * workflow node knows the platform surface exists (CHAT-10X-VISION Â§4.4.2).
    * Adapters format this for their LLM. Note: workflow-node dispatch is
-   * fire-and-forget — this is awareness only; interactive tool execution
+   * fire-and-forget â€” this is awareness only; interactive tool execution
    * happens on the chat() path, not here.
    */
   toolManifest?: ToolManifestEntry[];
@@ -527,3 +522,6 @@ export type NormalizedAgentEvent =
       timestamp: string;
     }
   | { eventType: 'agent.heartbeat'; agentId: string; connected: boolean; timestamp: string };
+
+
+

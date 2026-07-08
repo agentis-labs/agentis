@@ -1,6 +1,6 @@
-/**
+﻿/**
  * Specialist agent library + role-scoped tool manifests.
- * WORKFLOW-10X-MASTERPLAN Layer 2 (Â§2.1â€“2.2).
+ * WORKFLOW-10X-MASTERPLAN Layer 2 (Ã‚Â§2.1Ã¢â‚¬â€œ2.2).
  *
  * These are workspace-portable definitions: the engine resolves an
  * `agent_task.agentRole` to the workspace's actual agent carrying that role at
@@ -10,7 +10,7 @@
 
 /**
  * The 10 platform specialist roles ship as seed templates. They keep strong
- * literal typing so the role→tools / role→definition maps stay exhaustive.
+ * literal typing so the roleâ†’tools / roleâ†’definition maps stay exhaustive.
  */
 export type PlatformRole =
   | 'planner'
@@ -76,8 +76,8 @@ export function isSpecialistRole(role: string | null | undefined): boolean {
 /**
  * Capabilities the engine grants a role at dispatch time (the agentic tool-use loop).
  *
- * The Brain tools â€” `knowledge_search`, `memory_append`, `workflow_memory_read`,
- * `workflow_memory_write` â€” let an agent read from and write back to the
+ * The Brain tools Ã¢â‚¬â€ `knowledge_search`, `memory_append`, `workflow_memory_read`,
+ * `workflow_memory_write` Ã¢â‚¬â€ let an agent read from and write back to the
  * workspace Brain (knowledge bases, DB-backed memory atoms, and per-workflow
  * persistent state) during its own reasoning loop, not just via graph nodes.
  */
@@ -90,7 +90,7 @@ export type AgentTool =
   | 'run_code'
   | 'git_diff'
   | 'git_status'
-  // ── Browser/computer-use: drive headless Chromium during the reasoning loop ──
+  // â”€â”€ Browser/computer-use: drive headless Chromium during the reasoning loop â”€â”€
   | 'browser_screenshot'
   | 'browser_navigate'
   | 'browser_extract_text'
@@ -102,18 +102,18 @@ export type AgentTool =
   | 'workflow_memory_read'
   | 'workflow_memory_write'
   | 'call_workflow'
-  // ── AG-UI: author Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN §4) ──
+  // â”€â”€ AG-UI: author Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN Â§4) â”€â”€
   | 'ui_render'
   | 'ui_patch'
   | 'ui_action_schema'
-  // ── App Datastore: typed collections + records (§5) ──
+  // â”€â”€ App Datastore: typed collections + records (Â§5) â”€â”€
   | 'data_define_collection'
   | 'data_insert'
   | 'data_update'
   | 'data_upsert'
   | 'data_delete'
   | 'data_query'
-  /** Brain bridge (§5.4) — promote a datastore record into workspace memory. */
+  /** Brain bridge (Â§5.4) â€” promote a datastore record into workspace memory. */
   | 'data_promote_memory';
 
 export const ROLE_TOOLS: Partial<Record<PlatformRole, AgentTool[]>> = {};
@@ -154,7 +154,7 @@ export const DEFAULT_SPECIALIST_TOOLS: AgentTool[] = [
   'data_promote_memory',
 ];
 
-/** Role-scoped tool manifest, safe for the open role vocabulary (unknown → none). */
+/** Role-scoped tool manifest, safe for the open role vocabulary (unknown â†’ none). */
 export function roleTools(role: AgentRole): AgentTool[] {
   return (ROLE_TOOLS as Record<string, AgentTool[]>)[role] ?? [];
 }
@@ -177,7 +177,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   read_file: 'Read a file from the workspace volume. args: { path: string }',
   write_file: 'Create or overwrite a workspace file. args: { path: string, content: string }',
   search_code: 'Find text across workspace files. args: { query: string, dir?: string }',
-  run_code: 'Evaluate a sandboxed JS expression â€” no I/O, pure compute. args: { expression: string, input?: object }',
+  run_code: 'Evaluate a sandboxed JS expression Ã¢â‚¬â€ no I/O, pure compute. args: { expression: string, input?: object }',
   git_diff: 'Show the working-tree diff (git-backed workspaces only).',
   git_status: 'Show git status (git-backed workspaces only).',
   browser_screenshot: 'Open a real (headless) browser, render a URL or inline HTML, and capture a PNG screenshot. Default is a transient visual check, not a saved asset. Set save:true only when the user/task intentionally wants the image kept or delivered; saved captures return { artifactId, ref, url }. args: { url?: string, html?: string, fullPage?: boolean, viewport?: { width, height }, title?: string, save?: boolean }',
@@ -191,7 +191,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   workflow_memory_read: 'Read persistent state this workflow saved on a prior run (cursors, dedup keys, accumulated findings). args: { key?: string }',
   workflow_memory_write: 'Persist state for future runs of this workflow. args: { key: string, value: unknown }',
   call_workflow: 'Invoke another workflow in this workspace. args: { workflowId: string, inputs?: object }',
-  ui_render: 'Author the full UI of an Agentic App surface as a typed ViewNode tree. AGENT-NATIVE composites (prefer these — they make the surface a living agentic app, not a static dashboard): ActivityStream (a live feed of your work), DataBoard ({ bind, groupBy, titleField? } — a kanban over a collection grouped by a status field). Plus data/content nodes: Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge. Tables/Lists/Charts/Boards bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Buttons/Forms declare an action ({ action: "name", args }) registered with ui_action_schema. Lead operator-facing surfaces with an ActivityStream. Replaces the surface view. args: { surface: string, view: ViewNode }',
+  ui_render: 'Author the full UI of an Agentic App surface as a typed ViewNode tree. AGENT-NATIVE composites (prefer these â€” they make the surface a living agentic app, not a static dashboard): ActivityStream (a live feed of your work), DataBoard ({ bind, groupBy, titleField? } â€” a kanban over a collection grouped by a status field). Plus data/content nodes: Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge. Tables/Lists/Charts/Boards bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Buttons/Forms declare an action ({ action: "name", args }) registered with ui_action_schema. Lead operator-facing surfaces with an ActivityStream. Replaces the surface view. args: { surface: string, view: ViewNode }',
   ui_patch: 'Mutate part of an existing surface view without re-sending the whole tree. args: { surface: string, ops: Array<{ op: "set"|"insert"|"remove", path, value?|node? }> }',
   ui_action_schema: 'Declare the actions a surface\'s buttons/forms can invoke. Each action resolves to a workflow run, an agent tool, or a datastore op. args: { surface: string, actions: Array<{ name, kind: "workflow"|"tool"|"data", target, inputSchema? }> }',
   data_define_collection: 'Define (or update) a typed App Datastore collection. Fields: { key, type: "string"|"number"|"boolean"|"date"|"json", required?, indexed? }. args: { name: string, schema: { fields: [...] } }',
@@ -200,7 +200,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   data_upsert: 'Insert, or update the first record matching `match`. args: { collection: string, match: object, record: object }',
   data_delete: 'Delete a record by id. args: { collection: string, id: string }',
   data_query: 'Query records. Filter ops: eq/ne/gt/gte/lt/lte/contains/in, or a bare value for equality. args: { collection: string, filter?: object, sort?: [{field,dir}], limit?: number, cursor?: string }',
-  data_promote_memory: 'Promote a datastore record into the workspace Brain as a durable memory (one-way bridge — data stays the source of truth). Use for facts worth remembering across runs (a customer preference, a decision). args: { collection: string, id: string, title?: string }',
+  data_promote_memory: 'Promote a datastore record into the workspace Brain as a durable memory (one-way bridge â€” data stays the source of truth). Use for facts worth remembering across runs (a customer preference, a decision). args: { collection: string, id: string, title?: string }',
 };
 
 export interface SpecialistDefinition {
@@ -235,7 +235,7 @@ export function specialistForRole(
   throw new Error(`Unknown agent role: ${role}`);
 }
 
-/** Title-case a role slug for display, e.g. `frontend_architect` → `Frontend Architect`. */
+/** Title-case a role slug for display, e.g. `frontend_architect` â†’ `Frontend Architect`. */
 function humanizeRole(role: string): string {
   return role
     .replace(/[_-]+/g, ' ')
@@ -268,9 +268,12 @@ export function genericSpecialist(
     defaultModel: overrides.defaultModel ?? 'gpt-4o',
     // A generated specialist is still an AGENT: give it the universal toolbox when
     // its role carries no explicit manifest, so it can research, recall, compute,
-    // and persist — not just emit one block of text.
+    // and persist â€” not just emit one block of text.
     tools: overrides.tools ?? (roleTools(role).length > 0 ? roleTools(role) : DEFAULT_SPECIALIST_TOOLS),
-    avatarGlyph: overrides.avatarGlyph ?? '✦',
+    avatarGlyph: overrides.avatarGlyph ?? 'âœ¦',
     colorHex: overrides.colorHex ?? '#6366f1',
   };
 }
+
+
+

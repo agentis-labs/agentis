@@ -57,7 +57,7 @@ import {
 } from './cliChatRuntime.js';
 import { runtimeProgressActivity } from './runtimeProgress.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
-import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 20_000;
 const DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS = 30_000;

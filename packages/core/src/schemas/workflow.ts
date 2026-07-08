@@ -1,9 +1,9 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 import { listenerConfigSchema } from './listener.js';
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Node configs
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const outputConfigFields = {
   isOutput: z.boolean().optional(),
@@ -37,7 +37,7 @@ const triggerConfigSchema = z.object({
   listenerConfig: listenerConfigSchema.optional(),
 }).passthrough();
 
-// Roles are an OPEN vocabulary (packages/core/src/types/specialist.ts —
+// Roles are an OPEN vocabulary (packages/core/src/types/specialist.ts â€”
 // `AgentRole = PlatformRole | (string & {})`): any non-empty string is a legal
 // specialist role, resolved on-demand via the workspace specialist system
 // (POST /v1/specialists authors a brand-new specialist for an unknown role at
@@ -224,15 +224,15 @@ const browserConfigSchema = z.object({
   artifactName: z.string().optional(),
 });
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // n8n-inspired utility & data primitives (WORKFLOW-UPDATE). These kinds have
 // no dedicated inspector form on the canvas (they render through a generic
-// schema-driven form — see ContextInspector.tsx's GenericForm), so the shapes
+// schema-driven form â€” see ContextInspector.tsx's GenericForm), so the shapes
 // here double as the introspection source for that renderer: field name,
 // optionality, and (for enums) the option list all come straight from these
 // schemas. Field sets mirror the authoritative TS configs in
 // packages/core/src/types/workflow.ts one-for-one.
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const dataQueryConfigSchema = z.object({
   ...outputConfigFields,
@@ -389,7 +389,7 @@ const graphqlConfigSchema = z.object({
 }).passthrough();
 
 /**
- * Kind → schema map for the ~15 utility/data-primitive kinds that share the
+ * Kind â†’ schema map for the ~15 utility/data-primitive kinds that share the
  * canvas's generic schema-driven inspector form (no bespoke `XxxForm`
  * component). Exported so the web app can introspect field name/type/options
  * straight from the same zod object the API validates against, instead of a
@@ -415,7 +415,7 @@ export const genericFormNodeConfigSchemas = {
 
 // Permissive config: accepts any object with a `kind` string. Concrete kinds
 // (triggerConfigSchema, etc.) are validated by the engine when a node actually
-// runs — at edit-time we don't want to reject draft workflows that still have
+// runs â€” at edit-time we don't want to reject draft workflows that still have
 // incomplete or non-canonical config (e.g., a freshly dragged "approval" node
 // with no fields yet, or legacy `variables` nodes from older versions).
 const fallbackConfigSchema = z
@@ -459,7 +459,7 @@ export const workflowNodeConfigSchema = z.union([
 export const workflowNodeSchema = z.object({
   id: z.string().min(1),
   // Permissive at edit-time. Engine validates execution-time semantics. `type`
-  // and `title` are display/derived fields — the engine never requires them and
+  // and `title` are display/derived fields â€” the engine never requires them and
   // happily persists graphs without them, so the edit-time schema must accept
   // those too or autosave fails on graphs the engine just built. (A title is
   // backfilled from the node kind on persist; see normalizeWorkflowGraphTitles.)
@@ -505,8 +505,8 @@ export const workflowPhaseSchema = z.object({
   rollbackPlan: z.string().max(4000).optional(),
 });
 
-// Legacy "Studio" surface schemas removed — UI surfaces now live on the Agentic
-// App (app_surfaces + AG-UI ViewNode, AGENTIC-APPS-10X §4). `.passthrough()`
+// Legacy "Studio" surface schemas removed â€” UI surfaces now live on the Agentic
+// App (app_surfaces + AG-UI ViewNode, AGENTIC-APPS-10X Â§4). `.passthrough()`
 // keeps any stored graph JSON that still carries an old `surfaces` key valid.
 
 export const workflowGraphSchema = z.object({
@@ -518,9 +518,9 @@ export const workflowGraphSchema = z.object({
 }).passthrough();
 
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // API request bodies
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const createWorkflowSchema = z.object({
   workspaceId: z.string().uuid(),
@@ -567,3 +567,6 @@ export const workflowGraphPatchSchema = z.object({
   addEdges: z.array(workflowEdgeSchema).default([]),
   removeEdgeIds: z.array(z.string().min(1)).default([]),
 });
+
+
+

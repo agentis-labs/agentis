@@ -1,14 +1,14 @@
-/**
- * Memory Architecture types — Agentis Memory OS.
+﻿/**
+ * Memory Architecture types â€” Agentis Memory OS.
  *
  *
  * The Memory Architecture defines five layers:
  *
- *   1. Run Working Memory     — scratchpad + compact turn state for active runs
- *   2. Workspace Knowledge          — seeds + imported datasets (Workspace Knowledge)
- *   3. Episodic Memory        — durable lessons distilled from execution
- *   4. Evaluator + Baselines  — what "good" looks like
- *   5. Retrieval Memory       — semantic + lexical selection across the layers
+ *   1. Run Working Memory     â€” scratchpad + compact turn state for active runs
+ *   2. Workspace Knowledge          â€” seeds + imported datasets (Workspace Knowledge)
+ *   3. Episodic Memory        â€” durable lessons distilled from execution
+ *   4. Evaluator + Baselines  â€” what "good" looks like
+ *   5. Retrieval Memory       â€” semantic + lexical selection across the layers
  *
  * This file defines:
  *   - Layer 1 working-memory entry types (typed scratchpad shapes)
@@ -21,17 +21,17 @@
  * Layer 5 types live in `retrieval.ts` (InjectedMemoryContext, budget classes).
  *
  * Naming distinction with the Workspace Knowledge:
- *   - Wedge `MemoryEpisode`  — typed knowledge (fact|preference|pattern|rule|lesson)
- *   - Memory `RuntimeEpisode` — durable execution lesson (decision|failure|recovery|...)
+ *   - Wedge `MemoryEpisode`  â€” typed knowledge (fact|preference|pattern|rule|lesson)
+ *   - Memory `RuntimeEpisode` â€” durable execution lesson (decision|failure|recovery|...)
  *
  * These coexist because they answer different questions:
- *   - "What does the workspace know?"           → wedge MemoryEpisode (`workspace_memory`)
- *   - "What happened during execution?"    → RuntimeEpisode (`memory_episodes`)
+ *   - "What does the workspace know?"           â†’ wedge MemoryEpisode (`workspace_memory`)
+ *   - "What happened during execution?"    â†’ RuntimeEpisode (`memory_episodes`)
  */
 
-// ────────────────────────────────────────────────────────────
-// Layer 1 — Run Working Memory (typed scratchpad entries)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Layer 1 â€” Run Working Memory (typed scratchpad entries)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Working-memory entry kind. Replaces the old "untyped blob" scratchpad.
@@ -75,18 +75,18 @@ export interface WorkingMemoryEntry<TPayload = unknown> {
   key: string;
   /**
    * The structured payload. Shape depends on `kind`:
-   *   working_plan       → { steps: Array<{ title, status, owner? }> }
-   *   working_summary    → { summary: string, tokenCount: number }
-   *   pending_questions  → { questions: string[] }
-   *   tool_result_cache  → { toolId, args, result, atIso }
-   *   artifact_draft     → { mime, content, version }
-   *   evaluation_state   → { evaluatorKey, lastVerdict, lastScore? }
-   *   turn_history       → { turns: Array<{ summary, costCents, atIso }> }
-   *   blocker            → { reason: string, since: string }
-   *   note               → { text: string }
+   *   working_plan       â†’ { steps: Array<{ title, status, owner? }> }
+   *   working_summary    â†’ { summary: string, tokenCount: number }
+   *   pending_questions  â†’ { questions: string[] }
+   *   tool_result_cache  â†’ { toolId, args, result, atIso }
+   *   artifact_draft     â†’ { mime, content, version }
+   *   evaluation_state   â†’ { evaluatorKey, lastVerdict, lastScore? }
+   *   turn_history       â†’ { turns: Array<{ summary, costCents, atIso }> }
+   *   blocker            â†’ { reason: string, since: string }
+   *   note               â†’ { text: string }
    */
   payload: TPayload;
-  /** Approximate token cost — used by the compactor. */
+  /** Approximate token cost â€” used by the compactor. */
   tokenEstimate?: number;
   createdAt: string;
   updatedAt: string;
@@ -110,9 +110,9 @@ export interface WorkingMemorySummary {
   generatedAt: string;
 }
 
-// ────────────────────────────────────────────────────────────
-// Layer 3 — Runtime Episodic Memory
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Layer 3 â€” Runtime Episodic Memory
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Type of a runtime episode. These are execution-derived; they answer the
@@ -130,11 +130,11 @@ export type RuntimeEpisodeType =
   | 'evaluator_outcome'  // an evaluator verdict that's worth remembering
   | 'incident'           // a runtime anomaly with explanation
   | 'artifact_outcome'   // validation result of a produced artifact
-  | 'distilled_lesson'   // operator- or agent-distilled lesson
+  | 'distilled_lesson'
   | 'observation';       // staged, unconsolidated episodic trace (decays unless graduated)
 
 /**
- * Where the episode was created. Trust defaults vary by source (§11.2).
+ * Where the episode was created. Trust defaults vary by source (Â§11.2).
  */
 export type RuntimeEpisodeSource =
   | 'seed'             // shipped with the package
@@ -143,10 +143,10 @@ export type RuntimeEpisodeSource =
   | 'operator_write'   // a human wrote it (high trust)
   | 'evaluator_write'  // an evaluator wrote it (high confidence)
   | 'system_write'     // the runtime wrote it
-  | 'harness_ingest';  // distilled from a connected harness's own memory (CLAUDE.md, AGENTS.md, …) when an agent transitions into Agentis
+  | 'harness_ingest';  // distilled from a connected harness's own memory (CLAUDE.md, AGENTS.md, â€¦) when an agent transitions into Agentis
 
 /**
- * Outcome polarity. Used by the retrieval ranker (§9.6) and the dashboard.
+ * Outcome polarity. Used by the retrieval ranker (Â§9.6) and the dashboard.
  */
 export type RuntimeEpisodeOutcome = 'good' | 'bad' | 'mixed';
 
@@ -161,11 +161,11 @@ export interface RuntimeEpisode {
   workspaceId: string;
   /** Intelligence scope - null for workspace-global episodes. */
   scopeId?: string | null;
-  /** Workflow scope — null when not workflow-specific. */
+  /** Workflow scope â€” null when not workflow-specific. */
   workflowId?: string | null;
-  /** Origin run — null for operator-written or seed episodes. */
+  
   runId?: string | null;
-  /** Origin agent — null when no specific agent owned the lesson. */
+  /** Origin agent â€” null when no specific agent owned the lesson. */
   agentId?: string | null;
 
   type: RuntimeEpisodeType;
@@ -176,11 +176,11 @@ export interface RuntimeEpisode {
 
   source: RuntimeEpisodeSource;
 
-  /** 0..1 — how likely this is factually correct. */
+  /** 0..1 â€” how likely this is factually correct. */
   confidence: number;
-  /** 0..1 — how consequential. */
+  /** 0..1 â€” how consequential. */
   importance: number;
-  /** 0..1 — how much the runtime should rely on this in future execution. */
+  /** 0..1 â€” how much the runtime should rely on this in future execution. */
   trust: number;
 
   tags: string[];
@@ -189,7 +189,7 @@ export interface RuntimeEpisode {
 
   outcomeStatus?: RuntimeEpisodeOutcome | null;
 
-  /** Reserved for vector retrieval — null when only lexical is active. */
+  /** Reserved for vector retrieval â€” null when only lexical is active. */
   embedding?: number[] | null;
 
   metadata: Record<string, unknown>;
@@ -226,12 +226,12 @@ export interface CreateRuntimeEpisodeInput {
   metadata?: Record<string, unknown>;
 }
 
-// ────────────────────────────────────────────────────────────
-// Promotion pipeline (§10) — audit trail
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Promotion pipeline (Â§10) â€” audit trail
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
- * Reasons an episode was promoted (§10.4 promotion rules). Multiple may
+ * Reasons an episode was promoted (Â§10.4 promotion rules). Multiple may
  * apply; the strongest is stored as the primary reason on the event row.
  */
 export type PromotionReason =
@@ -254,12 +254,7 @@ export type PromotionCandidateSource =
   | 'operator_distillation'
   | 'agent_proposal';
 
-/**
- * One audit-trail event for the memory promotion pipeline.
- *
- * Stored in `memory_promotion_events`. Lets operators see exactly why a
- * given episode landed in durable memory (and what was rejected).
- */
+
 export interface MemoryPromotionEvent {
   id: string;
   workspaceId: string;
@@ -289,7 +284,7 @@ export interface PromotionCandidate {
   details?: string | null;
   type: RuntimeEpisodeType;
   outcomeStatus?: RuntimeEpisodeOutcome | null;
-  /** Pre-computed signals — the scorer uses these. */
+  /** Pre-computed signals â€” the scorer uses these. */
   signals: {
     /** Did a human approve? */
     humanApproved?: boolean;
@@ -307,9 +302,9 @@ export interface PromotionCandidate {
   metadata?: Record<string, unknown>;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Memory seeds (Layer 1+3 build-time inputs from a package)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Seed for a runtime episode shipped with a package.
@@ -328,3 +323,6 @@ export interface RuntimeEpisodeSeed {
   tags?: string[];
   entities?: string[];
 }
+
+
+

@@ -1,4 +1,4 @@
-export * from './activityLabel.js';
+﻿export * from './activityLabel.js';
 export * from './architectureCanvas.js';
 export * from './constants.js';
 export * from './errors.js';
@@ -8,7 +8,10 @@ export * from './genuiAudit.js';
 export * from './graphLayout.js';
 export * from './graphPhases.js';
 export * from './graphCanonical.js';
-export * from './halAffordances.js';
+export * from './ralAffordances.js';
 export * from './logger.js';
 export * from './types/index.js';
 export * as schemas from './schemas/index.js';
+
+
+

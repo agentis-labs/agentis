@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Header button to toggle the persistent ChatPanel.
  *
  * Shows unread badge + pending approval ring + typing shimmer
@@ -25,7 +25,7 @@ export function ChatPanelHeaderButton() {
         busy ? 'border-accent/60 text-accent' : 'border-line',
         open && 'bg-surface-3 text-text-primary',
       )}
-      title={busy ? `${activeTask!.agentName} is working…` : 'Chat (⌘/)'}
+      title={busy ? `${activeTask!.agentName} is workingâ€¦` : 'Chat (âŒ˜/)'}
     >
       {busy && (
         <span className="absolute inset-0 rounded-btn ring-1 ring-accent/50 motion-safe:animate-ping" aria-hidden />
@@ -41,3 +41,6 @@ export function ChatPanelHeaderButton() {
     </button>
   );
 }
+
+
+

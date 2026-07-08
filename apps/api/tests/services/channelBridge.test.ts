@@ -12,8 +12,8 @@ import { schema } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
 import { AgentisError, REALTIME_EVENTS } from '@agentis/core';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ChannelBridge } from '../../src/services/channelBridge.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ChannelBridge } from '../../src/services/conversation/channelBridge.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
 
 class StubTelegramAdapter implements ChannelAdapter {

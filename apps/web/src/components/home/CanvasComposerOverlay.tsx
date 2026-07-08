@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+﻿import { useMemo, useRef, useState } from 'react';
 import { ChevronDown, Send } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
@@ -179,3 +179,6 @@ export function CanvasComposerOverlay({
     </div>
   );
 }
+
+
+

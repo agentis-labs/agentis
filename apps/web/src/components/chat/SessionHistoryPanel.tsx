@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react';
+﻿import { useEffect, useMemo, useState, useRef } from 'react';
 import { ChevronLeft, Clock3, Hash, Megaphone, MessageCircle, Search, Pencil, Trash2, Archive, Check, X, ChevronDown, ChevronUp, Loader2, MoreVertical, ExternalLink } from 'lucide-react';
 import clsx from 'clsx';
 import * as Tabs from '@radix-ui/react-tabs';
@@ -856,3 +856,6 @@ function channelLabel(kind: string): string {
   if (normalized === 'discord') return 'Discord';
   return normalized ? `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}` : 'Channel';
 }
+
+
+

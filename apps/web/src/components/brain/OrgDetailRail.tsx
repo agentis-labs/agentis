@@ -1,11 +1,11 @@
-/**
- * Organizational detail rail — the deep-reading surface for the Workspace
- * Brain Map's organizational overlay (RFC §14.4 detail-rail modes).
+﻿/**
+ * Organizational detail rail â€” the deep-reading surface for the Workspace
+ * Brain Map's organizational overlay (RFC Â§14.4 detail-rail modes).
  *
  * Renders claim / source / entity inspectors: confidence components, grounded
  * citations with native links, dispute state, approve/reject governance, and
- * the §14.5 bridge — "Discuss in chat" hands the node to the orchestrator
- * (`/chat?draft=…`) instead of duplicating a second ask surface in the map.
+ * the Â§14.5 bridge â€” "Discuss in chat" hands the node to the orchestrator
+ * (`/chat?draft=â€¦`) instead of duplicating a second ask surface in the map.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -72,7 +72,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
   }, [groundingKind, rawId]);
 
   const discussInChat = useCallback(() => {
-    const summary = node.description ? ` — ${node.description}` : '';
+    const summary = node.description ? ` â€” ${node.description}` : '';
     const draft = groundingKind === 'claim'
       ? `About the organizational claim "${node.label}"${summary}: explain what supports it, what contradicts it, and whether it is still current.`
       : groundingKind === 'source'
@@ -119,7 +119,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
         {groundingKind === 'claim' && (
           <>
             {!detail && !error && (
-              <p className="mt-4 inline-flex items-center gap-2 text-text-muted"><Loader2 size={13} className="animate-spin" /> Loading claim…</p>
+              <p className="mt-4 inline-flex items-center gap-2 text-text-muted"><Loader2 size={13} className="animate-spin" /> Loading claimâ€¦</p>
             )}
             {detail && (
               <>
@@ -165,7 +165,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
                         )}
                       </div>
                       <p className="mt-0.5 text-[10px] text-text-muted">
-                        {row.role}{row.citation ? ` · ${row.citation.objectType} · ${row.citation.live ? 'live' : 'historical'}` : ''}
+                        {row.role}{row.citation ? ` Â· ${row.citation.objectType} Â· ${row.citation.live ? 'live' : 'historical'}` : ''}
                       </p>
                     </div>
                   ))}
@@ -182,7 +182,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
                   </button>
                 </div>
                 {detail.claim.status === 'disputed' && (
-                  <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-amber-500"><Scale size={11} /> Conflicting claims exist — resolve in Insights → Disputes.</p>
+                  <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-amber-500"><Scale size={11} /> Conflicting claims exist â€” resolve in Insights â†’ Disputes.</p>
                 )}
               </>
             )}
@@ -216,3 +216,6 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
     </aside>
   );
 }
+
+
+

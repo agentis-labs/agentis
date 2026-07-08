@@ -193,7 +193,6 @@ export class BrowserPool {
     }
   }
 
-  // ── internals ──────────────────────────────────────────────────────────
 
   async #withPage<T>(
     opts: { headless?: boolean; signal?: AbortSignal },

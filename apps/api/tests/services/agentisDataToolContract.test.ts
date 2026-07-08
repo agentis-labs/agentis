@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { dataQuerySchema, type AgentisToolContext } from '@agentis/core';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerAppDataTools } from '../../src/services/agentisToolHandlers/appData.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import { createInProcessEventBus } from '../../src/event-bus.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';

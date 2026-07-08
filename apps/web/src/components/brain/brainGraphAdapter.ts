@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   BrainEdge,
   BrainEdgeKind,
   BrainGraph,
@@ -14,7 +14,7 @@ import type {
  * BrainNode / BrainEdge shape consumed by the canvas renderer.
  *
  * Note: layout is intentionally NOT computed here. The canvas runs a live
- * d3-force simulation (see BrainStage.tsx) — baking a one-off layout would
+ * d3-force simulation (see BrainStage.tsx) â€” baking a one-off layout would
  * just be wasted work. Each node only gets a cheap deterministic *seed*
  * position so the simulation has a sensible starting point.
  */
@@ -61,7 +61,7 @@ export function graphNodeToBrainNode(
       reinforceCount: node.reinforceCount,
       isDisputed: node.isDisputed ?? false,
       workspaceGlobal: !node.scopeId,
-      // §scope-provenance — which App/Agent/Workflow owns this atom (for labels).
+      // Â§scope-provenance â€” which App/Agent/Workflow owns this atom (for labels).
       scopeKind: node.scopeKind ?? null,
       scopeLabel: node.scopeLabel ?? null,
       createdAt: node.createdAt,
@@ -114,7 +114,7 @@ function layerForAtom(atomKind: BrainGraphNode['atomKind']): BrainLayer {
     case 'grounding_source':
     case 'grounding_entity': return 'knowledge';
     case 'grounding_claim': return 'judgment';
-    // NOT 'core' — owner hubs must float in the force sim like every other node
+    // NOT 'core' â€” owner hubs must float in the force sim like every other node
     // (only the single Workspace-brain core is pinned). Their many `owned_by`
     // links naturally pull them into a hub amid the atoms they own.
     case 'scope_owner': return 'knowledge';
@@ -164,3 +164,6 @@ function hashUnit(input: string): number {
   }
   return (hash >>> 0) / 4294967295;
 }
+
+
+

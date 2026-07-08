@@ -1,4 +1,4 @@
-export { ConnectorRegistry, missingContractFields } from './ConnectorRegistry.js';
+﻿export { ConnectorRegistry, missingContractFields } from './ConnectorRegistry.js';
 export type {
   ConnectorExecuteOptions,
   ConnectorModule,
@@ -14,3 +14,6 @@ export { defaultConnectorRegistry, builtinConnectors, connectorReadiness, connec
 export { executeManifestOperation, manifestHttpConnector } from './connectors/manifestHttp.js';
 export { normalizeEmailContent } from './connectors/emailContent.js';
 export { buildIntegrationDeliveryReceipt } from './deliveryReceipt.js';
+
+
+

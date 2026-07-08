@@ -1,5 +1,5 @@
-/**
- * Agentic Apps client (AGENTIC-APPS-10X §3/§4/§5). Thin typed wrappers over the
+﻿/**
+ * Agentic Apps client (AGENTIC-APPS-10X Â§3/Â§4/Â§5). Thin typed wrappers over the
  * `/v1/apps` routes used by the Apps pages and the AppRuntime renderer.
  */
 import type {
@@ -28,7 +28,7 @@ export interface GeneratedSurface {
   source: 'model' | 'fallback';
 }
 
-/** One seat in an App's cast (the Team strip — Phase R birth-staff). */
+/** One seat in an App's cast (the Team strip â€” Phase R birth-staff). */
 export interface AppTeamMember {
   agentId: string;
   memberRole: 'operator' | 'worker' | string;
@@ -45,16 +45,16 @@ export interface AppTeam {
   members: AppTeamMember[];
 }
 
-/** A live App conversation (Phase 1 — the real channel thread, not a datastore row). */
+/** A live App conversation (Phase 1 â€” the real channel thread, not a datastore row). */
 export interface AppConversation {
   id: string;
   title: string;
   channel: string | null;
   lastMessageAt: string | null;
   unread: number;
-  /** 'human' when an operator has taken over the thread (Phase 2). */
+  
   handoffState: 'human' | null;
-  /** True when the resident agent has flagged this thread for the operator (Phase 2). */
+  
   needsAttention?: boolean;
   /** Why a human is needed ("wants a discount I can't approve"). */
   needsAttentionReason?: string | null;
@@ -81,7 +81,7 @@ export interface LearnedLesson {
 }
 
 /** An ability that graduated out of the App agent's accumulated lessons. */
-/** "What this agent learned" — recent graded lessons. */
+/** "What this agent learned" â€” recent graded lessons. */
 export interface AppLearnings {
   appId: string;
   ownerAgentId: string | null;
@@ -138,7 +138,6 @@ export const appsApi = {
     api<Wrapped<AppSurface>>(`/v1/apps/${id}/surfaces`, { method: 'PUT', body: JSON.stringify(body) }).then((r) => r.data),
   generateSurface: (id: string, body: { prompt: string; surface?: string }) =>
     api<Wrapped<GeneratedSurface>>(`/v1/apps/${id}/surfaces/generate`, { method: 'POST', body: JSON.stringify(body) }).then((r) => r.data),
-  // Phase M3 — operator pin/dismiss of a performed AgentRegion.
   performRegion: (id: string, surface: string, body: { region: string; pin?: boolean; clear?: boolean; reason?: string }) =>
     api<Wrapped<AppSurface>>(`/v1/apps/${id}/surfaces/${encodeURIComponent(surface)}/perform-region`, {
       method: 'POST', body: JSON.stringify(body),
@@ -157,14 +156,13 @@ export const appsApi = {
     api<Wrapped<{ conversationId: string; delivered: boolean }>>(`/v1/apps/${id}/conversations/${conversationId}/send`, {
       method: 'POST', body: JSON.stringify({ body }),
     }).then((r) => r.data),
-  // Needs-you flag (Phase 2) — the operator acknowledges (active:false) or re-raises a flag.
   flagNeedsAttention: (id: string, conversationId: string, active: boolean, reason?: string | null) =>
     api<Wrapped<{ conversationId: string; needsAttention: boolean; needsAttentionReason: string | null }>>(
       `/v1/apps/${id}/conversations/${conversationId}/needs-attention`,
       { method: 'POST', body: JSON.stringify({ active, reason: reason ?? null }) },
     ).then((r) => r.data),
 
-  // Live co-presence (G9) — heartbeat while viewing; leave on unmount. Ephemeral.
+  // Live co-presence (G9) â€” heartbeat while viewing; leave on unmount. Ephemeral.
   presence: (id: string, conversationId?: string | null) =>
     api<Wrapped<{ viewers: AppPresenceViewer[] }>>(`/v1/apps/${id}/presence`, {
       method: 'POST', body: JSON.stringify({ conversationId: conversationId ?? null }),
@@ -215,7 +213,7 @@ export const appsApi = {
       `/v1/apps/${id}/workflows/run-all`,
       { method: 'POST' },
     ).then((r) => r.data.results),
-  /** Update an App→workflow binding (purpose/order/enabled/dependsOn). */
+  /** Update an Appâ†’workflow binding (purpose/order/enabled/dependsOn). */
   updateWorkflowBinding: (id: string, workflowId: string, binding: UpdateAppWorkflowBindingInput) =>
     api<Wrapped<AppWorkflowBinding>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/binding`, {
       method: 'PATCH',
@@ -258,7 +256,7 @@ export const appsApi = {
       method: 'DELETE',
     }).then((r) => r.data),
 
-  // Public, unauthed share (AGENTIC-APPS-10X §4.7)
+  // Public, unauthed share (AGENTIC-APPS-10X Â§4.7)
   publicSurface: (token: string) =>
     api<Wrapped<{ app: { name: string; icon: string | null }; surface: AppSurface }>>(`/v1/apps/public/surfaces/${encodeURIComponent(token)}`).then((r) => r.data),
   publicQuery: (token: string, collection: string, q: Record<string, unknown>) =>
@@ -267,3 +265,6 @@ export const appsApi = {
       { method: 'POST', body: JSON.stringify({ collection, ...q }) },
     ),
 };
+
+
+

@@ -1,5 +1,5 @@
-/**
- * Migration runner — dialect-aware.
+﻿/**
+ * Migration runner â€” dialect-aware.
  *
  * Tracks applied migrations in a `schema_migrations` table:
  *
@@ -244,7 +244,7 @@ export function runSqliteMigrations(sqlite: Database.Database): RunSqliteMigrati
   const already = listAppliedVersions(sqlite);
   const applied: Migration[] = [];
 
-  // Defensive ordering — the runtime registry is already sorted by version,
+  // Defensive ordering â€” the runtime registry is already sorted by version,
   // but we sort again so a future hand-edit can't introduce silent mis-order.
   const ordered = [...SQLITE_MIGRATIONS].sort((a, b) => a.version - b.version);
 
@@ -274,3 +274,6 @@ export function getSqliteMigrationStatus(sqlite: Database.Database): MigrationSt
   const pending = SQLITE_MIGRATIONS.filter((m) => !appliedSet.has(m.version));
   return { applied: rows, pending };
 }
+
+
+

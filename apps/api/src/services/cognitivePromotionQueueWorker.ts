@@ -29,7 +29,7 @@ interface AgentAbilityReviewer { review(input: AbilityReviewInput): Promise<unkn
 import type { PeerProfileService } from './peerProfileService.js';
 import type { ReflectionService } from './reflectionService.js';
 import type { FeynmanReflectionService, FeynmanReflectionPayload } from './feynmanReflection.js';
-import type { MemoryReflectionService, MemoryReflectionPayload } from './memoryReflectionService.js';
+import type { MemoryReflectionService, MemoryReflectionPayload } from './memory/memoryReflectionService.js';
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_ATTEMPTS = 5;

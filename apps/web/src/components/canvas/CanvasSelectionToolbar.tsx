@@ -1,4 +1,4 @@
-import type { Node } from '@xyflow/react';
+﻿import type { Node } from '@xyflow/react';
 import { ViewportPortal } from '@xyflow/react';
 import type { WorkflowPhase } from '@agentis/core';
 import type React from 'react';
@@ -88,3 +88,6 @@ export function CanvasSelectionToolbar({
 }
 
 const buttonClass = 'inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[10px] font-medium text-text-secondary hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-35';
+
+
+

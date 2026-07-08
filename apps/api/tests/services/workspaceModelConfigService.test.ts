@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { WorkspaceModelConfigService } from '../../src/services/workspaceModelConfigService.js';
+import { WorkspaceModelConfigService } from '../../src/services/workspace/workspaceModelConfigService.js';
 
 describe('WorkspaceModelConfigService', () => {
   let ctx: TestContext;

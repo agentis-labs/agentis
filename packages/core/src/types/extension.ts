@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Extension manifest contract.
  *
  * Extensions are deterministic, sandboxed capability units. They are not agent
@@ -14,7 +14,7 @@ export type ExtensionPermission =
   | 'workspace.write'
   | 'filesystem'
   | 'spawn'
-  // Listener / cross-run capabilities (EXTENSIONS-AND-LISTENER-10X §2.2).
+  // Listener / cross-run capabilities (EXTENSIONS-AND-LISTENER-10X Â§2.2).
   // Grant-only: the UI surfaces these explicitly and they are never
   // auto-granted from the registry.
   | 'listener'        // extension operation may be used as a Listener source
@@ -31,10 +31,10 @@ export interface ExtensionOperation {
   /**
    * Marks this operation as a valid Listener source. When true, the operation
    * receives `ctx.emit()` / `ctx.cursor` and may run continuously as the
-   * source of a persistent_listener trigger (EXTENSIONS-AND-LISTENER-10X §1.8).
+   * source of a persistent_listener trigger (EXTENSIONS-AND-LISTENER-10X Â§1.8).
    */
   isListenerSource?: boolean;
-  /** Operator-facing copy + capability flags shown to workflow builders. */
+  
   listenerConfig?: {
     emitsEvents?: boolean;
     cursorSupported?: boolean;
@@ -120,3 +120,6 @@ export interface ExtensionExecutionFailure {
 }
 
 export type ExtensionExecutionOutcome = ExtensionExecutionResult | ExtensionExecutionFailure;
+
+
+

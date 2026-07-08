@@ -12,7 +12,7 @@ import { AgentisError } from '@agentis/core';
 import type { ExtensionCredentialKey, ExtensionManifest, ExtensionOperation, ExtensionPermission } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { WorkspaceVolumeService } from './workspaceVolume.js';
+import type { WorkspaceVolumeService } from './workspace/workspaceVolume.js';
 import { validateExtensionManifest } from './extensionRuntime.js';
 import { validateExtensionSource } from '../extensions/validateSource.js';
 

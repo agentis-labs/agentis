@@ -4,8 +4,8 @@
  * renders into a synthesis-prompt block for the next build to design around.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MemoryStore } from '../../src/services/memoryStore.js';
-import { recordWorkflowLesson, recallWorkflowLessons, renderPlaybookLessons } from '../../src/services/workflowPlaybook.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
+import { recordWorkflowLesson, recallWorkflowLessons, renderPlaybookLessons } from '../../src/services/workflow/workflowPlaybook.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

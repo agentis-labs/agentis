@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   BookHeart, FileText, LockKeyhole, Network, NotebookPen, Plus, Search, Trash2, Save,
   Folder, FolderOpen, ChevronDown, ChevronRight, X, Pin, PinOff, Share2, Bold, Italic,
@@ -272,7 +272,6 @@ export function PersonalBrainPanel() {
       await load();
       if (created?.note?.id) setSelectedNoteId(created.note.id);
     } catch {
-      // Best-effort from a preview click; the editor stays put on failure.
     }
   }, [load]);
 
@@ -876,7 +875,7 @@ export function PersonalBrainPanel() {
           />
         ) : (
           <div className="h-full px-6 py-5 overflow-hidden flex flex-col gap-4">
-            {/* Drop Zone — digital brain upload */}
+            {/* Drop Zone â€” digital brain upload */}
             <WorkspaceDocDropZone
               bases={personalBase ? [personalBase] : []}
               selectedBaseId={personalBase?.id ?? null}
@@ -886,7 +885,7 @@ export function PersonalBrainPanel() {
               defaultBaseName="Personal Brain Files"
               defaultBaseDescription="Private files stored in your Personal Brain."
               title="Your digital brain"
-              description="PDF, Markdown, TXT, DOCX, CSV — private to you."
+              description="PDF, Markdown, TXT, DOCX, CSV â€” private to you."
               accept=".pdf,.docx,.md,.markdown,.txt,.csv,.json,.xlsx,.xls,text/*,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               compact
               showDescribeImages={false}
@@ -967,7 +966,7 @@ export function PersonalBrainPanel() {
                     folderTree.subfolders.map(sub => renderFolderNode(sub, 0))
                   )}
 
-                  {/* Uploaded Files — integrated as a collapsible folder node in the tree */}
+                  {/* Uploaded Files â€” integrated as a collapsible folder node in the tree */}
                   {personalFiles.length > 0 && (
                     <div className="mt-1">
                       <button
@@ -1020,7 +1019,7 @@ export function PersonalBrainPanel() {
                 </div>
               </aside>
               
-              {/* 2. Center Pane — File detail OR Note editor */}
+              {/* 2. Center Pane â€” File detail OR Note editor */}
               <section className="flex-1 flex flex-col rounded-card border border-line/20 bg-surface overflow-hidden">
                 {selectedFileId ? (
                   (() => {
@@ -1038,7 +1037,7 @@ export function PersonalBrainPanel() {
                             </div>
                             <div>
                               <p className="text-[13px] font-semibold text-text-primary leading-tight truncate max-w-[360px]">{doc.name}</p>
-                              <p className="text-[11px] text-text-muted mt-0.5">{mimeLabel} • {doc.status}</p>
+                              <p className="text-[11px] text-text-muted mt-0.5">{mimeLabel} â€¢ {doc.status}</p>
                             </div>
                           </div>
                           <button
@@ -1356,7 +1355,7 @@ export function PersonalBrainPanel() {
                             onMouseDown={(e) => e.preventDefault()}
                             onClick={() => insertFormatting('[[', ']]')}
                             className="p-1.5 rounded hover:bg-surface-3 text-text-muted hover:text-text-primary transition-colors"
-                            title="Link to another note ([[…]])"
+                            title="Link to another note ([[â€¦]])"
                           >
                             <Link2 size={13} />
                           </button>
@@ -1396,7 +1395,7 @@ export function PersonalBrainPanel() {
                             }}
                             onKeyDown={handleKeyDown}
                             onBlur={() => setTimeout(() => setWikiQuery(null), 200)}
-                            placeholder="Write in Markdown. Link related notes with [[Note title]] — type [[ for suggestions."
+                            placeholder="Write in Markdown. Link related notes with [[Note title]] â€” type [[ for suggestions."
                             className={`${viewMode === 'split' ? 'w-1/2 border-r border-line' : 'w-full'} flex-none resize-none bg-transparent p-6 text-[13.5px] leading-relaxed text-text-secondary outline-none placeholder:text-text-muted font-sans selection:bg-accent-soft selection:text-text-primary focus:outline-none`}
                           />
                         )}
@@ -1438,7 +1437,7 @@ export function PersonalBrainPanel() {
                                   onClick={() => insertWikilink(wikiQuery.trim())}
                                   className="block w-full truncate border-t border-line px-3 py-1.5 text-left text-[12px] text-text-muted hover:bg-surface-3 hover:text-text-primary"
                                 >
-                                  Link as new: “{wikiQuery.trim()}”
+                                  Link as new: â€œ{wikiQuery.trim()}â€
                                 </button>
                               )}
                             </div>
@@ -1446,7 +1445,7 @@ export function PersonalBrainPanel() {
                         })()}
                       </div>
 
-                      {/* Backlinks — notes that reference this one */}
+                      {/* Backlinks â€” notes that reference this one */}
                       {selectedNoteId !== 'new' && editTitle.trim() && (() => {
                         const backlinks = findBacklinks(notes, editTitle, selectedNoteId);
                         if (backlinks.length === 0) return null;
@@ -1475,7 +1474,7 @@ export function PersonalBrainPanel() {
                     {/* Editor Footer */}
                     <div className="flex items-center justify-between px-6 py-3 bg-surface-2/40 text-[11px] text-text-muted shrink-0">
                       <span>
-                        {editContent.trim() ? editContent.trim().split(/\s+/).length : 0} words • {editContent.length} characters
+                        {editContent.trim() ? editContent.trim().split(/\s+/).length : 0} words â€¢ {editContent.length} characters
                       </span>
                       <div className="flex items-center gap-2">
                         {selectedNoteId !== 'new' && (
@@ -1651,3 +1650,6 @@ function formatDate(iso: string): string {
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
+
+
+

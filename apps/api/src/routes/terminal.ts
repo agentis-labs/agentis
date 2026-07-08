@@ -17,7 +17,7 @@ import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { ConversationStore } from '../services/conversationStore.js';
+import type { ConversationStore } from '../services/conversation/conversationStore.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 

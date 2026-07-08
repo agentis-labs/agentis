@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+﻿import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, Check, Loader2, Upload, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -74,7 +74,6 @@ interface AgentCreateWizardProps {
   intro?: string;
 }
 
-// Auto-pick order for zero-config runtime selection (most capable / most common first).
 const ADAPTER_PRIORITY: AdapterType[] = ['claude_code', 'codex', 'cursor', 'antigravity', 'hermes_agent', 'openclaw'];
 
 const EMPTY_DETECTIONS: HarnessDetectionResult[] = [];
@@ -113,7 +112,7 @@ const ROLE_OPTIONS: Array<{
   {
     value: 'worker',
     title: 'Specialist',
-    subtitle: 'An expert role. Pick a specialty (or define one) — it executes tasks in workflows or for a manager.',
+    subtitle: 'An expert role. Pick a specialty (or define one) â€” it executes tasks in workflows or for a manager.',
     icon: WorkerGlyph,
   },
 ];
@@ -229,7 +228,6 @@ export function AgentCreateWizard({
   const [agents, setAgents] = useState<ExistingAgent[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
   // First-agent on-ramp: when the workspace is empty, hide the org-chart vocabulary
-  // and just commission "your agent" (the orchestrator). Operator can opt into the
   // full role/hierarchy controls with "Set up a team structure".
   const [showHierarchy, setShowHierarchy] = useState(false);
   const [detections, setDetections] = useState<HarnessDetectionResult[]>(EMPTY_DETECTIONS);
@@ -237,7 +235,6 @@ export function AgentCreateWizard({
   const [playbookEntries, setPlaybookEntries] = useState<PlaybookEntry[]>(EMPTY_PLAYBOOKS);
   const [adapterType, setAdapterType] = useState<AdapterType>('claude_code');
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig>(DEFAULT_RUNTIME_CONFIG);
-  // Zero-config: the runtime is auto-picked from what's installed; the operator only
   // opens this to override. Stays collapsed unless they ask, or nothing was detected.
   const [runtimeAdvanced, setRuntimeAdvanced] = useState(false);
   const [playbook, setPlaybook] = useState('');
@@ -253,7 +250,6 @@ export function AgentCreateWizard({
   const avatarFileRef = useRef<HTMLInputElement>(null);
 
   // True while we're commissioning the very first agent of an empty workspace and
-  // the operator hasn't asked for the full org controls.
   const firstAgentOnRamp = agentsLoaded && agents.length === 0 && !initialRole && !lockInitialRole && !showHierarchy;
   const orchestrator = useMemo(() => agents.find((agent) => agent.role === 'orchestrator') ?? null, [agents]);
   const managers = useMemo(() => agents.filter((agent) => agent.role === 'manager'), [agents]);
@@ -319,7 +315,7 @@ export function AgentCreateWizard({
       const loadedAgents = agentsResult.status === 'fulfilled' ? agentsResult.value.agents ?? [] : [];
       setAgents(loadedAgents);
       setAgentsLoaded(true);
-      // Empty workspace + no preset role → first-agent mode: default to orchestrator
+      // Empty workspace + no preset role â†’ first-agent mode: default to orchestrator
       // ("the agent you talk to") and keep the hierarchy controls tucked away.
       if (loadedAgents.length === 0 && !initialRole && !lockInitialRole) {
         setRole('orchestrator');
@@ -336,9 +332,7 @@ export function AgentCreateWizard({
         : [];
       setDetections(loadedDetections);
 
-      // Zero-config: auto-select the best installed runtime. Prefer a detected
       // ("found") harness in priority order; otherwise leave the default and
-      // surface the picker so the operator can install/connect one.
       const found = ADAPTER_PRIORITY.find((type) => loadedDetections.some((d) => d.adapterType === type && d.status === 'found'));
       if (found) {
         setAdapterType(found);
@@ -442,7 +436,6 @@ export function AgentCreateWizard({
     if (value === CUSTOM_SPECIALTY || value === '') return;
     const chosen = specialties.find((s) => s.role === value);
     if (!chosen) return;
-    // Prefill identity from the chosen specialty so the operator starts from a real expert.
     if (!name.trim()) setName(chosen.name);
     if (chosen.capabilityTags.length > 0) setCapabilityTags(chosen.capabilityTags);
   }
@@ -455,7 +448,7 @@ export function AgentCreateWizard({
       ? slugifySpecialty(customRole)
       : specialty || 'specialist';
 
-  // A custom slug not already in the registry → author a library def on create so
+  // A custom slug not already in the registry â†’ author a library def on create so
   // the engine resolves it richly and it joins the specialist registry.
   const isNewCustomSpecialty = role === 'worker'
     && functionalRole.length > 0
@@ -538,7 +531,7 @@ export function AgentCreateWizard({
 
       // Register a brand-new custom specialty in the specialist library so the
       // engine resolves its persona richly and it appears in the registry. This
-      // upserts the agent just created (same workspace+role) — no duplicate row.
+      // upserts the agent just created (same workspace+role) â€” no duplicate row.
       if (isNewCustomSpecialty) {
         try {
           await specialistsApi.create({
@@ -549,7 +542,7 @@ export function AgentCreateWizard({
             capabilityTags,
           });
         } catch {
-          /* best effort — the agent already exists and runs regardless */
+          
         }
       }
 
@@ -680,7 +673,7 @@ export function AgentCreateWizard({
                         <option value="">{role === 'manager' ? 'No domain' : 'Inherit supervisor domain'}</option>
                         {spaces.map(s => {
                           const parent = s.parentDomainId ? spaces.find((d) => d.id === s.parentDomainId) : null;
-                          return <option key={s.id} value={s.id}>{parent ? `${parent.name} › ${s.name}` : s.name}</option>;
+                          return <option key={s.id} value={s.id}>{parent ? `${parent.name} â€º ${s.name}` : s.name}</option>;
                         })}
                         <option value="__create__">{managerDomainId ? 'Create new subdomain...' : 'Create new domain...'}</option>
                       </select>
@@ -692,7 +685,7 @@ export function AgentCreateWizard({
                       {role === 'manager'
                         ? 'Optional. Use a domain when this manager owns a clear area.'
                         : managerDomainId
-                          ? 'Pick a subdomain this specialist is responsible for, or create one under its manager’s domain.'
+                          ? 'Pick a subdomain this specialist is responsible for, or create one under its managerâ€™s domain.'
                           : 'Specialists can inherit their manager domain or be placed manually.'}
                     </p>
                   </label>
@@ -715,7 +708,7 @@ export function AgentCreateWizard({
 
               {firstAgentOnRamp ? (
                 <section className="rounded-lg border border-line bg-surface-2 px-3 py-3 text-[12px] leading-relaxed text-text-muted">
-                  This is your first agent — it’ll be the one you talk to and that coordinates everything else.
+                  This is your first agent â€” itâ€™ll be the one you talk to and that coordinates everything else.
                   You can add managers and specialists under it later.
                   <button
                     type="button"
@@ -772,12 +765,12 @@ export function AgentCreateWizard({
                           <optgroup label="Existing specialists">
                             {specialties.map((s) => (
                               <option key={s.role} value={s.role}>
-                                {s.name} · {s.source}
+                                {s.name} Â· {s.source}
                               </option>
                             ))}
                           </optgroup>
                         )}
-                        <option value={CUSTOM_SPECIALTY}>+ Define a custom specialty…</option>
+                        <option value={CUSTOM_SPECIALTY}>+ Define a custom specialtyâ€¦</option>
                       </select>
                       <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
                         <svg className="h-4 w-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
@@ -793,7 +786,7 @@ export function AgentCreateWizard({
                           className={inputCls}
                         />
                         {customRole.trim() && (
-                          <span className="block font-mono text-[11px] text-text-muted">role: {slugifySpecialty(customRole) || '—'}</span>
+                          <span className="block font-mono text-[11px] text-text-muted">role: {slugifySpecialty(customRole) || 'â€”'}</span>
                         )}
                       </label>
                     ) : (
@@ -931,7 +924,7 @@ export function AgentCreateWizard({
                     className={secondaryBtnCls}
                   >
                     {testing ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                    {testing ? 'Testing runtime…' : 'Test runtime'}
+                    {testing ? 'Testing runtimeâ€¦' : 'Test runtime'}
                   </button>
                 ) : (
                   <button type="button" onClick={() => setRuntimeAdvanced(true)} className={secondaryBtnCls}>
@@ -956,12 +949,12 @@ export function AgentCreateWizard({
               ) : (
                 <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-xs text-text-secondary">
                   {detecting ? (
-                    <><Loader2 size={13} className="animate-spin" /> Detecting installed runtimes…</>
+                    <><Loader2 size={13} className="animate-spin" /> Detecting installed runtimesâ€¦</>
                   ) : (
                     <>
                       <Check size={13} className="text-accent" />
                       <span className="text-text-primary">{runtimeLabel(adapterType)}</span>
-                      <span className="text-text-muted">· auto-selected{activeDetection?.status === 'found' ? ' (installed)' : ''}. Commission to go.</span>
+                      <span className="text-text-muted">Â· auto-selected{activeDetection?.status === 'found' ? ' (installed)' : ''}. Commission to go.</span>
                     </>
                   )}
                 </div>
@@ -973,7 +966,7 @@ export function AgentCreateWizard({
         <footer className="flex items-center justify-between gap-2 border-t border-line bg-surface-2 px-5 py-3">
           <button type="button" onClick={onClose} className={secondaryBtnCls}>Cancel</button>
           <button type="button" disabled={creating || !canCreate} onClick={() => void handleCreate()} className={primaryBtnCls}>
-            {creating ? 'Commissioning…' : 'Commission agent'}
+            {creating ? 'Commissioningâ€¦' : 'Commission agent'}
           </button>
         </footer>
       </aside>
@@ -1007,7 +1000,7 @@ function RuntimeTestReport({
     return (
       <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-xs text-text-muted">
         <Loader2 size={13} className="animate-spin" />
-        Running a live runtime probe — this can take up to 45 seconds.
+        Running a live runtime probe â€” this can take up to 45 seconds.
       </div>
     );
   }
@@ -1045,8 +1038,8 @@ function RuntimeTestReport({
             <span className="mt-0.5 shrink-0"><CheckGlyph level={check.level} /></span>
             <span className="min-w-0 text-text-secondary">
               <span className="text-text-primary">{check.message}</span>
-              {check.detail ? <span className="text-text-muted"> — {check.detail}</span> : null}
-              {check.hint ? <span className="mt-0.5 block text-text-muted">↳ {check.hint}</span> : null}
+              {check.detail ? <span className="text-text-muted"> â€” {check.detail}</span> : null}
+              {check.hint ? <span className="mt-0.5 block text-text-muted">â†³ {check.hint}</span> : null}
             </span>
           </li>
         ))}
@@ -1167,4 +1160,7 @@ function InboxChannelCard({
 const inputCls = 'mt-1 h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
 const secondaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn border border-line px-3 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary';
 const primaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40';
+
+
+
 

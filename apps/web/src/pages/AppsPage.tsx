@@ -1,5 +1,5 @@
-/**
- * AppsPage — the Agentic App index. One primitive: every item is an App.
+﻿/**
+ * AppsPage â€” the Agentic App index. One primitive: every item is an App.
  *
  * Clean list, like the workflows page it replaces: search, import, a single
  * "New app" create, and a grid. Opening an App goes to the unified editor
@@ -79,7 +79,7 @@ export function AppsPage() {
   const [engineSurfaces, setEngineSurfaces] = useState<AppSurface[]>([]);
   // Extensions are a shared workflow-building block, not a top-level destination,
   // so they open as a modal from here (the apps/workflows hub) and from each
-  // workflow canvas toolbar — never a standalone sidebar page.
+  // workflow canvas toolbar â€” never a standalone sidebar page.
   const [extensionsOpen, setExtensionsOpen] = useState(false);
 
   const [importOpen, setImportOpen] = useState(false);
@@ -97,7 +97,7 @@ export function AppsPage() {
     try {
       // Apps + workflows are the index itself; domains + agents are auxiliary
       // metadata (grouping + owner labels), so a failure there must never blank
-      // the page — it just degrades to an ungrouped list.
+      // the page â€” it just degrades to an ungrouped list.
       const [appRows, workflowRows] = await Promise.all([
         appsApi.list(),
         apiCached<{ workflows: WorkflowRow[] }>('/v1/workflows').then((r) => r.workflows ?? []),
@@ -161,7 +161,7 @@ export function AppsPage() {
   };
 
   // Domain-grouped sections: each top-level Domain followed by its Subdomains,
-  // then an Unassigned bucket — mirrors the workflows page's visual separation.
+  // then an Unassigned bucket â€” mirrors the workflows page's visual separation.
   const sections = buildDomainSections(filtered, domains);
   const engineApp = apps.find((app) => app.id === engineAppId) ?? null;
 
@@ -276,7 +276,7 @@ export function AppsPage() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search…"
+            placeholder="Searchâ€¦"
             className="h-9 w-56 rounded-input border border-line bg-canvas pl-9 pr-3 text-[13px] text-text-primary outline-none focus:border-accent"
           />
         </div>
@@ -324,7 +324,7 @@ export function AppsPage() {
           allLabel="All domains"
           unassignedLabel="Unassigned"
         />
-        <span className="text-[12px] text-text-muted">Organize apps by domain — the manager who owns each is shown on its section.</span>
+        <span className="text-[12px] text-text-muted">Organize apps by domain â€” the manager who owns each is shown on its section.</span>
       </div>
 
       <main className="min-h-0 flex-1 overflow-auto p-6">
@@ -421,8 +421,8 @@ interface DomainSection {
 }
 
 /**
- * Group index items into domain sections — each top-level Domain followed by its
- * Subdomains (labelled "Parent › Sub"), then an Unassigned bucket. Empty domains
+ * Group index items into domain sections â€” each top-level Domain followed by its
+ * Subdomains (labelled "Parent â€º Sub"), then an Unassigned bucket. Empty domains
  * are omitted so the page only shows sections that actually hold apps.
  */
 function buildDomainSections(items: AppIndexItem[], domains: DomainRow[]): DomainSection[] {
@@ -446,7 +446,7 @@ function buildDomainSections(items: AppIndexItem[], domains: DomainRow[]): Domai
     for (const sub of domains.filter((domain) => domain.parentDomainId === top.id)) {
       const subItems = byDomain.get(sub.id) ?? [];
       if (subItems.length > 0) {
-        sections.push({ key: sub.id, domainId: sub.id, label: `${top.name} › ${sub.name}`, colorHex: sub.colorHex, items: subItems });
+        sections.push({ key: sub.id, domainId: sub.id, label: `${top.name} â€º ${sub.name}`, colorHex: sub.colorHex, items: subItems });
       }
     }
   }
@@ -623,7 +623,7 @@ function ImportDialog({
                 </span>
                 <div className="min-w-0">
                   <div className="truncate text-[15px] font-semibold text-text-primary">{preview.identity.name}</div>
-                  <div className="mt-0.5 text-[12px] text-text-muted">{preview.identity.slug} · v{preview.identity.version}</div>
+                  <div className="mt-0.5 text-[12px] text-text-muted">{preview.identity.slug} Â· v{preview.identity.version}</div>
                   <div className="mt-1 truncate font-mono text-[10px] text-text-muted">sha256:{preview.checksum}</div>
                 </div>
               </div>
@@ -683,3 +683,6 @@ function Chips({ title, items, empty }: { title: string; items: string[]; empty:
     </div>
   );
 }
+
+
+

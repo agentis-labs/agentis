@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import type { WorkflowGraph } from '@agentis/core';
-import { analyzeWorkflowReadiness } from '../../src/services/workflowReadiness.js';
+import { analyzeWorkflowReadiness } from '../../src/services/workflow/workflowReadiness.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

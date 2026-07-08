@@ -1,7 +1,7 @@
 {
   "name": "@agentis-ai/cli",
   "version": "0.1.3",
-  "description": "Agentis — proactive ambient agent dashboard. Run `npx @agentis-ai/cli up` to start.",
+  "description": "Agentis — the operating system for agentic software. Run `npx @agentis-ai/cli up` to start.",
   "license": "Apache-2.0",
   "author": "Robson Prado <robsonpradodev>",
   "homepage": "https://github.com/nexseed/agentis#readme",

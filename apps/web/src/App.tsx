@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
+﻿import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Search, Check, Plus, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
@@ -12,6 +12,7 @@ import { RealtimeStatusIndicator } from './components/shared/RealtimeStatusIndic
 import { ChatPanelHeaderButton } from './components/chat/ChatPanelHeaderButton';
 import { NotificationPanel } from './components/shared/NotificationPanel';
 import { AvatarMenu } from './components/shared/AvatarMenu';
+import { BrandMark } from './components/shared/BrandMark';
 import { RunModalProvider } from './components/runs/RunModalProvider';
 import { ApprovalModalProvider } from './components/shared/ApprovalModalProvider';
 import { ConfirmProvider } from './components/shared/ConfirmDialog';
@@ -32,6 +33,16 @@ import { useAgentisStore } from './store/agentisStore';
 // Initialize theme on app boot
 import './components/shared/ThemeToggle';
 import { SettingsModal } from './components/settings/SettingsModal';
+
+/** Full-screen brand boot/loading state — the mark breathes above a quiet label. */
+function BootScreen({ label }: { label: string }) {
+  return (
+    <div className="flex h-screen flex-col items-center justify-center gap-5 bg-canvas">
+      <BrandMark size={48} className="s-pulse text-text-primary" />
+      <span className="text-[12px] tracking-wide text-text-muted">{label}</span>
+    </div>
+  );
+}
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
 const AppsPage = lazy(() => import('./pages/AppsPage').then((m) => ({ default: m.AppsPage })));
@@ -181,7 +192,7 @@ export function App() {
     );
   }
 
-  // DEV-only GenUI gallery — renders the real ViewRenderer with an in-memory
+  // DEV-only GenUI gallery â€” renders the real ViewRenderer with an in-memory
   // client (no API/auth) so the surface vocabulary can be previewed in isolation.
   if (import.meta.env.DEV && location.pathname.startsWith('/genui-showcase')) {
     return (
@@ -192,11 +203,7 @@ export function App() {
   }
 
   if (initializing) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-canvas text-[13px] text-text-muted">
-        {initializingLabel}
-      </div>
-    );
+    return <BootScreen label={initializingLabel} />;
   }
 
   if (!authed) {
@@ -208,11 +215,7 @@ export function App() {
   }
 
   if (!wsReady) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-canvas text-[13px] text-text-muted">
-        Loading…
-      </div>
-    );
+    return <BootScreen label="Loading…" />;
   }
 
   return (
@@ -221,7 +224,7 @@ export function App() {
         <RunModalProvider>
           <ApprovalModalProvider>
           <Shell
-          workspaceName={ws?.name ?? '…'}
+          workspaceName={ws?.name ?? 'â€¦'}
           workspaceImage={ws?.imageUrl ?? null}
           workspaceId={ws?.id ?? null}
           operator={me}
@@ -251,13 +254,13 @@ export function App() {
               <Route path="/knowledge" element={<BrainPage />} />
               <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
               <Route path="/assets" element={<ArtifactsPage />} />
-              {/* Legacy alias — chat/share links still point at /artifacts. */}
+              {/* Legacy alias â€” chat/share links still point at /artifacts. */}
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/abilities" element={<Navigate to="/agents" replace />} />
               <Route path="/abilities/:id" element={<Navigate to="/brain" replace />} />
               <Route path="/packages" element={<PackagesPage />} />
               <Route path="/history" element={<HistoryPage />} />
-              {/* Approvals no longer have a page — they open in a global review modal
+              {/* Approvals no longer have a page â€” they open in a global review modal
                   (ApprovalModalProvider). Legacy links redirect home. */}
               <Route path="/approvals" element={<Navigate to="/home" replace />} />
               <Route path="/runs/:id" element={<RunRouteBridge />} />
@@ -292,7 +295,7 @@ export function App() {
 function RouteFallback() {
   return (
     <div className="flex h-full items-center justify-center text-[13px] text-text-muted">
-      Loading…
+      Loadingâ€¦
     </div>
   );
 }
@@ -410,11 +413,11 @@ function Shell({
               window.dispatchEvent(ev);
             }}
             className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
-            title="Search (⌘K)"
+            title="Search (âŒ˜K)"
           >
             <Search size={12} />
             Search
-            <span className="rounded border border-line px-1 py-0.5 text-[9px]">⌘K</span>
+            <span className="rounded border border-line px-1 py-0.5 text-[9px]">âŒ˜K</span>
           </button>
           <RealtimeStatusIndicator />
           <NotificationPanel />
@@ -533,7 +536,7 @@ function WorkspaceSwitcher({
         <div className="absolute left-0 top-full z-50 mt-1 w-64 overflow-hidden rounded-card border border-line bg-surface shadow-dropdown">
           <div className="max-h-72 overflow-y-auto py-1">
             {items.length === 0 ? (
-              <div className="px-3 py-3 text-[12px] text-text-muted">Loading…</div>
+              <div className="px-3 py-3 text-[12px] text-text-muted">Loadingâ€¦</div>
             ) : (
               items.map((w) => {
                 const isActive = w.id === workspaceId;
@@ -595,7 +598,7 @@ function WorkspaceSwitcher({
               onClick={() => { setOpen(false); setSettingsOpen(true, 'workspace'); }}
               className="block w-full border-t border-line px-3 py-2 text-left text-[11px] text-text-muted hover:bg-surface-2 hover:text-text-primary"
             >
-              Manage workspace settings →
+              Manage workspace settings â†’
             </button>
           </div>
         </div>
@@ -603,3 +606,6 @@ function WorkspaceSwitcher({
     </div>
   );
 }
+
+
+

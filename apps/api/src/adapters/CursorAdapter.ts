@@ -25,7 +25,7 @@ import {
   runCliChatTurn,
   type CliChatPart,
 } from './cliChatRuntime.js';
-import type { RuntimeSessionStore } from '../services/runtimeSessionStore.js';
+import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 
 export interface CursorAdapterOptions {

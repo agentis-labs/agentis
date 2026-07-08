@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Extension registry contract.
  *
  * The registry is an anonymous, read-only third-party source of
@@ -32,7 +32,7 @@ export interface RegistryArtifact {
 }
 
 export interface RegistryEntry {
-  /** Stable identifier — typically equal to `slug` for anonymous registries. */
+  /** Stable identifier â€” typically equal to `slug` for anonymous registries. */
   entryId: string;
   entryType: RegistryEntryType;
   slug: string;
@@ -45,3 +45,6 @@ export interface RegistryEntry {
   };
   artifacts: RegistryArtifact[];
 }
+
+
+

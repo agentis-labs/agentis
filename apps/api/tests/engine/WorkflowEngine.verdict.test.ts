@@ -18,9 +18,9 @@ import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
-import { readBuildLoop, graphContentHash } from '../../src/services/workflowCompass.js';
-import type { WorkflowSpec } from '../../src/services/workflowSpec.js';
-import type { RunVerdict } from '../../src/services/workflowVerdict.js';
+import { readBuildLoop, graphContentHash } from '../../src/services/workflow/workflowCompass.js';
+import type { WorkflowSpec } from '../../src/services/workflow/workflowSpec.js';
+import type { RunVerdict } from '../../src/services/workflow/workflowVerdict.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

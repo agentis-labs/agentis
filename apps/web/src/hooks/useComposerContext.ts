@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+﻿import { useMemo } from 'react';
 import type {
   ComposerContextAgent,
   ComposerContextRun,
@@ -59,3 +59,5 @@ function normalizeRole(agent: ComposerContextAgent): string {
 function isActiveAgent(status: string | undefined): boolean {
   return status === 'active' || status === 'running' || status === 'busy' || status === 'online';
 }
+
+

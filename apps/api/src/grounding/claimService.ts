@@ -227,7 +227,6 @@ export class ClaimService {
     }
   };
 
-  // ── Formation internals ───────────────────────────────────
 
   /** §10.3 — computed components; calibrated weighted blend, each part inspectable. */
   private computeConfidence(input: ClaimInput): ConfidenceComponents {

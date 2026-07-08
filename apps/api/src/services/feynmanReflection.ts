@@ -28,9 +28,9 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { SharedIntelligenceService } from './sharedIntelligence.js';
 import type { StructuredCompleter } from './structuredCompleter.js';
-import { analyzeRunFailure } from './runFailureAnalysis.js';
-import { tokenize } from './brainText.js';
-import { classifyPacer } from './brainPacer.js';
+import { analyzeRunFailure } from './run/runFailureAnalysis.js';
+import { tokenize } from './brain/brainText.js';
+import { classifyPacer } from './brain/brainPacer.js';
 
 export type FeynmanTrigger = 'self_heal_exhausted' | 'repeated_failure' | 'contradiction';
 

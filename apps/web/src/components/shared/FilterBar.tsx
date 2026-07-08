@@ -1,5 +1,5 @@
-/**
- * FilterBar — standardized filter pill row.
+﻿/**
+ * FilterBar â€” standardized filter pill row.
  *
  * One source of truth for the [All] [Active] [Failed] style controls
  * that appear on every list page. Active item is bg-accent-soft + text-accent.
@@ -53,3 +53,6 @@ export function FilterBar<T extends string = string>({
     </div>
   );
 }
+
+
+

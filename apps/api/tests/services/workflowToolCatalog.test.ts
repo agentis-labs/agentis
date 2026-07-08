@@ -6,7 +6,7 @@
  * catalog is always included as the base.
  */
 import { describe, it, expect } from 'vitest';
-import { buildWorkspaceToolCatalog, CHAT_TOOL_CATALOG } from '../../src/services/chatToolCatalog.js';
+import { buildWorkspaceToolCatalog, CHAT_TOOL_CATALOG } from '../../src/services/chat/chatToolCatalog.js';
 
 describe('buildWorkspaceToolCatalog', () => {
   it('exposes capability authoring tools to the orchestrator', () => {

@@ -1,8 +1,8 @@
-import { ArrowLeft, Maximize2, Minimize2, Minus, Plus, RadioTower, Scan } from 'lucide-react';
+﻿import { ArrowLeft, Maximize2, Minimize2, Minus, Plus, RadioTower, Scan } from 'lucide-react';
 import clsx from 'clsx';
 
 /**
- * Bottom-right control puck for the workspace canvas — mirrors the Brain /
+ * Bottom-right control puck for the workspace canvas â€” mirrors the Brain /
  * Workflows ReactFlow controls, but with actions purpose-built for /home:
  * zoom, fit/recenter, fullscreen, the Live Workspace toggle, and (in focus
  * mode) a "back to overview" affordance. Replaces the old full-width HUD bar.
@@ -126,3 +126,6 @@ function LivePuckButton({
     </button>
   );
 }
+
+
+

@@ -3,9 +3,9 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AdapterType, AgentisToolContext, ChatMessage, NormalizedTask } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
-import { publishAgentWorkStep, publishChatDeltaProgress } from '../agentWorkProgress.js';
+import { publishAgentWorkStep, publishChatDeltaProgress } from '../agent/agentWorkProgress.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { modelConfiguredOnAgent } from '../runtimeModels.js';
+import { modelConfiguredOnAgent } from '../runtime/runtimeModels.js';
 import { renderRuntimeRoutingIntelligence, routeModelForTask } from '../modelRoutingPolicy.js';
 
 const V1_ADAPTERS = new Set<AdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);

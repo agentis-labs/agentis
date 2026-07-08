@@ -1,11 +1,4 @@
-/**
- * AppTeamStrip — the App's cast at a glance (LIVING-APPS-10X Phase R).
- *
- * Every App is born staffed (an operator + workers seated at creation). This
- * strip makes that visible: an overlapping avatar stack in the App command
- * chrome, owner first with a ring, each agent tipped with its role. Renders
- * nothing until a team loads, so an unstaffed/legacy App shows no clutter.
- */
+﻿
 import { useEffect, useState } from 'react';
 import { Crown } from 'lucide-react';
 import { appsApi, type AppTeam, type AppTeamMember } from '../../lib/appsApi';
@@ -24,7 +17,7 @@ function roleLabel(role: string | null): string {
 
 function Avatar({ member, index }: { member: AppTeamMember; index: number }) {
   const color = member.colorHex ?? '#64748b';
-  const tip = `${member.name}${member.functionalRole ? ` · ${roleLabel(member.functionalRole)}` : ''}${member.isOwner ? ' · owner' : ''}`;
+  const tip = `${member.name}${member.functionalRole ? ` Â· ${roleLabel(member.functionalRole)}` : ''}${member.isOwner ? ' Â· owner' : ''}`;
   return (
     <span
       title={tip}
@@ -70,3 +63,5 @@ export function AppTeamStrip({ appId, reloadKey = 0 }: { appId: string; reloadKe
     </div>
   );
 }
+
+

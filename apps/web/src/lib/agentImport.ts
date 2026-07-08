@@ -1,5 +1,5 @@
-/**
- * Agent transition & import client (AGENT-TRANSITION §8).
+﻿/**
+ * Agent transition & import client (AGENT-TRANSITION Â§8).
  * Detect external agents on the machine, preview their scope-routed memory,
  * and import them (commission + ingest). Plus runtime rebind (Track R).
  */
@@ -116,3 +116,6 @@ export function switchAgentRuntime(agentId: string, input: { adapterType: string
     body: JSON.stringify(input),
   });
 }
+
+
+

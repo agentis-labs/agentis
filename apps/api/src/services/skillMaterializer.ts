@@ -17,7 +17,7 @@
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import type { Logger } from '../logger.js';
-import { harnessAgentHomeDir } from './harnessAgentHome.js';
+import { harnessAgentHomeDir } from './harness/harnessAgentHome.js';
 import { serializeSkillMarkdown, type SkillRecord, type SkillService } from './skillService.js';
 
 /** Skills below this confidence are not materialized (demoted/unproven). */

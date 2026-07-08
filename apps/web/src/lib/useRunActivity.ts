@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { rtSubscribe, useRealtime } from './realtime';
 import {
@@ -18,7 +18,7 @@ interface RunActivityEnvelope {
  *
  * Subscribes to the run room, BACK-FILLS the replayable tail from
  * `GET /v1/runs/:id/activity` (so a surface opened mid-run shows recent
- * reasoning/steps immediately — never "EVENTS 0"), then merges live events.
+ * reasoning/steps immediately â€” never "EVENTS 0"), then merges live events.
  * Works over whichever transport `useRealtime` has (socket or SSE fallback).
  * This is the single hook every run surface (monitor, inspector, triage) uses.
  */
@@ -52,7 +52,7 @@ export function useRunActivity(
           return [...current, ...historical.filter((h) => !seen.has(h.id))].slice(0, cap);
         });
       })
-      .catch(() => { /* back-fill is best-effort */ });
+      .catch(() => {  });
     return () => { cancelled = true; unsubscribe(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
@@ -72,3 +72,6 @@ export function useRunActivity(
 export function latestRunActivity(feed: RealtimeActivity[]): RealtimeActivity | null {
   return feed[0] ?? null;
 }
+
+
+

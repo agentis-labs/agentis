@@ -1,26 +1,8 @@
-/**
- * Workspace Intelligence types — the Brain's knowledge layer.
- *
- * Four intelligence classes that compose into one coherent system:
- *
- *   1. Seeds                  — authored, shipped with the workspace
- *   2. Imported datasets      — operator-provided business data, ingested
- *   3. Evaluator examples     — pass/fail references and rubric calibration
- *   4. Promoted intelligence  — distilled patterns earned from real execution
- *
- * Every type here is shared by the runtime stores (read/write surfaces), the
- * intelligence composition (retrieval API), and the `/v1/brain` UI surface.
- *
- * Naming conventions:
- *   - "Seed" types are static and travel with the workspace.
- *   - "Spec" types describe a contract (datasets the workspace can absorb).
- *   - Plain entity types (e.g. `KnowledgeChunk`) describe what's persisted at runtime.
- *   - "Hit" / "Episode" / "Example" are retrieval results.
- */
+﻿
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Enums (small, exhaustive, exported as union-of-strings)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Where ingested data lands. Mirrors the four classes but is restricted to
@@ -67,12 +49,7 @@ export type ExpectedImpactArea =
   | 'output_quality'
   | 'cost_efficiency';
 
-/**
- * How fresh the operator should keep this dataset.
- *
- * Drives reminders ("CRM export is 2 months old; re-import?") and ranking
- * (older = decayed weight on retrieval).
- */
+
 export type FreshnessExpectation =
   | 'static'
   | 'monthly'
@@ -80,7 +57,7 @@ export type FreshnessExpectation =
   | 'daily'
   | 'live';
 
-/** Status of a dataset ingestion job — V1 in-process worker. */
+/** Status of a dataset ingestion job â€” V1 in-process worker. */
 export type DatasetIngestionStatus =
   | 'pending'
   | 'parsing'
@@ -93,15 +70,15 @@ export type DatasetIngestionStatus =
 /** Trust scale used everywhere a piece of intelligence carries authority. */
 export type TrustLevel = number; // 0..1
 
-// ────────────────────────────────────────────────────────────
-// Class 1 — Seeds (build-time, shipped with the workspace)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Class 1 â€” Seeds (build-time, shipped with the workspace)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Knowledge seed: domain taxonomies, heuristics, business rules, references.
  *
  * Shipped as part of `AgentisPackageContents` and copied verbatim into the
- * runtime knowledge store on activation. Compact, portable, high-signal —
+ * runtime knowledge store on activation. Compact, portable, high-signal â€”
  * not raw business history.
  */
 export interface KnowledgeSeed {
@@ -115,17 +92,14 @@ export interface KnowledgeSeed {
 }
 
 /**
- * Memory seed: compact facts the workspace should "already know" — preferences,
+ * Memory seed: compact facts the workspace should "already know" â€” preferences,
  * recurring rules, named patterns. Distinguished from knowledge by intent:
  * memory is recalled, knowledge is retrieved.
  */
 export interface MemorySeed {
   title: string;
   content: string;
-  /**
-   * 0..1. Trust the seed carries from the package author. Operator review
-   * may raise or lower this; promotion can pin trust to 1.0.
-   */
+  
   trust?: TrustLevel;
   /** 0..1. Bias toward keeping this in the budgeted retrieval window. */
   importance?: number;
@@ -139,7 +113,7 @@ export interface EvaluatorExampleSeed {
   evaluatorKey: string;
   /** Input shown to the evaluator. */
   input: unknown;
-  /** Expected output — exact, schema-shaped, or paraphrase reference. */
+  /** Expected output â€” exact, schema-shaped, or paraphrase reference. */
   expected: unknown;
   verdict: 'pass' | 'fail';
   /** Optional human-readable rationale (why pass/fail). */
@@ -163,9 +137,9 @@ export interface EvaluatorRubric {
   examples: EvaluatorExampleSeed[];
 }
 
-/** Build-time baseline — what the package author claims is normal. */
+/** Build-time baseline â€” what the package author claims is normal. */
 export interface WorkflowBaselineSeed {
-  /** Workflow slug inside the package — resolved to a workflow id at activation. */
+  /** Workflow slug inside the package â€” resolved to a workflow id at activation. */
   workflowSlug: string;
   p50DurationMs?: number;
   p95DurationMs?: number;
@@ -176,17 +150,11 @@ export interface WorkflowBaselineSeed {
   derivedFromRuns?: number;
 }
 
-// ────────────────────────────────────────────────────────────
-// Class 2 — DatasetSpec (build-time contract for what the workspace can absorb)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Class 2 â€” DatasetSpec (build-time contract for what the workspace can absorb)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * Dataset spec — the workspace declares what kinds of operator data it can absorb,
- * how that data should be chunked, where it lands, and what role it plays.
- *
- * `wedgeRole`, `expectedImpact`, and `freshnessExpectation` so the runtime
- * and UI can rank, prompt, and explain imports.
- */
+
 export interface DatasetSpec {
   key: string;
   label: string;
@@ -199,7 +167,7 @@ export interface DatasetSpec {
   /** Fields the parser must find before ingestion can start. */
   requiredFields?: string[];
   optional: boolean;
-  /** True when the workspace wants the operator to import this. UI should nudge. */
+  
   recommended?: boolean;
   wedgeRole: WedgeRole;
   /**
@@ -220,8 +188,8 @@ export interface DatasetSpec {
   };
 }
 
-// ────────────────────────────────────────────────────────────
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Wedge-aware contents shipped inside an Agentis package. This is the
@@ -232,7 +200,7 @@ export interface DatasetSpec {
  * consumes.
  */
 interface AgentisPackageContents {
-  /** Imported datasets the workspace expects the operator to bring. */
+  
   datasetSpecs: DatasetSpec[];
   /** Class 1: seeds. */
   knowledgeSeeds: KnowledgeSeed[];
@@ -242,9 +210,9 @@ interface AgentisPackageContents {
   workflowBaselines: WorkflowBaselineSeed[];
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Runtime entities (what's stored, what gets returned by retrieval)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * One indexed slice of knowledge. A `KnowledgeSeed` may produce 1+ chunks
@@ -262,7 +230,7 @@ export interface KnowledgeChunk {
   /** Free-form provenance: package version, dataset key, ingestion job id, etc. */
   provenance: Record<string, unknown>;
   tags: string[];
-  /** Reserved for vector retrieval — null on the V1 lexical path. */
+  /** Reserved for vector retrieval â€” null on the V1 lexical path. */
   embedding?: number[] | null;
   /** Author-declared trust at write time; retrieval may decay this. */
   trust: TrustLevel;
@@ -270,16 +238,13 @@ export interface KnowledgeChunk {
   updatedAt: string;
 }
 
-/**
- * One memory episode. Scoped memory stores typed, compact facts and patterns
- * — not raw run output. Promotion writes here; the operator can edit.
- */
+
 export interface MemoryEpisode {
   id: string;
   workspaceId: string;
   scopeId: string | null;
   /**
-   * What kind of memory this is — narrows retrieval and UI grouping.
+   * What kind of memory this is â€” narrows retrieval and UI grouping.
    * `skill`/`example` are Skill-library atoms (a procedure and its demonstrations):
    * they ride the episode substrate but on their own plane, and are deliberately
    * kept OUT of the always-inject dispatch tier (discovered via search / skill
@@ -312,7 +277,7 @@ export interface EvaluatorExample {
   verdict: 'pass' | 'fail';
   score?: number;
   reason?: string;
-  /** Optional run that produced this example (operator-confirmed verdicts). */
+  
   originRunId?: string | null;
   createdAt: string;
 }
@@ -339,19 +304,12 @@ export interface WorkflowBaselineSnapshot {
   capturedAt: string;
 }
 
-/**
- * A Class 4 promoted pattern — distilled, durable, attributed to its source.
- *
- * Promotion writes here only when:
- *   - confidence threshold met
- *   - operator-approved (depending on policy)
- *   - evaluator-confirmed
- */
+
 export interface PromotedPattern {
   id: string;
   workspaceId: string;
   scopeId: string | null;
-  /** What kind of pattern — narrows the surfaces it can flow back into. */
+  /** What kind of pattern â€” narrows the surfaces it can flow back into. */
   kind:
     | 'successful_playbook'
     | 'failure_with_fix'
@@ -360,9 +318,9 @@ export interface PromotedPattern {
     | 'recurring_exception';
   title: string;
   summary: string;
-  /** Structured payload — schema depends on kind. */
+  /** Structured payload â€” schema depends on kind. */
   payload: Record<string, unknown>;
-  /** 0..1 — confidence in the promotion. Decays on counter-evidence. */
+  /** 0..1 â€” confidence in the promotion. Decays on counter-evidence. */
   confidence: number;
   trust: TrustLevel;
   /** Number of independent occurrences that contributed to this pattern. */
@@ -375,9 +333,9 @@ export interface PromotedPattern {
   updatedAt: string;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Retrieval results
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface KnowledgeHit {
   chunkId: string;
@@ -397,9 +355,9 @@ export interface KnowledgeHit {
   retrievalMethod?: 'lexical' | 'vector' | 'hybrid';
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Composed runtime context (what the intelligence runtime returns)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Composed view used by agents, evaluators, and planners. Token budgets are
@@ -408,10 +366,10 @@ export interface KnowledgeHit {
 export interface IntelligenceContext {
   scopeId: string | null;
   query: string;
-  /** Knowledge results — seeds first, then imports, then promotion. */
+  /** Knowledge results â€” seeds first, then imports, then promotion. */
   seedKnowledge: KnowledgeHit[];
   importedKnowledge: KnowledgeHit[];
-  /** Memory episodes ranked by trust × importance × recency. */
+  /** Memory episodes ranked by trust Ã— importance Ã— recency. */
   memoryPatterns: MemoryEpisode[];
   /** Evaluator examples relevant to the run's evaluator bindings. */
   evaluatorExamples: EvaluatorExample[];
@@ -425,14 +383,11 @@ export interface IntelligenceContext {
   composedAt: string;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Dataset ingestion (runtime job lifecycle)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/**
- * One ingestion job. Tracked end-to-end so the UI can show progress, the
- * operator can resume, and the impact preview can be generated.
- */
+
 export interface DatasetIngestionJob {
   id: string;
   workspaceId: string;
@@ -440,7 +395,7 @@ export interface DatasetIngestionJob {
   /** Matches a `DatasetSpec.key` from the workspace manifest. */
   datasetKey: string;
   status: DatasetIngestionStatus;
-  /** Inputs as parsed from the upload — never the raw bytes. */
+  /** Inputs as parsed from the upload â€” never the raw bytes. */
   sourceMeta: {
     format: string;
     fileName?: string;
@@ -462,13 +417,7 @@ export interface DatasetIngestionJob {
 /** Per-item status for granular resume tracking (Agentis 1.1.1). */
 export type DatasetImportItemStatus = 'pending' | 'completed' | 'failed' | 'skipped';
 
-/**
- * One row-level item tracked inside a dataset ingestion job.
- *
- * Added to enable granular recovery: failed items can be retried when the
- * operator re-uploads the same file. Items are identified by their content
- * hash so the pipeline can skip already-completed rows.
- */
+
 export interface DatasetImportItem {
   id: string;
   workspaceId: string;
@@ -477,7 +426,7 @@ export interface DatasetImportItem {
   /** Position of this item in the parsed payload (0-indexed). */
   itemIndex: number;
   status: DatasetImportItemStatus;
-  /** SHA-256 hex of the item's content — dedup key on resume. */
+  /** SHA-256 hex of the item's content â€” dedup key on resume. */
   contentHash: string;
   /** ID in the target store (knowledge chunk, memory episode, etc.). */
   storedId?: string | null;
@@ -499,17 +448,17 @@ export interface DatasetImpactPreview {
   evaluatorConfidenceDelta: Array<{ evaluatorKey: string; delta: number }>;
   memoryRegionsStrengthened: string[];
   workflowBaselinesAffected: string[];
-  /** Free-form notes — human-readable summary of the impact. */
+  /** Free-form notes â€” human-readable summary of the impact. */
   notes: string[];
 }
 
-// ────────────────────────────────────────────────────────────
-// API response shape — /v1/brain
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// API response shape â€” /v1/brain
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Activation / promotion contracts (small but explicit)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Result of seeding workspace intelligence on package install. */
 export interface IntelligenceActivationResult {
@@ -520,7 +469,7 @@ export interface IntelligenceActivationResult {
   workflowBaselinesCreated: number;
 }
 
-/** Promotion request — what the runtime hands to IntelligencePromotion. */
+/** Promotion request â€” what the runtime hands to IntelligencePromotion. */
 export interface PromotionInput {
   scopeId: string | null;
   workspaceId: string;
@@ -530,6 +479,9 @@ export interface PromotionInput {
   payload: Record<string, unknown>;
   /** Source evidence (run ids, approval ids, evaluator verdicts). */
   provenance: Record<string, unknown>;
-  /** Optional 0..1 confidence supplied by the caller — runtime may override. */
+  /** Optional 0..1 confidence supplied by the caller â€” runtime may override. */
   confidenceHint?: number;
 }
+
+
+

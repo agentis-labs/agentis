@@ -8,7 +8,7 @@
  */
 
 import os from 'node:os';
-import { detectHarnesses, type HarnessDetectionResult } from '../harnessProbe.js';
+import { detectHarnesses, type HarnessDetectionResult } from '../harness/harnessProbe.js';
 import type { DiscoverCtx, DiscoveredAgent, HarnessImportSource, ImportInputs } from './types.js';
 import { claudeCodeSource } from './sources/claudeCode.js';
 import { hermesSource } from './sources/hermes.js';

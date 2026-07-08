@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AgentChannelsTab - manage native messaging channels for an agent.
  *
  * The UI mirrors the backend health contract: a channel is only "active" when
@@ -362,8 +362,8 @@ function ProviderCard({
         <>
           <div className="mt-1 text-[12px] text-text-muted">
             {connection.name}
-            {connection.mode ? ` · ${connection.mode === 'cloud' ? 'Cloud API' : 'QR local'}` : ''}
-            {connection.defaultChatId ? ` · target: ${connection.defaultChatId}` : ''}
+            {connection.mode ? ` Â· ${connection.mode === 'cloud' ? 'Cloud API' : 'QR local'}` : ''}
+            {connection.defaultChatId ? ` Â· target: ${connection.defaultChatId}` : ''}
           </div>
           {connection.lastError && <div className="mt-1 text-[12px] text-danger">{connection.lastError}</div>}
           <TargetEditor
@@ -607,7 +607,7 @@ function TargetEditor({
     <div className="mt-3 flex flex-col gap-3 rounded-input border border-line bg-surface-2 px-3 py-3">
       <ConnectField
         label={provider.kind === 'whatsapp' ? 'Default recipient (you)' : 'Default target (you)'}
-        hint="You — full access, no rules needed."
+        hint="You â€” full access, no rules needed."
       >
         <input
           value={value}
@@ -650,7 +650,7 @@ function TargetEditor({
               <textarea
                 value={r.rules ?? ''}
                 onChange={(event) => setRecipient(i, { rules: event.target.value })}
-                placeholder="Rules in plain words — e.g. My assistant. Can check my calendar and answer questions, but don't send money or delete anything."
+                placeholder="Rules in plain words â€” e.g. My assistant. Can check my calendar and answer questions, but don't send money or delete anything."
                 rows={2}
                 className={`${INPUT_CLS} mt-2`}
               />
@@ -676,7 +676,7 @@ function TargetEditor({
             value={access.anyoneRules ?? ''}
             onChange={(event) => onAccessChange({ ...access, anyoneRules: event.target.value })}
             rows={3}
-            placeholder="You're answering on my behalf. Be friendly and helpful, never share my personal details, and don't take any actions — take a message and let me know."
+            placeholder="You're answering on my behalf. Be friendly and helpful, never share my personal details, and don't take any actions â€” take a message and let me know."
             className={INPUT_CLS}
           />
         </ConnectField>
@@ -738,3 +738,6 @@ function firstProblem(health: ChannelHealth): string | null {
   const problem = health.checks.find((check) => !check.ok);
   return problem?.remediation ?? problem?.message ?? null;
 }
+
+
+

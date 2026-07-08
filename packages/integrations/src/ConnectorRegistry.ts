@@ -1,4 +1,4 @@
-import { AgentisError } from '@agentis/core';
+﻿import { AgentisError } from '@agentis/core';
 import type { ConnectorExecuteOptions, ConnectorModule, ConnectorOperationContract } from './types.js';
 
 export class ConnectorRegistry {
@@ -66,7 +66,7 @@ function normalizeParams(
 
 /**
  * Canonicalize `params` against a contract's aliases, drawing from `params` and
- * `inputData` (and JSON objects nested inside their text fields). Pure — no
+ * `inputData` (and JSON objects nested inside their text fields). Pure â€” no
  * throwing. Shared by {@link normalizeParams} (run time) and
  * {@link missingContractFields} (design-time preflight) so both resolve fields
  * the same way.
@@ -102,7 +102,7 @@ function applyContractAliases(
  * run time. Returns the unmet field names (a `requiredAny` group is reported as
  * `"a or b"`); an empty array means the contract is satisfied. Lets the workflow
  * preflight probe a connector node's resolved config without crossing the
- * network — the design-time mirror of the run-time guard.
+ * network â€” the design-time mirror of the run-time guard.
  */
 export function missingContractFields(
   params: Record<string, unknown>,
@@ -173,3 +173,6 @@ function parseJsonObject(raw: string): Record<string, unknown> | null {
     }
   }
 }
+
+
+

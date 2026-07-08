@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef } from 'react';
+﻿import { forwardRef, useImperativeHandle, useRef } from 'react';
 import type { Vec2 } from './homeCanvasTypes';
 
 export interface CanvasBackgroundHandle {
@@ -44,3 +44,5 @@ export const CanvasBackground = forwardRef<CanvasBackgroundHandle, { pan: Vec2; 
     );
   },
 );
+
+

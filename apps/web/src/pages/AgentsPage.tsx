@@ -1,7 +1,7 @@
-/**
- * AgentsPage — hierarchy canvas with table fallback, search, filters, space grouping.
+﻿/**
+ * AgentsPage â€” hierarchy canvas with table fallback, search, filters, space grouping.
  *
- * The constellation view is killed (per UIUX-REPLAN §7.2). Grid mode
+ * The constellation view is killed (per UIUX-REPLAN Â§7.2). Grid mode
  * shows agent cards; Table mode shows a sortable list. Both group by
  * space when spaces are configured.
  */
@@ -111,7 +111,7 @@ export function AgentsPage() {
   const [loading, setLoading] = useState(() => peekCached('/v1/agents') === undefined);
   const [view, setView] = useState<View>(() => {
     try {
-      // Legacy value 'canvas' migrates to 'fleet' (AGENTS-PAGE-REDESIGN.md §1.1).
+      // Legacy value 'canvas' migrates to 'fleet' (AGENTS-PAGE-REDESIGN.md Â§1.1).
       const stored = localStorage.getItem('agentis.agents.view');
       return stored === 'table' ? stored : 'fleet';
     } catch { return 'fleet'; }
@@ -132,7 +132,7 @@ export function AgentsPage() {
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
   const [selectedAgent, setSelectedAgent] = useState<AgentRow | null>(null);
-  // §AGENT-TRANSITION P4 — ambient surface for the continuous harness sync: new
+  // Â§AGENT-TRANSITION P4 â€” ambient surface for the continuous harness sync: new
   // memory accrued by already-imported agents, ready to pull (approval-gated).
   const [importUpdates, setImportUpdates] = useState<ImportUpdate[]>([]);
   const [dismissedUpdates, setDismissedUpdates] = useState(false);
@@ -174,7 +174,7 @@ export function AgentsPage() {
       const updates = res?.updates ?? [];
       setImportUpdates(updates);
       if (updates.length > 0) setDismissedUpdates(false);
-    } catch { /* best-effort — the banner just stays hidden */ }
+    } catch {  }
   }
 
   useEffect(() => {
@@ -199,7 +199,6 @@ export function AgentsPage() {
   );
 
   // The 6h continuous-sync service emits this when imported agents accrue new
-  // harness memory — refresh the banner so the operator can pull it in.
   useRealtime([REALTIME_EVENTS.HARNESS_IMPORT_UPDATES], () => { void loadImportUpdates(); });
 
   useEffect(() => {
@@ -409,7 +408,7 @@ export function AgentsPage() {
           <EmptyState
             icon={<Bot size={48} />}
             title="No agents yet"
-            body="Create your first agent — or bring in agents you already run outside Agentis, with their memory."
+            body="Create your first agent â€” or bring in agents you already run outside Agentis, with their memory."
             primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={openCreateAgent}>Add agent</Button>}
             secondaryAction={<Button variant="secondary" size="md" iconLeft={<Download size={14} />} onClick={() => setImportingAgents(true)}>Import existing agents</Button>}
             variant="page"
@@ -444,7 +443,7 @@ export function AgentsPage() {
                   <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
                     {space?.colorHex && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: space.colorHex }} />}
                     {groupLabel}
-                    <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">· {list.length}</span>
+                    <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">Â· {list.length}</span>
                   </div>
                   <AgentTable rows={list} spaces={spaces} onSelect={(id) => nav(`/agents/${id}`)} />
                 </div>
@@ -455,7 +454,7 @@ export function AgentsPage() {
                 <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
                   <Sparkles size={12} className="text-text-muted" />
                   Specialist Bench
-                  <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">· {tableSpecialists.length}</span>
+                  <span className="text-[10px] font-normal normal-case tracking-normal text-text-muted">Â· {tableSpecialists.length}</span>
                 </div>
                 <AgentTable rows={tableSpecialists} spaces={spaces} onSelect={(id) => nav(`/agents/${id}`)} />
               </div>
@@ -478,12 +477,12 @@ export function AgentsPage() {
           if (ownerCtx) {
             try {
               await api(`/v1/domains/${ownerCtx.subdomainId}`, { method: 'PATCH', body: JSON.stringify({ managerId: agent.id }) });
-            } catch { /* best-effort owner assignment */ }
+            } catch {  }
             await refresh();
             if (editingDomain) setDomainEditorOpen(true);
             return;
           }
-          // Specialists open straight into their detail subpage — the "complete"
+          // Specialists open straight into their detail subpage â€” the "complete"
           // surface where mind (memory & knowledge) is configured.
           const isSpecialist = agent.role && agent.role !== 'orchestrator' && agent.role !== 'manager';
           if (isSpecialist) {
@@ -545,7 +544,7 @@ export function AgentsPage() {
 }
 
 /**
- * Ambient surface for the continuous harness sync — shows when imported agents
+ * Ambient surface for the continuous harness sync â€” shows when imported agents
  * have accrued new memory/skills upstream, with the harness logos and a single
  * approval-gated "Review & pull" CTA into the import wizard.
  */
@@ -573,9 +572,9 @@ function ImportUpdatesBanner({
         })}
       </div>
       <div className="text-[13px] text-text-primary">
-        <span className="font-semibold">{parts.join(' · ') || 'New memory'}</span>
+        <span className="font-semibold">{parts.join(' Â· ') || 'New memory'}</span>
         <span className="text-text-secondary">
-          {' '}from {updates.length} imported {updates.length === 1 ? 'agent' : 'agents'} — pull it into Agentis Brain.
+          {' '}from {updates.length} imported {updates.length === 1 ? 'agent' : 'agents'} â€” pull it into Agentis Brain.
         </span>
       </div>
       <div className="ml-auto flex items-center gap-2">
@@ -712,7 +711,7 @@ function AgentTable({ rows, spaces, onSelect }: { rows: AgentRow[]; spaces: Spac
               <td className="px-4 py-3 text-[12px] text-text-secondary">{agentHarnessLabel(a)}</td>
               <td className="px-4 py-3 text-[12px] text-text-muted">{relativeTime(a.lastActiveAt)}</td>
               <td className="px-2 py-3">
-                <span className="text-text-muted">›</span>
+                <span className="text-text-muted">â€º</span>
               </td>
             </tr>
           ))}
@@ -730,7 +729,7 @@ function agentHarnessLabel(agent: AgentRow) {
   const type = agentHarnessType(agent);
   const model = agent.runtimeModel ?? agent.adapter?.model;
   const label = harnessLabel(type);
-  return model ? `${label} · ${model}` : label;
+  return model ? `${label} Â· ${model}` : label;
 }
 
 function harnessLabel(adapterType: string) {
@@ -765,4 +764,7 @@ function Avatar({ name, imageUrl, size = 36 }: { name: string; imageUrl?: string
     </div>
   );
 }
+
+
+
 

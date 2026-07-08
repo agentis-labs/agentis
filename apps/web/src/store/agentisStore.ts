@@ -1,5 +1,5 @@
-/**
- * Shared client state — V1 review feedback.
+﻿/**
+ * Shared client state â€” V1 review feedback.
  *
  * The dashboard's prop-passing was getting tangled around two concerns
  * that genuinely span the tree:
@@ -7,7 +7,7 @@
  *   1. The active workspace + ambient (set in TopBarPills, read by every
  *      data-fetching page). Today it lives in URL search params + a
  *      one-off context.
- *   2. UI shell flags — whether the conversation dock is open, whether
+ *   2. UI shell flags â€” whether the conversation dock is open, whether
  *      the command palette is open, what the live presence map looks
  *      like by agent. These are sourced from the realtime bus and need
  *      to be observable from anywhere without re-subscribing per
@@ -19,7 +19,7 @@
  *   - The store is reachable from non-React code paths (e.g. the realtime
  *     bridge in `useRealtime.ts`).
  *
- * Components opt in incrementally — existing prop flow keeps working
+ * Components opt in incrementally â€” existing prop flow keeps working
  * until each consumer is migrated.
  */
 
@@ -41,7 +41,7 @@ export interface ActiveRunSummary {
   startedAt: string;
 }
 
-export type SettingsTab = 'profile' | 'workspace' | 'channels' | 'mcp' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
+export type SettingsTab = 'profile' | 'data' | 'workspace' | 'channels' | 'mcp' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
 
 export interface AgentisStore {
   // Workspace + ambient context
@@ -64,7 +64,7 @@ export interface AgentisStore {
   setSettingsOpen: (open: boolean, tab?: SettingsTab) => void;
   closeSettings: () => void;
 
-  // Realtime-derived state — keyed by agentId / runId so selectors can
+  // Realtime-derived state â€” keyed by agentId / runId so selectors can
   // subscribe to a single key without watching the whole map.
   presenceByAgent: Record<string, AgentPresence>;
   upsertPresence: (p: AgentPresence) => void;
@@ -74,8 +74,8 @@ export interface AgentisStore {
   upsertActiveRun: (run: ActiveRunSummary) => void;
   removeActiveRun: (runId: string) => void;
 
-  // Resource-name registry — pages that fetch an entity (app, workflow, agent,
-  // extension, …) register its human name here, keyed `${kind}:${id}`, so any
+  // Resource-name registry â€” pages that fetch an entity (app, workflow, agent,
+  // extension, â€¦) register its human name here, keyed `${kind}:${id}`, so any
   // id-only surface (the "Viewing" pill, node labels) can resolve a real name
   // instead of leaking the raw identifier. See lib/resourceNames.
   resourceNames: Record<string, string>;
@@ -123,7 +123,7 @@ export const useAgentisStore = create<AgentisStore>((set) => ({
     }),
   removeActiveRun: (runId) =>
     set((s) => {
-      // Object spread + delete — cheaper than Object.fromEntries(filter).
+      // Object spread + delete â€” cheaper than Object.fromEntries(filter).
       const next = { ...s.activeRuns };
       delete next[runId];
       return { activeRuns: next };
@@ -139,7 +139,7 @@ export const useAgentisStore = create<AgentisStore>((set) => ({
     }),
 }));
 
-// Selector helpers — call sites import these instead of slicing the
+// Selector helpers â€” call sites import these instead of slicing the
 // store inline so the dependency surface is grep-able.
 export const selectPresence = (agentId: string) => (s: AgentisStore) =>
   s.presenceByAgent[agentId];
@@ -162,3 +162,6 @@ function sameActiveRun(a: ActiveRunSummary | undefined, b: ActiveRunSummary): bo
     && a!.status === b.status
     && a!.startedAt === b.startedAt;
 }
+
+
+

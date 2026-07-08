@@ -1,5 +1,5 @@
-/**
- * NotificationPanel — opaque, well-styled dropdown anchored to the bell.
+﻿/**
+ * NotificationPanel â€” opaque, well-styled dropdown anchored to the bell.
  *
  * Replaces the previous transparent list. Shows human-readable
  * summaries with inline action buttons. Approval items always first.
@@ -205,7 +205,7 @@ export function NotificationPanel() {
 
           <div className="max-h-[420px] overflow-y-auto">
             {loading && panelItems.length === 0 && (
-              <div className="px-4 py-6 text-center text-[12px] text-text-muted">Loading…</div>
+              <div className="px-4 py-6 text-center text-[12px] text-text-muted">Loadingâ€¦</div>
             )}
             {!loading && panelItems.length === 0 && (
               <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
@@ -371,3 +371,6 @@ function writeSeenNotificationIds(workspaceId: string | null, ids: Set<string>):
     /* ignore */
   }
 }
+
+
+

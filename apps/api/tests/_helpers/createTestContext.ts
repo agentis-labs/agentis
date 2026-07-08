@@ -12,6 +12,13 @@
  * otherwise a regression in any one of those middlewares slips through.
  */
 
+// Integration tests must never spawn real CLI harness `--version` probes
+// (slow + environment-dependent → flaky timeouts). The harness detector honors
+// this flag and returns no detections. Set at import time so it is in effect
+// before any route handler runs. (The dedicated harnessProbe.test.ts drives the
+// real probe with its own sandboxed env and is unaffected.)
+process.env.AGENTIS_SKIP_HARNESS_PROBE = 'true';
+
 import { randomBytes, randomUUID, generateKeyPairSync } from 'node:crypto';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';

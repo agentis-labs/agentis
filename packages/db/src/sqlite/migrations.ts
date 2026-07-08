@@ -1,5 +1,5 @@
-/**
- * Migration registry — SQLite dialect.
+﻿/**
+ * Migration registry â€” SQLite dialect.
  *
  * Migrations are inlined as string literals (not loaded from .sql files) so
  * the bundled CLI distribution works whether running via tsx, tsc-compiled
@@ -16,7 +16,7 @@
  *   3. The SQL must be idempotent (CREATE TABLE IF NOT EXISTS, etc.).
  *   4. Mirror the change in src/sqlite/schema.ts so drizzle stays in sync.
  *
- * Forward-only — V1 has no rollback infrastructure. For destructive changes,
+ * Forward-only â€” V1 has no rollback infrastructure. For destructive changes,
  * ship a follow-up migration that re-creates the prior shape.
  */
 
@@ -429,7 +429,7 @@ CREATE TABLE IF NOT EXISTS personal_brain_grants (
     version: 44,
     name: 'abilities',
     sql: `
--- Abilities — compiled behavioral specialization units (docs/brain/ABILITIES.md).
+-- Abilities â€” compiled behavioral specialization units (docs/brain/ABILITIES.md).
 -- Workspace-scoped pool; semantic relevance + optional pinning decide injection.
 CREATE TABLE IF NOT EXISTS abilities (
   id                TEXT PRIMARY KEY,
@@ -438,7 +438,7 @@ CREATE TABLE IF NOT EXISTS abilities (
   slug              TEXT NOT NULL,
   description       TEXT,
   domain_tag        TEXT,
-  icon_emoji        TEXT DEFAULT '⚡',
+  icon_emoji        TEXT DEFAULT 'âš¡',
   author_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
   compiled_prompt   TEXT,
   specs             TEXT NOT NULL DEFAULT '{}',
@@ -587,7 +587,7 @@ ALTER TABLE workflows ADD COLUMN domain_id TEXT REFERENCES domains(id) ON DELETE
     version: 50,
     name: 'extension_kv',
     sql: `
--- Workspace-scoped extension KV store (EXTENSIONS-AND-LISTENER-10X §2.5).
+-- Workspace-scoped extension KV store (EXTENSIONS-AND-LISTENER-10X Â§2.5).
 -- Backs listener-source extensions that maintain rolling state across runs.
 CREATE TABLE IF NOT EXISTS extension_kv (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -650,7 +650,7 @@ ALTER TABLE abilities ADD COLUMN preferred_model TEXT;
     sql: `
 -- Peer-profile tables (Brain discourse) were added to the already-shipped v40
 -- migration body, so databases that recorded v40 BEFORE that edit never got the
--- table — every chat turn then warned "no such table: peer_profiles". Recreate
+-- table â€” every chat turn then warned "no such table: peer_profiles". Recreate
 -- both at their full current shape (v40 base + v42 columns). Idempotent: a no-op
 -- where they already exist.
 CREATE TABLE IF NOT EXISTS peer_profiles (
@@ -728,7 +728,7 @@ CREATE INDEX IF NOT EXISTS idx_specialist_loadout_role ON specialist_ability_loa
     name: 'specialist_profiles',
     sql: `
 -- Phase 1 (SPECIALISTS-10X): the durable expert definition for a functional
--- role — identity, runtime contract, generated A2A-style card, status, version.
+-- role â€” identity, runtime contract, generated A2A-style card, status, version.
 -- One profile per (workspace, role); the materialized agent rows are instances.
 CREATE TABLE IF NOT EXISTS specialist_profiles (
   id                      TEXT PRIMARY KEY,
@@ -758,7 +758,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_specialist_profile_role ON specialist_prof
     version: 57,
     name: 'specialist_mind',
     sql: `
--- Phase 2 (SPECIALISTS-10X): a specialist's MIND — curated, multimodal source
+-- Phase 2 (SPECIALISTS-10X): a specialist's MIND â€” curated, multimodal source
 -- material distilled into retrievable atoms. One mind per (workspace, role).
 CREATE TABLE IF NOT EXISTS specialist_minds (
   id                TEXT PRIMARY KEY,
@@ -970,7 +970,7 @@ CREATE INDEX IF NOT EXISTS idx_specialist_quality_role ON specialist_quality_eve
     version: 59,
     name: 'session_moments_backfill',
     // session_moments was added into the already-released v40 block AFTER many
-    // workspaces had recorded v40 as applied, so it never ran on those DBs —
+    // workspaces had recorded v40 as applied, so it never ran on those DBs â€”
     // chat then logs "no such table: session_moments" every turn during memory
     // capture. (peer_profiles had the same problem and got its own v53 backfill.)
     // This is the proper fix: a NEW versioned, idempotent migration so existing
@@ -1004,13 +1004,12 @@ ALTER TABLE workflows ADD COLUMN content_hash TEXT;
   {
     version: 61,
     name: 'abilities_10x_depth_eval_activations',
-    // ABILITIES-10X — make the Ability the LoRA-style add-on primitive:
-    //   • depth: the earned specialization rung (d0_instinct … d4_conductor).
-    //   • visibility: private | workspace | unlisted | hub.
-    //   • content_hash: drives the Ability Cache + prefix-cache ordering.
-    //   • origin_json: which creation on-ramp produced it (provenance).
-    //   • execution_policy_json / routing_policy_json: D3/D4 behavioral policy.
-    // Plus two lean tables — ability-scoped self-eval evidence and the
+    // ABILITIES-10X â€” make the Ability the LoRA-style add-on primitive:
+    //   â€¢ depth: the earned specialization rung (d0_instinct â€¦ d4_conductor).
+    //   â€¢ content_hash: drives the Ability Cache + prefix-cache ordering.
+    //   â€¢ origin_json: which creation on-ramp produced it (provenance).
+    //   â€¢ execution_policy_json / routing_policy_json: D3/D4 behavioral policy.
+    // Plus two lean tables â€” ability-scoped self-eval evidence and the
     // activation ledger (the free flywheel). No weights, no GPU, no training jobs.
     sql: `
 ALTER TABLE abilities ADD COLUMN depth TEXT NOT NULL DEFAULT 'd0_instinct';
@@ -1054,10 +1053,10 @@ CREATE INDEX IF NOT EXISTS ability_activations_ws ON ability_activations(workspa
   {
     version: 62,
     name: 'pacer_feynman_indexes',
-    // BRAIN PACER + FEYNMAN — make the two new hot reads cheap:
-    //   • Phase 3 graduation counts `atom_injected` events per atom
+    // BRAIN PACER + FEYNMAN â€” make the two new hot reads cheap:
+    //   â€¢ Phase 3 graduation counts `atom_injected` events per atom
     //     (retrieval-frequency signal).
-    //   • Phase 4 Feynman counts `node_failure` events per workspace
+    //   â€¢ Phase 4 Feynman counts `node_failure` events per workspace
     //     (repeated-failure trigger).
     // Both are JSON-payload reads gated by (atom_id|workspace_id, event_type),
     // so two composite indexes cover them. Idempotent; no data change.
@@ -1071,18 +1070,18 @@ CREATE INDEX IF NOT EXISTS idx_brain_quality_events_ws_type_created
   {
     version: 63,
     name: 'cora_organizational_intelligence',
-    // CORA — the Workspace Brain's continuous organizational reasoning engine
+    // CORA â€” the Workspace Brain's continuous organizational reasoning engine
     // (docs/brain/AGENTIS_ORGANIZATIONAL_INTELLIGENCE_ARCHITECTURE.md).
     // Engineering tables only; the user-facing surface is the Brain "Sources"
     // tab. Physical layout is deliberately leaner than the RFC's logical list:
-    //   • learning briefs fold into cora_source_connections.learning_brief_json
-    //   • entity aliases fold into cora_entities.aliases_json
-    //   • access policies fold into per-row access_policy_json
-    //   • onboarding/feedback events ride cora_audit_events
+    //   â€¢ learning briefs fold into cora_source_connections.learning_brief_json
+    //   â€¢ entity aliases fold into cora_entities.aliases_json
+    //   â€¢ access policies fold into per-row access_policy_json
+    //   â€¢ onboarding/feedback events ride cora_audit_events
     // Evidence is append-only: UNIQUE(source_object_id, content_hash) makes
-    // replay idempotent (RFC §7.5). Claim conflicts carry dispute_link_id so
+    // replay idempotent (RFC Â§7.5). Claim conflicts carry dispute_link_id so
     // contradictions surface through the EXISTING dispute system instead of a
-    // parallel one (RFC §10.5).
+    // parallel one (RFC Â§10.5).
     sql: `
 CREATE TABLE IF NOT EXISTS cora_owner_profiles (
   id TEXT PRIMARY KEY,
@@ -1394,10 +1393,10 @@ CREATE INDEX IF NOT EXISTS cora_audit_events_ws ON cora_audit_events(workspace_i
   {
     version: 64,
     name: 'cora_investigations_access_requests',
-    // CORA second slice (RFC §11.2 + §9.5):
-    //   • cora_investigations — bounded Feynman reasoning jobs with grounding
+    // CORA second slice (RFC Â§11.2 + Â§9.5):
+    //   â€¢ cora_investigations â€” bounded Feynman reasoning jobs with grounding
     //     scores; publish a cited result, a disputed result, or an explicit no-op.
-    //   • cora_access_requests — the `human_approval` grant mode's request
+    //   â€¢ cora_access_requests â€” the `human_approval` grant mode's request
     //     queue: what the agent wants to know, why, and the owner's decision
     //     (once / run / session / standing, with expiry).
     sql: `
@@ -1469,7 +1468,7 @@ CREATE INDEX IF NOT EXISTS runtime_sessions_agent
   {
     version: 66,
     name: 'embedding_identity',
-    // Brain 10x §B1.2 — every embedding-bearing row records WHICH model produced
+    // Brain 10x Â§B1.2 â€” every embedding-bearing row records WHICH model produced
     // its vector and at WHAT dimension, so retrieval can compare (model,dims)
     // instead of length alone. `needs_reembed` flags rows whose stored vector no
     // longer matches the workspace's configured provider, so the maintenance
@@ -1495,12 +1494,11 @@ CREATE INDEX IF NOT EXISTS memory_episodes_needs_reembed
   {
     version: 67,
     name: 'unified_substrate_governing',
-    // Brain 10x §B4 (dual-read stage, NON-DESTRUCTIVE) — memory_episodes becomes
-    // the canonical substrate. `governing` marks operator-authored atoms that
+    // Brain 10x Â§B4 (dual-read stage, NON-DESTRUCTIVE) â€” memory_episodes becomes
     // must inject on every dispatch (the constitutional tier), replacing the
     // separate workspace_memory-only scan. `applies_to` carries scope-affinity
-    // links (agent/workflow ids) for the narrow-write scope model (§B7.3). Both
-    // additive + reversible; the workspace_memory → episodes backfill and the
+    // links (agent/workflow ids) for the narrow-write scope model (Â§B7.3). Both
+    // additive + reversible; the workspace_memory â†’ episodes backfill and the
     // eventual table drop are deferred destructive stages gated on a DB backup.
     sql: `
 ALTER TABLE memory_episodes ADD COLUMN governing INTEGER NOT NULL DEFAULT 0;
@@ -1539,12 +1537,10 @@ DELETE FROM agents
   {
     version: 69,
     name: 'collapse_workspace_memory_into_episodes',
-    // Brain 10x §B4 (DESTRUCTIVE — operator-sanctioned, post-backup) — fold the
     // typed workspace_memory plane into the canonical memory_episodes substrate.
     // Rows copy id-preserving with a `plane:workspace_memory` tag + a metadata
     // discriminator (memoryKind/memorySource/provenance) so the typed MemoryStore
-    // facade reconstructs the kind/source contract. kind→type and source→episode
-    // source are mapped; operator rules become `governing`. embedding is reset
+    // facade reconstructs the kind/source contract. kindâ†’type and sourceâ†’episode
     // (needs_reembed=1) so the spine re-embeds with the workspace provider.
     // Idempotent copy (NOT EXISTS), then drop the table.
     sql: `
@@ -1618,11 +1614,10 @@ CREATE TABLE IF NOT EXISTS plan_versions (
   {
     version: 71,
     name: 'rename_cora_to_grounding',
-    // Brain 10x §B8 — "CORA" retired as a name. Internal understanding folded into
     // the Brain (facts, not claims); the claim/evidence/source machinery + its
     // tables are reserved for the future EXTERNAL-sources system, now named
-    // "Grounding". Rename the 20 tables `cora_*` → `grounding_*`. SQLite's
-    // ALTER TABLE … RENAME TO updates FK references in dependent tables
+    // "Grounding". Rename the 20 tables `cora_*` â†’ `grounding_*`. SQLite's
+    // ALTER TABLE â€¦ RENAME TO updates FK references in dependent tables
     // automatically (legacy_alter_table off by default), so this is safe.
     sql: `
 ALTER TABLE cora_access_requests RENAME TO grounding_access_requests;
@@ -1650,11 +1645,10 @@ ALTER TABLE cora_sync_runs RENAME TO grounding_sync_runs;
   {
     version: 72,
     name: 'brain_working_set_and_shared_axis',
-    // Brain 10x §C2 — sleep-time precomputed working set (Tier-0 cache): one row
+    // Brain 10x Â§C2 â€” sleep-time precomputed working set (Tier-0 cache): one row
     // per (workspace, scope) holding the precomputed top durable atoms so the
     // injector can serve a scope's core knowledge at zero retrieval cost.
-    // §C7 — `shared` axis on every atom: 1 = visible to the whole team, 0 =
-    // private to its scope/owner. Powers the privacy-scoped team brain.
+    // Â§C7 â€” `shared` axis on every atom: 1 = visible to the whole team, 0 =
     sql: `
 CREATE TABLE IF NOT EXISTS brain_working_set (
   id TEXT PRIMARY KEY,
@@ -1830,7 +1824,7 @@ CREATE TABLE IF NOT EXISTS workspace_counters (
 -- knowledge_chunks by (workspace_id, scope_id) and orders by updated_at DESC,
 -- capped at CANDIDATE_SCAN_LIMIT. Until now the table carried only its
 -- primary-key autoindex, so every recall was a full table scan + transient
--- sort that grew linearly with corpus size — invisible on small dev databases,
+-- sort that grew linearly with corpus size â€” invisible on small dev databases,
 -- a cliff on real ones. memory_episodes already had its equivalents; this
 -- closes the gap. Mirrored in src/sqlite/schema.ts (knowledgeChunks).
 CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_scope_recency
@@ -1894,9 +1888,9 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_bases_scope ON knowledge_bases(workspac
     version: 82,
     name: 'agentic_apps',
     sql: `
--- Agentic App = first-class deployable unit (AGENTIC-APPS-10X-MASTERPLAN §3).
+-- Agentic App = first-class deployable unit (AGENTIC-APPS-10X-MASTERPLAN Â§3).
 -- An App owns workflows (workflows.app_id, nullable = full back-compat: a bare
--- workflow is an App-of-one). Surfaces (§4) and datastore (§5) land in later
+-- workflow is an App-of-one). Surfaces (Â§4) and datastore (Â§5) land in later
 -- migrations and reference apps(id). Mirrored in src/sqlite/schema.ts
 -- (apps, appMembers, workflows.appId).
 CREATE TABLE IF NOT EXISTS apps (
@@ -1933,7 +1927,7 @@ CREATE INDEX IF NOT EXISTS idx_workflows_app ON workflows(workspace_id, app_id);
     version: 83,
     name: 'app_datastore',
     sql: `
--- App Datastore (AGENTIC-APPS-10X-MASTERPLAN §5) — typed collections + records.
+-- App Datastore (AGENTIC-APPS-10X-MASTERPLAN Â§5) â€” typed collections + records.
 -- NOT the Brain: exact, structured, transactional rows. Records are validated
 -- against the collection's field schema on write; V1 filters via json_extract
 -- on data_json (a later pass projects indexed fields into generated columns).
@@ -1968,7 +1962,7 @@ CREATE INDEX IF NOT EXISTS idx_app_records_collection ON app_records(collection_
     version: 84,
     name: 'app_surfaces',
     sql: `
--- AG-UI surfaces (AGENTIC-APPS-10X-MASTERPLAN §4). An agent-authored ViewNode
+-- AG-UI surfaces (AGENTIC-APPS-10X-MASTERPLAN Â§4). An agent-authored ViewNode
 -- tree + declared actions, owned by an App (not coupled to one workflow as the
 -- legacy WorkflowGraph.surfaces JSON was). Mirrored in src/sqlite/schema.ts
 -- (appSurfaces).
@@ -1992,7 +1986,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_app_surfaces_app_name ON app_surfaces(app_
     version: 85,
     name: 'app_lifecycle_snapshots',
     sql: `
--- App lifecycle snapshots (AGENTIC-SYSTEMS-ARCHITECTURE §9): captured before
+-- App lifecycle snapshots (AGENTIC-SYSTEMS-ARCHITECTURE Â§9): captured before
 -- upgrade so rollback restores both the manifest definition and live collection
 -- rows. Rows are app-scoped and bounded by the lifecycle service.
 CREATE TABLE IF NOT EXISTS app_lifecycle_snapshots (
@@ -2089,7 +2083,7 @@ CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps(workspace_id, owner_agent_id);
     version: 89,
     name: 'memory_episodes_scope_recency_index',
     sql: `
--- §0.1 — the dispatch read path (loadAtoms) filters memory_episodes by
+-- Â§0.1 â€” the dispatch read path (loadAtoms) filters memory_episodes by
 -- (workspace_id, scope_id) + archived_at IS NULL and orders by updated_at DESC.
 -- Without this it is a per-workspace table scan on every recall; the prior v78
 -- comment claiming the index existed was wrong (only the needs_reembed index
@@ -2102,7 +2096,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_episodes_scope_recency
     version: 90,
     name: 'artifacts_app_and_origin',
     sql: `
--- Assets §1 — make artifacts groupable by what generated them. app_id binds an
+-- Assets Â§1 â€” make artifacts groupable by what generated them. app_id binds an
 -- artifact to its producing App (for the App "Data & Assets" view); origin is the
 -- coarse source class (agent | app | workflow | channel | manual). Backfill origin
 -- from the strongest existing signal. Mirrored in src/sqlite/schema.ts +
@@ -2122,7 +2116,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_origin ON artifacts(workspace_id, origi
     version: 91,
     name: 'issues_scheduling',
     sql: `
--- Live Workspace §C — issues become the schedulable backlog. scheduled_for is
+-- Live Workspace Â§C â€” issues become the schedulable backlog. scheduled_for is
 -- the ISO time the assigned agent should auto-start (picked up by the due
 -- sweep); recurrence_cron reschedules it after each fire. Mirrored in
 -- src/sqlite/schema.ts + the index.ts drift path.
@@ -2136,7 +2130,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_scheduled ON issues(workspace_id, schedule
     name: 'knowledge_bases_polymorphic_scope',
     sql: `
 -- Knowledge scope is now polymorphic: a scoped Knowledge brain is owned by a
--- Workflow OR an Agentic App (App Brain → Knowledge binds scope_id = app.id).
+-- Workflow OR an Agentic App (App Brain â†’ Knowledge binds scope_id = app.id).
 -- The old FK pinned scope_id to workflows(id), so an App id raised a FK error
 -- (surfaced as a 500 on create / "Workflow not found" path). Rebuild the table
 -- to drop that FK; scope ownership is validated in the route against both tables.
@@ -2181,7 +2175,7 @@ ALTER TABLE conversations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask'
     version: 94,
     name: 'blackboard_entries',
     sql: `
--- Blackboard — durable, identity-tagged inter-agent shared state
+-- Blackboard â€” durable, identity-tagged inter-agent shared state
 -- (AGENT-COOPERATION-10X). Promotes the run-scoped scratchpad/channel bus into
 -- a persisted store so a convergence loop's cross-iteration memory survives an
 -- API restart and is fully auditable. Every entry records WHO (agent) on WHICH
@@ -2196,7 +2190,7 @@ CREATE TABLE IF NOT EXISTS blackboard_entries (
   key              TEXT,                           -- KV key for facts
   channel          TEXT,                           -- channel name for messages
   author_agent_id  TEXT,
-  author_runtime   TEXT,                           -- opus | codex | cursor | …
+  author_runtime   TEXT,                           -- opus | codex | cursor | â€¦
   author_label     TEXT,                           -- display name
   iteration        INTEGER NOT NULL DEFAULT 0,
   confidence       REAL,                           -- 0..1 for claims
@@ -2212,7 +2206,7 @@ CREATE INDEX IF NOT EXISTS idx_blackboard_run_ns ON blackboard_entries(run_id, n
     version: 95,
     name: 'living_apps_channel_conversation_app_id',
     sql: `
--- Living Apps Phase 0 — the App owns the relationship. A channel connection and
+-- Living Apps Phase 0 â€” the App owns the relationship. A channel connection and
 -- a conversation can now belong to an Agentic App, so an inbound turn runs in
 -- the App's context (its datastore, actions, and operating doctrine) and the
 -- live thread is visible on the App's surfaces. Nullable + ON DELETE SET NULL,
@@ -2220,7 +2214,7 @@ CREATE INDEX IF NOT EXISTS idx_blackboard_run_ns ON blackboard_entries(run_id, n
 -- Mirrored in src/sqlite/schema.ts (channelConnections.appId / conversations.appId)
 -- + the idempotent column-drift path in index.ts. Plain TEXT (no inline FK):
 -- channel_connections + conversations are created in the embedded baseline, so the
--- drift adds this column BEFORE the apps table exists (apps is a later migration) —
+-- drift adds this column BEFORE the apps table exists (apps is a later migration) â€”
 -- an inline REFERENCES apps(id) would fail with "no such table: apps". The schema's
 -- Drizzle .references() carries the ORM relation; app deletion degrades gracefully.
 ALTER TABLE channel_connections ADD COLUMN app_id TEXT;
@@ -2233,7 +2227,7 @@ CREATE INDEX IF NOT EXISTS idx_conversations_app ON conversations(app_id);
     version: 96,
     name: 'living_apps_conversation_handoff',
     sql: `
--- Living Apps Phase 2 — operator handoff. 'human' parks the resident agent so an
+-- Living Apps Phase 2 â€” operator handoff. 'human' parks the resident agent so an
 -- operator can drive the thread (take over); null/'agent' = the agent answers.
 -- Mirrored in src/sqlite/schema.ts (conversations.handoffState) + index.ts drift.
 ALTER TABLE conversations ADD COLUMN handoff_state TEXT;
@@ -2243,9 +2237,9 @@ ALTER TABLE conversations ADD COLUMN handoff_state TEXT;
     version: 97,
     name: 'living_apps_app_contacts',
     sql: `
--- Living Apps Phase 3 — the relationship entity. One row per contact an App
+-- Living Apps Phase 3 â€” the relationship entity. One row per contact an App
 -- talks to, unifying a person across channels (peer_id) and carrying pipeline
--- state (stage/goal) + the proactivity clock (next_touch_at → the follow-up
+-- state (stage/goal) + the proactivity clock (next_touch_at â†’ the follow-up
 -- sweep). Mirrored in src/sqlite/schema.ts (appContacts).
 CREATE TABLE IF NOT EXISTS app_contacts (
   id              TEXT PRIMARY KEY,
@@ -2272,11 +2266,11 @@ CREATE INDEX IF NOT EXISTS idx_app_contacts_app ON app_contacts(app_id, stage);
     version: 98,
     name: 'living_apps_conversation_participants',
     sql: `
--- Living Apps Phase 2 (G1) — multi-party threads. ADDITIVE: conversations.agent_id
+-- Living Apps Phase 2 (G1) â€” multi-party threads. ADDITIVE: conversations.agent_id
 -- stays the singular PRIMARY participant; this join layers more parties beside it
 -- (customer + resident agent + escalation specialist + human operator in ONE
 -- thread). An active 'specialist' agent participant becomes the inbound responder
--- (warm handoff). New table → inline FK to conversations is fine (it exists by now).
+-- (warm handoff). New table â†’ inline FK to conversations is fine (it exists by now).
 -- Mirrored in src/sqlite/schema.ts (conversationParticipants).
 CREATE TABLE IF NOT EXISTS conversation_participants (
   id                TEXT PRIMARY KEY,
@@ -2311,10 +2305,10 @@ WHERE c.app_id IS NOT NULL AND c.agent_id IS NOT NULL
     version: 99,
     name: 'living_apps_contact_outcome',
     sql: `
--- Living Apps Phase M2 (G10) — the conversational learning loop. A resident App
+-- Living Apps Phase M2 (G10) â€” the conversational learning loop. A resident App
 -- relationship reaches an OUTCOME (won | lost | abandoned); recording it is what
 -- lets the agent deposit a graded lesson and graduate winning patterns into an
--- ability. ADDITIVE: plain TEXT columns on app_contacts (no inline FK — even
+-- ability. ADDITIVE: plain TEXT columns on app_contacts (no inline FK â€” even
 -- though app_contacts is post-baseline, we keep the safe pattern). NULL = no
 -- outcome yet (every existing row behaves exactly as before).
 -- Mirrored in src/sqlite/schema.ts (appContacts.outcome / outcomeAt).
@@ -2326,14 +2320,14 @@ ALTER TABLE app_contacts ADD COLUMN outcome_at TEXT;
     version: 100,
     name: 'living_apps_channel_turn_queue',
     sql: `
--- Living Apps Phase 5 (G2) — durable channel turns at scale. The inbound
+-- Living Apps Phase 5 (G2) â€” durable channel turns at scale. The inbound
 -- dispatcher was fire-and-forget, in-process: a 24/7 desk dropped turns on
 -- restart with no backpressure or resumption. This table makes a channel turn a
 -- durable, at-least-once job: the ChannelTurnInput payload is stored verbatim, a
 -- polling worker claims pending rows, runs the turn, and marks them done. A crash
 -- mid-flight (lease expiry) re-picks the row; dedup_key (the inbound
 -- conversation-message id) makes enqueue idempotent so a redelivered webhook
--- never doubles a turn. New table → inline FKs are fine (conversations/workspaces
+-- never doubles a turn. New table â†’ inline FKs are fine (conversations/workspaces
 -- exist by v100). Mirrored in src/sqlite/schema.ts (channelTurnQueue).
 CREATE TABLE IF NOT EXISTS channel_turn_queue (
   id               TEXT PRIMARY KEY,
@@ -2363,13 +2357,13 @@ CREATE INDEX IF NOT EXISTS idx_channel_turn_conversation ON channel_turn_queue(c
     version: 101,
     name: 'living_apps_outbound_log',
     sql: `
--- Living Apps Phase 5 (G7) — the per-App outbound safety envelope. A resident
+-- Living Apps Phase 5 (G7) â€” the per-App outbound safety envelope. A resident
 -- agent runs 24/7; without a rate limit it can over-message a contact. This
 -- append-only counter table records each agent-initiated outbound send so the
 -- OutboundPolicyService enforces a durable per-App rolling-hour rate limit
 -- (survives restart, unlike an in-memory window). Operator manual sends are
--- recorded too (source='operator') — exempt from the limit but kept in the
--- window. New table → no inline FK needed (app_id is a plain TEXT bucket, like
+-- recorded too (source='operator') â€” exempt from the limit but kept in the
+-- window. New table â†’ no inline FK needed (app_id is a plain TEXT bucket, like
 -- channel_turn_queue.app_id). Mirrored in src/sqlite/schema.ts (appOutboundLog).
 CREATE TABLE IF NOT EXISTS app_outbound_log (
   id       TEXT PRIMARY KEY,
@@ -2385,12 +2379,12 @@ CREATE INDEX IF NOT EXISTS idx_app_outbound_log_app_time ON app_outbound_log(app
     version: 103,
     name: 'living_apps_conversation_summaries',
     sql: `
--- Living Apps Phase 6 (G4) — long-horizon per-conversation memory. The channel
+-- Living Apps Phase 6 (G4) â€” long-horizon per-conversation memory. The channel
 -- turn only sees a 20-message window (HISTORY_LIMIT), so the agent forgets the
 -- middle of a month-long thread. This table holds ONE rolling "state of this
 -- relationship" summary per conversation, refreshed as messages accrue past the
 -- window and injected into every turn's context. ADDITIVE: a new table (nothing
--- references it until present); no existing row/path changes. New table → inline
+-- references it until present); no existing row/path changes. New table â†’ inline
 -- FK to conversations is fine (it exists by v103). Mirrored in
 -- src/sqlite/schema.ts (conversationSummaries).
 CREATE TABLE IF NOT EXISTS conversation_summaries (
@@ -2413,10 +2407,10 @@ CREATE INDEX IF NOT EXISTS idx_conversation_summaries_workspace ON conversation_
     version: 104,
     name: 'living_apps_conversation_needs_attention',
     sql: `
--- Living Apps Phase 2 — "needs-you" flags. A resident agent FLAGS (it does not
--- interrupt) when a thread needs the operator — "Ana's ready to buy, wants a
--- discount I can't approve" — and the App console surfaces a count + a ◆ marker.
--- ADDITIVE: plain INTEGER/TEXT on conversations (no inline FK — both columns are
+-- Living Apps Phase 2 â€” "needs-you" flags. A resident agent FLAGS (it does not
+-- interrupt) when a thread needs the operator â€” "Ana's ready to buy, wants a
+-- discount I can't approve" â€” and the App console surfaces a count + a â—† marker.
+-- ADDITIVE: plain INTEGER/TEXT on conversations (no inline FK â€” both columns are
 -- on the embedded baseline table; 0 = not flagged, every existing row unchanged).
 -- Mirrored in src/sqlite/schema.ts (conversations.needsAttention/needsAttentionReason)
 -- + index.ts drift. v101/v102/v103 reserved for parallel agents.
@@ -2431,7 +2425,7 @@ ALTER TABLE conversations ADD COLUMN needs_attention_reason TEXT;
 -- Real per-node token consumption, recorded on the terminal node.completed audit
 -- entry so workflow/app analytics can SUM tokens (and existing cost_cents) from a
 -- single sink with no double counting. Every agent execution path (session /
--- tool-loop / dispatch) writes here — exact when the runtime reports usage,
+-- tool-loop / dispatch) writes here â€” exact when the runtime reports usage,
 -- estimated from prompt+output text otherwise. ADDITIVE nullable columns; every
 -- existing row stays unchanged. Mirrored in src/sqlite/schema.ts (auditEntries).
 ALTER TABLE audit_entries ADD COLUMN tokens_in INTEGER;
@@ -2458,7 +2452,7 @@ DROP TABLE IF EXISTS abilities;
     version: 107,
     name: 'connection_agent_grants',
     sql: `
--- Per-agent scoped authority over a connection (Agent-Native Platform Plan §3.3).
+-- Per-agent scoped authority over a connection (Agent-Native Platform Plan Â§3.3).
 -- Generalizes the grounding_agent_grants ACL to any connection an agent uses to act.
 CREATE TABLE IF NOT EXISTS connection_agent_grants (
   id              TEXT PRIMARY KEY,
@@ -2482,7 +2476,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS connection_agent_grants_uq
     version: 108,
     name: 'durable_entity_spine',
     sql: `
--- The Durable Entity spine (Agent-Native Platform Plan §3.0) — keyed single-writer
+-- The Durable Entity spine (Agent-Native Platform Plan Â§3.0) â€” keyed single-writer
 -- durable record + inbox + wake clock, one dispatcher. Unifies Agent + Subject.
 CREATE TABLE IF NOT EXISTS durable_entities (
   id                        TEXT PRIMARY KEY,
@@ -2517,7 +2511,7 @@ CREATE INDEX IF NOT EXISTS entity_inbox_scan_idx ON entity_inbox(entity_id, cons
     version: 109,
     name: 'experiment_substrate',
     sql: `
--- Experiment substrate (Agent-Native Platform Plan §3.5) — variant assignment + outcome.
+-- Experiment substrate (Agent-Native Platform Plan Â§3.5) â€” variant assignment + outcome.
 CREATE TABLE IF NOT EXISTS experiments (
   id            TEXT PRIMARY KEY,
   workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -2550,9 +2544,9 @@ CREATE INDEX IF NOT EXISTS experiment_assignments_variant_idx ON experiment_assi
     sql: `
 -- Queue-then-auto-continue mid-turn composer. While a conversation's turn is
 -- streaming, further sends are not dropped or steered into the live model
--- call — they are durably queued here (so a page reload never silently loses
+-- call â€” they are durably queued here (so a page reload never silently loses
 -- them) and auto-dispatched, oldest first, the moment the in-flight turn's
--- SSE stream ends. New table → inline FKs are fine (conversations/workspaces
+-- SSE stream ends. New table â†’ inline FKs are fine (conversations/workspaces
 -- exist by v110). Mirrored in src/sqlite/schema.ts (conversationMessageQueue).
 CREATE TABLE IF NOT EXISTS conversation_message_queue (
   id               TEXT PRIMARY KEY,
@@ -2569,3 +2563,6 @@ CREATE INDEX IF NOT EXISTS idx_conversation_message_queue_conversation ON conver
 `,
   },
 ];
+
+
+

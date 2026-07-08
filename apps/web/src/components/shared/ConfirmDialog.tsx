@@ -1,5 +1,5 @@
-/**
- * ConfirmDialog — destructive action confirmation with optional type-to-confirm.
+﻿/**
+ * ConfirmDialog â€” destructive action confirmation with optional type-to-confirm.
  *
  * Replaces native window.confirm. Supports tone (danger/warn/neutral),
  * keyboard shortcuts (Enter=confirm, Escape=cancel), and an optional
@@ -144,3 +144,6 @@ export function useConfirm() {
       ))
   );
 }
+
+
+

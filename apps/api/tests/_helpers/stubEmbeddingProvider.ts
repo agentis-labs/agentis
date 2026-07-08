@@ -1,4 +1,4 @@
-import type { EmbeddingProvider } from '../../src/services/embeddingProvider.js';
+import type { EmbeddingProvider } from '../../src/services/embedding/embeddingProvider.js';
 
 /**
  * Deterministic, dependency-free embedding provider for TESTS ONLY.

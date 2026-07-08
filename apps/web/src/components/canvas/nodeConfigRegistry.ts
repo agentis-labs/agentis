@@ -1,4 +1,4 @@
-export interface IntegrationManifestLite {
+﻿export interface IntegrationManifestLite {
   id?: string;
   service: string;
   name: string;
@@ -72,14 +72,14 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   planner: { label: 'Planner', reason: 'Turns a goal into a bounded sequence of executable agent steps.' },
   evaluator: { label: 'Evaluator', reason: 'Scores an output against natural-language acceptance criteria.' },
   guardrails: { label: 'Guardrails', reason: 'Applies deterministic policy checks before data continues.' },
-  knowledge: { label: 'Knowledge search', reason: 'Retrieves passages from the Knowledge Base (uploaded docs / RAG) — not the Brain memory.' },
-  knowledge_ingest: { label: 'Knowledge ingest (deprecated)', reason: 'Legacy: writes a doc into the Knowledge Base. Deprecated for authoring — memory fills automatically from chat/runs and agents write via tools.' },
+  knowledge: { label: 'Knowledge search', reason: 'Retrieves passages from the Knowledge Base (uploaded docs / RAG) â€” not the Brain memory.' },
+  knowledge_ingest: { label: 'Knowledge ingest (deprecated)', reason: 'Legacy: writes a doc into the Knowledge Base. Deprecated for authoring â€” memory fills automatically from chat/runs and agents write via tools.' },
   artifact_collect: { label: 'Artifact collect', reason: 'Packages generated artifacts into a versioned collection.' },
   return_output: { label: 'Return output', reason: 'Declares the rendered result operators see after a run.' },
   artifact_save: { label: 'Save artifact', reason: 'Persists generated content as a workspace artifact.' },
   browser: { label: 'Browser', reason: 'Uses Chromium to render, navigate, extract, or capture web content.' },
   checkpoint: { label: 'Checkpoint', reason: 'Pauses the run until an operator reviews the work.' },
-  // WORKFLOW-UPDATE — n8n-inspired utility & data primitives.
+  // WORKFLOW-UPDATE â€” n8n-inspired utility & data primitives.
   error_trigger: { label: 'Error trigger', reason: 'Starts this workflow when another workflow reaches a failure state.' },
   stop_error: { label: 'Stop & error', reason: 'Terminates the run immediately with a custom error message.' },
   code: { label: 'Code', reason: 'Runs sandboxed JavaScript (or Python) over the node input.' },
@@ -88,7 +88,7 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   xml_parse: { label: 'XML', reason: 'Converts between XML and JSON.' },
   markdown: { label: 'Markdown', reason: 'Converts between Markdown and HTML.' },
   json_schema_validate: { label: 'Validate schema', reason: 'Validates data against a JSON Schema before it continues.' },
-  sticky_note: { label: 'Sticky note', reason: 'A canvas annotation — it never executes.' },
+  sticky_note: { label: 'Sticky note', reason: 'A canvas annotation â€” it never executes.' },
   spreadsheet: { label: 'Spreadsheet', reason: 'Parses or builds CSV/XLSX rows.' },
   html_extract: { label: 'HTML extract', reason: 'Extracts values from an HTML string by CSS selector.' },
   graphql: { label: 'GraphQL', reason: 'Runs a structured GraphQL query against an endpoint.' },
@@ -195,11 +195,11 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
       if (!stringOf(c.bodyWorkflowId)) return missing('Choose the loop body workflow.');
       return stringOf(c.outputArrayKey) ? ready() : missing('Enter an output array key.');
     case 'converge':
-      // The engine hard-fails a converge without a body workflow — surface it
+      // The engine hard-fails a converge without a body workflow â€” surface it
       // at edit time instead of at run time.
       return stringOf(c.bodyWorkflowId) ? ready() : missing('Choose the converge body workflow.');
     case 'pursue':
-      // Same hard requirement as converge — a Pursuit needs a cohort body.
+      // Same hard requirement as converge â€” a Pursuit needs a cohort body.
       return stringOf(c.bodyWorkflowId) ? ready() : missing('Choose the pursuit body workflow.');
     case 'code':
       if (!stringOf(c.language)) return missing('Choose the code language.');
@@ -270,3 +270,6 @@ function nonEmptyArray(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 import { schemas } from '@agentis/core';
+
+
+

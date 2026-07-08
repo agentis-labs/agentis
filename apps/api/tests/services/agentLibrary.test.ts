@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { AgentLibraryService } from '../../src/services/agentLibrary.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
+import { AgentLibraryService } from '../../src/services/agent/agentLibrary.js';
 
 let dataDir: string;
 let volume: WorkspaceVolumeService;

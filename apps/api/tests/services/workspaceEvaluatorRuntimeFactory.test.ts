@@ -3,8 +3,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../../src/logger.js';
-import { OrchestratorModelRouter } from '../../src/services/orchestratorModelRouter.js';
-import { WorkspaceEvaluatorRuntimeFactory } from '../../src/services/workspaceEvaluatorRuntimeFactory.js';
+import { OrchestratorModelRouter } from '../../src/services/orchestrator/orchestratorModelRouter.js';
+import { WorkspaceEvaluatorRuntimeFactory } from '../../src/services/workspace/workspaceEvaluatorRuntimeFactory.js';
 
 const logger = createLogger({ level: 'error' });
 

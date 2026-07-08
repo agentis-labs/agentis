@@ -4,7 +4,7 @@ import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBrainTools } from '../../src/services/agentisToolHandlers/brain.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { SkillService } from '../../src/services/skillService.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';

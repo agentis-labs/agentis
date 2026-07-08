@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Self-healing workflow + operating-manual settings client (AGENT-AUTONOMY W7/W2).
  */
 
@@ -28,3 +28,6 @@ export function setSelfHealConfig(patch: Partial<SelfHealConfig>) {
     body: JSON.stringify(patch),
   });
 }
+
+
+

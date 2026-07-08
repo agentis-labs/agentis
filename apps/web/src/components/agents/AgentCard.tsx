@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+﻿import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { MessageSquare, MoreHorizontal, Play } from 'lucide-react';
 import { BudgetBar, money } from './BudgetBar';
@@ -65,12 +65,12 @@ export function AgentCard({
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-line bg-canvas text-sm font-medium"
             style={{ color: agent.colorHex ?? undefined }}
           >
-            {agent.avatarGlyph || '◈'}
+            {agent.avatarGlyph || 'â—ˆ'}
           </span>
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium text-text-primary">{agent.name}</div>
             <div className="truncate text-xs text-text-muted">
-              {agent.role || 'agent'} · {agent.runtimeModel || harnessLabel(agent.adapterType)}
+              {agent.role || 'agent'} Â· {agent.runtimeModel || harnessLabel(agent.adapterType)}
             </div>
           </div>
           <span className={clsx('inline-flex items-center gap-1 text-[11px]', readinessTone(readiness))}>
@@ -140,3 +140,6 @@ function harnessLabel(adapterType: string) {
     default: return 'Harness';
   }
 }
+
+
+

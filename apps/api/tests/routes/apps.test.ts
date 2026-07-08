@@ -9,14 +9,14 @@ import type { AppManifestEnvelope } from '@agentis/core';
 import { buildAppRoutes } from '../../src/routes/apps.js';
 import { AppDatastore, AppPackager, AppStore, AppSurfaceStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
-import { ConversationParticipantService } from '../../src/services/conversationParticipants.js';
-import { AppContactService } from '../../src/services/appContacts.js';
-import { AppLearningService } from '../../src/services/appLearning.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ConversationParticipantService } from '../../src/services/conversation/conversationParticipants.js';
+import { AppContactService } from '../../src/services/app/appContacts.js';
+import { AppLearningService } from '../../src/services/app/appLearning.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
-import { ConversationSimulatorService } from '../../src/services/conversationSimulator.js';
+import { ConversationSimulatorService } from '../../src/services/conversation/conversationSimulator.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { AgentAdapter, ChatDelta } from '@agentis/core';
 
@@ -329,7 +329,7 @@ describe('/v1/apps conversation simulator (G8)', () => {
         turn += 1;
         yield { type: 'text', delta: reply } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
     const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, simulator }) }]);
 

@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { AgentisError } from '@agentis/core';
 import type { AuthService } from '../services/auth.js';
-import type { KnowledgeBaseService } from '../services/knowledgeBase.js';
+import type { KnowledgeBaseService } from '../services/knowledge/knowledgeBase.js';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { schema } from '@agentis/db/sqlite';
 import { and, eq, isNull, sql } from 'drizzle-orm';

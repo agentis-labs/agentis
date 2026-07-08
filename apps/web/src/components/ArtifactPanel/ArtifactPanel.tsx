@@ -1,6 +1,6 @@
-/**
- * ArtifactPanel — modal/drawer surface for inspecting an artifact
- * (AGENTIS-UX-V2 §5.2).
+﻿/**
+ * ArtifactPanel â€” modal/drawer surface for inspecting an artifact
+ * (AGENTIS-UX-V2 Â§5.2).
  *
  * Supports closed | floating | docked | fullscreen states. Renderer chosen
  * by artifact.type. Sandboxed iframe for HTML; native img for image; pre
@@ -28,7 +28,7 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
   const toast = useToast();
   const [state, setState] = useState<PanelState>(initial);
 
-  // Sync external state changes (e.g. parent updating from `floating` → `docked`).
+  // Sync external state changes (e.g. parent updating from `floating` â†’ `docked`).
   useEffect(() => {
     setState(initial);
   }, [initial]);
@@ -37,7 +37,7 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
     onStateChange?.(state);
   }, [state, onStateChange]);
 
-  // §8.2 — when docked, compress the main zone via a body class so the Shell
+  // Â§8.2 â€” when docked, compress the main zone via a body class so the Shell
   // grid can react. The CSS lives in index.css under `.has-docked-artifact`.
   useEffect(() => {
     const cls = 'has-docked-artifact-panel';
@@ -60,12 +60,12 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
     downloadArtifactFile(artifact);
   }
 
-  // Branded native share — sends the actual asset file (so the recipient gets the
+  // Branded native share â€” sends the actual asset file (so the recipient gets the
   // real screenshot/doc, not just a link) with a "made with Agentis" caption.
   // Desktop browsers without Web Share fall back to copying a branded link.
   async function shareArtifact() {
     const shareUrl = `${window.location.origin}/artifacts?open=${encodeURIComponent(artifact.id)}`;
-    const caption = `${artifact.title} — made with Agentis ✨`;
+    const caption = `${artifact.title} â€” made with Agentis âœ¨`;
     const nav = navigator as Navigator & {
       canShare?: (data?: ShareData) => boolean;
       share?: (data: ShareData) => Promise<void>;
@@ -81,7 +81,7 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
         return;
       }
     } catch (err) {
-      // User-cancelled share is an AbortError — stay silent.
+      // User-cancelled share is an AbortError â€” stay silent.
       if ((err as Error)?.name === 'AbortError') return;
     }
     try {
@@ -107,7 +107,7 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
     <div
       className={clsx(
         'fixed flex flex-col rounded-lg border border-line bg-surface shadow-2xl',
-        // §8.2 — fullscreen sits above the Shell chrome (top bar/sidebar) on its
+        // Â§8.2 â€” fullscreen sits above the Shell chrome (top bar/sidebar) on its
         // own backdrop; docked/floating stay below modals.
         state === 'fullscreen' && 'inset-4 z-[81]',
         state === 'docked' && 'right-4 top-4 bottom-4 z-40 w-[640px] max-w-[calc(100vw-2rem)]',
@@ -120,7 +120,7 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium text-text">{artifact.title}</div>
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
-            {artifact.type} · {new Date(artifact.createdAt).toLocaleString()}
+            {artifact.type} Â· {new Date(artifact.createdAt).toLocaleString()}
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -148,7 +148,7 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
           >
             <Download size={12} />
           </button>
-          {/* §8.2 dock toggle — switches between floating (360px) and docked (480px, compresses main) */}
+          {/* Â§8.2 dock toggle â€” switches between floating (360px) and docked (480px, compresses main) */}
           {state !== 'fullscreen' && (
             <button
               type="button"
@@ -236,11 +236,11 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
     case 'spreadsheet':
       // Inline CSV/TSV text renders as a table; binary sheets (xlsx) download.
       if (artifact.content.startsWith('data:')) {
-        return <DownloadFallback artifact={artifact} note="Spreadsheet file — download to open." />;
+        return <DownloadFallback artifact={artifact} note="Spreadsheet file â€” download to open." />;
       }
       return <DataView content={artifact.content} />;
     case 'archive':
-      return <DownloadFallback artifact={artifact} note="Archive — download to extract its contents." />;
+      return <DownloadFallback artifact={artifact} note="Archive â€” download to extract its contents." />;
     case 'document':
     default:
       return (
@@ -271,7 +271,7 @@ function MediaRenderer({ artifact, kind }: { artifact: Artifact; kind: 'image' |
   const src = isData ? safeResourceUrl(artifact.content, DATA_URL_PREFIX[kind]) : url;
 
   if (!isData && loading) {
-    return <div className="flex h-full items-center justify-center p-6 text-sm text-text-muted">Loading…</div>;
+    return <div className="flex h-full items-center justify-center p-6 text-sm text-text-muted">Loadingâ€¦</div>;
   }
   if (!src || (!isData && error)) {
     return <DownloadFallback artifact={artifact} note="Preview unavailable for this source." />;
@@ -304,7 +304,7 @@ const MAX_ZOOM = 8;
 /**
  * Pan + zoom image viewer. Scroll to zoom toward the cursor, drag to pan when
  * zoomed in, double-click to toggle. A bottom-left toolbar mirrors the Brain
- * canvas controls (+/−/fit). Zooming reveals the screenshot's native pixels, so a
+ * canvas controls (+/âˆ’/fit). Zooming reveals the screenshot's native pixels, so a
  * page that's unreadable when fit-to-window becomes legible.
  */
 function ZoomableImage({ src, alt }: { src: string; alt: string }) {
@@ -479,7 +479,7 @@ function formatCell(v: unknown): string {
   return String(v);
 }
 
-/** Centered icon + download CTA for binary/unpreviewable assets (archives, xlsx, …). */
+/** Centered icon + download CTA for binary/unpreviewable assets (archives, xlsx, â€¦). */
 function DownloadFallback({ artifact, note }: { artifact: Artifact; note: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
@@ -499,8 +499,8 @@ function DownloadFallback({ artifact, note }: { artifact: Artifact; note: string
   );
 }
 
-/** Decode a `data:<mime>;base64,<…>` (or plain) URL into a typed Blob. Returns the
- * Blob — never the raw data URL — so downloads/shares produce valid, openable files
+/** Decode a `data:<mime>;base64,<â€¦>` (or plain) URL into a typed Blob. Returns the
+ * Blob â€” never the raw data URL â€” so downloads/shares produce valid, openable files
  * (Chrome truncates large `data:` hrefs, which yielded corrupt downloads). */
 function dataUrlToBlob(dataUrl: string): { blob: Blob; mime: string } | null {
   const m = /^data:([^;,]*)(;base64)?,([\s\S]*)$/.exec(dataUrl);
@@ -537,7 +537,7 @@ function downloadName(artifact: Artifact, mime?: string): string {
 
 /** Download an artifact as a real file (data URLs are decoded to a Blob first). */
 function downloadArtifactFile(artifact: Artifact) {
-  // Content-addressed blobs live on the asset store behind an authed endpoint —
+  // Content-addressed blobs live on the asset store behind an authed endpoint â€”
   // fetch the bytes (with the auth header) then save.
   if ((artifact.content ?? '').startsWith('asset://')) {
     void apiBlob(`/v1/artifacts/${artifact.id}/content?download=1`)
@@ -605,3 +605,6 @@ function extFor(a: Artifact, mime?: string): string {
 
 // Re-export so external imports stay terse.
 export { ExternalLink };
+
+
+

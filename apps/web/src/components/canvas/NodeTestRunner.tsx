@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { Play, RotateCcw } from 'lucide-react';
 import { api } from '../../lib/api';
@@ -8,7 +8,7 @@ import { api } from '../../lib/api';
  *
  * Hits `POST /v1/workflows/:id/nodes/:nodeId/test` against the live engine and
  * shows the structured result inline. Side-effecting nodes (integration,
- * http_request, evaluator) make real calls with real credentials — this is
+ * http_request, evaluator) make real calls with real credentials â€” this is
  * "run this one node now," not a mock.
  */
 
@@ -100,11 +100,11 @@ export function NodeTestRunner({ workflowId, nodeId, seedInputs }: NodeTestRunne
           disabled={running}
           className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-50"
         >
-          <Play size={12} /> {running ? 'Running…' : 'Run node'}
+          <Play size={12} /> {running ? 'Runningâ€¦' : 'Run node'}
         </button>
         {result && (
           <span className={clsx('text-[10px]', result.ok ? 'text-text-secondary' : 'text-danger')}>
-            {result.ok ? `OK · ${result.durationMs}ms` : `${result.code ?? 'ERROR'} · ${result.durationMs}ms`}
+            {result.ok ? `OK Â· ${result.durationMs}ms` : `${result.code ?? 'ERROR'} Â· ${result.durationMs}ms`}
           </span>
         )}
       </div>
@@ -126,3 +126,6 @@ export function NodeTestRunner({ workflowId, nodeId, seedInputs }: NodeTestRunne
     </div>
   );
 }
+
+
+

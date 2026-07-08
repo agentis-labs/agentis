@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Image, Loader2, Mic, Radio, Sparkles, Zap } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { Button } from '../shared/Button';
@@ -239,3 +239,6 @@ function TestRow({ loading, result, onTest }: { loading: boolean; result: Verify
 function Capability({ icon, title, detail, checked, onChange, children }: { icon: React.ReactNode; title: string; detail: string; checked: boolean; onChange: (value: boolean) => void; children?: React.ReactNode }) {
   return <div className="mt-3 rounded-input border border-line bg-surface-2 p-3"><div className="flex items-start justify-between gap-3"><div><p className="flex items-center gap-2 text-[13px] font-medium text-text-primary">{icon}{title}</p><p className="mt-1 text-[11px] leading-4 text-text-muted">{detail}</p></div><Toggle checked={checked} onChange={onChange} /></div>{checked && <div className="mt-3">{children}</div>}</div>;
 }
+
+
+

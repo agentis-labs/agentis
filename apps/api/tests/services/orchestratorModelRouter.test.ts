@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   OrchestratorModelRouter,
   type OrchestratorEnv,
-} from '../../src/services/orchestratorModelRouter.js';
+} from '../../src/services/orchestrator/orchestratorModelRouter.js';
 
 describe('OrchestratorModelRouter', () => {
   it('is disabled and resolves nothing when no model is configured', () => {

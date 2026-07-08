@@ -1,4 +1,4 @@
-interface BudgetBarProps {
+﻿interface BudgetBarProps {
   currentCents?: number | null;
   limitCents?: number | null;
 }
@@ -26,3 +26,5 @@ export function BudgetBar({ currentCents, limitCents }: BudgetBarProps) {
 export function money(cents: number) {
   return `$${(cents / 100).toFixed(2)}`;
 }
+
+

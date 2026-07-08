@@ -1,4 +1,4 @@
-import type { WorkflowGraph, WorkflowNode, WorkflowPhase } from './types/workflow.js';
+﻿import type { WorkflowGraph, WorkflowNode, WorkflowPhase } from './types/workflow.js';
 
 export const WORKFLOW_PHASE_COLORS = [
   '#2563eb',
@@ -63,7 +63,7 @@ export function suggestWorkflowPhases(graph: Pick<WorkflowGraph, 'nodes' | 'edge
 
 /**
  * Lay out ordered phases as LEFT-TO-RIGHT lanes (phase 1, then phase 2 to its
- * right, …) — the natural reading direction of a workflow and the shape of the
+ * right, â€¦) â€” the natural reading direction of a workflow and the shape of the
  * reference builder. Within a lane, dependencies determine local columns and
  * siblings stack vertically. Cards are compact with generous gutters so the
  * orthogonal edges have room to route cleanly between them.
@@ -252,3 +252,6 @@ function uniquePhaseId(name: string, index: number): string {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   return `phase-${index + 1}-${slug || 'workflow'}`;
 }
+
+
+

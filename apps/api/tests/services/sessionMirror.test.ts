@@ -10,7 +10,7 @@ import { eq } from 'drizzle-orm';
 import { REALTIME_EVENTS, type NormalizedAgentEvent } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { SessionMirror } from '../../src/services/sessionMirror.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

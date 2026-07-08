@@ -5,8 +5,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { cosineSimilarity, providerIdentity, vectorIsComparable } from './embeddingProvider.js';
-import type { EmbeddingProviderResolver } from './embeddingProviderRegistry.js';
+import { cosineSimilarity, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
+import type { EmbeddingProviderResolver } from './embedding/embeddingProviderRegistry.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 
 export interface SessionMoment {

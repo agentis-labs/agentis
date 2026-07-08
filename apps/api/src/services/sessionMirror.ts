@@ -23,7 +23,7 @@ import {
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
-import type { ConversationStore } from './conversationStore.js';
+import type { ConversationStore } from './conversation/conversationStore.js';
 import type { ApprovalInboxService } from './approvalInbox.js';
 
 export interface SessionMirrorDeps {

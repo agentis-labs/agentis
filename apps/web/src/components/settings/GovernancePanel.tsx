@@ -1,6 +1,6 @@
-/**
- * GovernancePanel — surfaces the workspace governance snapshot
- * (UNIVERSAL-HARNESS §8): fleet by runtime, today/month spend, pending
+﻿/**
+ * GovernancePanel â€” surfaces the workspace governance snapshot
+ * (UNIVERSAL-HARNESS Â§8): fleet by runtime, today/month spend, pending
  * approvals, and audit-trail depth. Read-only; composes /v1/governance/summary.
  */
 
@@ -94,3 +94,6 @@ function Stat({ icon, label, value, hint, tone = 'default' }: {
     </div>
   );
 }
+
+
+

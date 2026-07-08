@@ -4,7 +4,7 @@ import { schema } from '@agentis/db/sqlite';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerInspectTools } from '../../src/services/agentisToolHandlers/inspect.js';
 import { registerRunTools } from '../../src/services/agentisToolHandlers/run.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

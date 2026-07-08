@@ -1,5 +1,5 @@
-/**
- * OutputViewers — the Layer 6 viewer registry (WORKFLOW-10X-MASTERPLAN §6.1-6.2).
+﻿/**
+ * OutputViewers â€” the Layer 6 viewer registry (WORKFLOW-10X-MASTERPLAN Â§6.1-6.2).
  *
  * Production-grade, dependency-free viewers selected by artifact type / renderAs.
  * Each is a self-contained component the Output tab + artifact gallery dispatch to.
@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { Download, Copy, Check, ZoomIn, ZoomOut, X, ArrowUp, ArrowDown } from 'lucide-react';
 
-// ─── shared helpers ──────────────────────────────────────────────────────────
+// â”€â”€â”€ shared helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
@@ -53,7 +53,7 @@ function toCsv(rows: Array<Record<string, unknown>>, columns: string[]): string 
   return `${head}\n${body}`;
 }
 
-// ─── DataTableViewer ─────────────────────────────────────────────────────────
+// â”€â”€â”€ DataTableViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Interactive table: sort, global filter, pagination, CSV/JSON export. */
 export function DataTableViewer({ rows }: { rows: Array<Record<string, unknown>> }) {
@@ -102,10 +102,10 @@ export function DataTableViewer({ rows }: { rows: Array<Record<string, unknown>>
         <input
           value={query}
           onChange={(e) => { setQuery(e.target.value); setPage(0); }}
-          placeholder="Filter…"
+          placeholder="Filterâ€¦"
           className="h-7 w-40 rounded-input border border-line bg-surface-2 px-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
         />
-        <span className="text-[11px] text-text-muted">{sorted.length} rows · {columns.length} cols</span>
+        <span className="text-[11px] text-text-muted">{sorted.length} rows Â· {columns.length} cols</span>
         <div className="ml-auto flex items-center gap-1">
           <select
             value={pageSize}
@@ -172,7 +172,7 @@ export function rowsFrom(value: unknown): Array<Record<string, unknown>> | null 
   return null;
 }
 
-// ─── CodeViewer ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ CodeViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function CodeViewer({ code, language }: { code: string; language?: string }) {
   const [copied, setCopied] = useState(false);
@@ -181,7 +181,7 @@ export function CodeViewer({ code, language }: { code: string; language?: string
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="flex items-center gap-2 border-b border-line bg-surface px-2 py-1.5">
-        <span className="text-[10px] uppercase tracking-wider text-text-muted">{language ?? 'code'} · {lines.length} lines</span>
+        <span className="text-[10px] uppercase tracking-wider text-text-muted">{language ?? 'code'} Â· {lines.length} lines</span>
         <button type="button" onClick={copy} className="ml-auto inline-flex h-7 items-center gap-1 rounded-btn border border-line px-2 text-[11px] text-text-secondary hover:bg-surface-2">
           {copied ? <Check size={11} /> : <Copy size={11} />} {copied ? 'Copied' : 'Copy'}
         </button>
@@ -200,7 +200,7 @@ export function CodeViewer({ code, language }: { code: string; language?: string
   );
 }
 
-// ─── ImageViewer ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ ImageViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function ImageViewer({ src, alt }: { src: string; alt?: string }) {
   const [open, setOpen] = useState(false);
@@ -235,7 +235,7 @@ export function ImageViewer({ src, alt }: { src: string; alt?: string }) {
   );
 }
 
-// ─── PdfViewer ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ PdfViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function PdfViewer({ src, name }: { src: string; name?: string }) {
   const safeSrc = safeResourceUrl(src, ['data:application/pdf']);
@@ -253,7 +253,7 @@ export function PdfViewer({ src, name }: { src: string; name?: string }) {
   );
 }
 
-// ─── VideoPlayer ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ VideoPlayer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const PLAYBACK_RATES = [0.5, 1, 1.5, 2] as const;
 
@@ -273,7 +273,7 @@ export function VideoPlayer({ src, name }: { src: string; name?: string }) {
               onClick={() => { setRate(r); const el = document.getElementById(`vid-${name ?? 'v'}`) as HTMLVideoElement | null; if (el) el.playbackRate = r; }}
               className={clsx('h-6 rounded-btn border px-1.5 text-[10px]', rate === r ? 'border-accent text-accent' : 'border-line text-text-secondary hover:bg-surface-2')}
             >
-              {r}×
+              {r}Ã—
             </button>
           ))}
           <a href={safeSrc} download={name ?? 'video'} className="inline-flex h-6 items-center gap-1 rounded-btn border border-line px-2 text-[10px] text-text-secondary hover:bg-surface-2">
@@ -286,7 +286,7 @@ export function VideoPlayer({ src, name }: { src: string; name?: string }) {
   );
 }
 
-// ─── AudioPlayer ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ AudioPlayer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function AudioPlayer({ src, name }: { src: string; name?: string }) {
   const safeSrc = safeResourceUrl(src, ['data:audio/']);
@@ -307,7 +307,7 @@ export function AudioPlayer({ src, name }: { src: string; name?: string }) {
   );
 }
 
-// ─── WebsitePreview ──────────────────────────────────────────────────────────
+// â”€â”€â”€ WebsitePreview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** In-panel browser for a hosted site: read-only address bar + iframe + open. */
 export function WebsitePreview({ url }: { url: string }) {
@@ -327,7 +327,7 @@ export function WebsitePreview({ url }: { url: string }) {
   );
 }
 
-// ─── DiffViewer ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ DiffViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Unified-diff viewer: colorizes +/- lines and @@ hunks. */
 export function DiffViewer({ diff }: { diff: string }) {
@@ -350,7 +350,7 @@ export function DiffViewer({ diff }: { diff: string }) {
   );
 }
 
-// ─── CodebaseViewer ──────────────────────────────────────────────────────────
+// â”€â”€â”€ CodebaseViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** File tree + selected-file code pane for a multi-file artifact. */
 export function CodebaseViewer({ files }: { files: Array<{ path: string; content: string }> }) {
@@ -379,7 +379,7 @@ export function CodebaseViewer({ files }: { files: Array<{ path: string; content
   );
 }
 
-// ─── DashboardViewer ─────────────────────────────────────────────────────────
+// â”€â”€â”€ DashboardViewer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface DashboardSpec { title?: string; series: Array<{ label: string; value: number }> }
 
@@ -420,7 +420,7 @@ export function dashboardSpecFrom(value: unknown): DashboardSpec | null {
   return { title: typeof (root as { title?: unknown }).title === 'string' ? (root as { title: string }).title : undefined, series: parsed };
 }
 
-// ─── DeploymentCard ──────────────────────────────────────────────────────────
+// â”€â”€â”€ DeploymentCard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface DeploymentSpec { url: string; status?: string; version?: string; environment?: string }
 
@@ -459,7 +459,7 @@ export function deploymentSpecFrom(value: unknown): DeploymentSpec | null {
   };
 }
 
-// ─── APIExplorer ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ APIExplorer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface OpenApiSpec { title?: string; version?: string; paths: Array<{ method: string; path: string; summary?: string }> }
 
@@ -471,7 +471,7 @@ export function APIExplorer({ spec }: { spec: OpenApiSpec }) {
   return (
     <div className="overflow-hidden rounded-input border border-line bg-surface-2">
       <div className="border-b border-line bg-surface px-2 py-1.5 text-[10px] uppercase tracking-wider text-text-muted">
-        API · {spec.title ?? 'OpenAPI'}{spec.version ? ` v${spec.version}` : ''} · {spec.paths.length} ops
+        API Â· {spec.title ?? 'OpenAPI'}{spec.version ? ` v${spec.version}` : ''} Â· {spec.paths.length} ops
       </div>
       <div className="max-h-[420px] overflow-auto p-2">
         {spec.paths.map((op, i) => (
@@ -517,3 +517,6 @@ export function filesFrom(value: unknown): Array<{ path: string; content: string
     .filter((f) => f.path);
   return parsed.length > 0 ? parsed : null;
 }
+
+
+

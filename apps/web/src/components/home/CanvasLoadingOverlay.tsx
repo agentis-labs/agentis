@@ -1,10 +1,6 @@
-import clsx from 'clsx';
+﻿import clsx from 'clsx';
 
-/**
- * Full-canvas boot state shown while the workspace's first snapshot + ecosystem
- * are still loading — a shimmering skeleton of the orchestrator→managers pyramid
- * so the operator sees "the workspace is assembling", not a half-built tree.
- */
+
 export function CanvasLoadingOverlay() {
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-canvas">
@@ -26,7 +22,7 @@ export function CanvasLoadingOverlay() {
             <span className="absolute h-4 w-4 animate-ping rounded-full border border-accent/40" />
             <span className="h-1.5 w-1.5 rounded-full bg-accent" />
           </span>
-          Loading your workspace…
+          Loading your workspaceâ€¦
         </div>
       </div>
     </div>
@@ -44,3 +40,6 @@ function SkeletonNode({ className, delay }: { className?: string; delay?: string
     />
   );
 }
+
+
+

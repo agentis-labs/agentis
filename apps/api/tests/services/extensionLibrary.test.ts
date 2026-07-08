@@ -10,7 +10,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { AgentisError } from '@agentis/core';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
 import { ExtensionLibraryService } from '../../src/services/extensionLibrary.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
 

@@ -14,8 +14,8 @@ import {
   type PeerType,
   type VolatilityClass,
 } from './peerProfileService.js';
-import { embedText, selectEmbeddingProvider, type EmbeddingProvider } from './embeddingProvider.js';
-import { normalizeTextKey, safeJson, tokenize } from './brainText.js';
+import { embedText, selectEmbeddingProvider, type EmbeddingProvider } from './embedding/embeddingProvider.js';
+import { normalizeTextKey, safeJson, tokenize } from './brain/brainText.js';
 
 export interface DreamPassResult {
   peersProcessed: number;

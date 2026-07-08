@@ -6,7 +6,7 @@ import { ListenerRuntime } from '../../src/engine/ListenerRuntime.js';
 import type { ActiveTrigger } from '../../src/engine/ActiveWorkflowRegistry.js';
 import { ListenerHealthStore } from '../../src/engine/listener/health.js';
 import { createLogger } from '../../src/logger.js';
-import type { WorkflowStoreService } from '../../src/services/workflowStore.js';
+import type { WorkflowStoreService } from '../../src/services/workflow/workflowStore.js';
 
 const logger = createLogger({ level: 'error' });
 

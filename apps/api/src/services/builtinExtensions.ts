@@ -19,7 +19,7 @@ import path from 'node:path';
 import { CONSTANTS } from '@agentis/core';
 import type { ExtensionExecutionOutcome, ExtensionManifest } from '@agentis/core';
 import { resolveSpawnCwd } from './pathExpander.js';
-import { assertSafeUrl } from './safeUrl.js';
+import { safeFetch } from './safeFetch.js';
 
 type Executor = (
   input: Record<string, unknown>,
@@ -629,39 +629,34 @@ const BUILTIN_REGISTRY: Record<string, Executor> = {
     const body = input.body !== undefined ? JSON.stringify(input.body) : undefined;
 
     if (!url) throw new Error('http_fetch requires `url`');
-    const safe = await assertSafeUrl(url, { allowPrivate: ALLOW_PRIVATE });
-
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      Math.min(15_000, CONSTANTS.EXTENSION_EXECUTION_TIMEOUT_MS),
-    );
-    try {
-      const res = await fetch(safe.toString(), {
+    // safeFetch pins the connection to the IP validated at check time (defeats
+    // DNS rebinding) and re-validates each redirect hop before following it.
+    const res = await safeFetch(
+      url,
+      {
         method,
         headers: {
           'user-agent': 'Agentis/1.0 (builtin http_fetch extension)',
           ...headers,
         },
         body,
-        signal: controller.signal,
-      });
-      const text = await res.text();
-      let parsedBody: unknown;
-      try {
-        parsedBody = JSON.parse(text);
-      } catch {
-        parsedBody = text;
-      }
-      return {
-        status: res.status,
-        ok: res.ok,
-        body: parsedBody,
-        headers: Object.fromEntries(res.headers.entries()),
-      };
-    } finally {
-      clearTimeout(timeout);
+        timeoutMs: Math.min(15_000, CONSTANTS.EXTENSION_EXECUTION_TIMEOUT_MS),
+      },
+      { allowPrivate: ALLOW_PRIVATE },
+    );
+    const text = await res.text();
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(text);
+    } catch {
+      parsedBody = text;
     }
+    return {
+      status: res.status,
+      ok: res.ok,
+      body: parsedBody,
+      headers: Object.fromEntries(res.headers.entries()),
+    };
   },
   store_factory_harvest,
   store_factory_curate,

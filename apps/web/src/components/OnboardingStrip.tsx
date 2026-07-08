@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+﻿import { lazy, Suspense, useEffect, useState } from 'react';
 import { refreshWorkspaceSnapshot, useWorkspaceData } from '../lib/workspaceData';
 
 type WizardPreset = {
@@ -48,3 +48,6 @@ export function OnboardingStrip() {
     </Suspense>
   );
 }
+
+
+

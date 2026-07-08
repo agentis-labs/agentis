@@ -1,18 +1,4 @@
-/**
- * WorkflowBuildTimeline — the inspectable build narration that streams alongside
- * the live canvas in chat (10X-CREATION-SWARM-PLAN §6).
- *
- * Subscribes to the creation pipeline's phase / repair / critique events for one
- * build `runId` and renders, live and step-by-step:
- *   - the phase the orchestrator is in (analyzing → drafting → repairing →
- *     reviewing → building → complete), with its detail line — including the
- *     explicit "no model configured, used the deterministic builder" notice, so
- *     nothing is silent;
- *   - every structural repair it applied (🔧, with the Iron Rule number);
- *   - every reviewer critique (⚠, severity-colored).
- *
- * Everything is inspectable: the operator sees exactly how the graph was built.
- */
+﻿
 
 import { useEffect, useState } from 'react';
 import { CheckCircle2, Loader2, Wrench, AlertTriangle, Search, PencilRuler, ListChecks, Boxes, Sparkles, XCircle } from 'lucide-react';
@@ -105,11 +91,11 @@ export function WorkflowBuildTimeline({ runId }: { runId: string }) {
         <span className="font-semibold">{done ? 'Build complete' : 'Build trace'}</span>
         {(repairs.length > 0 || critiques.length > 0) && (
           <span className="ml-1 normal-case text-text-muted">
-            {repairs.length > 0 ? `· ${repairs.length} repair${repairs.length === 1 ? '' : 's'}` : ''}
-            {critiques.length > 0 ? ` · ${critiques.length} critique${critiques.length === 1 ? '' : 's'}` : ''}
+            {repairs.length > 0 ? `Â· ${repairs.length} repair${repairs.length === 1 ? '' : 's'}` : ''}
+            {critiques.length > 0 ? ` Â· ${critiques.length} critique${critiques.length === 1 ? '' : 's'}` : ''}
           </span>
         )}
-        <span className="ml-auto">{open ? '–' : '+'}</span>
+        <span className="ml-auto">{open ? 'â€“' : '+'}</span>
       </button>
 
       {open && (
@@ -125,7 +111,7 @@ export function WorkflowBuildTimeline({ runId }: { runId: string }) {
                     {isCurrent ? <Loader2 size={11} className="inline animate-spin" /> : <Icon size={11} className="inline" />}
                   </span>
                   <span className="text-text-primary">{PHASE_LABEL[ph]}</span>
-                  {details[ph] && <span className="text-text-muted">— {details[ph]}</span>}
+                  {details[ph] && <span className="text-text-muted">â€” {details[ph]}</span>}
                 </li>
               );
             })}
@@ -136,7 +122,7 @@ export function WorkflowBuildTimeline({ runId }: { runId: string }) {
               {repairs.map((r, i) => (
                 <li key={`r${i}`} className="flex items-baseline gap-2 text-text-secondary">
                   <Wrench size={11} className="mt-0.5 shrink-0 text-amber-500" />
-                  <span><span className="font-medium text-text-primary">Rule {r.rule}</span> — {r.message}</span>
+                  <span><span className="font-medium text-text-primary">Rule {r.rule}</span> â€” {r.message}</span>
                 </li>
               ))}
             </ul>
@@ -147,7 +133,7 @@ export function WorkflowBuildTimeline({ runId }: { runId: string }) {
               {critiques.map((c, i) => (
                 <li key={`c${i}`} className="flex items-baseline gap-2">
                   <AlertTriangle size={11} className={`mt-0.5 shrink-0 ${c.severity === 'error' ? 'text-danger' : c.severity === 'warn' ? 'text-amber-500' : 'text-text-muted'}`} />
-                  <span className="text-text-secondary"><span className="font-medium text-text-primary">Rule {c.rule}</span> — {c.message}</span>
+                  <span className="text-text-secondary"><span className="font-medium text-text-primary">Rule {c.rule}</span> â€” {c.message}</span>
                 </li>
               ))}
             </ul>
@@ -157,3 +143,6 @@ export function WorkflowBuildTimeline({ runId }: { runId: string }) {
     </div>
   );
 }
+
+
+

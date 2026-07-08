@@ -12,7 +12,7 @@ import {
   pacerRouting,
   coercePacerClass,
   type PacerClass,
-} from '../src/services/brainPacer.js';
+} from '../src/services/brain/brainPacer.js';
 import { StubEmbeddingProvider } from './_helpers/stubEmbeddingProvider.js';
 
 describe('§B5.2 — prototype-vector PACER fallback', () => {

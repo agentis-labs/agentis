@@ -1,6 +1,6 @@
-/**
- * AgentInteractionFeed — the "watch agents work together" surface
- * (UNIVERSAL-HARNESS §7, Pillar 4). Renders the unified agent↔agent timeline
+﻿/**
+ * AgentInteractionFeed â€” the "watch agents work together" surface
+ * (UNIVERSAL-HARNESS Â§7, Pillar 4). Renders the unified agentâ†”agent timeline
  * from /v1/interactions: chat between agents + non-chat actions (delegation,
  * hand-offs, tool calls). Scope to one agent via `agentId`, or omit for the
  * whole workspace.
@@ -80,3 +80,6 @@ function formatTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
+
+
+

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { Check, Loader2, Plus, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -32,9 +32,9 @@ interface DomainEditorSheetProps {
   specialists?: DomainManagerOption[];
   /** Preset parent when creating a new subdomain (the "Add subdomain" flow). */
   initialParentDomainId?: string | null;
-  /** Children of the top-level domain being edited — drives the Subdomains section. */
+  /** Children of the top-level domain being edited â€” drives the Subdomains section. */
   subdomains?: DomainOption[];
-  /** Resolve an owner agent id → display name (subdomains list + owner picker). */
+  /** Resolve an owner agent id â†’ display name (subdomains list + owner picker). */
   resolveAgentName?: (agentId: string | null | undefined) => string | undefined;
   /** Specialist count under a subdomain (badge in the list). */
   specialistCountFor?: (subdomainId: string) => number;
@@ -351,3 +351,6 @@ function capitalize(value: string): string {
 const inputCls = 'mt-1 w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
 const secondaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn border border-line px-3 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary';
 const primaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40';
+
+
+

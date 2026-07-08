@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -128,7 +128,7 @@ interface BlackboardEntry {
   at: string;
 }
 
-/** One pass of a `converge` loop — drives the iteration timeline. */
+/** One pass of a `converge` loop â€” drives the iteration timeline. */
 interface ConvergeIteration {
   nodeId: string;
   iteration: number;
@@ -238,8 +238,6 @@ function RunModal() {
     if (runId) void refreshDetail();
   }, [runId]);
 
-  // Live blackboard + convergence timeline — entries stream in as agents write,
-  // so the operator watches a multi-runtime cooperation unfold in real time.
   useRealtime([REALTIME_EVENTS.BLACKBOARD_ENTRY], (event) => {
     const payload = event.payload as { runId?: string; entry?: BlackboardEntry };
     if (!runId || payload?.runId !== runId || !payload.entry) return;
@@ -488,8 +486,7 @@ function RunModal() {
             <main className="flex min-w-0 flex-1 flex-col">
               <div className="flex gap-1 border-b border-line px-4 py-2">
                 {(['nodes', 'ledger', 'blackboard'] as const).map((item) => {
-                  // De-jargoned labels for non-developers (masterplan 5.3) — the
-                  // internal keys stay the same; only the display text changes.
+                  // De-jargoned labels for non-developers (masterplan 5.3) â€” the
                   const label = item === 'ledger' ? 'Activity log' : item === 'blackboard' ? 'Blackboard' : 'Steps';
                   const count = item === 'blackboard' && blackboard.length > 0 ? blackboard.length : null;
                   return (
@@ -582,9 +579,9 @@ function RunHistoryList({
                 </div>
               ) : (
                 // A run that made no model calls (deterministic path / skipped
-                // agent branch) — label it so a true zero doesn't read as a
+                // agent branch) â€” label it so a true zero doesn't read as a
                 // broken counter.
-                <div className="pr-3 text-[11px] italic text-text-muted" title="This run made no model calls — its path used deterministic nodes only.">No model calls</div>
+                <div className="pr-3 text-[11px] italic text-text-muted" title="This run made no model calls â€” its path used deterministic nodes only.">No model calls</div>
               )
             )}
             <Button variant="ghost" size="sm" iconRight={<ArrowRight size={12} />} onClick={() => onInspect(run)}>
@@ -662,7 +659,7 @@ function RunNodesTable({
           <tbody>
             {run.nodes.map((node) => {
               const isOpen = expanded === node.nodeId;
-              // A node "already ran" once it reached a terminal of its own — those
+              // A node "already ran" once it reached a terminal of its own â€” those
               // can be replayed from. Pending/waiting/skipped never produced work.
               const ran = node.status === 'completed' || node.status === 'failed';
               return (
@@ -798,12 +795,11 @@ function RunLedger({ entries }: { entries: LedgerEntry[] }) {
   );
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Blackboard panel — the operator's live view of inter-agent shared state
-// (AGENT-COOPERATION-10X §Pillar 2/3). Facts (KV), the channel conversation,
-// the claims ledger, and the convergence iteration timeline — each entry tagged
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// (AGENT-COOPERATION-10X Â§Pillar 2/3). Facts (KV), the channel conversation,
+// the claims ledger, and the convergence iteration timeline â€” each entry tagged
 // with WHO on WHICH runtime, streaming in as agents write.
-// ───────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const RUNTIME_PALETTE: Array<[string, string]> = [
   ['opus', '#c084fc'], ['claude', '#c084fc'], ['anthropic', '#c084fc'],
@@ -829,7 +825,7 @@ function IdentityChip({ author }: { author: BlackboardAuthor }) {
     <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px]">
       <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
       <span className="font-medium text-text-primary">{name}</span>
-      {author.runtime && <span className="text-text-muted">· {author.runtime}</span>}
+      {author.runtime && <span className="text-text-muted">Â· {author.runtime}</span>}
     </span>
   );
 }
@@ -865,7 +861,7 @@ function ConvergeTimeline({ iterations, settled }: { iterations: ConvergeIterati
             className="ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
             style={{ color: verdictTone(settled.verdict).color, backgroundColor: `${verdictTone(settled.verdict).color}22` }}
           >
-            {verdictTone(settled.verdict).label} · {settled.iterations} iter
+            {verdictTone(settled.verdict).label} Â· {settled.iterations} iter
           </span>
         )}
       </div>
@@ -875,7 +871,7 @@ function ConvergeTimeline({ iterations, settled }: { iterations: ConvergeIterati
           return (
             <div
               key={`${it.nodeId}:${it.iteration}`}
-              title={`Iteration ${it.iteration + 1} — ${it.verdict}${typeof it.score === 'number' ? ` · score ${it.score.toFixed(1)}` : ''}${it.stallStreak ? ` · no-progress streak ${it.stallStreak}` : ''}`}
+              title={`Iteration ${it.iteration + 1} â€” ${it.verdict}${typeof it.score === 'number' ? ` Â· score ${it.score.toFixed(1)}` : ''}${it.stallStreak ? ` Â· no-progress streak ${it.stallStreak}` : ''}`}
               className={clsx(
                 'flex min-w-[44px] flex-col items-center rounded-btn border px-2 py-1',
                 it.stallStreak ? 'border-amber-400/50' : 'border-line',
@@ -920,7 +916,7 @@ function RunBlackboard({
   const [view, setView] = useState<'facts' | 'chat' | 'claims'>('facts');
 
   const facts = useMemo(() => {
-    // KV semantics — latest entry per namespace+key wins.
+    // KV semantics â€” latest entry per namespace+key wins.
     const map = new Map<string, BlackboardEntry>();
     for (const e of entries) if (e.kind === 'fact' && e.key) map.set(`${e.namespace}:${e.key}`, e);
     return [...map.values()].sort((a, b) => a.at.localeCompare(b.at));
@@ -940,7 +936,7 @@ function RunBlackboard({
       <ModalEmpty
         icon={<Braces size={28} />}
         title="Blackboard empty"
-        body="When agents share facts, message each other, or post claims during this run, they appear here live — tagged by who wrote them."
+        body="When agents share facts, message each other, or post claims during this run, they appear here live â€” tagged by who wrote them."
       />
     );
   }
@@ -1064,7 +1060,7 @@ function RunBlackboard({
 function NamespaceTag({ namespace, iteration }: { namespace: string; iteration: number }) {
   return (
     <span className="inline-flex items-center gap-1 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-text-muted">
-      {namespace} · iter {iteration + 1}
+      {namespace} Â· iter {iteration + 1}
     </span>
   );
 }
@@ -1116,9 +1112,9 @@ function StatusIcon({ status }: { status: string }) {
   return <Clock size={15} className="text-text-muted" />;
 }
 
-/** Turn an engine node kind (`agent_task`) into a human label (`Agent task`) — masterplan 5.3. */
+/** Turn an engine node kind (`agent_task`) into a human label (`Agent task`) â€” masterplan 5.3. */
 function humanizeKind(kind: string | undefined): string {
-  if (!kind) return '—';
+  if (!kind) return 'â€”';
   return kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
@@ -1165,3 +1161,6 @@ function formatTokens(value: number): string {
   if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
   return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`;
 }
+
+
+

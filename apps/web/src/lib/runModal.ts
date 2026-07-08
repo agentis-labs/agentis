@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react';
+﻿import { useSyncExternalStore } from 'react';
 
 export const OPEN_RUN_MODAL_EVENT = 'agentis:open-run-modal';
 export const FOCUS_WORKFLOW_NODE_EVENT = 'agentis:focus-workflow-node';
@@ -66,3 +66,6 @@ export function dispatchFocusWorkflowNode(nodeId: string): void {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new CustomEvent(FOCUS_WORKFLOW_NODE_EVENT, { detail: { nodeId } }));
 }
+
+
+

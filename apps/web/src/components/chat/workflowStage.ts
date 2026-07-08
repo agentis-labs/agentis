@@ -1,4 +1,4 @@
-export interface WorkflowStageTarget {
+﻿export interface WorkflowStageTarget {
   workflowId: string;
   runId?: string;
   agentId?: string | null;
@@ -33,3 +33,6 @@ export function mergeWorkflowStageTarget(
     agentId: next.agentId ?? current.agentId,
   };
 }
+
+
+

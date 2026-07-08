@@ -1,9 +1,9 @@
-/**
+﻿/**
  * Specialists API client + shared types for the web UI.
  *
  * Thin wrapper around `api()` mirroring `/v1/specialists`
  * (docs/SPECIALISTS-10X-ARCHITECTURE-PLAN.md). A specialist is an expert *role*
- * — platform, custom, AI-generated, or community — that may or may not be
+ * â€” platform, custom, AI-generated, or community â€” that may or may not be
  * materialized as a runnable agent yet.
  */
 
@@ -164,3 +164,6 @@ export const specialistsApi = {
     return api(`/v1/specialists/${encodeURIComponent(role)}/runs`);
   },
 };
+
+
+

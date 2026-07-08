@@ -1,5 +1,5 @@
-/**
- * Button — standardized action surface.
+﻿/**
+ * Button â€” standardized action surface.
  *
  * Variants: primary, secondary, ghost, danger, pill.
  * Sizes: sm (32px), md (36px default), lg (40px).
@@ -96,3 +96,6 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
     </button>
   );
 });
+
+
+

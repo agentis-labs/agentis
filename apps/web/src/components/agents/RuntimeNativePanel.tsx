@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   Box,
@@ -204,7 +204,7 @@ export function RuntimeNativePanel({
             label="Effective model"
             value={runtime.currentModel?.value ?? 'Runtime default'}
             detail={runtime.currentModel
-              ? `${runtime.currentModel.source} · ${runtime.currentModel.verified ? 'verified' : 'unverified'}`
+              ? `${runtime.currentModel.source} Â· ${runtime.currentModel.verified ? 'verified' : 'unverified'}`
               : 'No model reported'}
             icon={<Sparkles size={14} />}
           />
@@ -409,7 +409,7 @@ function ResourceButton({
         </span>
         <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-muted">
           <span>{resource.kind.replace(/_/g, ' ')}</span>
-          <span>·</span>
+          <span>Â·</span>
           <span>{resource.scope}</span>
           {!resource.effective && <span className="text-warning">not created</span>}
         </span>
@@ -519,7 +519,7 @@ function ContextStack({ layers }: { layers: EffectiveContextLayer[] }) {
             <span className="min-w-0 flex-1">
               <span className="block truncate font-mono text-[11px] text-text-primary">{layer.resource.name}</span>
               <span className="text-[10px] text-text-muted">
-                {layer.resource.kind.replace(/_/g, ' ')} · {layer.resource.origin}
+                {layer.resource.kind.replace(/_/g, ' ')} Â· {layer.resource.origin}
               </span>
             </span>
             <span className="text-[10px] text-text-muted">{layer.resource.loadPolicy}</span>
@@ -559,8 +559,8 @@ function SessionList({
                 {session.sessionKey}
               </span>
               <span className="text-[10px] text-text-muted">
-                {session.status} · used {formatRelative(session.lastUsedAt)}
-                {session.selectedModel ? ` · ${session.selectedModel}` : ''}
+                {session.status} Â· used {formatRelative(session.lastUsedAt)}
+                {session.selectedModel ? ` Â· ${session.selectedModel}` : ''}
               </span>
             </span>
             <button
@@ -628,3 +628,6 @@ function formatRelative(iso: string): string {
   if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h ago`;
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
 }
+
+
+

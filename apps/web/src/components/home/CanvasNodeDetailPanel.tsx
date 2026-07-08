@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+﻿import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, ArrowRight, Bot, ChevronDown, ChevronRight, ExternalLink, MessageCircle, Settings, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
@@ -148,7 +148,7 @@ export function CanvasNodeDetailPanel({
               Open
             </button>
           )}
-          {/* App nodes: jump straight to the engine/settings (Domain · Owner)
+          {/* App nodes: jump straight to the engine/settings (Domain Â· Owner)
               without drilling through the editor first. */}
           {node.workflow?.app && (
             <button
@@ -280,7 +280,7 @@ function nodeStateLabel(state: NodeDetailState): string {
 }
 
 /**
- * Live, streaming activity for the selected node — the agent's real reasoning /
+ * Live, streaming activity for the selected node â€” the agent's real reasoning /
  * steps / tool-calls (or its workflow's run), so the detail card shows what is
  * happening right now instead of a static snapshot. Fed by the workspace activity
  * spine; renders nothing until there's something to show.
@@ -323,7 +323,7 @@ function NodeLiveFeed({ node }: { node: CanvasNode }) {
   );
 }
 
-// ── Workflow runtime: latest run steps + history + live stream ──────────────
+// â”€â”€ Workflow runtime: latest run steps + history + live stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface RunSummaryRow {
   id: string;
@@ -373,7 +373,7 @@ function renderOutput(output: unknown): string {
 }
 
 /**
- * The runtime half of a workflow's canvas card — so a workflow node answers
+ * The runtime half of a workflow's canvas card â€” so a workflow node answers
  * "what did the last run do, where did it fail, what did it produce, and how
  * has it behaved" without ever opening /history or the editor. Streams live
  * while a run is active.
@@ -437,14 +437,14 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
         <span className="flex items-center gap-2 text-[12px] font-semibold text-text-primary">
           <span className={clsx('inline-block h-2 w-2 rounded-full', headMeta.color, headMeta.live && 'animate-pulse')} />
           {headMeta.label}
-          {detail?.durationMs != null && <span className="font-mono text-[10px] font-normal text-text-muted">· {fmtDuration(detail.durationMs)}</span>}
+          {detail?.durationMs != null && <span className="font-mono text-[10px] font-normal text-text-muted">Â· {fmtDuration(detail.durationMs)}</span>}
         </span>
         <button type="button" onClick={() => selectedRunId && openRunModal({ runId: selectedRunId, workflowId, source: 'home-node-detail' })} className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-accent">
           <ExternalLink size={10} /> Run
         </button>
       </div>
 
-      {/* Step breakdown — a SUMMARY first. Big workflows have dozens of steps;
+      {/* Step breakdown â€” a SUMMARY first. Big workflows have dozens of steps;
           listing them all is noise. Show counts + a segmented progress bar +
           only the steps that matter (failed / running / waiting); the full
           list stays one toggle away. */}
@@ -466,13 +466,13 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
                     key={n.nodeId}
                     type="button"
                     onClick={() => setSelectedStep(n.nodeId)}
-                    title={`${n.title} · ${runStatusMeta(n.status).label}`}
+                    title={`${n.title} Â· ${runStatusMeta(n.status).label}`}
                     className={clsx('h-full flex-1 transition-opacity hover:opacity-70', runStatusMeta(n.status).color, runStatusMeta(n.status).live && 'animate-pulse')}
                   />
                 ))}
               </div>
               <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">
-                {done}/{total}{failedSteps.length > 0 && <span className="text-danger"> · {failedSteps.length}✗</span>}
+                {done}/{total}{failedSteps.length > 0 && <span className="text-danger"> Â· {failedSteps.length}âœ—</span>}
               </span>
             </div>
             {/* Only the steps that need attention; everything else behind a toggle. */}
@@ -486,7 +486,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
                       key={n.nodeId}
                       type="button"
                       onClick={() => setSelectedStep(n.nodeId)}
-                      title={`${n.title} · ${meta.label}${n.durationMs != null ? ` · ${fmtDuration(n.durationMs)}` : ''}`}
+                      title={`${n.title} Â· ${meta.label}${n.durationMs != null ? ` Â· ${fmtDuration(n.durationMs)}` : ''}`}
                       className={clsx(
                         'inline-flex max-w-[150px] items-center gap-1.5 rounded-pill border px-2 py-0.5 text-[10px]',
                         sel ? 'border-text-primary/40 bg-surface-2 text-text-primary' : 'border-line bg-canvas/40 text-text-muted hover:text-text-secondary',
@@ -518,7 +518,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
         <div className="border-t border-line/60">
           <button type="button" onClick={() => setShowOutput((v) => !v)} className="flex w-full items-center gap-1 px-3 py-1.5 text-[10px] uppercase tracking-wide text-text-muted hover:text-text-secondary">
             {showOutput ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-            {step.error ? `Error · ${step.title}` : `Output · ${step.title}`}
+            {step.error ? `Error Â· ${step.title}` : `Output Â· ${step.title}`}
           </button>
           {showOutput && (
             <div className="px-3 pb-2.5">
@@ -526,7 +526,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-danger/10 p-2 text-[11px] leading-snug text-danger">{step.error}</pre>
               ) : (
                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-[#141414] p-2 font-mono text-[10.5px] leading-snug text-text-secondary">
-                  {outputText.length > 3000 ? `${outputText.slice(0, 3000)}\n…` : outputText}
+                  {outputText.length > 3000 ? `${outputText.slice(0, 3000)}\nâ€¦` : outputText}
                 </pre>
               )}
             </div>
@@ -534,12 +534,12 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
         </div>
       )}
 
-      {/* Recent-run history — each run is a readable row (status · when · how
+      {/* Recent-run history â€” each run is a readable row (status Â· when Â· how
           long), selectable to load its steps above. Far more legible than a
           row of anonymous dots. */}
       <div className="border-t border-line/60">
         <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-text-muted">
-          History <span className="text-text-muted/70">· {runs.length}</span>
+          History <span className="text-text-muted/70">Â· {runs.length}</span>
         </div>
         <div className="max-h-40 overflow-y-auto pb-1.5">
           {runs.map((r) => {
@@ -561,7 +561,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
               >
                 <span className={clsx('h-2 w-2 shrink-0 rounded-full', meta.color, meta.live && 'animate-pulse')} />
                 <span className={clsx('w-[64px] shrink-0 text-[11px] font-medium', selected ? 'text-text-primary' : 'text-text-secondary')}>{meta.label}</span>
-                <span className="min-w-0 flex-1 truncate text-[10px] text-text-muted">{relTime(when) || '—'}</span>
+                <span className="min-w-0 flex-1 truncate text-[10px] text-text-muted">{relTime(when) || 'â€”'}</span>
                 {dur != null && <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">{fmtDuration(dur)}</span>}
                 <ExternalLink
                   size={11}
@@ -653,3 +653,6 @@ function AgentLiveState({ node }: { node: CanvasNode }) {
     </section>
   );
 }
+
+
+

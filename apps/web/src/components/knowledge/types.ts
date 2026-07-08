@@ -1,4 +1,4 @@
-export interface KnowledgeBaseRow {
+﻿export interface KnowledgeBaseRow {
   id: string;
   name: string;
   description?: string | null;
@@ -20,7 +20,7 @@ export interface KnowledgeDocumentRow {
 }
 
 
-// Brain � memory + episode row shapes (workspace Brain manage views).
+// Brain — memory + episode row shapes (workspace Brain manage views).
 export type MemoryKind = 'fact' | 'rule' | 'preference' | 'pattern' | 'lesson';
 
 export interface MemoryRecordRowData {
@@ -53,3 +53,6 @@ export interface EpisodeRowData {
   scopeId?: string | null;
   createdAt?: string;
 }
+
+
+

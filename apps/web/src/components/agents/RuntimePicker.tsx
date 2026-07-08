@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import type { ComponentType } from 'react';
 import { AlertTriangle, Check, ExternalLink, Loader2, RefreshCw } from 'lucide-react';
@@ -221,7 +221,7 @@ export function RuntimePicker({
   }
 
   useEffect(() => {
-    // Detect when uncontrolled — including in editing mode, where the runtime
+    // Detect when uncontrolled â€” including in editing mode, where the runtime
     // switcher (Track R) needs live status dots to show which harness is ready.
     if (controlledDetections !== undefined) return;
     void refreshDetections();
@@ -265,7 +265,7 @@ export function RuntimePicker({
       {editing ? (
         <div className="space-y-3">
           {/* Track R: the runtime is a swappable binding. Picking a different
-              harness rebinds this agent in place — identity, memory and abilities
+              harness rebinds this agent in place â€” identity, memory and abilities
               are unchanged. The agent is Agentis-owned, not the runtime's. */}
           <div className="flex items-start gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5">
             <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-canvas text-text-primary">
@@ -273,7 +273,7 @@ export function RuntimePicker({
             </span>
             <div className="min-w-0 flex-1">
               <div className="text-sm font-medium text-text-primary">Running on {activeAdapter.title}</div>
-              <div className="text-xs text-text-muted">Switch runtime below — keeps this agent's identity, memory and abilities. Only the execution backend changes.</div>
+              <div className="text-xs text-text-muted">Switch runtime below â€” keeps this agent's identity, memory and abilities. Only the execution backend changes.</div>
             </div>
           </div>
           <HarnessGrid
@@ -309,7 +309,7 @@ export function RuntimePicker({
           {/* Missing Harness Warning Banner */}
           {!editing && activeDetection?.status !== 'found' && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-text-secondary flex items-start gap-2">
-              <span className="mt-0.5 shrink-0 text-amber-500">⚠️</span>
+              <span className="mt-0.5 shrink-0 text-amber-500">âš ï¸</span>
               <span>
                 <strong>{activeAdapter.title} harness is not detected on your system.</strong> Make sure it is installed locally to execute tasks using this runtime.
               </span>
@@ -880,3 +880,6 @@ function positiveNumber(value: string): number | undefined {
 
 const inputCls = 'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
 const textareaCls = `${inputCls} min-h-20 resize-y font-mono text-xs`;
+
+
+

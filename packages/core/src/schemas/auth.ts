@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 import { CONSTANTS } from '../constants.js';
 
 export const loginRequestSchema = z.object({
@@ -30,3 +30,6 @@ export const loginResponseSchema = z.object({
   refreshToken: z.string(),
   expiresInSeconds: z.number().int().positive(),
 });
+
+
+

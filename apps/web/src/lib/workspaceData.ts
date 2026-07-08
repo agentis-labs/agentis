@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react';
+﻿import { useEffect, useSyncExternalStore } from 'react';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api, workspace as workspaceStore } from './api';
 import { useRealtime } from './realtime';
@@ -488,3 +488,6 @@ export function useWorkspaceData(): WorkspaceSnapshot {
 
   return current;
 }
+
+
+

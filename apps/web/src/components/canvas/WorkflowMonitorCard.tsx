@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -290,7 +290,7 @@ export function WorkflowMonitorCard({
           ));
         setFeed(dedupeActivities(historical).reverse());
       })
-      .catch(() => { /* historical activity is best-effort */ });
+      .catch(() => {  });
     return () => { cancelled = true; };
   }, [activeRunId, nodeTitles, workflowId]);
 
@@ -651,7 +651,7 @@ export function WorkflowMonitorCard({
 
       {mode === 'expanded' && (
         <div className="max-h-[min(440px,calc(100vh-190px))] overflow-y-auto px-3 py-2.5">
-          {/* SWIFT layer 3: the world-verified outcome â€” completion is not accomplishment. */}
+          {/* SWIFT layer 3: the world-verified outcome Ã¢â‚¬â€ completion is not accomplishment. */}
           {monitorRunId && (status === 'completed' || status === 'failed') && (
             <RunVerdictBanner runId={monitorRunId} refreshKey={status} />
           )}
@@ -862,9 +862,9 @@ function HealthStrip({
   const label = checking
     ? 'Checking health'
     : tone === 'healthy'
-      ? `Healthy Â· ${nodeCount} nodes`
+      ? `Healthy Ã‚Â· ${nodeCount} nodes`
       : tone === 'blocked'
-        ? `Blocked Â· ${errorCount} issue${errorCount === 1 ? '' : 's'}`
+        ? `Blocked Ã‚Â· ${errorCount} issue${errorCount === 1 ? '' : 's'}`
         : 'Needs run evidence';
   const Icon = checking ? RadioTower : tone === 'healthy' ? ShieldCheck : tone === 'blocked' ? AlertTriangle : CheckCircle2;
   return (
@@ -992,7 +992,7 @@ function AnalyticsDetails({
       </div>
       <div className="grid grid-cols-3 gap-2">
         <Metric label="Runs" value={String(analytics.runs)} />
-        <Metric label="Success" value={analytics.successRate == null ? 'â€“' : `${Math.round(analytics.successRate * 100)}%`} />
+        <Metric label="Success" value={analytics.successRate == null ? 'Ã¢â‚¬â€œ' : `${Math.round(analytics.successRate * 100)}%`} />
         <Metric label="Avg duration" value={formatDuration(analytics.avgDurationMs)} />
       </div>
       <TokenSummary
@@ -1108,7 +1108,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * Token consumption â€” the headline analytics signal. One tile replaces the old
+ * Token consumption Ã¢â‚¬â€ the headline analytics signal. One tile replaces the old
  * confusing "Tokens" + "Avg tokens" pair: a big total, the in/out split, and the
  * per-run average folded in as a caption.
  */
@@ -1147,7 +1147,7 @@ function CostSummary({ metered, avgCostCents, totalCostCents }: { metered: boole
   if (!metered) {
     return (
       <div className="rounded-lg border border-white/10 bg-surface/40 px-3 py-2 text-[10.5px] text-text-muted">
-        Subscription runtime â€” cost not metered. Tokens above are the spend signal.
+        Subscription runtime Ã¢â‚¬â€ cost not metered. Tokens above are the spend signal.
       </div>
     );
   }
@@ -1159,7 +1159,7 @@ function CostSummary({ metered, avgCostCents, totalCostCents }: { metered: boole
   );
 }
 
-/** Compact token count: 1234 â†’ "1.2k", 1_200_000 â†’ "1.2M". */
+/** Compact token count: 1234 Ã¢â€ â€™ "1.2k", 1_200_000 Ã¢â€ â€™ "1.2M". */
 function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0';
   if (value < 1_000) return String(Math.round(value));
@@ -1318,3 +1318,6 @@ function ActivityDot({ tone, active }: { tone: RealtimeActivityTone; active: boo
     )} />
   );
 }
+
+
+

@@ -1,9 +1,9 @@
-/**
- * Retrieval Memory types — Layer 5 of the Memory Architecture.
+﻿/**
+ * Retrieval Memory types â€” Layer 5 of the Memory Architecture.
  *
  *
  * Layer 5 is not a store. It's the selection and injection layer that
- * composes results from layers 1–4 under a token budget. This file defines:
+ * composes results from layers 1â€“4 under a token budget. This file defines:
  *
  *   - Budget classes (cheap | balanced | power) with their token caps
  *   - Injection modes (strict | normal | exploratory) controlling scope
@@ -15,9 +15,9 @@ import type { KnowledgeHit } from './intelligence.js';
 import type { EvaluatorExample, WorkflowBaselineSnapshot } from './intelligence.js';
 import type { RuntimeEpisode } from './memory.js';
 
-// ────────────────────────────────────────────────────────────
-// Budget classes — §9.4
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Budget classes â€” Â§9.4
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * How aggressively to retrieve. Maps to a token budget for the entire
@@ -35,28 +35,28 @@ export const MEMORY_BUDGETS = {
   power: 5000,
 } as const satisfies Record<RetrievalBudgetClass, number>;
 
-// ────────────────────────────────────────────────────────────
-// Injection modes — §9.7
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Injection modes â€” Â§9.7
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Controls retrieval scope:
- *   - strict       → only high-trust scoped memory
- *   - normal       → scoped + limited workspace memory (default)
- *   - exploratory  → wider retrieval when ambiguity is high
+ *   - strict       â†’ only high-trust scoped memory
+ *   - normal       â†’ scoped + limited workspace memory (default)
+ *   - exploratory  â†’ wider retrieval when ambiguity is high
  */
 export type RetrievalMode = 'strict' | 'normal' | 'exploratory';
 
-// ────────────────────────────────────────────────────────────
-// Retrieval scope — §6.7
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Retrieval scope â€” Â§6.7
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/** Where to search (precedence order: run → workspace). */
+/** Where to search (precedence order: run â†’ workspace). */
 export type RetrievalScope = 'run' | 'scoped' | 'workspace' | 'cross_workspace';
 
-// ────────────────────────────────────────────────────────────
-// Ranking weights — §9.6
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ranking weights â€” Â§9.6
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Default weights for the multi-signal ranker. Each candidate's final score
@@ -82,9 +82,9 @@ export type RetrievalWeights = {
   outcome: number;
 };
 
-// ────────────────────────────────────────────────────────────
-// Request — `IMemoryRuntime.buildContext()` arguments
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Request â€” `IMemoryRuntime.buildContext()` arguments
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Parameters for composing a memory context. Most fields are optional;
@@ -97,7 +97,7 @@ export interface RetrievalParams {
   workflowId?: string;
   runId?: string;
   agentId?: string;
-  /** The query — typically the current task description or agent prompt. */
+  /** The query â€” typically the current task description or agent prompt. */
   taskDescription: string;
   /** Override default budget. */
   budgetClass?: RetrievalBudgetClass;
@@ -118,9 +118,9 @@ export interface RetrievalParams {
   includeWorkingSummary?: boolean;
 }
 
-// ────────────────────────────────────────────────────────────
-// Response — composed context
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Response â€” composed context
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * One baseline hint surfaced to callers. Compact (just the numbers that
@@ -138,12 +138,12 @@ export interface BaselineHint {
 /**
  * The composed retrieval result returned by `buildContext()`.
  *
- * Token-budgeted: the runtime trims layers in priority order (§9.5) so the
- * total fits under the budget. Empty arrays mean "nothing relevant" — never
- * inject fabricated context (§12.4).
+ * Token-budgeted: the runtime trims layers in priority order (Â§9.5) so the
+ * total fits under the budget. Empty arrays mean "nothing relevant" â€” never
+ * inject fabricated context (Â§12.4).
  */
 export interface InjectedMemoryContext {
-  /** Compact summary of run working memory (§9.5 priority 1). */
+  /** Compact summary of run working memory (Â§9.5 priority 1). */
   workingSummary?: string;
   /** Knowledge chunks (Layer 2). */
   knowledgeHits: KnowledgeHit[];
@@ -155,7 +155,7 @@ export interface InjectedMemoryContext {
   baselineHints: BaselineHint[];
   /** Estimated total tokens in this context. */
   tokenEstimate: number;
-  /** Diagnostic metadata — useful for debugging retrieval. */
+  /** Diagnostic metadata â€” useful for debugging retrieval. */
   diagnostics: {
     budgetUsed: RetrievalBudgetClass | 'custom';
     tokenBudget: number;
@@ -170,9 +170,9 @@ export interface InjectedMemoryContext {
   composedAt: string;
 }
 
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Per-candidate scoring breakdown (for debugging / explainability)
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Per-candidate score breakdown. Useful for the dashboard's "why was this
@@ -191,3 +191,6 @@ export interface RetrievalScoreBreakdown {
     outcome: number;
   };
 }
+
+
+

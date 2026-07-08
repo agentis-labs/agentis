@@ -12,8 +12,8 @@ import {
   isRejectable,
   scoreStatement,
   FORMATION_MIN_SCORE,
-} from '../src/services/brainFormation.js';
-import { resolveMemoryPolicy } from '../src/services/memoryPolicyResolver.js';
+} from '../src/services/brain/brainFormation.js';
+import { resolveMemoryPolicy } from '../src/services/memory/memoryPolicyResolver.js';
 
 // The literal pollution from the bug report.
 const PRODUCTION_GARBAGE = [

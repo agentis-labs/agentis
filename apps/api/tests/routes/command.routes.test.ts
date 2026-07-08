@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { buildCommandRoutes } from '../../src/routes/command.js';
-import { CommandIndex } from '../../src/services/commandIndex.js';
+import { CommandIndex } from '../../src/services/command/commandIndex.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

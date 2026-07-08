@@ -1,17 +1,17 @@
-/**
- * AppManifestService / AppPackager — the projection between the three isomorphic
- * representations of an Agentic App (AGENTIC-SYSTEMS-ARCHITECTURE §2, §17):
+﻿/**
+ * AppManifestService / AppPackager â€” the projection between the three isomorphic
+ * representations of an Agentic App (AGENTIC-SYSTEMS-ARCHITECTURE Â§2, Â§17):
  *
- *   DB rows  ──toManifest──►  AppManifest (IR)  ──serialize──►  .agentisapp
- *   DB rows  ◄─fromManifest─  AppManifest (IR)  ◄─deserialize─  .agentisapp
+ *   DB rows  â”€â”€toManifestâ”€â”€â–º  AppManifest (IR)  â”€â”€serializeâ”€â”€â–º  .agentisapp
+ *   DB rows  â—„â”€fromManifestâ”€  AppManifest (IR)  â—„â”€deserializeâ”€  .agentisapp
  *
  * `toManifest`/`fromManifest` are the canonical projection (DoD gate 1). They
- * must round-trip: `rows → manifest → rows → manifest` is identity modulo
+ * must round-trip: `rows â†’ manifest â†’ rows â†’ manifest` is identity modulo
  * server-assigned ids/slug. `serialize`/`deserialize` add the integrity envelope
  * (sha256 over the canonical manifest); deserialize rejects tampering.
  *
  * Collections project SCHEMA only; rows never travel (empty-with-schema install,
- * §14.4). `export`/`import` are thin wrappers kept for the existing routes.
+ * Â§14.4). `export`/`import` are thin wrappers kept for the existing routes.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -70,7 +70,6 @@ function permissionSummary(manifest: AppManifest): string[] {
   }
   // Provenance gate (masterplan 0.4): an imported bundle whose workflows carry
   // executable payloads runs that code on the INSTALLER's host on first run. The
-  // installer must explicitly acknowledge it — the operator's own apps never go
   // through install, so this only gates third-party bundles.
   for (const permission of executablePayloadPermissions(manifest)) permissions.add(permission);
   return [...permissions].sort((a, b) => a.localeCompare(b));
@@ -110,7 +109,7 @@ export class AppPackager {
     this.surfaces = new AppSurfaceStore({ db });
   }
 
-  /** rows → canonical AppManifest IR. */
+  /** rows â†’ canonical AppManifest IR. */
   toManifest(workspaceId: string, appId: string): AppManifest {
     const app = this.apps.get(workspaceId, appId);
     const surfaces = this.surfaces.list(workspaceId, appId).map((s) => ({
@@ -148,7 +147,7 @@ export class AppPackager {
     });
   }
 
-  /** canonical AppManifest IR → rows (creates a fresh App). Collections come back EMPTY. */
+  /** canonical AppManifest IR â†’ rows (creates a fresh App). Collections come back EMPTY. */
   preview(envelope: AppManifestEnvelope): AppInstallPreview {
     const manifest = this.deserialize(envelope);
     const warnings: string[] = [];
@@ -228,7 +227,7 @@ export class AppPackager {
     return { appId: app.id };
   }
 
-  // ── Serialization envelope (.agentisapp) ────────────────────
+  // â”€â”€ Serialization envelope (.agentisapp) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   serialize(manifest: AppManifest): AppManifestEnvelope {
     const parsed = appManifestSchema.parse(manifest);
@@ -239,12 +238,12 @@ export class AppPackager {
     if (envelope.format !== '.agentisapp') throw new AgentisError('VALIDATION_FAILED', 'not an .agentisapp envelope');
     const manifest = appManifestSchema.parse(envelope.manifest);
     if (checksum(manifest) !== envelope.checksum) {
-      throw new AgentisError('VALIDATION_FAILED', 'checksum mismatch — package is corrupt or tampered');
+      throw new AgentisError('VALIDATION_FAILED', 'checksum mismatch â€” package is corrupt or tampered');
     }
     return manifest;
   }
 
-  // ── Route-facing wrappers ───────────────────────────────────
+  // â”€â”€ Route-facing wrappers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   export(workspaceId: string, appId: string): AppManifestEnvelope {
     return this.serialize(this.toManifest(workspaceId, appId));
@@ -254,3 +253,6 @@ export class AppPackager {
     return this.fromManifest(workspaceId, userId, this.deserialize(envelope));
   }
 }
+
+
+

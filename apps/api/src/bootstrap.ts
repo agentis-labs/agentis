@@ -27,7 +27,7 @@ import { CredentialVault } from './services/credentialVault.js';
 import { OAuthService } from './services/oauthService.js';
 import { buildOAuthRoutes } from './routes/oauth.js';
 import { buildMcpOAuthRoutes } from './routes/mcpOAuth.js';
-import { McpOAuthService } from './services/mcpOAuthService.js';
+import { McpOAuthService } from './services/mcp/mcpOAuthService.js';
 import { AuthService } from './services/auth.js';
 import { LedgerService } from './services/ledger.js';
 import { ScratchpadService } from './services/scratchpad.js';
@@ -36,48 +36,48 @@ import { ObservabilityService } from './services/observability.js';
 import { ApprovalInboxService } from './services/approvalInbox.js';
 import { ExtensionRuntime } from './services/extensionRuntime.js';
 import { SubflowExecutor } from './services/subflowExecutor.js';
-import { ConversationStore } from './services/conversationStore.js';
-import { ConversationSummaryService } from './services/conversationSummaryService.js';
+import { ConversationStore } from './services/conversation/conversationStore.js';
+import { ConversationSummaryService } from './services/conversation/conversationSummaryService.js';
 import { SessionMirror } from './services/sessionMirror.js';
 import { RegistryClient } from './services/registryClient.js';
-import { ChannelBridge } from './services/channelBridge.js';
+import { ChannelBridge } from './services/conversation/channelBridge.js';
 import { TelegramChannelAdapter } from './adapters/channels/telegram.js';
 import { DiscordChannelAdapter } from './adapters/channels/discord.js';
 import { SlackChannelAdapter } from './adapters/channels/slack.js';
 import { VoiceChannelAdapter } from './adapters/channels/voice.js';
 import { PartialReplayService } from './services/partialReplay.js';
-import { CommandIndex } from './services/commandIndex.js';
-import { KnowledgeBaseService } from './services/knowledgeBase.js';
+import { CommandIndex } from './services/command/commandIndex.js';
+import { KnowledgeBaseService } from './services/knowledge/knowledgeBase.js';
 import { DurableJobQueue } from './services/jobQueue.js';
 import { AgentisToolRegistry } from './services/agentisToolRegistry.js';
-import { CapabilityRegistry } from './services/capabilityRegistry.js';
+import { CapabilityRegistry } from './services/capability/capabilityRegistry.js';
 import { registerAllTools } from './services/agentisToolHandlers/index.js';
-import { ChatToolExecutor } from './services/chatToolExecutor.js';
-import { ChatSessionExecutor } from './services/chatSessionExecutor.js';
-import { OrchestratorEventBridge } from './services/orchestratorEventBridge.js';
+import { ChatToolExecutor } from './services/chat/chatToolExecutor.js';
+import { ChatSessionExecutor } from './services/chat/chatSessionExecutor.js';
+import { OrchestratorEventBridge } from './services/orchestrator/orchestratorEventBridge.js';
 import { ViewportStore } from './services/viewportStore.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
 import { AdapterManager } from './adapters/AdapterManager.js';
 import { WorktreeManager } from './services/worktreeManager.js';
-import { OrchestratorModelRouter, type ModelProfile } from './services/orchestratorModelRouter.js';
-import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from './services/workspaceHarnessRuntime.js';
-import { ChannelTurnDispatcher } from './services/channelTurnDispatcher.js';
-import { ConversationService } from './services/conversationService.js';
+import { OrchestratorModelRouter, type ModelProfile } from './services/orchestrator/orchestratorModelRouter.js';
+import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from './services/workspace/workspaceHarnessRuntime.js';
+import { ChannelTurnDispatcher } from './services/conversation/channelTurnDispatcher.js';
+import { ConversationService } from './services/conversation/conversationService.js';
 import { MediaService, openAiImageProvider } from './services/mediaService.js';
 import { resolveSynthesisCompleter } from './services/agentisToolHandlers/build.js';
-import { ChannelTurnQueue } from './services/channelTurnQueue.js';
-import { ChannelConnectionSupervisor } from './services/channelConnectionSupervisor.js';
-import { WorkspaceAwarenessService } from './services/workspaceAwarenessService.js';
-import { CapabilityIndex } from './services/capabilityIndex.js';
-import { CommandModelService } from './services/commandModel.js';
-import { CommandHeartbeat, isWorkspaceAutonomyEnabled } from './services/commandHeartbeat.js';
+import { ChannelTurnQueue } from './services/conversation/channelTurnQueue.js';
+import { ChannelConnectionSupervisor } from './services/conversation/channelConnectionSupervisor.js';
+import { WorkspaceAwarenessService } from './services/workspace/workspaceAwarenessService.js';
+import { CapabilityIndex } from './services/capability/capabilityIndex.js';
+import { CommandModelService } from './services/command/commandModel.js';
+import { CommandHeartbeat, isWorkspaceAutonomyEnabled } from './services/command/commandHeartbeat.js';
 import { TranscriptionService } from './services/transcriptionService.js';
 import { VisionService } from './services/visionService.js';
 import { DocumentExtractionService } from './services/documentExtractionService.js';
-import { ChannelIdentityService } from './services/channelIdentityService.js';
-import { WorkspaceModelConfigService } from './services/workspaceModelConfigService.js';
-import { WorkspaceEvaluatorRuntimeFactory } from './services/workspaceEvaluatorRuntimeFactory.js';
+import { ChannelIdentityService } from './services/conversation/channelIdentityService.js';
+import { WorkspaceModelConfigService } from './services/workspace/workspaceModelConfigService.js';
+import { WorkspaceEvaluatorRuntimeFactory } from './services/workspace/workspaceEvaluatorRuntimeFactory.js';
 import { buildOrchestratorModelRoutes } from './routes/orchestratorModels.js';
 import { WorkflowEngine, type EngineDeps } from './engine/WorkflowEngine.js';
 import { ActiveWorkflowRegistry } from './engine/ActiveWorkflowRegistry.js';
@@ -106,7 +106,7 @@ import { buildDashboardRoutes } from './routes/dashboard.js';
 import { buildAgentRoutes } from './routes/agents.js';
 import { buildHarnessRoutes } from './routes/harness.js';
 import { buildHarnessImportRoutes } from './routes/harnessImport.js';
-import { HarnessImportSyncService } from './services/harnessImportSync.js';
+import { HarnessImportSyncService } from './services/harness/harnessImportSync.js';
 import { buildGatewayRoutes } from './routes/gateways.js';
 import { buildGatewayMutationRoutes } from './routes/gatewayMutations.js';
 import { buildAmbientRoutes } from './routes/ambients.js';
@@ -114,48 +114,48 @@ import { buildDomainRoutes } from './routes/domains.js';
 import { buildAppRoutes } from './routes/apps.js';
 import { buildCapabilityRoutes } from './routes/capabilities.js';
 import { buildAppStores } from '@agentis/app';
-import { AppStaffingService } from './services/appStaffing.js';
-import { AppPresenceService } from './services/appPresence.js';
-import { AppContactService } from './services/appContacts.js';
+import { AppStaffingService } from './services/app/appStaffing.js';
+import { AppPresenceService } from './services/app/appPresence.js';
+import { AppContactService } from './services/app/appContacts.js';
 import { ConnectionGrantService } from './services/connectionGrants.js';
 import { DurableEntityService, DurableEntityDispatcher } from './services/durableEntities.js';
 import { SubjectRuntime, channelCorrelationId } from './services/subjectRuntime.js';
 import { ResidentAgentDriver } from './services/residentAgentDriver.js';
 import { ExperimentService } from './services/experiments.js';
 import { ProactiveFollowupService } from './services/proactiveFollowups.js';
-import { AppLearningService } from './services/appLearning.js';
-import { ConversationParticipantService } from './services/conversationParticipants.js';
+import { AppLearningService } from './services/app/appLearning.js';
+import { ConversationParticipantService } from './services/conversation/conversationParticipants.js';
 import { OutboundPolicyService } from './services/outboundPolicy.js';
 import { buildTaskRoutes } from './routes/tasks.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
 import { BudgetService } from './services/budget.js';
 import { defaultConnectorRegistry } from '@agentis/integrations';
-import { WorkflowStoreService } from './services/workflowStore.js';
-import { WorkspaceStoreService } from './services/workspaceStore.js';
-import { WorkspaceVolumeService } from './services/workspaceVolume.js';
-import { WorkspaceIntelligenceService } from './services/workspaceIntelligence.js';
+import { WorkflowStoreService } from './services/workflow/workflowStore.js';
+import { WorkspaceStoreService } from './services/workspace/workspaceStore.js';
+import { WorkspaceVolumeService } from './services/workspace/workspaceVolume.js';
+import { WorkspaceIntelligenceService } from './services/workspace/workspaceIntelligence.js';
 import { ExtensionLibraryService } from './services/extensionLibrary.js';
-import { AgentLibraryService } from './services/agentLibrary.js';
-import { AgentToolRuntime, type AgentToolRuntimeDeps, type PlatformToolBridge } from './services/agentToolRuntime.js';
-import { AgentSessionService } from './services/agentSession.js';
-import { AgentSessionRuntime } from './services/agentSessionRuntime.js';
+import { AgentLibraryService } from './services/agent/agentLibrary.js';
+import { AgentToolRuntime, type AgentToolRuntimeDeps, type PlatformToolBridge } from './services/agent/agentToolRuntime.js';
+import { AgentSessionService } from './services/agent/agentSession.js';
+import { AgentSessionRuntime } from './services/agent/agentSessionRuntime.js';
 import { PlanService } from './services/planService.js';
 import { LlmSessionAdapter } from './services/llmSessionAdapter.js';
 import { PlatformModelService } from './services/platformModelService.js';
-import { AgentMemoryService } from './services/agentMemory.js';
+import { AgentMemoryService } from './services/agent/agentMemory.js';
 import { PersonalBrainService } from './services/personalBrain.js';
 import { FailureReflectionService } from './services/failureReflection.js';
 import { FeynmanReflectionService } from './services/feynmanReflection.js';
-import { WorkflowSelfHealService } from './services/workflowSelfHeal.js';
-import { MemoryReflectionService } from './services/memoryReflectionService.js';
-import { BrainAskService } from './services/brainAskService.js';
-import { clipRealtimeText, publishAgentWorkStep, workCorrelationId } from './services/agentWorkProgress.js';
-import { SpecialistProfileService } from './services/specialistProfileService.js';
-import { SpecialistMindService } from './services/specialistMindService.js';
-import { SpecialistRuntimeService } from './services/specialistRuntimeService.js';
-import { SpecialistEvalService } from './services/specialistEvalService.js';
-import { SpecialistDemandRouter } from './services/specialistDemandRouter.js';
-import { SpecialistTemplateService } from './services/specialistTemplateService.js';
+import { WorkflowSelfHealService } from './services/workflow/workflowSelfHeal.js';
+import { MemoryReflectionService } from './services/memory/memoryReflectionService.js';
+import { BrainAskService } from './services/brain/brainAskService.js';
+import { clipRealtimeText, publishAgentWorkStep, workCorrelationId } from './services/agent/agentWorkProgress.js';
+import { SpecialistProfileService } from './services/specialist/specialistProfileService.js';
+import { SpecialistMindService } from './services/specialist/specialistMindService.js';
+import { SpecialistRuntimeService } from './services/specialist/specialistRuntimeService.js';
+import { SpecialistEvalService } from './services/specialist/specialistEvalService.js';
+import { SpecialistDemandRouter } from './services/specialist/specialistDemandRouter.js';
+import { SpecialistTemplateService } from './services/specialist/specialistTemplateService.js';
 import { buildSpecialistRoutes } from './routes/specialists.js';
 import { buildBrainRoutes } from './routes/brain.js';
 // Grounding — the Workspace Brain's organizational reasoning engine.
@@ -173,41 +173,41 @@ import { GroundingDiscoveryService } from './grounding/discovery.js';
 import { GroundingExtractionService } from './grounding/extractionService.js';
 import { GroundingRuntime } from './grounding/groundingRuntime.js';
 // Brain — knowledge graph + memory subsystem.
-import { LocalEmbeddingProvider } from './services/embeddingProvider.js';
-import { EmbeddingProviderRegistry } from './services/embeddingProviderRegistry.js';
-import { KnowledgeStore } from './services/knowledgeStore.js';
-import { MemoryStore } from './services/memoryStore.js';
-import { recordWorkflowLesson, distillFailureLesson, isInstructiveFailure } from './services/workflowPlaybook.js';
+import { LocalEmbeddingProvider } from './services/embedding/embeddingProvider.js';
+import { EmbeddingProviderRegistry } from './services/embedding/embeddingProviderRegistry.js';
+import { KnowledgeStore } from './services/knowledge/knowledgeStore.js';
+import { MemoryStore } from './services/memory/memoryStore.js';
+import { recordWorkflowLesson, distillFailureLesson, isInstructiveFailure } from './services/workflow/workflowPlaybook.js';
 import { SkillService } from './services/skillService.js';
 import { SkillMaterializer } from './services/skillMaterializer.js';
 import { EvaluatorExampleStore } from './services/evaluatorExampleStore.js';
-import { WorkflowBaselineStore } from './services/workflowBaselineStore.js';
+import { WorkflowBaselineStore } from './services/workflow/workflowBaselineStore.js';
 import { RollingBaselineStore } from './services/rollingBaselineStore.js';
 import { DatasetIngestion } from './services/datasetIngestion.js';
 import { IntelligencePromotion } from './services/intelligencePromotion.js';
 import { EpisodicMemoryStore } from './services/episodicMemoryStore.js';
-import { HarnessMemoryIngestionService } from './services/harnessMemoryIngestion.js';
-import { BrainComposer } from './services/brainComposer.js';
+import { HarnessMemoryIngestionService } from './services/harness/harnessMemoryIngestion.js';
+import { BrainComposer } from './services/brain/brainComposer.js';
 import { SharedIntelligenceService } from './services/sharedIntelligence.js';
 import { CognitivePromotionQueueWorker } from './services/cognitivePromotionQueueWorker.js';
 import { SessionMomentService } from './services/sessionMomentService.js';
 import { PeerProfileService } from './services/peerProfileService.js';
 import { ReflectionService } from './services/reflectionService.js';
-import { BrainDiscourseService } from './services/brainDiscourseService.js';
-import { BrainCompressionService } from './services/brainCompressionService.js';
-import { BrainMaintenanceService } from './services/brainMaintenanceService.js';
-import { BrainHealthService } from './services/brainHealthService.js';
-import { KnowledgeAutoLinker } from './services/knowledgeAutoLinker.js';
-import { EmbeddingBackfillService } from './services/embeddingBackfill.js';
-import { ConfiguredBrainEnrichmentProvider, EnrichedKnowledgeGraphWriter } from './services/brainEnrichment.js';
-import { ChatMemoryCaptureService } from './services/chatMemoryCapture.js';
+import { BrainDiscourseService } from './services/brain/brainDiscourseService.js';
+import { BrainCompressionService } from './services/brain/brainCompressionService.js';
+import { BrainMaintenanceService } from './services/brain/brainMaintenanceService.js';
+import { BrainHealthService } from './services/brain/brainHealthService.js';
+import { KnowledgeAutoLinker } from './services/knowledge/knowledgeAutoLinker.js';
+import { EmbeddingBackfillService } from './services/embedding/embeddingBackfill.js';
+import { ConfiguredBrainEnrichmentProvider, EnrichedKnowledgeGraphWriter } from './services/brain/brainEnrichment.js';
+import { ChatMemoryCaptureService } from './services/chat/chatMemoryCapture.js';
 import { BrowserPool } from './services/browserPool.js';
 import { createWebSearchProvider } from './services/webSearch.js';
 import { ArtifactService } from './services/artifactService.js';
 import { AssetStore } from './services/assetStore.js';
-import { McpToolBridge, computerUseServerFromEnv } from './services/mcpToolBridge.js';
-import { SpecialistAgentService } from './services/specialistAgents.js';
-import { McpHarnessSessionService } from './services/mcpHarnessSession.js';
+import { McpToolBridge, computerUseServerFromEnv } from './services/mcp/mcpToolBridge.js';
+import { SpecialistAgentService } from './services/specialist/specialistAgents.js';
+import { McpHarnessSessionService } from './services/mcp/mcpHarnessSession.js';
 import { AuditTrailService } from './services/auditTrail.js';
 import { InstinctEngine } from './services/instinctEngine.js';
 import { buildAuditRoutes } from './routes/audit.js';
@@ -221,7 +221,7 @@ import { buildWorkflowIoRoutes } from './routes/workflowIo.js';
 import { EvaluatorRuntime } from './services/evaluatorRuntime.js';
 import type { StructuredCompleter } from './services/structuredCompleter.js';
 import { AdapterStructuredCompleter } from './services/structuredCompleter.js';
-import { ConversationSimulatorService } from './services/conversationSimulator.js';
+import { ConversationSimulatorService } from './services/conversation/conversationSimulator.js';
 import { buildTerminalRoutes } from './routes/terminal.js';
 import { buildCredentialRoutes } from './routes/credentials.js';
 import { buildIntegrationRoutes } from './routes/integrations.js';
@@ -240,8 +240,9 @@ import { buildReplayRoutes } from './routes/replay.js';
 import { buildPackageRoutes } from './routes/packages.js';
 import { buildSkillRoutes } from './routes/skills.js';
 import { buildWorkspaceBundleRoutes } from './routes/workspaceBundle.js';
+import { buildSovereigntyRoutes } from './routes/sovereignty.js';
 import { PackagerService } from './services/packager.js';
-import { hydrateAgentRuntimes } from './services/agentRuntimeHydrator.js';
+import { hydrateAgentRuntimes } from './services/agent/agentRuntimeHydrator.js';
 import { buildArtifactRoutes } from './routes/artifacts.js';
 import { buildWorkspaceContextRoutes } from './routes/workspaceContext.js';
 import { buildWorkspaceIntelligenceRoutes } from './routes/workspaceIntelligence.js';
@@ -256,8 +257,8 @@ import { listenHttpServer } from './httpServer.js';
 import { createRealtimeServer, type RealtimeServer } from './websocket/rooms.js';
 import { IssueService } from './services/issues.js';
 import { EventChainService, SchedulerService } from './services/scheduler.js';
-import { AppOrchestratorService } from './services/appOrchestrator.js';
-import { RunCompactionService } from './services/runCompactionService.js';
+import { AppOrchestratorService } from './services/app/appOrchestrator.js';
+import { RunCompactionService } from './services/run/runCompactionService.js';
 
 export interface BootstrapResult extends AgentisRuntimeHandle<AgentisRuntimeStartResult<HttpServer>> {
   env: AgentisEnv;
@@ -268,32 +269,8 @@ export interface BootstrapResult extends AgentisRuntimeHandle<AgentisRuntimeStar
   seed: SeedResult | null;
 }
 
-/** Build an OAuth client config only when both id + secret are present. */
-function oauthClient(clientId?: string, clientSecret?: string): { clientId: string; clientSecret: string } | undefined {
-  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
-}
 
-function oauthProxyUrl(value?: string | null): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return new URL(trimmed).toString().replace(/\/+$/u, '');
-}
 
-function realtimeAllowedOrigins(env: AgentisEnv): string[] {
-  const configured = env.AGENTIS_ALLOWED_ORIGINS
-    ?.split(',')
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => new URL(value).origin);
-  if (configured?.length) return [...new Set(configured)];
-  if (env.AGENTIS_PUBLIC_URL) return [new URL(env.AGENTIS_PUBLIC_URL).origin];
-  return [
-    `http://127.0.0.1:${env.AGENTIS_HTTP_PORT}`,
-    `http://localhost:${env.AGENTIS_HTTP_PORT}`,
-    'http://127.0.0.1:5173',
-    'http://localhost:5173',
-  ];
-}
 
 function publishAdapterRealtime(
   event: NormalizedAgentEvent,
@@ -404,170 +381,70 @@ function publishAdapterRealtime(
   }
 }
 
+import { wireFoundation } from './bootstrap/wireFoundation.js';
+import { wireRoutes } from './bootstrap/wireRoutes.js';
+
 export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Promise<BootstrapResult> {
-  const env = loadEnv(envSource);
-  const logger = createLogger({ level: env.NODE_ENV === 'production' ? 'info' : 'debug' });
-  logger.info('agentis.bootstrap.start', { mode: env.AGENTIS_MODE ?? 'auto' });
-
-  const secrets = await loadOrCreateSecrets(env);
-  const db = await openDatabase(env);
-  if (!db.sqlite) throw new Error('SQLite handle missing — only embedded mode is supported in V1');
-  const sqlite = db.sqlite;
-
-  const bus = createInProcessEventBus();
-  const credentialVault = new CredentialVault(secrets.credentialKeyB64);
-  const allowedOrigins = realtimeAllowedOrigins(env);
-  // Inline OAuth (§7): mints encrypted credentials from a "Sign in with X" popup.
-  const oauthService = new OAuthService({
-    baseUrl: env.AGENTIS_PUBLIC_URL ?? `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`,
-    oauthProxyUrl: oauthProxyUrl(env.AGENTIS_OAUTH_PROXY_URL),
-    clients: {
-      google: oauthClient(env.OAUTH_GOOGLE_CLIENT_ID, env.OAUTH_GOOGLE_CLIENT_SECRET),
-      slack: oauthClient(env.OAUTH_SLACK_CLIENT_ID, env.OAUTH_SLACK_CLIENT_SECRET),
-      github: oauthClient(env.OAUTH_GITHUB_CLIENT_ID, env.OAUTH_GITHUB_CLIENT_SECRET),
-      notion: oauthClient(env.OAUTH_NOTION_CLIENT_ID, env.OAUTH_NOTION_CLIENT_SECRET),
-      linkedin: oauthClient(env.OAUTH_LINKEDIN_CLIENT_ID, env.OAUTH_LINKEDIN_CLIENT_SECRET),
-      twitter_x: oauthClient(env.OAUTH_TWITTER_X_CLIENT_ID, env.OAUTH_TWITTER_X_CLIENT_SECRET),
-    },
+  const foundation = await wireFoundation(envSource);
+  const {
+    env,
     logger,
-  });
-  // Spec-compliant OAuth for external MCP servers (discovery + DCR + PKCE) —
-  // "Connect with X", distinct from the fixed-provider oauthService above.
-  const mcpOAuthService = new McpOAuthService();
-  const auth = new AuthService(secrets);
-  const ledger = new LedgerService(sqlite, bus);
-  const scratchpad = new ScratchpadService(bus, logger, sqlite);
-  const activity = new ActivityFeedService(sqlite, bus);
-  const observability = new ObservabilityService(sqlite, bus, logger);
-  observability.startLegacyBridge();
-  const approvals = new ApprovalInboxService(sqlite, bus);
-  const extensionKv = new ExtensionKvStore(sqlite);
-  const extensions = new ExtensionRuntime(sqlite, logger, { dockerEnabled: !!env.AGENTIS_EXTENSION_DOCKER }, extensionKv);
-
-  // Telemetry (D38) — opt-in via AGENTIS_OTEL_ENDPOINT. Falls back to a
-  // no-op tracer if the OTel SDK packages are not installed, so the
-  // production install stays slim.
-  const telemetry: Telemetry = await loadTelemetry(
-    env.AGENTIS_OTEL_ENDPOINT
-      ? {
-          endpoint: env.AGENTIS_OTEL_ENDPOINT,
-          serviceName: env.AGENTIS_OTEL_SERVICE_NAME,
-          logger,
-        }
-      : null,
-  );
-
-  const adapters = new AdapterManager(logger, telemetry);
-  // Per-task filesystem isolation for parallel agents (swarm subtasks each get
-  // their own git worktree / temp dir instead of sharing one checkout).
-  const worktreeManager = new WorktreeManager(logger);
-  const workspaceHarnesses = new WorkspaceHarnessRuntimeResolver({ db: sqlite, adapters });
-  const workspaceHarnessCompleter = new WorkspaceHarnessStructuredCompleter(workspaceHarnesses);
-
-  const subflows = new SubflowExecutor({ db: sqlite, ledger, scratchpad });
-  const conversations = new ConversationStore({ db: sqlite, bus });
-  const sessionMirror = new SessionMirror({ db: sqlite, bus, logger, conversations, approvals });
-  const extensionRegistry = new RegistryClient({
-    registryUrl: env.AGENTIS_EXTENSION_REGISTRY_URL,
-    timeoutMs: env.AGENTIS_EXTENSION_REGISTRY_TIMEOUT_MS,
-    logger,
-  });
-  const replay = new PartialReplayService(sqlite);
-  const commandIndex = new CommandIndex(sqlite);
-  const registry = new ActiveWorkflowRegistry(sqlite, logger);
-  const viewportStore = new ViewportStore();
-
-  const knowledgeBaseService = new KnowledgeBaseService(sqlite);
-  const auditTrail = new AuditTrailService(sqlite, logger);
-  const budgetService = new BudgetService({ db: sqlite, bus, approvals, audit: auditTrail });
-  const workflowStoreService = new WorkflowStoreService(sqlite);
-  const workspaceStoreService = new WorkspaceStoreService(sqlite);
-  // Layer 1 — Workspace Intelligence: persistent context files on the Volume,
-  // injected into every agent_task + the build_workflow synthesis prompt.
-  const workspaceVolume = new WorkspaceVolumeService(env.AGENTIS_DATA_DIR);
-  // Authored workspace context (the "charter") is stored as operator brain
-  // atoms, not Markdown files — so the intelligence service is backed by the
-  // memory store, which is constructed here (used again by the brain layer).
-  const memoryStore = new MemoryStore(sqlite, logger);
-  const workspaceIntelligence = new WorkspaceIntelligenceService(memoryStore, sqlite);
-  const extensionLibrary = new ExtensionLibraryService(workspaceVolume, sqlite);
-  // Principle #11 — agent identity as files: platform specialists export to
-  // agents/platform/<role>.md; operator custom roles in agents/custom/*.md
-  // expand the creation casting vocabulary.
-  const agentLibrary = new AgentLibraryService(workspaceVolume);
-  // Agent-private memory is the workspace brain scoped to one agent: it writes
-  // to the canonical `memory_episodes` table (scope_id = agentId), so the same
-  // episodic store backs it. A dedicated instance keeps construction order
-  // simple; episodes are a stateless table writer.
-  // §B1.1 — ONE embedding provider owner, constructed before any memory store so
-  // every store embeds writes with the workspace's configured provider (not a
-  // hard-wired hashing instance). This is the keystone of the semantic-recall fix.
-  const embeddingRegistry = new EmbeddingProviderRegistry(sqlite, logger);
-  const embeddingResolver = embeddingRegistry.resolver();
-  const agentMemoryService = new AgentMemoryService(sqlite, new EpisodicMemoryStore(sqlite, logger, embeddingResolver));
-  // PersonalBrain is USER-scoped (cross-workspace); there is no per-user provider
-  // config, so it uses a default local (semantic) embedder until an account-level
-  // setting exists. Tracked as a known §B1 gap, not an oversight.
-  const personalBrain = new PersonalBrainService(sqlite, new LocalEmbeddingProvider());
-  const failureReflection = new FailureReflectionService(agentMemoryService, logger);
-  const specialistProfiles = new SpecialistProfileService(sqlite);
-  // Agentic App stores (AGENTIC-APPS-10X §4/§5) — datastore + surfaces with
-  // realtime emit wired to the bus; shared by the agent tool runtime and routes.
-  const appStores = buildAppStores({ db: sqlite, bus });
-  // Native Playwright runtime for `browser` nodes AND the `browser_*` agent
-  // tools (lazy: Chromium installs on first use if absent). Headless Chromium,
-  // capped by AGENTIS_BROWSER_CONCURRENCY.
-  const browserPool = new BrowserPool(logger);
-  // Shared artifact persistence/resolution — screenshots become referenceable
-  // artifacts and channel attachments resolve back to bytes. The assets dir lets
-  // it resolve `asset://<hash>` refs off the content-addressed store.
-  const artifactService = new ArtifactService(sqlite, logger, bus, env.AGENTIS_ASSETS_DIR);
-  // Content-addressed asset store — the single authority for generated media.
-  const assetStore = new AssetStore(env.AGENTIS_ASSETS_DIR, artifactService, sqlite, logger);
-  // External MCP tool bridge (Phase 2/3A) — makes operator-mounted MCP servers
-  // (incl. an env-configured computer-use server) callable as agent tools. Same
-  // outbound network policy as the /v1/mcp-servers REST routes.
-  const mcpAllowPrivate = String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true';
-  const computerUseServer = computerUseServerFromEnv(process.env);
-  const mcpToolBridge = new McpToolBridge({
-    db: sqlite,
-    logger,
-    // Secrets plane (MCP-CAPABILITY-PLANE §S1): servers registered with a
-    // credentialId get their headers resolved from the vault at call time.
-    vault: credentialVault,
-    allowPrivateNetwork: mcpAllowPrivate,
-    ...(computerUseServer ? { computerUse: computerUseServer } : {}),
-  });
-  if (computerUseServer) {
-    logger.info('mcp_bridge.computer_use_enabled', { url: computerUseServer.url });
-  }
-  // Zero-config web search backs the `web_search` agent tool (no API key). Every
-  // specialist's default toolbox advertises web_search; without a provider it
-  // failed "not configured", so discovery/research agents could never search.
-  const webSearchProvider = createWebSearchProvider(logger);
-  const agentToolRuntimeDeps: AgentToolRuntimeDeps = {
-    volume: workspaceVolume,
-    knowledgeBases: knowledgeBaseService,
-    workflowStore: workflowStoreService,
-    agentMemory: agentMemoryService,
-    memory: memoryStore,
-    logger,
-    webSearch: webSearchProvider,
-    browser: browserPool,
-    artifacts: artifactService,
-    mcpBridge: mcpToolBridge,
-    appData: appStores.data,
-    appSurfaces: appStores.surfaces,
-    resolveAppIdForWorkflow: (workspaceId, workflowId) => {
-      const row = sqlite
-        .select({ appId: schema.workflows.appId })
-        .from(schema.workflows)
-        .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, workflowId)))
-        .get();
-      return row?.appId ?? undefined;
-    },
-  };
-  const agentToolRuntime = new AgentToolRuntime(agentToolRuntimeDeps);
+    secrets,
+    db,
+    sqlite,
+    bus,
+    credentialVault,
+    allowedOrigins,
+    oauthService,
+    mcpOAuthService,
+    auth,
+    ledger,
+    scratchpad,
+    activity,
+    observability,
+    approvals,
+    extensionKv,
+    extensions,
+    telemetry,
+    adapters,
+    worktreeManager,
+    workspaceHarnesses,
+    workspaceHarnessCompleter,
+    subflows,
+    conversations,
+    sessionMirror,
+    extensionRegistry,
+    replay,
+    commandIndex,
+    registry,
+    viewportStore,
+    knowledgeBaseService,
+    auditTrail,
+    budgetService,
+    workflowStoreService,
+    workspaceStoreService,
+    workspaceVolume,
+    memoryStore,
+    workspaceIntelligence,
+    extensionLibrary,
+    agentLibrary,
+    embeddingRegistry,
+    embeddingResolver,
+    agentMemoryService,
+    personalBrain,
+    failureReflection,
+    specialistProfiles,
+    appStores,
+    browserPool,
+    artifactService,
+    assetStore,
+    mcpAllowPrivate,
+    computerUseServer,
+    mcpToolBridge,
+    webSearchProvider,
+    agentToolRuntimeDeps,
+    agentToolRuntime,
+  } = foundation;
   let instinctEngine: InstinctEngine | undefined;
   // Layer 2 — specialist agent library: resolves agent_task.agentRole → a
   // workspace agent (seeding the built-in specialists on first use).
@@ -667,7 +544,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Workspace embedding-provider resolver, forward-declared so consumers can call
   // it lazily after SharedIntelligence is wired below (used by specialist mind,
   // the capability index, etc.). Falls back to a local semantic embedder pre-wire.
-  let resolveAbilityEmbeddingProvider: ((workspaceId: string) => import('./services/embeddingProvider.js').EmbeddingProvider) | undefined;
+  let resolveAbilityEmbeddingProvider: ((workspaceId: string) => import('./services/embedding/embeddingProvider.js').EmbeddingProvider) | undefined;
   const abilityEmbeddings = (workspaceId: string) => {
     if (!resolveAbilityEmbeddingProvider) return new LocalEmbeddingProvider();
     return resolveAbilityEmbeddingProvider(workspaceId);
@@ -1659,241 +1536,56 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     await engine.resolveApproval({ runId, approvalId, decision, data, feedback });
   });
 
-  const app = new Hono();
-  app.onError(errorHandler(logger));
-  app.use('*', securityHeaders({ productionMode: env.NODE_ENV === 'production' }));
-  app.get('/healthz', (c) => c.json({
-    ok: true,
-    mode: db.mode,
-    runtime: 'local-first',
-    standardMode: 'unsupported-in-v1',
-  }));
-  app.route('/.well-known', buildJwksRoutes({ auth }));
-  mountOpenApi(app);
-
-  // Universal audit middleware (D38) — records every successful state-changing
-  // /v1/* call to activity_events.
-  app.use('/v1/*', auditLog({ activity, logger }));
-
-  // ── Route surface (V1) ──────────────────────────────────
-  const sharedPackager = new PackagerService({ db: sqlite, bus, logger, skills: skillService });
-  app.route('/v1/auth', buildAuthRoutes({ db: sqlite, auth, secrets }));
-  app.route('/v1/bootstrap', buildBootstrapRoutes({
-    db: sqlite,
-    auth,
-    bridge: channelBridge,
-    vault: credentialVault,
-    adapters,
-    logger,
-    bus,
-  }));
-  app.route('/v1/dashboard', buildDashboardRoutes({ db: sqlite, auth }));
-  app.route('/v1/activity', buildActivityRoutes({ db: sqlite, auth, activity }));
-  app.route('/v1/observability', buildObservabilityRoutes({ db: sqlite, auth, bus, observability }));
-  app.route('/v1/approvals', buildApprovalRoutes({ db: sqlite, auth, approvals }));
-  app.route('/v1/workflows', buildWorkflowRoutes({
-    db: sqlite,
-    auth,
-    engine,
-    bus,
-    packager: sharedPackager,
-    triggerRuntime,
-  }));
-  app.route('/v1/workflows', buildAnalyticsRoutes({ db: sqlite, auth }));
-  app.route('/v1/workflows', buildWorkflowIoRoutes({ db: sqlite, auth }));
-  app.route('/v1/mcp', buildMcpRoutes({ db: sqlite, auth, engine, toolRegistry }));
-  app.route('/v1/mcp-servers', buildMcpServerRoutes({
-    db: sqlite,
-    auth,
-    vault: credentialVault,
-    mcpBridge: mcpToolBridge,
-    allowPrivateNetwork: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
-  }));
-  app.route('/v1/a2a', buildA2aRoutes({ db: sqlite, auth, adapters, engine, activity }));
-  app.route('/v1/interactions', buildInteractionRoutes({ db: sqlite, auth }));
-  app.route('/v1/governance', buildGovernanceRoutes({ db: sqlite, auth, adapters }));
-  app.route('/v1/ephemeral', buildEphemeralRoutes({ db: sqlite, auth, engine, bus }));
-  app.route('/v1/runs', buildRunRoutes({ db: sqlite, auth, engine, ledger, scratchpad, bus }));
-  app.route('/v1/runs', buildReplayRoutes({ db: sqlite, auth, engine, replay }));
-  app.route('/v1/runs', buildAuditRoutes({ db: sqlite, auth, audit: auditTrail }));
-  app.route('/v1/extensions', buildExtensionRoutes({ db: sqlite, auth, extensionLibrary, runtime: extensions, kv: extensionKv }));
-  app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, bus, logger, skills: skillService }));
-  app.route('/v1/skills', buildSkillRoutes({ db: sqlite, auth, skills: skillService }));
-  app.route('/v1/workspace/bundle', buildWorkspaceBundleRoutes({ db: sqlite, auth, bus, logger, dataDir: env.AGENTIS_DATA_DIR, signer: { privateKeyPem: secrets.jwtPrivateKeyPem, publicKeyPem: secrets.jwtPublicKeyPem } }));
-  app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus, artifacts: artifactService }));
-  app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
-  app.route('/v1/workspace/intelligence', buildWorkspaceIntelligenceRoutes({ db: sqlite, auth, intelligence: SharedIntelligence, backfill: embeddingBackfill, logger }));
-  app.route('/v1/memory', buildMemoryRoutes({ db: sqlite, auth, memory: memoryStore, episodes: episodicMemoryStore, brainAsk }));
-  // Grounding — evidence ledger, source fabric, claims, grants, migration. The
-  // claim service hears about evidence invalidation; the dispatch composer is
-  // wired into SharedIntelligence (extends buildDispatchContext, RFC §12.2).
-  const groundingLedger = new EvidenceLedgerService({ db: sqlite, logger });
-  const groundingClaims = new ClaimService({ db: sqlite, logger, ledger: groundingLedger });
-  groundingLedger.setInvalidationHandler(groundingClaims.onEvidenceInvalidated);
-  const groundingIdentity = new IdentityService({ db: sqlite, logger });
-  const groundingFabric = new GroundingSourceFabric({
-    db: sqlite,
-    logger,
-    ledger: groundingLedger,
-    vault: credentialVault,
-    identity: groundingIdentity,
-  });
-  groundingFabric.register(new AgentisNativeSource(sqlite));
-  const groundingModel = new GroundingModelService({ db: sqlite, logger, claims: groundingClaims });
-  const groundingComposer = new GroundingContextComposer({ db: sqlite, logger });
-  const groundingMigration = new GroundingMigrationService({ db: sqlite, logger, claims: groundingClaims });
-  const groundingDiscovery = new GroundingDiscoveryService({ db: sqlite, logger, fabric: groundingFabric, composer: groundingComposer });
-  const groundingExtraction = new GroundingExtractionService({
-    db: sqlite,
-    logger,
-    claims: groundingClaims,
-    identity: groundingIdentity,
-    migration: groundingMigration,
-  });
-  // Adaptive-mode extraction reuses the Formation Judge's model source: when an
-  // evaluator runtime is configured, free-text evidence gets model extraction;
-  // otherwise Adaptive is an honest no-op (Core mode still extracts native shapes).
-  const groundingInvestigations = new GroundingInvestigationService({ db: sqlite, logger, claims: groundingClaims });
-  groundingExtraction.setAdaptiveCompleter(defaultCognitiveCompleter);
-  groundingInvestigations.setCompleter(defaultCognitiveCompleter);
-  const groundingRuntime = new GroundingRuntime({
-    db: sqlite,
-    logger,
-    fabric: groundingFabric,
-    extraction: groundingExtraction,
-    model: groundingModel,
-    discovery: groundingDiscovery,
-  });
-  SharedIntelligence.setGroundingComposer(groundingComposer);
-  app.route('/v1/workspaces', buildWorkspaceRoutes({
-    db: sqlite,
-    auth,
-    bus,
-    groundingDiscovery,
+  const {
+    app,
     groundingRuntime,
-  }));
-  app.route('/v1/grounding', buildGroundingRoutes({
-    db: sqlite,
-    auth,
-    fabric: groundingFabric,
-    ledger: groundingLedger,
-    claims: groundingClaims,
-    identity: groundingIdentity,
-    model: groundingModel,
-    composer: groundingComposer,
-    migration: groundingMigration,
-    discovery: groundingDiscovery,
-    runtime: groundingRuntime,
-    investigations: groundingInvestigations,
-  }));
-  // Separate prefix: /v1/grounding/* is auth-gated; webhook ingress must not nest under it.
-  app.route('/v1/grounding-webhooks', buildGroundingWebhookRoutes({ fabric: groundingFabric }));
-  app.route('/v1/brain', buildBrainRoutes({
-    db: sqlite,
-    auth,
-    brain: brainComposer,
-    SharedIntelligence,
-    knowledgeAutoLinker,
-    health: brainHealth,
+    harnessImportSync,
+  } = wireRoutes({
+    ...foundation,
+    PeerProfiles,
     Reflection,
-    agentMemory: agentMemoryService,
-    peerProfiles: PeerProfiles,
-    sessionMoments: SessionMoments,
-  }));
-  app.route('/v1/specialists', buildSpecialistRoutes({
-    db: sqlite,
-    auth,
-    specialists: specialistAgents,
-    agentLibrary,
-    profiles: specialistProfiles,
-    mind: specialistMind,
-    router: specialistRouter,
-    runtime: specialistRuntime,
-    evals: specialistEvals,
-    templates: specialistTemplates,
-  }));
-  app.route('/v1/personal-brain', buildPersonalBrainRoutes({ db: sqlite, auth, brain: personalBrain }));
-  app.route('/v1/issues', buildIssueRoutes({ db: sqlite, auth, issues, replay, engine }));
-  app.route('/v1/knowledge-bases', buildKnowledgeBaseRoutes({ db: sqlite, auth, knowledge: knowledgeBaseService }));
-  app.route('/v1/tools', buildToolRoutes({ db: sqlite, auth, toolRegistry }));
-  app.route('/v1/capabilities', buildCapabilityRoutes({ db: sqlite, auth, capabilities: capabilityRegistry }));
-  app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations, harnessMemoryIngestion, mcpHarness, skillMaterializer, episodes: episodicMemoryStore }));
-  app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
-  app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
-  const appStaffing = new AppStaffingService({ store: appStores.store, specialists: specialistAgents, logger });
-  // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
-  const appPresence = new AppPresenceService({ bus, logger });
-  appPresence.start();
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator }));
-  app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
-  app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer }));
-  const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer }, bus, logger);
-  app.route('/v1/adapters', buildHarnessRoutes({ db: sqlite, auth }));
-  app.route('/v1/agents', buildTerminalRoutes({ db: sqlite, auth, conversations }));
-  app.route('/v1/gateways', buildGatewayRoutes({ db: sqlite, auth, vault: credentialVault }));
-  app.route('/v1/gateways', buildGatewayMutationRoutes({ db: sqlite, auth, vault: credentialVault }));
-  app.route('/v1/ambients', buildAmbientRoutes({ db: sqlite, auth }));
-  app.route('/v1/budgets', buildBudgetRoutes({ db: sqlite, auth, budget: budgetService }));
-  app.route('/v1/command', buildCommandRoutes({ db: sqlite, auth, commandIndex }));
-  app.route('/v1/scheduler', buildSchedulerRoutes({ db: sqlite, auth }));
-  app.route('/v1/command', buildCommandAutonomyRoutes({ db: sqlite, auth, master: commandAutonomyMaster }));
-  app.route('/v1/triggers', buildTriggerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
-  app.route('/v1/listeners', buildListenerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
-  app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge, voice: voiceChannelAdapter }));
-  app.route('/v1/credentials', buildCredentialRoutes({ db: sqlite, auth, vault: credentialVault }));
-  app.route('/v1/oauth', buildOAuthRoutes({ db: sqlite, auth, vault: credentialVault, oauth: oauthService, allowedOrigins }));
-  app.route('/v1/mcp-oauth', buildMcpOAuthRoutes({
-    db: sqlite,
-    auth,
-    vault: credentialVault,
-    oauth: mcpOAuthService,
-    publicUrl: env.AGENTIS_PUBLIC_URL ?? `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`,
-    allowedOrigins,
-    allowPrivateNetwork: mcpAllowPrivate,
-  }));
-  app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
-  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, memoryCapture: chatMemoryCapture }));
-  const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
-  app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));
-  app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));
-  app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge, supervisor: channelSupervisor, identity: channelIdentity }));
-  app.route('/v1/orchestrator/models', buildOrchestratorModelRoutes({
-    db: sqlite,
-    auth,
-    config: workspaceModelConfig,
-    router: orchestratorModelRouter,
-    harnesses: workspaceHarnesses,
-  }));
-  app.route('/v1/extensions/registry', buildExtensionRegistryRoutes({ db: sqlite, auth, registry: extensionRegistry, activity }));
-  // Mounted ONLY when AGENTIS_TEST_MODE=true AND NODE_ENV !== 'production'.
-  if (env.AGENTIS_TEST_MODE) {
-    if (env.NODE_ENV === 'production') {
-      logger.error('agentis.test_mode.refused', {
-        reason: 'AGENTIS_TEST_MODE=true is forbidden when NODE_ENV=production',
-        action: 'unset AGENTIS_TEST_MODE or change NODE_ENV',
-      });
-    } else {
-      app.route(
-        '/v1/_test',
-        buildTestHarnessRoutes({ db: sqlite, auth, env, logger }),
-      );
-      logger.warn('agentis.test_mode.enabled', {
-        reset: '/v1/_test/reset',
-        seedPassword: env.AGENTIS_SEED_PASSWORD ? '<custom>' : 'test-password-1234',
-        nodeEnv: env.NODE_ENV,
-      });
-    }
-  }
-
-  // ── Static dashboard (D21) ──────────────────────────────
-  // Mount LAST so it doesn't shadow API routes. SPA fallback rewrites
-  // unknown paths to index.html. Disabled when AGENTIS_DASHBOARD_DIST is unset.
-  if (env.AGENTIS_DASHBOARD_DIST) {
-    const distRoot = path.resolve(env.AGENTIS_DASHBOARD_DIST);
-    app.use('/*', serveStatic({ root: distRoot }));
-    app.get('*', serveStatic({ path: 'index.html', root: distRoot }));
-    logger.info('agentis.dashboard.mounted', { dist: distRoot });
-  }
+    SessionMoments,
+    SharedIntelligence,
+    appContacts,
+    appLearning,
+    appOrchestrator,
+    brainAsk,
+    brainComposer,
+    brainHealth,
+    capabilityRegistry,
+    channelBridge,
+    channelIdentity,
+    channelSupervisor,
+    chatMemoryCapture,
+    commandAutonomyMaster,
+    conversationParticipants,
+    conversationSimulator,
+    defaultCognitiveCompleter,
+    embeddingBackfill,
+    engine,
+    episodicMemoryStore,
+    harnessMemoryIngestion,
+    issues,
+    knowledgeAutoLinker,
+    mcpHarness,
+    orchestratorModelRouter,
+    outboundPolicy,
+    planService,
+    scheduler,
+    sessionStore,
+    skillMaterializer,
+    skillService,
+    specialistAgents,
+    specialistEvals,
+    specialistMind,
+    specialistRouter,
+    specialistRuntime,
+    specialistTemplates,
+    toolRegistry,
+    triggerRuntime,
+    voiceChannelAdapter,
+    workspaceModelConfig,
+  });
 
   let httpServer: HttpServer | undefined;
   let realtime: RealtimeServer | undefined;

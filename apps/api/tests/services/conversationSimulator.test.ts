@@ -19,7 +19,7 @@ import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import {
   ConversationSimulatorService,
   type SimulatorScenario,
-} from '../../src/services/conversationSimulator.js';
+} from '../../src/services/conversation/conversationSimulator.js';
 import type { StructuredCompleter } from '../../src/services/structuredCompleter.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -58,7 +58,7 @@ function scriptedRunner(replyFor: (userMessage: string, turn: number) => string)
     turn += 1;
     yield { type: 'text', delta: reply } as ChatDelta;
     yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-  }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn;
+  }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn;
 }
 
 const SCRIPTED_SCENARIO: SimulatorScenario = {
@@ -142,7 +142,7 @@ describe('ConversationSimulatorService — scripted scenario', () => {
       runTurn: (async function* () {
         yield { type: 'tool_result', id: 't', name: 'x', result: null, error: 'runtime exploded' } as ChatDelta;
         yield { type: 'done', finishReason: 'error' } as ChatDelta;
-      }) as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const result = await sim.runScenario({ workspaceId: ctx.workspace.id, userId: ctx.user.id, appId, scenario: SCRIPTED_SCENARIO });

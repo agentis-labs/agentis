@@ -1,13 +1,13 @@
-/**
- * Live-operations blocks (APP-INTERFACE-10X §2.2/§2.3) — the agentic heartbeat
+﻿/**
+ * Live-operations blocks (APP-INTERFACE-10X Â§2.2/Â§2.3) â€” the agentic heartbeat
  * of an App Interface, registered on the open block seam:
  *
- *   OrchestrationPanel — multi-workflow control BY RULE: live status, schedule /
+ *   OrchestrationPanel â€” multi-workflow control BY RULE: live status, schedule /
  *                        depends-on / concurrency editing, enable-pause, run-all.
- *   RunMonitor         — the App's runs, live: pulse, node progress, elapsed,
+ *   RunMonitor         â€” the App's runs, live: pulse, node progress, elapsed,
  *                        cancel/pause/resume, expandable per-run activity.
- *   AgentFeed          — watch the agents think: reasoning/tool/node stream.
- *   ApprovalsInbox     — pending human gates, approve/deny inline.
+ *   AgentFeed          â€” watch the agents think: reasoning/tool/node stream.
+ *   ApprovalsInbox     â€” pending human gates, approve/deny inline.
  *
  * All four consume the SAME live substrate the platform already runs on
  * (run rooms + `/v1/runs/:id/activity` backfill + RUN_/NODE_/APPROVAL_ events);
@@ -31,7 +31,7 @@ import { ApprovalPreviewCard, ApprovalReviewModal, type ApprovalReview } from '.
 import { registerBlock } from './registry';
 import { EmptyState, PanelShell, SkeletonRows, relativeTime, useRuntime } from '../ViewRenderer';
 
-// ── shared: live app workflows ────────────────────────────────
+// â”€â”€ shared: live app workflows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const RUN_EVENTS = [
   REALTIME_EVENTS.RUN_CREATED, REALTIME_EVENTS.RUN_RUNNING, REALTIME_EVENTS.RUN_PAUSED,
@@ -40,7 +40,7 @@ const RUN_EVENTS = [
 ];
 
 /**
- * Hold a workspace realtime-room subscription while mounted — run status events
+ * Hold a workspace realtime-room subscription while mounted â€” run status events
  * fan out to the workspace room (engine publishes run+workspace), and approvals
  * publish there too. Without this the socket never receives them.
  */
@@ -96,7 +96,6 @@ export function useAppRuns(workflowIds: Set<string>, limit: number): { runs: Run
     if (workflowIds.size === 0) { setRuns([]); setLoading(false); return; }
     // Fetch recent runs AND active runs separately: an active run can be older
     // than the recent-runs window (e.g. a run parked WAITING/PAUSED for days).
-    // Merging guarantees the operator always sees — and can cancel — whatever is
     // still counted as "active", instead of a phantom the run list never surfaces.
     Promise.all([
       opsApi.listRuns({ limit: 100 }),
@@ -128,7 +127,7 @@ export function useAppRuns(workflowIds: Set<string>, limit: number): { runs: Run
   return { runs, loading, reload };
 }
 
-// ── shared: presentation ──────────────────────────────────────
+// â”€â”€ shared: presentation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function runTone(status: string): { chip: string; dot: string; label: string } {
   const s = status.toUpperCase();
@@ -170,7 +169,7 @@ export function cronHint(cron: string): string {
   if (/^\d+$/.test(m) && /^\d+$/.test(h)) {
     const days = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
     if (dow !== '*' && /^\d$/.test(dow)) return `${days[Number(dow)]} ${pad(h)}:${pad(m)}`;
-    if (dom !== '*' && /^\d+$/.test(dom)) return `day ${dom} · ${pad(h)}:${pad(m)}`;
+    if (dom !== '*' && /^\d+$/.test(dom)) return `day ${dom} Â· ${pad(h)}:${pad(m)}`;
     return `daily ${pad(h)}:${pad(m)}`;
   }
   return cron;
@@ -185,7 +184,7 @@ const SCHEDULE_PRESETS: Array<{ label: string; cron: string | null }> = [
   { label: 'Weekly Mon 08:00', cron: '0 8 * * 1' },
 ];
 
-// ── OrchestrationPanel ────────────────────────────────────────
+// â”€â”€ OrchestrationPanel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function OrchestrationPanelView({ appId, title, controls = true }: { appId: string; title?: string; controls?: boolean }) {
   const { workflows, error, reload } = useAppWorkflows(appId);
@@ -275,7 +274,7 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
                       </span>
                     ) : null}
                     {wf.schedule ? (
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary" title={`cron: ${wf.schedule.cron}${wf.nextRunAt ? ` · next ${new Date(wf.nextRunAt).toLocaleString()}` : ''}`}>
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary" title={`cron: ${wf.schedule.cron}${wf.nextRunAt ? ` Â· next ${new Date(wf.nextRunAt).toLocaleString()}` : ''}`}>
                         <CalendarClock size={10} /> {cronHint(wf.schedule.cron)}
                       </span>
                     ) : wf.triggerKind && wf.triggerKind !== 'manual' ? (
@@ -377,7 +376,7 @@ function RulesEditor({ workflow, siblings, onPatch }: {
           }}
         >
           {SCHEDULE_PRESETS.map((p) => <option key={p.label} value={p.cron ?? ''}>{p.label}</option>)}
-          <option value="__custom">Custom cron…</option>
+          <option value="__custom">Custom cronâ€¦</option>
         </select>
         {!isPreset || customCron ? (
           <div className="flex items-center gap-1">
@@ -434,7 +433,7 @@ function RulesEditor({ workflow, siblings, onPatch }: {
   );
 }
 
-// ── RunMonitor ────────────────────────────────────────────────
+// â”€â”€ RunMonitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function RunMonitorView({ appId, title, workflowIds, limit = 8, controls = true }: {
   appId: string; title?: string; workflowIds?: string[]; limit?: number; controls?: boolean;
@@ -452,7 +451,7 @@ export function RunMonitorView({ appId, title, workflowIds, limit = 8, controls 
   const icon = <Activity size={14} />;
   const heading = title ?? 'Runs';
   if (workflows === null || (loading && runs.length === 0)) return <PanelShell title={heading} icon={icon}><SkeletonRows /></PanelShell>;
-  if (runs.length === 0) return <PanelShell title={heading} icon={icon}><EmptyState label="No runs yet" hint="Start a workflow from the orchestration panel — every run shows up here, live." /></PanelShell>;
+  if (runs.length === 0) return <PanelShell title={heading} icon={icon}><EmptyState label="No runs yet" hint="Start a workflow from the orchestration panel â€” every run shows up here, live." /></PanelShell>;
 
   return (
     <PanelShell title={heading} icon={icon} action={<LiveDot />}>
@@ -537,13 +536,13 @@ function LiveDot() {
   );
 }
 
-/** Expanded run row → the run's live reasoning/steps feed (backfilled). */
+/** Expanded run row â†’ the run's live reasoning/steps feed (backfilled). */
 function RunActivityFeed({ runId }: { runId: string }) {
   const feed = useRunActivity(runId, { cap: 40 });
   return (
     <div className="mb-2.5 max-h-64 overflow-auto rounded-btn border border-line bg-canvas/70">
       {feed.length === 0 ? (
-        <div className="px-3 py-4 text-center text-[11px] text-text-muted">Waiting for activity…</div>
+        <div className="px-3 py-4 text-center text-[11px] text-text-muted">Waiting for activityâ€¦</div>
       ) : (
         <ul className="divide-y divide-line/60">
           {feed.map((item) => <ActivityRow key={item.id} item={item} />)}
@@ -553,7 +552,7 @@ function RunActivityFeed({ runId }: { runId: string }) {
   );
 }
 
-// ── AgentFeed ─────────────────────────────────────────────────
+// â”€â”€ AgentFeed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const FEED_ICON: Record<string, React.ReactNode> = {
   run: <Workflow size={12} />,
@@ -616,7 +615,7 @@ export function AgentFeedView({ appId, title, limit = 30 }: { appId: string; tit
       )}
     >
       {feed.length === 0 ? (
-        <div className="px-1 py-5 text-center text-[11px] text-text-muted">Waiting for the agent…</div>
+        <div className="px-1 py-5 text-center text-[11px] text-text-muted">Waiting for the agentâ€¦</div>
       ) : (
         <ul className="-mx-1 max-h-[420px] divide-y divide-line/60 overflow-auto">
           {feed.map((item) => <ActivityRow key={item.id} item={item} />)}
@@ -626,7 +625,7 @@ export function AgentFeedView({ appId, title, limit = 30 }: { appId: string; tit
   );
 }
 
-// ── ApprovalsInbox ────────────────────────────────────────────
+// â”€â”€ ApprovalsInbox â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function ApprovalsInboxView({ appId, title, limit = 10 }: { appId: string; title?: string; limit?: number }) {
   const { workflows } = useAppWorkflows(appId);
@@ -673,14 +672,14 @@ export function ApprovalsInboxView({ appId, title, limit = 10 }: { appId: string
   );
 }
 
-// ── registrations (open block seam) ───────────────────────────
+// â”€â”€ registrations (open block seam) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 registerBlock('OrchestrationPanel', (node) => {
   if (node.type !== 'OrchestrationPanel') return null;
   return <OrchestrationPanelBlock title={node.title} controls={node.controls} />;
 });
 
-// WorkflowControl (E0/E3) is superseded — alias it to the OrchestrationPanel so
+// WorkflowControl (E0/E3) is superseded â€” alias it to the OrchestrationPanel so
 // every existing surface upgrades in place. (Overrides the built-in registered
 // by ViewRenderer: last registration wins on the open seam.)
 registerBlock('WorkflowControl', (node) => {
@@ -721,3 +720,5 @@ function ApprovalsInboxBlock(props: { title?: string; limit?: number }) {
   const { appId } = useRuntime();
   return <ApprovalsInboxView appId={appId} {...props} />;
 }
+
+

@@ -1,5 +1,5 @@
-/**
- * SurfaceCanvas — the WYSIWYG builder canvas.
+﻿/**
+ * SurfaceCanvas â€” the WYSIWYG builder canvas.
  *
  * Renders the *draft* (unsaved) ViewNode tree through the real {@link ViewRenderer}
  * in edit mode, so what you build is pixel-true to what ships. It provides a
@@ -84,3 +84,6 @@ export function SurfaceCanvas({
     </RuntimeProvider>
   );
 }
+
+
+

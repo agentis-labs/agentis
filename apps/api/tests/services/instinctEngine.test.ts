@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import { REALTIME_EVENTS, type WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { InstinctEngine } from '../../src/services/instinctEngine.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

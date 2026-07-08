@@ -1,10 +1,10 @@
-/**
+﻿/**
  * Node Capability Manifests (NATIVE-ADVANCEMENT Proposal 6b).
  *
  * Every workflow node kind declares, statically, what it can reach and what it
  * sends out. This is a *transparency / audit* layer, not a sandbox: it lets a
  * user (or the canvas) see "this workflow contacts N external hosts, sends user
- * data to a model provider, and needs these credentials" BEFORE running —
+ * data to a model provider, and needs these credentials" BEFORE running â€”
  * answering the "the abstractions are pre-written, what do they actually do?"
  * concern with a machine-readable declaration instead of a code audit.
  *
@@ -176,15 +176,15 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
 
   // --- utility & data primitives (WORKFLOW-UPDATE) ---------------------
   // Deterministic, local-only transforms. No network, no credentials.
-  error_trigger: local('error_trigger', 'Entry point fired on another workflow’s failure; no external access.'),
+  error_trigger: local('error_trigger', 'Entry point fired on another workflowâ€™s failure; no external access.'),
   stop_error: local('stop_error', 'Terminates the run with a custom error; no external access.'),
   datetime: local('datetime', 'Parses/formats/diffs dates locally; no external access.'),
-  xml_parse: local('xml_parse', 'Converts XML ↔ JSON locally; no external access.'),
-  markdown: local('markdown', 'Converts Markdown ↔ HTML locally; no external access.'),
+  xml_parse: local('xml_parse', 'Converts XML â†” JSON locally; no external access.'),
+  markdown: local('markdown', 'Converts Markdown â†” HTML locally; no external access.'),
   json_schema_validate: local('json_schema_validate', 'Validates data against a JSON Schema locally; no external access.'),
   sticky_note: local('sticky_note', 'Canvas annotation; no execution, no external access.'),
   html_extract: local('html_extract', 'Extracts values from an HTML string by selector; no external access.'),
-  // Crypto primitives use local crypto APIs only — no network.
+  // Crypto primitives use local crypto APIs only â€” no network.
   crypto_util: {
     nodeKind: 'crypto_util',
     networkAccess: 'none',
@@ -227,7 +227,7 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
     credentialTypes: [],
     externalDataSent: 'none',
     codeExecution: false,
-    summary: 'Delegates to a sub-workflow; its capabilities are the child workflow’s.',
+    summary: 'Delegates to a sub-workflow; its capabilities are the child workflowâ€™s.',
   },
   loop: {
     nodeKind: 'loop',
@@ -236,7 +236,7 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
     credentialTypes: [],
     externalDataSent: 'none',
     codeExecution: false,
-    summary: 'Iterates a body workflow; its capabilities are the body’s.',
+    summary: 'Iterates a body workflow; its capabilities are the bodyâ€™s.',
   },
   parallel: {
     nodeKind: 'parallel',
@@ -245,7 +245,7 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
     credentialTypes: [],
     externalDataSent: 'none',
     codeExecution: false,
-    summary: 'Fans out to branches; its capabilities are the branches’.',
+    summary: 'Fans out to branches; its capabilities are the branchesâ€™.',
   },
 };
 
@@ -309,16 +309,16 @@ export interface GraphCapabilitySummary {
   runsCode: boolean;
   /** True if any node writes to the workspace filesystem. */
   writesFilesystem: boolean;
-  /** Node kinds present that have no manifest (catalog gap — should be empty). */
+  /** Node kinds present that have no manifest (catalog gap â€” should be empty). */
   unknownNodeKinds: string[];
   /** Human-readable one-paragraph summary for the audit view. */
   headline: string;
 }
 
-/** Best-effort host extraction from a templated URL. Returns null if unparseable. */
+
 function hostOf(url: unknown): string | null {
   if (typeof url !== 'string' || url.length === 0) return null;
-  // Skip obviously-templated URLs ({{...}}) — host is not statically known.
+  // Skip obviously-templated URLs ({{...}}) â€” host is not statically known.
   if (url.includes('{{') || url.includes('${')) return null;
   try {
     return new URL(url).host || null;
@@ -385,7 +385,7 @@ export function summarizeGraphCapabilities(graph: WorkflowGraph): GraphCapabilit
   }
   if (runsCode) parts.push('executes code');
   if (writesFilesystem) parts.push('writes to the workspace');
-  if (parts.length === 0) parts.push('no external access — purely local');
+  if (parts.length === 0) parts.push('no external access â€” purely local');
 
   const headline = `This workflow ${parts.join('; ')}.`;
 
@@ -402,3 +402,6 @@ export function summarizeGraphCapabilities(graph: WorkflowGraph): GraphCapabilit
     headline,
   };
 }
+
+
+

@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { AppStore } from '@agentis/app';
-import { AppStaffingService, classifyAppArchetype, deriveCast } from '../../src/services/appStaffing.js';
-import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
+import { AppStaffingService, classifyAppArchetype, deriveCast } from '../../src/services/app/appStaffing.js';
+import { SpecialistAgentService } from '../../src/services/specialist/specialistAgents.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

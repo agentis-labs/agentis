@@ -1,15 +1,15 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { SegmentedControl } from '../shared/SegmentedControl';
 import { NodePalette } from './NodePalette';
 import { PhaseRail } from './PhaseRail';
 import type { PhaseNode, PhaseSpec } from './PhaseLayer';
 
 /**
- * CanvasLeftRail — the single left panel for the workflow editor.
+ * CanvasLeftRail â€” the single left panel for the workflow editor.
  *
  * One column, two modes: "Phases" (structure + navigation) and "Nodes" (the
  * drag-and-drop palette). A workflow with phases opens structure-first so the
- * shape of the flow reads before the parts list — minimalism over a wall of
+ * shape of the flow reads before the parts list â€” minimalism over a wall of
  * panels.
  */
 type RailMode = 'phases' | 'nodes';
@@ -60,3 +60,6 @@ export function CanvasLeftRail({
     </aside>
   );
 }
+
+
+

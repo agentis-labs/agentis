@@ -1,5 +1,5 @@
-/**
- * @agentis/db — dual-dialect database access.
+﻿/**
+ * @agentis/db â€” dual-dialect database access.
  *
  * Embedded mode (default): SQLite via better-sqlite3.
  *   `import { openSqlite } from '@agentis/db/sqlite'`
@@ -31,9 +31,9 @@ export interface ModeDetectionEnv {
 }
 
 /**
- * Mode rule (V1-SPEC §3.1):
+ * Mode rule (V1-SPEC Â§3.1):
  *   - explicit AGENTIS_MODE wins.
- *   - else AGENTIS_DATABASE_URL present → standard.
+ *   - else AGENTIS_DATABASE_URL present â†’ standard.
  *   - else embedded.
  */
 export function detectMode(env: ModeDetectionEnv = process.env): AgentisDbMode {
@@ -46,3 +46,6 @@ export function detectMode(env: ModeDetectionEnv = process.env): AgentisDbMode {
   }
   return 'embedded';
 }
+
+
+

@@ -1,12 +1,12 @@
-/**
- * genuiAudit — the deterministic layout floor (GENUI-QUALITY-FLOOR plan).
+﻿/**
+ * genuiAudit â€” the deterministic layout floor (GENUI-QUALITY-FLOOR plan).
  *
  * `repairSurface` walks an agent-authored `ViewNode` tree and auto-fixes the
- * anti-patterns that make agent output look broken — clamps absurd Split ratios,
+ * anti-patterns that make agent output look broken â€” clamps absurd Split ratios,
  * strips data panels bound to collections that don't exist, caps how many data
  * panels a sparse app gets (no "No records" sprawl), removes garbled image-banner
  * headers, drops empty containers, and guarantees a root theme. Pure, model-free,
- * idempotent — runs at the render seam so EVERY surface (scaffold, model, or
+ * idempotent â€” runs at the render seam so EVERY surface (scaffold, model, or
  * hand-authored via ui_render) passes through it. Mirrors the workflow robustness
  * auditor pattern.
  */
@@ -32,7 +32,7 @@ interface Ctx {
   maxPanels: number;
 }
 
-/** Nodes that render a panel of collection rows — counted + capped. */
+/** Nodes that render a panel of collection rows â€” counted + capped. */
 const DATA_PANEL = new Set(['Table', 'Chart', 'DataBoard', 'List', 'Kanban', 'RecordMaster', 'Roadmap']);
 /** Nodes whose `bind.collection` must exist (else the panel is dead). */
 const REQUIRES_BIND = new Set(['Table', 'Chart', 'DataBoard', 'List', 'Inbox', 'Kanban', 'RecordMaster', 'Roadmap', 'PipelineFlow']);
@@ -50,7 +50,7 @@ function hasChildren(node: ViewNode): node is ViewNode & { children: ViewNode[] 
 }
 
 function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
-  // 0. Legacy kind → current kind (a stored tree from a removed grammar era).
+  // 0. Legacy kind â†’ current kind (a stored tree from a removed grammar era).
   const renamed = KIND_RENAME[node.type as string];
   if (renamed) {
     ctx.fixes.push(`migrated legacy ${node.type} to ${renamed}`);
@@ -58,7 +58,7 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
     node = { type: renamed, ...(legacy.title ? { title: legacy.title } : {}), ...(legacy.style ? { style: legacy.style } : {}) } as ViewNode;
   }
 
-  // 1. Garbled image-banner header — a row/grid/stack that is mostly images. Drop it.
+  // 1. Garbled image-banner header â€” a row/grid/stack that is mostly images. Drop it.
   if ((node.type === 'Row' || node.type === 'Grid' || node.type === 'Stack') && Array.isArray(node.children) && node.children.length >= 2) {
     const imgs = node.children.filter(isImageish).length;
     if (imgs >= 2 && imgs * 2 >= node.children.length) {
@@ -67,7 +67,7 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
     }
   }
 
-  // 2. Data panel bound to a collection that doesn't exist → dead panel, drop it.
+  // 2. Data panel bound to a collection that doesn't exist â†’ dead panel, drop it.
   if (REQUIRES_BIND.has(node.type) && 'bind' in node && node.bind && ctx.collections.size > 0 && !ctx.collections.has(node.bind.collection)) {
     ctx.fixes.push(`removed ${node.type} bound to unknown collection "${node.bind.collection}"`);
     return null;
@@ -82,7 +82,7 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
     }
   }
 
-  // 4. Split — clamp the ratio so neither side is a sliver; collapse if a side dies.
+  // 4. Split â€” clamp the ratio so neither side is a sliver; collapse if a side dies.
   if (node.type === 'Split') {
     const left = repair(node.left, ctx, depth + 1);
     const right = repair(node.right, ctx, depth + 1);
@@ -97,7 +97,7 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
     return { ...node, ...(ratio != null ? { ratio } : {}), left, right };
   }
 
-  // 5. Tabs / Accordion — recurse into their panels; drop empty tabs/sections.
+  // 5. Tabs / Accordion â€” recurse into their panels; drop empty tabs/sections.
   if (node.type === 'Tabs') {
     const tabs = node.tabs
       .map((t) => ({ ...t, children: t.children.map((c) => repair(c, ctx, depth + 1)).filter((x): x is ViewNode => x != null) }))
@@ -111,14 +111,14 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
     return sections.length > 0 ? { ...node, sections } : null;
   }
 
-  // 5b. AgentRegion — a stable, intentionally-empty slot. Repair its performed
+  // 5b. AgentRegion â€” a stable, intentionally-empty slot. Repair its performed
   //     child if present, but NEVER drop the slot (an empty region is valid).
   if (node.type === 'AgentRegion') {
     const child = node.child ? repair(node.child, ctx, depth + 1) : null;
     return child ? { ...node, child } : { ...node, child: undefined };
   }
 
-  // 6. Containers with a children[] — recurse, then drop if everything inside died.
+  // 6. Containers with a children[] â€” recurse, then drop if everything inside died.
   if (hasChildren(node)) {
     const kids = node.children.map((c) => repair(c, ctx, depth + 1)).filter((x): x is ViewNode => x != null);
     if (kids.length === 0 && LAYOUT.has(node.type)) {
@@ -138,11 +138,7 @@ function inferTheme(view: ViewNode): SurfaceTheme {
   return 'operations';
 }
 
-/**
- * The premium design language a theme leads with (kept in sync with the web
- * `theme.ts` PRESETS). Guarantees every surface gets a non-flat look even when
- * the model omits `design`. The operator can still override it.
- */
+
 function inferDesign(theme: SurfaceTheme): DesignLanguage {
   switch (theme) {
     case 'analytics': return 'aurora';
@@ -152,9 +148,9 @@ function inferDesign(theme: SurfaceTheme): DesignLanguage {
   }
 }
 
-// ── Operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X §2.1) ────
-// The DB-proven failure mode: an agent declares `run_factory (workflow→…)` and
-// authors zero interactive elements — the action is unreachable from any pixel.
+// â”€â”€ Operability gate â€” RENDERED â‰  OPERABLE (INTERFACE-OVERHAUL-10X Â§2.1) â”€â”€â”€â”€
+// The DB-proven failure mode: an agent declares `run_factory (workflowâ†’â€¦)` and
+// authors zero interactive elements â€” the action is unreachable from any pixel.
 // This pass makes that state unrepresentable: every declared workflow action
 // gets a control, delete actions get row actions, dead references are stripped,
 // and an app that drives workflows always exposes its orchestration panel.
@@ -254,7 +250,7 @@ function wireOrphanWorkflowActions(root: ViewNode, orphans: SurfaceAction[], fix
     fixes.push(`added an action bar for ${orphans.length} unreachable workflow action(s)`);
     return { ...root, children: [toolbar, ...root.children] } as ViewNode;
   }
-  // Root without a children[] (Split/Tabs/…): wrap it, moving root-only style up.
+  // Root without a children[] (Split/Tabs/â€¦): wrap it, moving root-only style up.
   const { style, ...rest } = root as ViewNode & { style?: ViewNode['style'] };
   fixes.push(`added an action bar for ${orphans.length} unreachable workflow action(s)`);
   return {
@@ -346,7 +342,7 @@ export function repairSurface(
   let out = view ? repair(view, ctx, 0) : null;
   if (!out) out = { type: 'Stack', gap: 16, children: [] };
 
-  // Operability gate — only when the caller supplied the declared actions.
+  // Operability gate â€” only when the caller supplied the declared actions.
   if (opts.actions) out = auditOperability(out, opts.actions, ctx.fixes);
 
   // Guarantee a root theme so the surface is always coherently styled.
@@ -355,7 +351,7 @@ export function repairSurface(
     ctx.fixes.push('set root theme');
   }
 
-  // Guarantee a premium design language so no surface renders flat — inferred
+  // Guarantee a premium design language so no surface renders flat â€” inferred
   // from the (now-guaranteed) theme. Honors any language the model already chose.
   if (!out.style?.design) {
     const theme = out.style?.theme ?? inferTheme(out);
@@ -365,3 +361,6 @@ export function repairSurface(
 
   return { view: out, fixes: ctx.fixes };
 }
+
+
+

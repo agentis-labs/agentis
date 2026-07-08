@@ -20,7 +20,7 @@ import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBuildTools } from '../../src/services/agentisToolHandlers/build.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
-import { readBuildLoop } from '../../src/services/workflowCompass.js';
+import { readBuildLoop } from '../../src/services/workflow/workflowCompass.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

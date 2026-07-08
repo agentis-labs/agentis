@@ -20,7 +20,7 @@ import vm from 'node:vm';
 import { AgentisError } from '@agentis/core';
 import type { ExtensionExecutionOutcome, ExtensionManifest, ExtensionPermission } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { assertSafeUrl } from '../services/safeUrl.js';
+import { safeFetch } from '../services/safeFetch.js';
 import { normalizeExtensionSource } from './normalizeSource.js';
 import type { ListenerHooks } from './nodeWorkerRuntime.js';
 
@@ -44,15 +44,17 @@ export async function runVmExtension(args: {
     if (!hasPerm('network') && !hasPerm('network.unrestricted')) {
       throw new AgentisError('EXTENSION_PERMISSION_DENIED', 'Extension manifest does not grant network access');
     }
-    const safe = await assertSafeUrl(url, {
-      allowPrivate: args.allowPrivateNetwork,
-      allowedDomains: hasPerm('network.unrestricted') ? [] : args.allowedDomains,
-    });
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), args.timeoutMs);
-    t.unref?.();
-    try {
-      const res = await fetch(safe.toString(), { method: init.method ?? 'GET', body: init.body, headers: init.headers, signal: controller.signal });
+    // safeFetch pins the connection to the IP validated at check time (defeats
+    // DNS rebinding) and re-validates every redirect hop.
+    {
+      const res = await safeFetch(
+        url,
+        { method: init.method ?? 'GET', body: init.body, headers: init.headers, timeoutMs: args.timeoutMs },
+        {
+          allowPrivate: args.allowPrivateNetwork,
+          allowedDomains: hasPerm('network.unrestricted') ? [] : args.allowedDomains,
+        },
+      );
       const bytes = await res.arrayBuffer();
       const text = new TextDecoder().decode(bytes);
       let body: unknown = text;
@@ -88,8 +90,6 @@ export async function runVmExtension(args: {
         json: async () => JSON.parse(text) as unknown,
         arrayBuffer: async () => bytes.slice(0),
       };
-    } finally {
-      clearTimeout(t);
     }
   };
 

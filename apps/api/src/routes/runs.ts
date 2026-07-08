@@ -23,7 +23,7 @@ import type { LedgerService } from '../services/ledger.js';
 import type { ScratchpadService } from '../services/scratchpad.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { failedNodeCount, firstFailedNodeId, isFailedNodeId } from '../services/runStateFailures.js';
+import { failedNodeCount, firstFailedNodeId, isFailedNodeId } from '../services/run/runStateFailures.js';
 
 export function buildRunRoutes(deps: {
   db: AgentisSqliteDb;

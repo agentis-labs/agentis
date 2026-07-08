@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
-import { auditWorkflowRobustness } from '../../src/services/workflowRobustnessAudit.js';
+import { auditWorkflowRobustness } from '../../src/services/workflow/workflowRobustnessAudit.js';
 
 type N = WorkflowGraph['nodes'][number];
 const node = (id: string, kind: string, extra: Record<string, unknown> = {}): N =>

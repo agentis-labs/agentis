@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { buildMemoryRoutes } from '../../src/routes/memory.js';

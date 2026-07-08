@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import {
   AgentisError,
@@ -521,3 +521,6 @@ function recordValidator(collectionSchema: CollectionSchema): z.ZodType<Record<s
   }
   return z.object(shape).passthrough() as unknown as z.ZodType<Record<string, unknown>>;
 }
+
+
+

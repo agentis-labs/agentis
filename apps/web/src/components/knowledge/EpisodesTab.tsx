@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { History } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -11,7 +11,7 @@ const FILTERS = ['all', 'decision', 'failure', 'recovery', 'correction', 'patter
 
 /**
  * `scopeId`, `workflowId`, and `agentId` are three independent memory-episode
- * filters (see EpisodicMemoryStore.list) — pass exactly one for a scoped view.
+ * filters (see EpisodicMemoryStore.list) â€” pass exactly one for a scoped view.
  * `scopeId` is what App-owned and directly-scoped runs are written under;
  * `workflowId`/`agentId` are separate columns recorded on every episode and let
  * a specific workflow canvas or agent panel find its own episodes even when the
@@ -44,7 +44,7 @@ export function EpisodesTab({ scopeId, workflowId, agentId }: { scopeId?: string
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-[13px] text-text-muted">
-          {isScoped ? 'Lessons promoted from this scope’s runs.' : 'Lessons promoted automatically from workflow runs.'}
+          {isScoped ? 'Lessons promoted from this scopeâ€™s runs.' : 'Lessons promoted automatically from workflow runs.'}
         </p>
         <div className="ml-auto flex flex-wrap gap-1">
           {FILTERS.map((item) => (
@@ -59,7 +59,7 @@ export function EpisodesTab({ scopeId, workflowId, agentId }: { scopeId?: string
           icon={<History size={48} />}
           title="No promoted memories yet"
           body={isScoped
-            ? 'Episodes appear here as this scope’s runs complete and Agentis distills useful decisions, recoveries, and patterns.'
+            ? 'Episodes appear here as this scopeâ€™s runs complete and Agentis distills useful decisions, recoveries, and patterns.'
             : 'Episodes appear here as workflows complete and Agentis distills useful decisions, recoveries, and patterns.'}
         />
       ) : (
@@ -71,3 +71,6 @@ export function EpisodesTab({ scopeId, workflowId, agentId }: { scopeId?: string
 
 const activeFilter = 'inline-flex h-7 items-center rounded-pill border border-accent-muted bg-accent-soft px-2.5 text-[11px] font-medium capitalize text-accent';
 const idleFilter = 'inline-flex h-7 items-center rounded-pill border border-line bg-surface-2 px-2.5 text-[11px] font-medium capitalize text-text-muted hover:text-text-primary';
+
+
+

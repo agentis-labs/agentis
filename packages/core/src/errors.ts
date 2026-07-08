@@ -1,10 +1,4 @@
-/**
- * Domain error taxonomy.
- *
- * Errors are typed by code so the API layer can map them to HTTP responses
- * without leaking internal details, and so the dashboard can render specific
- * remediation copy per failure mode.
- */
+﻿
 
 export type AgentisErrorCode =
   // Auth
@@ -76,10 +70,10 @@ export type AgentisErrorCode =
   | 'CHANNEL_CONNECTION_INACTIVE'
   | 'CHANNEL_BRIDGE_UNAVAILABLE'
   | 'CHANNEL_DISCORD_INBOUND_UNAVAILABLE'
-  // Connection authority (Agent-Native Platform Plan §3.3)
+  // Connection authority (Agent-Native Platform Plan Â§3.3)
   | 'CONNECTION_GRANTS_UNAVAILABLE'
   | 'CONNECTION_SCOPE_MISSING'
-  // Code-mode (Agent-Native Platform Plan §3.7)
+  // Code-mode (Agent-Native Platform Plan Â§3.7)
   | 'CODE_MODE_ERROR'
   | 'CODE_MODE_LIMIT'
   // Media generation
@@ -110,7 +104,7 @@ export type AgentisErrorCode =
 export interface AgentisErrorPayload {
   code: AgentisErrorCode;
   message: string;
-  /** Operator-facing remediation hint. Optional. */
+  
   remediation?: string;
   /** Structured detail safe to expose to the client. */
   details?: Record<string, unknown>;
@@ -235,3 +229,6 @@ function defaultStatusFor(code: AgentisErrorCode): number {
       return 500;
   }
 }
+
+
+

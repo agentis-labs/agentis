@@ -10,7 +10,7 @@ import {
   mcpToolUrn,
   mcpBridgeIdFromUrn,
   collectionUrn,
-} from '../../src/services/capabilityUrn.js';
+} from '../../src/services/capability/capabilityUrn.js';
 
 describe('capabilityUrn', () => {
   it('parses an app urn', () => {

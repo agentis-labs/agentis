@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Search, X } from 'lucide-react';
 import type { BrainNode } from '@agentis/core';
@@ -75,3 +75,6 @@ export function CanvasSearch({
     </div>
   );
 }
+
+
+

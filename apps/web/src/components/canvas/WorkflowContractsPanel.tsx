@@ -1,19 +1,8 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import clsx from 'clsx';
 import { Plus, Trash2 } from 'lucide-react';
 
-/**
- * WorkflowContractsPanel — edit the workflow's input + output contracts.
- *
- * A contract declares the shape of trigger inputs the workflow accepts AND the
- * shape of outputs an Output-marked node must produce. The engine validates
- * COMPLETED runs against `outputContract` and flips the run status to
- * COMPLETED_WITH_CONTRACT_VIOLATION when the shape doesn't match — operators
- * see the violation on the canvas instead of silently shipping bad data.
- *
- * Keep the shape stable: Brain runtime evaluation reuses this same
- * WorkflowContract type for workflow outputs.
- */
+
 
 export interface ContractField {
   key: string;
@@ -155,3 +144,6 @@ export function WorkflowContractsPanel({ inputContract, outputContract, onChange
     </div>
   );
 }
+
+
+

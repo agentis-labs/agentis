@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveChannelAccess, normalizeHandle, buildAccessAddendum } from '../../src/services/channelAccess.js';
+import { resolveChannelAccess, normalizeHandle, buildAccessAddendum } from '../../src/services/conversation/channelAccess.js';
 
 describe('normalizeHandle', () => {
   it('reduces phone/jids to digits regardless of formatting', () => {
@@ -9,7 +9,7 @@ describe('normalizeHandle', () => {
     expect(normalizeHandle('8271269949')).toBe('8271269949');
   });
   it('keeps usernames as lowercased text', () => {
-    expect(normalizeHandle('@Robson')).toBe('robson');
+    expect(normalizeHandle('@Alex')).toBe('alex');
     expect(normalizeHandle('U01ABC23')).toBe('u01abc23');
   });
 });
@@ -28,7 +28,7 @@ describe('resolveChannelAccess', () => {
       access: { recipients: [], answerAnyone: false },
       defaultChatId: owner,
       senderHandle: owner,
-      senderName: 'Robson',
+      senderName: 'Alex',
     });
     expect(d.allow).toBe(true);
     expect(d.isOwner).toBe(true);

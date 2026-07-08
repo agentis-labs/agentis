@@ -1,10 +1,10 @@
-/**
- * buildAppStores — single construction point for the Agentic App stores with
- * realtime emit wired to the bus (AGENTIC-APPS-10X §4/§5).
+﻿/**
+ * buildAppStores â€” single construction point for the Agentic App stores with
+ * realtime emit wired to the bus (AGENTIC-APPS-10X Â§4/Â§5).
  *
  * Shared by the `/v1/apps` routes and the chat tool-handler family so both
  * paths emit identical `DATA_CHANGED` / `SURFACE_RENDER` / `SURFACE_PATCH`
- * events and there is exactly one wiring of the bus → store seam.
+ * events and there is exactly one wiring of the bus â†’ store seam.
  */
 
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
@@ -44,3 +44,6 @@ export function buildAppStores(deps: { db: AgentisSqliteDb; bus?: AppRealtimePub
   });
   return { store, data, surfaces };
 }
+
+
+

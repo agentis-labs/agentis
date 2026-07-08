@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 
 const cursorSchema = z.object({
   scratchpadKey: z.string().min(1),
@@ -184,3 +184,6 @@ export const listenerConfigSchema = z.object({
     })
     .optional(),
 });
+
+
+

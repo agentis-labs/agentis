@@ -1,13 +1,13 @@
-/**
- * AppManifest — the canonical, versioned, serializable IR for an Agentic App
- * (AGENTIC-SYSTEMS-ARCHITECTURE §2.1). The single source of truth that:
+﻿/**
+ * AppManifest â€” the canonical, versioned, serializable IR for an Agentic App
+ * (AGENTIC-SYSTEMS-ARCHITECTURE Â§2.1). The single source of truth that:
  *   - the SDK emits (code authoring),
  *   - the agent/visual builders emit,
  *   - the runtime projects to/from DB rows (toManifest/fromManifest),
  *   - `.agentisapp` serializes for distribution.
  *
  * Every facet is a field; absence = that facet is unused (a logic-only app has
- * empty `surfaces`/`collections`). No facet carries runtime data — `collections`
+ * empty `surfaces`/`collections`). No facet carries runtime data â€” `collections`
  * ship SCHEMA only; rows never travel except as explicit scrubbed seed.
  */
 
@@ -26,13 +26,13 @@ export const manifestWorkflowSchema = z.object({
 });
 export type ManifestWorkflow = z.infer<typeof manifestWorkflowSchema>;
 
-/** A surface (Interface facet) — reuses the AG-UI upsert shape + declared actions. */
+/** A surface (Interface facet) â€” reuses the AG-UI upsert shape + declared actions. */
 export const manifestSurfaceSchema = upsertSurfaceSchema.extend({
   actions: z.array(surfaceActionSchema).default([]),
 });
 export type ManifestSurface = z.infer<typeof manifestSurfaceSchema>;
 
-/** A collection (Data facet) — SCHEMA only; optional opt-in seed rows (§14.4). */
+/** A collection (Data facet) â€” SCHEMA only; optional opt-in seed rows (Â§14.4). */
 export const manifestCollectionSchema = z.object({
   name: z.string().min(1),
   schema: collectionSchemaSchema,
@@ -40,7 +40,7 @@ export const manifestCollectionSchema = z.object({
 });
 export type ManifestCollection = z.infer<typeof manifestCollectionSchema>;
 
-/** An agent (Team facet) — embedded definition or a shared-component reference. */
+/** An agent (Team facet) â€” embedded definition or a shared-component reference. */
 export const manifestAgentSchema = z.object({
   name: z.string().min(1),
   role: z.enum(['operator', 'worker']).default('worker'),
@@ -51,7 +51,7 @@ export const manifestAgentSchema = z.object({
 });
 export type ManifestAgent = z.infer<typeof manifestAgentSchema>;
 
-/** An ordered, forward-only collection migration applied on upgrade (§9.2). */
+/** An ordered, forward-only collection migration applied on upgrade (Â§9.2). */
 export const collectionMigrationSchema = z.object({
   id: z.string().min(1),
   collection: z.string().min(1),
@@ -70,14 +70,14 @@ export type AppDependency = z.infer<typeof appDependencySchema>;
 
 /**
  * The full portable manifest. `identity` + `policy` reuse the runtime shapes so
- * the projection (rows ↔ manifest) is a straight map.
+ * the projection (rows â†” manifest) is a straight map.
  */
 export const appManifestSchema = z.object({
   manifestVersion: z.literal(1).default(1),
   agentisVersion: z.string().min(1).default('1.0.0'),
   identity: appIdentitySchema,
   policy: appPolicySchema,
-  // facets — present only when used
+  // facets â€” present only when used
   workflows: z.array(manifestWorkflowSchema).default([]),
   surfaces: z.array(manifestSurfaceSchema).default([]),
   collections: z.array(manifestCollectionSchema).default([]),
@@ -133,7 +133,7 @@ export type AppInstallPreview = z.infer<typeof appInstallPreviewSchema>;
 
 /**
  * Canonical JSON serialization (sorted keys) so `checksum` is deterministic and
- * manifest diffs (for upgrade, §9.2) are meaningful. Pure, dependency-free.
+ * manifest diffs (for upgrade, Â§9.2) are meaningful. Pure, dependency-free.
  */
 export function canonicalizeManifest(manifest: AppManifest): string {
   return JSON.stringify(sortKeysDeep(manifest));
@@ -151,3 +151,6 @@ function sortKeysDeep(value: unknown): unknown {
   }
   return value;
 }
+
+
+

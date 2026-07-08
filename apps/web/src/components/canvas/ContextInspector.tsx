@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import { Check, Code2, LayoutTemplate, Search, Settings2 } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
@@ -70,7 +70,7 @@ export interface InspectorSelection {
   nodeType?: string;
   nodeId?: string;
   data?: Record<string, unknown>;
-  /** The node's display title (the canvas label) — edited separately from config. */
+  /** The node's display title (the canvas label) â€” edited separately from config. */
   title?: string;
 }
 
@@ -112,17 +112,17 @@ const KIND_LABEL: Record<string, string> = {
 
 // "Why this node?" rationale per kind (mirrors the engine's nodeReason()).
 const NODE_REASON: Record<string, string> = {
-  trigger: 'Starts the workflow — manual, scheduled, or on an incoming event.',
+  trigger: 'Starts the workflow â€” manual, scheduled, or on an incoming event.',
   agent_task: 'A specialist reasons over the input and produces the work product.',
   agent_swarm: 'Fans the task out across parallel agents and merges the results.',
-  skill_task: 'Runs a typed, deterministic skill — no LLM tokens spent.',
+  skill_task: 'Runs a typed, deterministic skill â€” no LLM tokens spent.',
   router: 'Branches the flow based on the data or an LLM routing decision.',
   branch: 'Branches the flow based on the data or an LLM routing decision.',
   merge: 'Joins parallel branches back into one path.',
-  integration: 'Calls an external service (Slack, Gmail, …) with a bound credential.',
+  integration: 'Calls an external service (Slack, Gmail, â€¦) with a bound credential.',
   http_request: 'Fetches or posts to an HTTP endpoint with retry/backoff.',
-  transform: 'Shapes data deterministically — no LLM tokens spent.',
-  filter: 'Drops items that don’t match the condition.',
+  transform: 'Shapes data deterministically â€” no LLM tokens spent.',
+  filter: 'Drops items that donâ€™t match the condition.',
   wait: 'Pauses the run (crash-recoverable) until a delay or time elapses.',
   knowledge: 'Fetches the most relevant passages from the workspace Brain before the next node runs.',
   checkpoint: 'Pauses for human approval before continuing.',
@@ -155,7 +155,7 @@ export function ContextInspector({
   onSave?: (data: Record<string, unknown>) => void;
   /** Rename the node (its canvas label). Separate from config save. */
   onTitleChange?: (title: string) => void;
-  /** The run currently watched on the canvas — powers the node's live runtime card. */
+  /** The run currently watched on the canvas â€” powers the node's live runtime card. */
   activeRunId?: string | null;
   /** Open a run in the canvas run drawer (stays on the canvas). */
   onOpenRun?: (runId: string) => void;
@@ -223,7 +223,7 @@ export function ContextInspector({
     }
   }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length, integrations.length]);
 
-  // Resource-name registry — lets the node explainer resolve an extension id to
+  // Resource-name registry â€” lets the node explainer resolve an extension id to
   // its real name instead of showing a raw identifier.
   const resourceNames = useAgentisStore((s) => s.resourceNames);
 
@@ -301,7 +301,7 @@ export function ContextInspector({
             <button
               type="button"
               onClick={() => { setPane('json'); }}
-              title="Advanced — edit raw JSON config"
+              title="Advanced â€” edit raw JSON config"
               className={clsx('rounded p-1 transition-colors', pane === 'json' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
             >
               <Code2 size={12} />
@@ -322,7 +322,7 @@ export function ContextInspector({
               title="Test this node in isolation"
               className={clsx('rounded p-1 transition-colors', pane === 'test' ? 'text-accent' : 'text-text-muted hover:text-text-primary')}
             >
-              ▶
+              â–¶
             </button>
           )}
           <button
@@ -331,7 +331,7 @@ export function ContextInspector({
             aria-label="Close inspector"
             className="rounded p-1 text-text-muted hover:text-accent"
           >
-            ×
+            Ã—
           </button>
         </div>
       </header>
@@ -477,7 +477,7 @@ export function ContextInspector({
   );
 }
 
-// ─── Per-kind form renderer ────────────────────────────────────────────────
+// â”€â”€â”€ Per-kind form renderer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface NodeFormProps {
   kind: string;
@@ -492,7 +492,7 @@ interface NodeFormProps {
   integrations: IntegrationManifestLite[];
   refreshCredentials: () => void;
   refreshIntegrations: () => void;
-  /** Other nodes in the same workflow — populates the variable picker. */
+  /** Other nodes in the same workflow â€” populates the variable picker. */
   upstream?: UpstreamNode[];
   onSkillsChange?: () => void;
   onAgentsChange?: () => void;
@@ -580,7 +580,7 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
   }
 }
 
-// ─── Reusable atoms ────────────────────────────────────────────────────────
+// â”€â”€â”€ Reusable atoms â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function Field({
   label,
@@ -610,7 +610,7 @@ function Accordion({ title, children, defaultOpen = false }: { title: string; ch
         className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-medium text-text-secondary hover:text-text-primary"
       >
         <span>{title}</span>
-        <span className="text-text-muted">{isOpen ? '−' : '+'}</span>
+        <span className="text-text-muted">{isOpen ? 'âˆ’' : '+'}</span>
       </button>
       {isOpen && <div className="border-t border-line/60 px-3 pb-3 pt-2">{children}</div>}
     </div>
@@ -643,7 +643,7 @@ function credentialFieldPlaceholder(serviceName: string, field: string): string 
   return `${serviceName ? `${serviceName} ` : ''}${label}`.trim();
 }
 
-// ─── Per-kind forms ────────────────────────────────────────────────────────
+// â”€â”€â”€ Per-kind forms â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function TriggerForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const triggerType = asStr(data.triggerType) || 'manual';
@@ -660,10 +660,10 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
           value={triggerType}
           onChange={(e) => update({ triggerType: e.target.value })}
         >
-          <option value="manual">Manual — run on demand</option>
-          <option value="cron">Schedule — recurring (cron)</option>
-          <option value="webhook">Webhook — inbound POST</option>
-          <option value="persistent_listener">Persistent listener — long-poll source</option>
+          <option value="manual">Manual â€” run on demand</option>
+          <option value="cron">Schedule â€” recurring (cron)</option>
+          <option value="webhook">Webhook â€” inbound POST</option>
+          <option value="persistent_listener">Persistent listener â€” long-poll source</option>
         </select>
       </Field>
       {triggerType === 'cron' && (
@@ -705,7 +705,7 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
             <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px]">
               {cronDescription
                 ? <div className="text-text-primary">{cronDescription}</div>
-                : <div className="text-warn">Could not parse expression — saving anyway, server may still accept it.</div>}
+                : <div className="text-warn">Could not parse expression â€” saving anyway, server may still accept it.</div>}
               {cronNextFires.length > 0 && (
                 <div className="mt-1.5 border-t border-line/60 pt-1.5">
                   <div className="mb-0.5 text-[10px] uppercase tracking-wider text-text-muted">Next 5 fires (UTC)</div>
@@ -720,7 +720,7 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
       )}
       {triggerType === 'webhook' && (
         <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] text-text-secondary">
-          Webhook URL is generated when this trigger is registered. The endpoint accepts <code className="rounded bg-canvas px-1">POST</code> with HMAC verification — see the Triggers list for the secret.
+          Webhook URL is generated when this trigger is registered. The endpoint accepts <code className="rounded bg-canvas px-1">POST</code> with HMAC verification â€” see the Triggers list for the secret.
         </div>
       )}
       {triggerType === 'persistent_listener' && (
@@ -744,7 +744,7 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
   const castingReason = asStr((data as { castingReason?: unknown }).castingReason);
   return (
     <>
-      {/* ORCHESTRATOR-CREATION §4: a node configured with a specialist role is valid —
+      {/* ORCHESTRATOR-CREATION Â§4: a node configured with a specialist role is valid â€”
           show it as a badge so the inspector doesn't look empty/broken. Roles are an
           OPEN vocabulary (packages/core/src/types/specialist.ts): pick a live/draft
           specialist or author a brand-new role on the spot. */}
@@ -779,14 +779,14 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
       )}
       <Field label="Agent" hint="Bind a specific agent (overrides the role).">
         <select className={selectCls} value={agentId} onChange={(e) => update({ agentId: e.target.value || undefined })}>
-          <option value="">{agentRole ? `— Auto (${agentRole} specialist) —` : '— Pick an agent —'}</option>
+          <option value="">{agentRole ? `â€” Auto (${agentRole} specialist) â€”` : 'â€” Pick an agent â€”'}</option>
           {agents.map((a) => (
             <option key={a.id} value={a.id}>{a.name}{a.status && a.status !== 'online' ? ` (${a.status})` : ''}</option>
           ))}
         </select>
         {boundAgent && boundAgent.status && boundAgent.status !== 'online' && (
           <p className="mt-1 flex items-center gap-1 text-[10px] text-warn">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-warn" /> {boundAgent.status} — connect a runtime or this node fails on first run.
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-warn" /> {boundAgent.status} â€” connect a runtime or this node fails on first run.
           </p>
         )}
       </Field>
@@ -808,7 +808,7 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
         <TemplatedTextField
           multiline
           rows={5}
-          placeholder="Describe the task in plain English…"
+          placeholder="Describe the task in plain Englishâ€¦"
           value={asStr(data.prompt)}
           onChange={(next) => update({ prompt: next })}
           upstream={upstream}
@@ -831,7 +831,7 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
 
 /**
  * Typed outputs (reference-builder parity): the agent's declared output keys as
- * pills with "+ Add output". These are the node's OUTPUT CONTRACT — downstream
+ * pills with "+ Add output". These are the node's OUTPUT CONTRACT â€” downstream
  * nodes read them by name, the dry-run mocks them, and the runtime reshapes /
  * typed-empty-fills against them.
  */
@@ -845,7 +845,7 @@ function OutputKeysField({ data, update }: { data: Record<string, unknown>; upda
     setDraft('');
   };
   return (
-    <Field label="Outputs" hint="The keys this agent MUST return — its output contract. Downstream nodes read them by name (e.g. nodes['this-node'].caption).">
+    <Field label="Outputs" hint="The keys this agent MUST return â€” its output contract. Downstream nodes read them by name (e.g. nodes['this-node'].caption).">
       <div className="flex flex-wrap items-center gap-1.5">
         {keys.map((key) => (
           <span key={key} className="inline-flex items-center gap-1 rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-text-primary">
@@ -856,7 +856,7 @@ function OutputKeysField({ data, update }: { data: Record<string, unknown>; upda
               className="text-text-muted hover:text-danger"
               onClick={() => update({ outputKeys: keys.filter((k) => k !== key) })}
             >
-              ×
+              Ã—
             </button>
           </span>
         ))}
@@ -896,7 +896,7 @@ function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data
   // confirm rather than hot-applied. Preserves the rest of the agent's config.
   async function enableBrowser(agent: AgentRow) {
     const ok = window.confirm(
-      `Enable Native browser on “${agent.name}”?\n\nThis updates the agent's runtime config (browser = on) and reconnects it so it can take native-browser tasks.`,
+      `Enable Native browser on â€œ${agent.name}â€?\n\nThis updates the agent's runtime config (browser = on) and reconnects it so it can take native-browser tasks.`,
     );
     if (!ok) return;
     setEnabling(agent.id);
@@ -946,7 +946,7 @@ function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data
               {match.state === 'ready' ? (
                 <span className="text-success">ready</span>
               ) : match.state === 'offline_capable' ? (
-                <span className="text-text-muted" title="Configured for these powers — connect the runtime to use it.">configured · offline</span>
+                <span className="text-text-muted" title="Configured for these powers â€” connect the runtime to use it.">configured Â· offline</span>
               ) : (
                 <button
                   type="button"
@@ -955,7 +955,7 @@ function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data
                   className="shrink-0 rounded-btn border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent hover:bg-accent/20 disabled:opacity-50"
                   title={`Turn on ${match.enablable.join(', ')} for this runtime`}
                 >
-                  {enabling === match.id ? 'Enabling…' : `Enable ${match.enablable.join(', ')}`}
+                  {enabling === match.id ? 'Enablingâ€¦' : `Enable ${match.enablable.join(', ')}`}
                 </button>
               )}
             </div>
@@ -963,7 +963,7 @@ function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data
           {showBrowserNodeSteer && (
             <div className="rounded-md border border-warn/35 bg-warn/10 px-2 py-1.5 text-[10px] leading-relaxed text-warn">
               No runtime advertises {requirements.browser ? 'Native browser' : 'Computer use'} yet. The simplest fix:
-              uncheck it here and add a <strong>Browser node</strong> (platform headless Chromium — no runtime setup).
+              uncheck it here and add a <strong>Browser node</strong> (platform headless Chromium â€” no runtime setup).
               For genuine agent-driven browser control, enable it on a Codex agent above or connect OpenClaw.
             </div>
           )}
@@ -1040,7 +1040,7 @@ function ExtensionTaskForm({ data, update, skills, onSkillsChange }: { data: Rec
           onChange={(inputMapping) => update({ inputMapping })}
         />
       </Field>
-      <Field label="Output mapping" hint="Copy operation output keys onto the run scratchpad: output key → scratchpad key. Empty = output flows downstream only.">
+      <Field label="Output mapping" hint="Copy operation output keys onto the run scratchpad: output key â†’ scratchpad key. Empty = output flows downstream only.">
         <RawMappingEditor
           mapping={(data.outputMapping as Record<string, string>) || {}}
           onChange={(outputMapping) => update({ outputMapping })}
@@ -1102,7 +1102,7 @@ function BranchForm({ data, update }: { data: Record<string, unknown>; update: N
                   next[index] = { ...branch, label: event.target.value };
                   update({ branches: next });
                 }} />
-                <button type="button" aria-label="Remove branch" className="px-1.5 text-text-muted hover:text-danger" onClick={() => update({ branches: branches.filter((_, branchIndex) => branchIndex !== index) })}>×</button>
+                <button type="button" aria-label="Remove branch" className="px-1.5 text-text-muted hover:text-danger" onClick={() => update({ branches: branches.filter((_, branchIndex) => branchIndex !== index) })}>Ã—</button>
               </div>
               <input className={inputCls + ' mt-1.5 font-mono'} value={branch.condition ?? ''} placeholder="input.score > 0.8" onChange={(event) => {
                 const next = [...branches];
@@ -1149,7 +1149,7 @@ function SubflowForm({ data, update, workflows }: { data: Record<string, unknown
         value={asStr(data.workflowId)}
         onChange={(e) => update({ workflowId: e.target.value })}
       >
-        <option value="">— Pick a workflow —</option>
+        <option value="">â€” Pick a workflow â€”</option>
         {workflows.map((w) => (
           <option key={w.id} value={w.id}>{w.title ?? w.name ?? 'Untitled'}</option>
         ))}
@@ -1240,7 +1240,7 @@ function KnowledgeNodeForm({ data, update, knowledgeBases }: { data: Record<stri
   );
 }
 
-// knowledge_ingest — write-side twin of `knowledge` (WorkflowEngine.ts
+// knowledge_ingest â€” write-side twin of `knowledge` (WorkflowEngine.ts
 // #executeKnowledgeIngest). `contentPath`/`documentNamePath` win over their
 // static `content`/`documentName` siblings when both are set; an unset
 // `knowledgeBaseId` creates (or reuses) a base named `knowledgeBaseName`.
@@ -1256,7 +1256,7 @@ function KnowledgeIngestForm({ data, update, knowledgeBases, upstream }: { data:
           value={knowledgeBaseId}
           onChange={(e) => update({ knowledgeBaseId: e.target.value || undefined })}
         >
-          <option value="">— Create new —</option>
+          <option value="">â€” Create new â€”</option>
           {knowledgeBases.map((base) => <option key={base.id} value={base.id}>{base.name}</option>)}
         </select>
       </Field>
@@ -1292,7 +1292,7 @@ function KnowledgeIngestForm({ data, update, knowledgeBases, upstream }: { data:
             multiline
             rows={5}
             upstream={upstream}
-            placeholder="Paste or template the document content…"
+            placeholder="Paste or template the document contentâ€¦"
           />
         </Field>
       ) : (
@@ -1325,7 +1325,7 @@ function KnowledgeIngestForm({ data, update, knowledgeBases, upstream }: { data:
             value={asStr(data.documentName)}
             onChange={(next) => update({ documentName: next || undefined })}
             upstream={upstream}
-            placeholder="Weekly report — {{trigger.date}}"
+            placeholder="Weekly report â€” {{trigger.date}}"
           />
         </Field>
       ) : (
@@ -1402,7 +1402,7 @@ function WaitForm({ data, update }: { data: Record<string, unknown>; update: Nod
   );
 }
 
-// ─── Transform & Filter ─────────────────────────────────────────────────────
+// â”€â”€â”€ Transform & Filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function TransformForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   return (
@@ -1458,7 +1458,7 @@ function TransformForm({ data, update, upstream }: { data: Record<string, unknow
 function FilterForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   return (
     <>
-      <Field label="Condition" hint="Boolean JS expression — truthy passes the input through; falsy stops this branch.">
+      <Field label="Condition" hint="Boolean JS expression â€” truthy passes the input through; falsy stops this branch.">
         <TemplatedTextField
           multiline
           mono
@@ -1494,7 +1494,7 @@ function FilterForm({ data, update, upstream }: { data: Record<string, unknown>;
   );
 }
 
-// ─── Integration & HTTP ─────────────────────────────────────────────────────
+// â”€â”€â”€ Integration & HTTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function schemaProps(schema: unknown): Array<{ key: string; type: string; description?: string; required: boolean }> {
   if (!schema || typeof schema !== 'object') return [];
@@ -1526,7 +1526,7 @@ function RawMappingEditor({ mapping, onChange }: { mapping: Record<string, strin
             className="shrink-0 rounded-md px-1.5 text-text-muted hover:text-danger"
             onClick={() => { const next = { ...mapping }; delete next[key]; onChange(next); }}
           >
-            ×
+            Ã—
           </button>
         </div>
       ))}
@@ -1561,7 +1561,7 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
   const bound = credentials.find((credential) => credential.id === credentialId);
   const provider = slug ? oauthProviders.find((item) => item.slugs.includes(slug.toLowerCase())) : undefined;
   const needsCredential = integrationNeedsCredential(manifest);
-  // OAuth-only services (e.g. Gmail) must show a "Sign in with X" button — never
+  // OAuth-only services (e.g. Gmail) must show a "Sign in with X" button â€” never
   // an API-key field, which can't authenticate them.
   const isOAuth = (manifest?.auth?.type ?? manifest?.credentialSchema?.type) === 'oauth2';
   const credentialFields = useMemo(
@@ -1695,10 +1695,10 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
               <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
                 {provider?.configured === false
                   ? `Sign-in for ${provider.label} isn't enabled on this server yet.`
-                  : `Sign in to connect your account — Agentis handles the rest. Nothing is stored on the node.`}
+                  : `Sign in to connect your account â€” Agentis handles the rest. Nothing is stored on the node.`}
               </p>
               <button type="button" onClick={connectOAuth} disabled={connecting} className="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-btn border border-accent/40 bg-accent-soft text-[12px] font-semibold text-accent hover:bg-accent/20 disabled:opacity-50">
-                {connecting ? 'Connecting…' : `Sign in with ${provider?.label ?? manifest?.name ?? 'OAuth'}`}
+                {connecting ? 'Connectingâ€¦' : `Sign in with ${provider?.label ?? manifest?.name ?? 'OAuth'}`}
               </button>
               {oauthError && <p className="mt-2 text-[10px] leading-relaxed text-danger">{oauthError}</p>}
             </>
@@ -1745,7 +1745,7 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
                 ))}
               </div>
               <button type="button" onClick={() => void saveCredential()} disabled={!hasAnySecretValue(secretValues) || savingCredential} className="mt-1.5 inline-flex h-8 w-full items-center justify-center rounded-btn bg-accent px-2 text-[11px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-50">
-                {savingCredential ? 'Saving…' : 'Save and connect'}
+                {savingCredential ? 'Savingâ€¦' : 'Save and connect'}
               </button>
             </div>
           )}
@@ -1820,9 +1820,9 @@ interface BridgedMcpTool {
 }
 
 /**
- * MCP node — pick a tool from the workspace's MOUNTED MCP servers and map its
+ * MCP node â€” pick a tool from the workspace's MOUNTED MCP servers and map its
  * arguments. The picker uses the bridge's NAMESPACED ids (mcp__<slug>__<tool>),
- * the exact ids the engine executes — never hand-assembled.
+ * the exact ids the engine executes â€” never hand-assembled.
  */
 function McpForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const { setSettingsOpen } = useAgentisStore();
@@ -1847,18 +1847,18 @@ function McpForm({ data, update }: { data: Record<string, unknown>; update: Node
 
   return (
     <>
-      <Field label="Tool" hint="Tools from the workspace's mounted MCP servers. Secrets stay on the mount (vault) — never in this node.">
+      <Field label="Tool" hint="Tools from the workspace's mounted MCP servers. Secrets stay on the mount (vault) â€” never in this node.">
         {tools === null ? (
-          <div className="text-[11px] text-text-muted">Loading mounted servers…</div>
+          <div className="text-[11px] text-text-muted">Loading mounted serversâ€¦</div>
         ) : tools.length === 0 ? (
           <div className="rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] leading-4 text-text-secondary">
-            No MCP servers are mounted yet. Mount one (Supabase, GitHub, …) — its tools then appear here AND in every agent&apos;s own toolset. Secrets stay in the vault.
+            No MCP servers are mounted yet. Mount one (Supabase, GitHub, â€¦) â€” its tools then appear here AND in every agent&apos;s own toolset. Secrets stay in the vault.
             <button
               type="button"
               onClick={() => setSettingsOpen(true, 'mcp')}
               className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-white hover:bg-accent/90"
             >
-              Mount an MCP server →
+              Mount an MCP server â†’
             </button>
             {loadError ? <div className="mt-1 text-danger">({loadError})</div> : null}
           </div>
@@ -1868,7 +1868,7 @@ function McpForm({ data, update }: { data: Record<string, unknown>; update: Node
             value={toolId}
             onChange={(e) => update({ toolId: e.target.value || undefined })}
           >
-            <option value="">Choose a tool…</option>
+            <option value="">Choose a toolâ€¦</option>
             {[...byServer.entries()].map(([server, group]) => (
               <optgroup key={server} label={server}>
                 {group.map((t) => (
@@ -1883,20 +1883,20 @@ function McpForm({ data, update }: { data: Record<string, unknown>; update: Node
         <p className="-mt-1 text-[11px] leading-4 text-text-muted">{selected.description}</p>
       )}
       {selected && Object.keys(schemaProps).length > 0 && (
-        <Field label="Tool inputs" hint="What this tool accepts — map them in Arguments below.">
+        <Field label="Tool inputs" hint="What this tool accepts â€” map them in Arguments below.">
           <div className="space-y-0.5">
             {Object.entries(schemaProps).map(([key, prop]) => (
               <div key={key} className="text-[11px] leading-4">
                 <span className="font-mono text-text-primary">{key}</span>
                 {requiredArgs.has(key) ? <span className="text-danger"> *</span> : null}
                 {prop.type ? <span className="text-text-muted"> ({prop.type})</span> : null}
-                {prop.description ? <span className="text-text-muted"> — {prop.description}</span> : null}
+                {prop.description ? <span className="text-text-muted"> â€” {prop.description}</span> : null}
               </div>
             ))}
           </div>
         </Field>
       )}
-      <Field label="Arguments (JSON)" hint="Values support {{templates}} — e.g. {'table': 'leads', 'row': '{{nodes.normalize.record}}'}.">
+      <Field label="Arguments (JSON)" hint="Values support {{templates}} â€” e.g. {'table': 'leads', 'row': '{{nodes.normalize.record}}'}.">
         <textarea
           rows={5}
           spellCheck={false}
@@ -1927,7 +1927,7 @@ function HttpRequestForm({ data, update, upstream, credentials = [] }: { data: R
   const authType = auth.type ?? 'none';
   const responseMapping = (typeof data.responseMapping === 'object' && data.responseMapping ? data.responseMapping : {}) as { outputKey?: string; bodyPath?: string };
   const setAuth = (next: { type: string; credentialId?: string; header?: string }) => {
-    // `none` clears the field entirely — the runtime treats absent and
+    // `none` clears the field entirely â€” the runtime treats absent and
     // {type:'none'} identically, and absent keeps configs minimal.
     if (next.type === 'none') { update({ auth: undefined }); return; }
     update({ auth: next });
@@ -2008,7 +2008,7 @@ function HttpRequestForm({ data, update, upstream, credentials = [] }: { data: R
             }}
           >
             <option value="none">None</option>
-            <option value="bearer">Bearer token (Authorization: Bearer …)</option>
+            <option value="bearer">Bearer token (Authorization: Bearer â€¦)</option>
             <option value="api_key">API key header</option>
             <option value="basic">Basic (username:password)</option>
           </select>
@@ -2021,7 +2021,7 @@ function HttpRequestForm({ data, update, upstream, credentials = [] }: { data: R
                 value={auth.credentialId ?? ''}
                 onChange={(e) => setAuth({ type: authType, credentialId: e.target.value, ...(authType === 'api_key' ? { header: auth.header ?? 'x-api-key' } : {}) })}
               >
-                <option value="">Choose a credential…</option>
+                <option value="">Choose a credentialâ€¦</option>
                 {credentials.map((credential) => (
                   <option key={credential.id} value={credential.id}>{credential.name} ({credential.credentialType})</option>
                 ))}
@@ -2054,7 +2054,7 @@ function HttpRequestForm({ data, update, upstream, credentials = [] }: { data: R
           />
         </Field>
         {responseMapping.outputKey ? (
-          <Field label="Body path" hint="Dot path into the response body, e.g. data.items — empty = whole body.">
+          <Field label="Body path" hint="Dot path into the response body, e.g. data.items â€” empty = whole body.">
             <input
               type="text"
               className={inputCls + ' font-mono'}
@@ -2111,7 +2111,7 @@ function HttpRequestForm({ data, update, upstream, credentials = [] }: { data: R
   );
 }
 
-// ─── Workflow Store ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Workflow Store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function WorkflowStoreForm({ data, update, workspace = false }: { data: Record<string, unknown>; update: NodeFormProps['update']; workspace?: boolean }) {
   const operations = Array.isArray(data.operations)
@@ -2167,7 +2167,7 @@ function WorkflowStoreForm({ data, update, workspace = false }: { data: Record<s
   );
 }
 
-// ─── Evaluator & Guardrails ─────────────────────────────────────────────────
+// â”€â”€â”€ Evaluator & Guardrails â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function EvaluatorForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   return (
@@ -2191,7 +2191,7 @@ function EvaluatorForm({ data, update }: { data: Record<string, unknown>; update
           onChange={(e) => update({ criteria: e.target.value })}
         />
       </Field>
-      <Field label="Pass threshold (0–10)">
+      <Field label="Pass threshold (0â€“10)">
         <input
           type="number"
           className={inputCls}
@@ -2201,7 +2201,7 @@ function EvaluatorForm({ data, update }: { data: Record<string, unknown>; update
           onChange={(e) => update({ passThreshold: e.target.value === '' ? undefined : Number(e.target.value) })}
         />
       </Field>
-      <Field label="Max retries" hint="How many fail→retry cycles before the run is terminated. Default 3.">
+      <Field label="Max retries" hint="How many failâ†’retry cycles before the run is terminated. Default 3.">
         <input
           type="number"
           className={inputCls}
@@ -2228,8 +2228,8 @@ function GuardrailsForm({ data, update }: { data: Record<string, unknown>; updat
           value={asStr(data.onViolation) || 'block'}
           onChange={(e) => update({ onViolation: e.target.value })}
         >
-          <option value="block">Block — route to error edge</option>
-          <option value="flag">Flag — annotate output and continue</option>
+          <option value="block">Block â€” route to error edge</option>
+          <option value="flag">Flag â€” annotate output and continue</option>
         </select>
       </Field>
       <Field label="Rules" hint="Add deterministic checks in the order they should run.">
@@ -2284,7 +2284,7 @@ function GuardrailsForm({ data, update }: { data: Record<string, unknown>; updat
   );
 }
 
-// ─── Loop & Parallel ────────────────────────────────────────────────────────
+// â”€â”€â”€ Loop & Parallel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function LoopForm({ data, update, workflows }: { data: Record<string, unknown>; update: NodeFormProps['update']; workflows: WorkflowRow[] }) {
   return (
@@ -2304,7 +2304,7 @@ function LoopForm({ data, update, workflows }: { data: Record<string, unknown>; 
           value={asStr(data.bodyWorkflowId)}
           onChange={(e) => update({ bodyWorkflowId: e.target.value })}
         >
-          <option value="">— Select workflow —</option>
+          <option value="">â€” Select workflow â€”</option>
           {workflows.map((wf) => (
             <option key={wf.id} value={wf.id}>{wf.title ?? wf.name ?? wf.id}</option>
           ))}
@@ -2320,7 +2320,7 @@ function LoopForm({ data, update, workflows }: { data: Record<string, unknown>; 
           onChange={(e) => update({ maxConcurrency: Math.max(1, Number(e.target.value || 1)) })}
         />
       </Field>
-      <Field label="Chunk size (optional)" hint="For very large arrays — process this many at a time. Emits LOOP_PROGRESS per chunk.">
+      <Field label="Chunk size (optional)" hint="For very large arrays â€” process this many at a time. Emits LOOP_PROGRESS per chunk.">
         <input
           type="number"
           className={inputCls}
@@ -2336,9 +2336,9 @@ function LoopForm({ data, update, workflows }: { data: Record<string, unknown>; 
           value={asStr(data.onIterationError) || 'stop_all'}
           onChange={(e) => update({ onIterationError: e.target.value })}
         >
-          <option value="stop_all">Stop all — fail the loop</option>
-          <option value="continue">Continue — skip failed items</option>
-          <option value="collect_errors">Collect errors — emit alongside results</option>
+          <option value="stop_all">Stop all â€” fail the loop</option>
+          <option value="continue">Continue â€” skip failed items</option>
+          <option value="collect_errors">Collect errors â€” emit alongside results</option>
         </select>
       </Field>
       <Field label="Output array key">
@@ -2380,12 +2380,12 @@ function ParallelForm({ data, update }: { data: Record<string, unknown>; update:
   );
 }
 
-// ─── Convergence loop (converge / pursue) — COGNITIVE-LOOPING-RFC ──────────
+// â”€â”€â”€ Convergence loop (converge / pursue) â€” COGNITIVE-LOOPING-RFC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // `pursue` is a forward-reading rename of `converge` ("pursue an Objective
 // until done"); the engine normalizes a `pursue` config into the `converge`
 // shape at dispatch (pursueConfigToConverge in WorkflowEngine.ts) so both
 // share one loop/worktree/resume machine. Field names differ only cosmetically
-// (continuation↔doneWhen, stallPolicy↔stopWhenStalled, carryStrategy↔carry).
+// (continuationâ†”doneWhen, stallPolicyâ†”stopWhenStalled, carryStrategyâ†”carry).
 
 type ContinuationType = 'deterministic' | 'judge' | 'signal' | 'objective';
 
@@ -2406,10 +2406,10 @@ function DoneConditionField({
     <>
       <Field label={label} hint="How the loop knows it is finished.">
         <select className={selectCls} value={type} onChange={(e) => onChange({ type: e.target.value })}>
-          <option value="deterministic">Deterministic — a JS expression over the body output</option>
-          <option value="judge">LLM judge — score the body output against criteria</option>
-          <option value="signal">Signal — an agent posts a done-signal to the blackboard</option>
-          <option value="objective">Objective — the workflow's own acceptance checks (SWIFT verdict)</option>
+          <option value="deterministic">Deterministic â€” a JS expression over the body output</option>
+          <option value="judge">LLM judge â€” score the body output against criteria</option>
+          <option value="signal">Signal â€” an agent posts a done-signal to the blackboard</option>
+          <option value="objective">Objective â€” the workflow's own acceptance checks (SWIFT verdict)</option>
         </select>
       </Field>
       {type === 'deterministic' && (
@@ -2442,7 +2442,7 @@ function DoneConditionField({
               onChange={(e) => onChange({ ...value, type, criteria: e.target.value })}
             />
           </Field>
-          <Field label="Pass threshold" hint="Minimum score (0–10) that counts as converged. Default 7.">
+          <Field label="Pass threshold" hint="Minimum score (0â€“10) that counts as converged. Default 7.">
             <input
               type="number"
               min={0}
@@ -2468,7 +2468,7 @@ function DoneConditionField({
       )}
       {type === 'objective' && (
         <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] leading-relaxed text-text-secondary">
-          Done when this workflow's own <code className="rounded bg-canvas px-1">WorkflowSpec</code> acceptance checks all pass — run against the world (http/data/file/expr/judge) by the SWIFT verdict engine. Progress is the fraction of checks passing, so distance-to-goal is real.
+          Done when this workflow's own <code className="rounded bg-canvas px-1">WorkflowSpec</code> acceptance checks all pass â€” run against the world (http/data/file/expr/judge) by the SWIFT verdict engine. Progress is the fraction of checks passing, so distance-to-goal is real.
         </div>
       )}
     </>
@@ -2482,7 +2482,7 @@ function ConvergeForm({ data, update, workflows, upstream }: { data: Record<stri
     <>
       <Field label="Body workflow" hint="The cohort sub-graph, invoked once per iteration.">
         <select className={selectCls} value={asStr(data.bodyWorkflowId)} onChange={(e) => update({ bodyWorkflowId: e.target.value })}>
-          <option value="">— Select workflow —</option>
+          <option value="">â€” Select workflow â€”</option>
           {workflows.map((wf) => <option key={wf.id} value={wf.id}>{wf.title ?? wf.name ?? wf.id}</option>)}
         </select>
       </Field>
@@ -2534,11 +2534,11 @@ function PursueForm({ data, update, workflows, upstream }: { data: Record<string
   return (
     <>
       <div className="mb-3 rounded-md border border-accent/25 bg-accent-soft px-2.5 py-2 text-[11px] leading-4 text-text-secondary">
-        Pursue an Objective: run the body workflow repeatedly, ASSESS progress each iteration, and REFLECT (pivot) on a stall instead of giving up — until <code className="rounded bg-canvas px-1">doneWhen</code> is met or the iteration ceiling is hit.
+        Pursue an Objective: run the body workflow repeatedly, ASSESS progress each iteration, and REFLECT (pivot) on a stall instead of giving up â€” until <code className="rounded bg-canvas px-1">doneWhen</code> is met or the iteration ceiling is hit.
       </div>
       <Field label="Body workflow" hint="The cohort sub-graph, invoked once per iteration.">
         <select className={selectCls} value={asStr(data.bodyWorkflowId)} onChange={(e) => update({ bodyWorkflowId: e.target.value })}>
-          <option value="">— Select workflow —</option>
+          <option value="">â€” Select workflow â€”</option>
           {workflows.map((wf) => <option key={wf.id} value={wf.id}>{wf.title ?? wf.name ?? wf.id}</option>)}
         </select>
       </Field>
@@ -2551,7 +2551,7 @@ function PursueForm({ data, update, workflows, upstream }: { data: Record<string
           <input type="number" min={0} className={inputCls} placeholder="2" value={typeof data.maxPivots === 'number' ? data.maxPivots : ''} onChange={(e) => update({ maxPivots: e.target.value === '' ? undefined : Math.max(0, Number(e.target.value)) })} />
         </Field>
       </div>
-      <Field label="Assess progress" hint="Default on for a Pursuit — measures distance-to-goal each iteration.">
+      <Field label="Assess progress" hint="Default on for a Pursuit â€” measures distance-to-goal each iteration.">
         <label className="flex cursor-pointer items-center gap-2">
           <input type="checkbox" checked={data.assess !== false} onChange={(e) => update({ assess: e.target.checked })} className="rounded border-line bg-surface-2 accent-accent" />
           <span className="text-[12px] text-text-primary">{data.assess !== false ? 'on' : 'off'}</span>
@@ -2591,7 +2591,7 @@ function PursueForm({ data, update, workflows, upstream }: { data: Record<string
   );
 }
 
-// ─── Agent Swarm & Artifact Collect (engine handlers already shipped) ───────
+// â”€â”€â”€ Agent Swarm & Artifact Collect (engine handlers already shipped) â”€â”€â”€â”€â”€â”€â”€
 
 function AgentSwarmForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   const tags = Array.isArray(data.capabilityTags) ? (data.capabilityTags as string[]).join(', ') : '';
@@ -2743,18 +2743,18 @@ function ArtifactCollectForm({ data, update }: { data: Record<string, unknown>; 
   );
 }
 
-// ─── Output surface & native browser ────────────────────────────────────────
+// â”€â”€â”€ Output surface & native browser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function ReturnOutputForm({ data, update, upstream }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[] }) {
   return (
     <>
       <Field label="Render as" hint="How the Output tab renders this result.">
         <select className={selectCls} value={asStr(data.renderAs) || 'json'} onChange={(e) => update({ renderAs: e.target.value })}>
-          <option value="html">HTML — live sandboxed preview</option>
-          <option value="markdown">Markdown — rendered</option>
-          <option value="table">Table — rows</option>
-          <option value="json">JSON — collapsible</option>
-          <option value="text">Text — plain</option>
+          <option value="html">HTML â€” live sandboxed preview</option>
+          <option value="markdown">Markdown â€” rendered</option>
+          <option value="table">Table â€” rows</option>
+          <option value="json">JSON â€” collapsible</option>
+          <option value="text">Text â€” plain</option>
         </select>
       </Field>
       <Field label="Title (optional)" hint="Heading shown above the rendered output.">
@@ -2775,7 +2775,7 @@ function ReturnOutputForm({ data, update, upstream }: { data: Record<string, unk
 function ArtifactSaveForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   return (
     <>
-      <Field label="File name" hint="e.g. report.html, leads.csv — extension drives the artifact type.">
+      <Field label="File name" hint="e.g. report.html, leads.csv â€” extension drives the artifact type.">
         <input type="text" className={inputCls} value={asStr(data.name)} placeholder="report.html" onChange={(e) => update({ name: e.target.value })} />
       </Field>
       <Field label="Artifact type (optional)" hint="Override the type inferred from the file name.">
@@ -2806,18 +2806,18 @@ function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>
     <>
       <Field label="Operation" hint="Native Chromium runs headless; Chromium auto-installs on first use.">
         <select className={selectCls} value={op} onChange={(e) => update({ operation: e.target.value })}>
-          <option value="serve_html">serve_html — render HTML + screenshot</option>
-          <option value="screenshot">screenshot — capture a URL/HTML → PNG</option>
-          <option value="pdf">pdf — print a URL/HTML → PDF</option>
-          <option value="navigate">navigate — load URL, return title/text</option>
-          <option value="extract_text">extract_text — text under a selector</option>
-          <option value="fill_form">fill_form — fill fields + submit</option>
-          <option value="extract_table">extract_table — table → rows</option>
+          <option value="serve_html">serve_html â€” render HTML + screenshot</option>
+          <option value="screenshot">screenshot â€” capture a URL/HTML â†’ PNG</option>
+          <option value="pdf">pdf â€” print a URL/HTML â†’ PDF</option>
+          <option value="navigate">navigate â€” load URL, return title/text</option>
+          <option value="extract_text">extract_text â€” text under a selector</option>
+          <option value="fill_form">fill_form â€” fill fields + submit</option>
+          <option value="extract_table">extract_table â€” table â†’ rows</option>
         </select>
       </Field>
       {op === 'fill_form' && (
         <>
-          <Field label="Form data (JSON)" hint='Map of CSS selector → value, e.g. {"#email": "a@b.com"}.'>
+          <Field label="Form data (JSON)" hint='Map of CSS selector â†’ value, e.g. {"#email": "a@b.com"}.'>
             <textarea
               rows={4}
               spellCheck={false}
@@ -2900,7 +2900,7 @@ function BrowserForm({ data, update, upstream }: { data: Record<string, unknown>
                 update({ viewport: width && height ? { width, height } : width ? { width, height: 800 } : undefined });
               }}
             />
-            <span className="text-[11px] text-text-muted">×</span>
+            <span className="text-[11px] text-text-muted">Ã—</span>
             <input
               type="number"
               className={inputCls}
@@ -2975,7 +2975,7 @@ function VariablesForm({ data, update }: { data: Record<string, unknown>; update
   );
 }
 
-// Kinds with a real zod schema (packages/core) but no bespoke `XxxForm` —
+// Kinds with a real zod schema (packages/core) but no bespoke `XxxForm` â€”
 // n8n-style utility/data primitives. `SchemaDrivenFields` introspects the
 // schema's shape so every supported field renders as a typed input from the
 // moment the node is dropped on the canvas, not only once it already has data.
@@ -3051,3 +3051,6 @@ function RawGenericForm({ data, update }: { data: Record<string, unknown>; updat
     </>
   );
 }
+
+
+

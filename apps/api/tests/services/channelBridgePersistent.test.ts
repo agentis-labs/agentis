@@ -11,8 +11,8 @@ import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ChannelBridge, type PersistentChannelTransport } from '../../src/services/channelBridge.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
+import { ChannelBridge, type PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { SlackChannelAdapter } from '../../src/adapters/channels/slack.js';
 
 function seedAgent(ctx: TestContext) {

@@ -217,7 +217,6 @@ export function formatToolManifestAwareness(manifest?: Array<{ name: string; des
   ].join('\n');
 }
 
-// ── internals ──────────────────────────────────────────────────────────────
 
 function matchBalancedBrace(text: string, start: number): number {
   let depth = 0;

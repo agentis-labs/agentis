@@ -1,4 +1,4 @@
-import clsx from 'clsx';
+﻿import clsx from 'clsx';
 import { AlertTriangle, CircleDashed, HelpCircle } from 'lucide-react';
 
 export type BrainVisibleLayers = Record<'knowledge' | 'memory' | 'judgment', boolean>;
@@ -83,3 +83,6 @@ function Chip({ active, onClick, label, icon }: { active: boolean; onClick: () =
     </button>
   );
 }
+
+
+

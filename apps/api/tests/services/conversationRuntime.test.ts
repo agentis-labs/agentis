@@ -11,7 +11,7 @@ import {
   timeGreeting,
   type ConversationRuntimeDeps,
   type ConversationContext,
-} from '../../src/services/conversationRuntime.js';
+} from '../../src/services/conversation/conversationRuntime.js';
 
 // The exact sales-desk shape from the gap analysis: greet → pitch → qualify →
 // build (workflow) → deliver(stop), with a negative branch to closed(stop).

@@ -17,9 +17,9 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentAdapter, ChatDelta } from '@agentis/core';
 import { VoiceChannelAdapter } from '../../src/adapters/channels/voice.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
-import { ChannelBridge } from '../../src/services/channelBridge.js';
-import { ChannelTurnDispatcher } from '../../src/services/channelTurnDispatcher.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ChannelBridge } from '../../src/services/conversation/channelBridge.js';
+import { ChannelTurnDispatcher } from '../../src/services/conversation/channelTurnDispatcher.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 
 /** A chat-capable adapter stub — only `.chat`/`.capabilities` are exercised. */

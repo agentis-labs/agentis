@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
 import { ExtensionLibraryService } from '../../src/services/extensionLibrary.js';
 import { registerCapabilityTools } from '../../src/services/agentisToolHandlers/capability.js';
 import type { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';

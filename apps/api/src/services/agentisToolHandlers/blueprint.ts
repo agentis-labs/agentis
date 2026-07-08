@@ -14,8 +14,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { WorkflowGraph } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { findBlessedGraph } from '../workflowBlueprint.js';
-import { graphContentHash, readBuildLoop, stampBuildLoop } from '../workflowCompass.js';
+import { findBlessedGraph } from '../workflow/workflowBlueprint.js';
+import { graphContentHash, readBuildLoop, stampBuildLoop } from '../workflow/workflowCompass.js';
 
 export function registerBlueprintTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.register(

@@ -24,7 +24,7 @@ import {
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
-import type { WorkflowStoreService } from '../services/workflowStore.js';
+import type { WorkflowStoreService } from '../services/workflow/workflowStore.js';
 import type { ExtensionRuntime } from '../services/extensionRuntime.js';
 import type { ActiveTrigger } from './ActiveWorkflowRegistry.js';
 import { ListenerHealthStore } from './listener/health.js';
@@ -162,7 +162,6 @@ export class ListenerRuntime {
     }
   }
 
-  // ── internals ──────────────────────────────────────────────────────────────
 
   #build(trigger: ActiveTrigger, config: ListenerConfig): ListenerInstance {
     const cursorConfig = ('cursor' in config.source ? config.source.cursor : undefined) ?? undefined;

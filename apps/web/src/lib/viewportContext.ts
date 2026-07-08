@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+﻿import { useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import type { AgentisSurface, ViewportContext } from '@agentis/core';
 import { emitRealtime } from './realtime';
@@ -56,7 +56,7 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
   }, [context]);
 
   // Resolve the resource's real name from the registry so the label reads
-  // "App · My Sales Dashboard" instead of "App · Workflow #efe2961f".
+  // "App Â· My Sales Dashboard" instead of "App Â· Workflow #efe2961f".
   const resolvedName = useAgentisStore((s) =>
     context.resourceId && context.resourceKind
       ? s.resourceNames[`${context.resourceKind}:${context.resourceId}`]
@@ -70,18 +70,17 @@ export function deriveSurface(pathname: string, search = ''): Pick<ViewportConte
   const parts = pathname.split('/').filter(Boolean);
   const [root, id] = parts;
   if (!root || root === 'home') return { surface: 'home', title: 'Home' };
-  // Agentic Apps — a real surface (not 'unknown') so the chat keeps viewport
+  // Agentic Apps â€” a real surface (not 'unknown') so the chat keeps viewport
   // context active and the agent knows it is operating inside an App. The facet
   // (?facet=interface|workflow|data|brain) is folded into the title so the agent
-  // knows which part of the App the operator is looking at. resourceKind 'app'
-  // lets chat tools resolve the open App (AGENTIC-APPS-10X §4).
+  // lets chat tools resolve the open App (AGENTIC-APPS-10X Â§4).
   if (root === 'apps' && id === 'workflows' && parts[2]) {
     return { surface: 'workflow_detail', resourceKind: 'workflow', resourceId: parts[2], title: 'App logic' };
   }
   if (root === 'apps' && id) {
     const facet = new URLSearchParams(search).get('facet');
     const facetLabel = facet ? facet.charAt(0).toUpperCase() + facet.slice(1) : null;
-    return { surface: 'app_detail', resourceKind: 'app', resourceId: id, title: facetLabel ? `App · ${facetLabel}` : 'App' };
+    return { surface: 'app_detail', resourceKind: 'app', resourceId: id, title: facetLabel ? `App Â· ${facetLabel}` : 'App' };
   }
   if (root === 'apps') return { surface: 'apps', title: 'Apps' };
   if (root === 'workflows' && id) return { surface: 'workflow_detail', resourceKind: 'workflow', resourceId: id, title: 'Workflow' };
@@ -104,8 +103,11 @@ function formatViewportLabel(context: ViewportContext, resolvedName?: string): s
   const base = context.title ?? context.surface;
   // Prefer the resolved human name; only fall back to a short reference.
   const ref = resolvedName?.trim()
-    ? ` · ${resolvedName.trim()}`
+    ? ` Â· ${resolvedName.trim()}`
     : context.resourceId ? ` ${shortRef(context.resourceId)}` : '';
-  const run = context.activeRunId ? ` · ${shortRef(context.activeRunId)} running` : '';
+  const run = context.activeRunId ? ` Â· ${shortRef(context.activeRunId)} running` : '';
   return `${base}${ref}${run}`;
 }
+
+
+

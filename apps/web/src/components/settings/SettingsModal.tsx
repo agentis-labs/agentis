@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale, Boxes } from 'lucide-react';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale, Boxes, Database } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -26,10 +26,12 @@ import { OrchestratorModelsPanel } from './OrchestratorModelsPanel';
 import { SelfHealingPanel } from './SelfHealingPanel';
 import { AutonomyPanel } from './AutonomyPanel';
 import { IntegrationsPanel } from './IntegrationsPanel';
+import { DataOwnershipPanel } from './DataOwnershipPanel';
 import { useAgentisStore, SettingsTab } from '../../store/agentisStore';
 
 const TABS: { value: SettingsTab; label: string; icon: React.ReactNode }[] = [
   { value: 'profile', label: 'Profile', icon: <User size={16} /> },
+  { value: 'data', label: 'Your Data', icon: <Database size={16} /> },
   { value: 'workspace', label: 'Workspace', icon: <Briefcase size={16} /> },
   { value: 'channels', label: 'Channels', icon: <MessageSquare size={16} /> },
   { value: 'mcp', label: 'MCP', icon: <Boxes size={16} /> },
@@ -99,6 +101,7 @@ export function SettingsModal() {
                 {TABS.find(t => t.value === settingsTab)?.label}
               </h1>
               {settingsTab === 'profile' && <ProfileTab />}
+              {settingsTab === 'data' && <DataOwnershipPanel />}
               {settingsTab === 'workspace' && (
                 <div className="space-y-10">
                   <WorkspaceTab />

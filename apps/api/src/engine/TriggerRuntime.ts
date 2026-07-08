@@ -29,7 +29,7 @@ import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { type JobQueueBackend, shouldQueueWorkflowRun } from '../services/jobQueue.js';
 import { buildInitialRunState } from './initialRunState.js';
 import { ListenerRuntime } from './ListenerRuntime.js';
-import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
+import { normalizeWorkflowGraph } from '../services/workflow/workflowGraphNormalization.js';
 import { hashWorkflowGraph } from '../services/graphHash.js';
 import { connectorFromConfig, verifyConnectorWebhook } from './triggerConnectors.js';
 

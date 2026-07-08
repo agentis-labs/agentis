@@ -22,7 +22,7 @@ import {
   importAgents,
   checkImportUpdates,
   type HarnessImportDeps,
-} from '../services/harnessAgentImport.js';
+} from '../services/harness/harnessAgentImport.js';
 
 export interface HarnessImportRoutesDeps extends HarnessImportDeps {
   db: AgentisSqliteDb;

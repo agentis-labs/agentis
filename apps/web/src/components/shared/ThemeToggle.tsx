@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ThemeToggle -- dark/light/system theme switcher.
  *
  * Theme preference is stored in localStorage and applied to the root element
@@ -135,3 +135,6 @@ export function ThemeToggle({ variant = 'compact', className }: ThemeToggleProps
 if (typeof window !== 'undefined') {
   applyTheme(readStored());
 }
+
+
+

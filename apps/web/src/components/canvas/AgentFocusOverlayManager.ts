@@ -1,5 +1,5 @@
-/**
- * AgentFocusOverlayManager — V1-SPEC §13.5.
+﻿/**
+ * AgentFocusOverlayManager â€” V1-SPEC Â§13.5.
  *
  * A presence-driven overlay layer for the workflow canvas. When agents
  * publish presence events (`agent.focused_on_node`, `agent.task_started`,
@@ -113,3 +113,6 @@ export class AgentFocusOverlayManager {
     }
   }
 }
+
+
+

@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { PALETTE_NODES, type PaletteNodeType } from './NodePalette';
 
 /**
- * NodeCommandPalette — Cmd/Ctrl+K modal for fast node insertion.
+ * NodeCommandPalette â€” Cmd/Ctrl+K modal for fast node insertion.
  *
  * Surfaces:
  *   - every node kind from the palette (curated, validated)
@@ -18,7 +18,7 @@ import { PALETTE_NODES, type PaletteNodeType } from './NodePalette';
 export interface CommandOption {
   /** Unique key for React. */
   key: string;
-  /** Engine node kind (`agent_task`, `extension_task`, `integration`, …). */
+  /** Engine node kind (`agent_task`, `extension_task`, `integration`, â€¦). */
   type: string;
   label: string;
   description: string;
@@ -75,7 +75,7 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
         label: extension.name,
         description: extension.description ?? 'Run a typed deterministic extension',
         category: 'Extensions',
-        glyph: '✦',
+        glyph: 'âœ¦',
         defaults: { extensionId: extension.id, inputMapping: {}, outputMapping: {} },
       });
     }
@@ -86,7 +86,7 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
         label: sub.title || 'Untitled workflow',
         description: 'Embed this workflow as a subflow',
         category: 'Subflows',
-        glyph: '▦',
+        glyph: 'â–¦',
         defaults: { workflowId: sub.id, inputMapping: {}, outputMapping: {} },
       });
     }
@@ -95,10 +95,10 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
         out.push({
           key: `int:${integration.service}:${operation}`,
           type: 'integration',
-          label: `${integration.name} — ${operation}`,
+          label: `${integration.name} â€” ${operation}`,
           description: `${integration.name} ${operation} operation`,
           category: 'Integrations',
-          glyph: integration.icon ?? '⚙',
+          glyph: integration.icon ?? 'âš™',
           defaults: { integrationId: integration.service, operationId: operation, inputs: {} },
         });
       }
@@ -171,7 +171,7 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Search nodes, Extensions, integrations…"
+            placeholder="Search nodes, Extensions, integrationsâ€¦"
             className="w-full bg-transparent text-[14px] text-text-primary placeholder:text-text-muted focus:outline-none"
           />
         </div>
@@ -199,7 +199,7 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
                       )}
                     >
                       <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-canvas text-sm">
-                        {opt.glyph ?? '•'}
+                        {opt.glyph ?? 'â€¢'}
                       </span>
                       <span className="min-w-0 flex-1">
                         <div className="truncate text-[13px] text-text-primary">{opt.label}</div>
@@ -213,10 +213,13 @@ export function NodeCommandPalette(props: NodeCommandPaletteProps) {
           )}
         </div>
         <div className="flex items-center justify-between border-t border-line/60 bg-surface-2 px-3 py-1.5 text-[10px] text-text-muted">
-          <span>↑↓ navigate</span>
-          <span>↵ pick · Esc close</span>
+          <span>â†‘â†“ navigate</span>
+          <span>â†µ pick Â· Esc close</span>
         </div>
       </div>
     </div>
   );
 }
+
+
+

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { rtSubscribe, useRealtime } from './realtime';
 import {
@@ -14,7 +14,7 @@ interface RunActivityEnvelope {
 }
 
 /**
- * Workspace-wide live activity spine — the single feed that powers Mission
+ * Workspace-wide live activity spine â€” the single feed that powers Mission
  * Control and the canvas's "what is the orchestrator doing right now" liveness.
  *
  * Where `useRunActivity` watches ONE run, this watches the whole workspace:
@@ -43,7 +43,6 @@ export function useWorkspaceActivity(
     return () => unsubscribe();
   }, []);
 
-  // Back-fill the replayable tail of each active run (best-effort, parallel).
   useEffect(() => {
     if (!runKey) return;
     let cancelled = false;
@@ -102,7 +101,7 @@ export interface WorkspaceRequestStatus {
 }
 
 /**
- * Kinds that mean "real work is executing" — runs, node transitions, tool
+ * Kinds that mean "real work is executing" â€” runs, node transitions, tool
  * calls, progress. Deliberately EXCLUDES 'agent'/'message'/'status': those
  * include ambient chatter (status pings, chat-memory "learning from this
  * conversation" steps) that must never light up the canvas or mark the
@@ -137,7 +136,7 @@ function isTerminal(a: RealtimeActivity): boolean {
 /** Is the workspace mid-work, and what's the current focus? */
 export function workspaceRequestStatus(feed: RealtimeActivity[]): WorkspaceRequestStatus {
   const cutoff = Date.now() - BUSY_WINDOW_MS;
-  // The newest WORK item decides — ambient agent/message chatter is ignored.
+  // The newest WORK item decides â€” ambient agent/message chatter is ignored.
   const latestWork = feed.find((a) => isWork(a)) ?? null;
   if (!latestWork) return { busy: false, label: null, latest: null };
   const recent = new Date(latestWork.at).getTime() >= cutoff;
@@ -148,7 +147,7 @@ export function workspaceRequestStatus(feed: RealtimeActivity[]): WorkspaceReque
   };
 }
 
-/** Ids (agentId/workflowId) currently doing WORK — drives canvas node/edge liveness. */
+/** Ids (agentId/workflowId) currently doing WORK â€” drives canvas node/edge liveness. */
 export function useLiveNodeIds(feed: RealtimeActivity[], windowMs = BUSY_WINDOW_MS): {
   agentIds: Set<string>;
   workflowIds: Set<string>;
@@ -183,3 +182,6 @@ export function useLiveNodeIds(feed: RealtimeActivity[], windowMs = BUSY_WINDOW_
 export function isWorkActivity(a: RealtimeActivity): boolean {
   return isWork(a) && !isTerminal(a);
 }
+
+
+

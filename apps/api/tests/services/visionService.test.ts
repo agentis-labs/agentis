@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { VisionService, resolveChatCompletionsUrl } from '../../src/services/visionService.js';
-import type { ModelProfile } from '../../src/services/orchestratorModelRouter.js';
+import type { ModelProfile } from '../../src/services/orchestrator/orchestratorModelRouter.js';
 
 const profile: ModelProfile = { baseUrl: 'https://api.example.com/v1', model: 'gpt-4o', apiKey: 'k' };
 

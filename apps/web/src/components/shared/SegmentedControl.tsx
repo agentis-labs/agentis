@@ -1,10 +1,10 @@
-/**
- * SegmentedControl — central, segmented switcher.
+﻿/**
+ * SegmentedControl â€” central, segmented switcher.
  *
  * Used for compact, mutually exclusive surface switches.
  *
- * Heavier visual weight than Tabs — this is a *shell-level* control and the
- * design rule (§5) is that it should feel central and product-defining.
+ * Heavier visual weight than Tabs â€” this is a *shell-level* control and the
+ * design rule (Â§5) is that it should feel central and product-defining.
  */
 
 import clsx from 'clsx';
@@ -63,3 +63,6 @@ export function SegmentedControl<T extends string = string>({
     </div>
   );
 }
+
+
+

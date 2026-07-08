@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { WorkspaceIntelligenceService } from '../../src/services/workspaceIntelligence.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
+import { WorkspaceIntelligenceService } from '../../src/services/workspace/workspaceIntelligence.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 describe('WorkspaceVolumeService', () => {

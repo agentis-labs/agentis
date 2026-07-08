@@ -16,9 +16,9 @@ import { z } from 'zod';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError } from '@agentis/core';
 import type { AuthService } from '../services/auth.js';
-import type { ChannelBridge } from '../services/channelBridge.js';
-import type { ChannelConnectionSupervisor } from '../services/channelConnectionSupervisor.js';
-import type { ChannelIdentityService } from '../services/channelIdentityService.js';
+import type { ChannelBridge } from '../services/conversation/channelBridge.js';
+import type { ChannelConnectionSupervisor } from '../services/conversation/channelConnectionSupervisor.js';
+import type { ChannelIdentityService } from '../services/conversation/channelIdentityService.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 

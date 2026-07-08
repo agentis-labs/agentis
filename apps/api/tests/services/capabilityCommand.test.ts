@@ -11,11 +11,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { CapabilityIndex } from '../../src/services/capabilityIndex.js';
-import { CapabilityRouter } from '../../src/services/capabilityRouter.js';
-import { resolveCommandScope } from '../../src/services/commandScope.js';
-import { CommandModelService } from '../../src/services/commandModel.js';
-import { CommandHeartbeat, isWorkspaceAutonomyEnabled, setWorkspaceAutonomy } from '../../src/services/commandHeartbeat.js';
+import { CapabilityIndex } from '../../src/services/capability/capabilityIndex.js';
+import { CapabilityRouter } from '../../src/services/capability/capabilityRouter.js';
+import { resolveCommandScope } from '../../src/services/command/commandScope.js';
+import { CommandModelService } from '../../src/services/command/commandModel.js';
+import { CommandHeartbeat, isWorkspaceAutonomyEnabled, setWorkspaceAutonomy } from '../../src/services/command/commandHeartbeat.js';
 
 let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });

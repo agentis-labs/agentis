@@ -17,7 +17,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { EpisodicMemoryStore } from './episodicMemoryStore.js';
-import { SKILL_LIBRARY_PLANE } from './memoryStore.js';
+import { SKILL_LIBRARY_PLANE } from './memory/memoryStore.js';
 
 /** SQL LIKE pattern matching the Skill-library plane tag on an episode row. */
 const SKILL_LIBRARY_PLANE_LIKE = `%plane:${SKILL_LIBRARY_PLANE}%`;
@@ -29,8 +29,8 @@ import {
   embedText,
   selectEmbeddingProvider,
   vectorIsComparable,
-} from './embeddingProvider.js';
-import type { EmbeddingProviderRegistry } from './embeddingProviderRegistry.js';
+} from './embedding/embeddingProvider.js';
+import type { EmbeddingProviderRegistry } from './embedding/embeddingProviderRegistry.js';
 import {
   extractCandidateStatements,
   extractOperatorCandidates,
@@ -42,14 +42,14 @@ import {
   type FormedMemory,
   type MemoryWritePolicy,
   type ScoredStatement,
-} from './brainFormation.js';
+} from './brain/brainFormation.js';
 import type { StructuredCompleter } from './structuredCompleter.js';
 import {
   classifyPacer,
   pacerRouting,
   type PacerClass,
   type SourceSurface,
-} from './brainPacer.js';
+} from './brain/brainPacer.js';
 import {
   clamp01,
   compactValue,

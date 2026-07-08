@@ -1,5 +1,5 @@
-/**
- * backgroundInstall — singleton store for background runtime installs.
+﻿/**
+ * backgroundInstall â€” singleton store for background runtime installs.
  *
  * When a user commissions an agent whose runtime is not yet installed,
  * the wizard closes immediately and the install runs here in the background.
@@ -14,7 +14,7 @@
 
 import { api, apiErrorMessage, streamSse } from './api';
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type InstallStep = {
   index: number;
@@ -42,7 +42,7 @@ export interface InstallSession {
   };
 }
 
-// ─── Store ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Store â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const sessions = new Map<string, InstallSession>();
 const listeners = new Set<() => void>();
@@ -87,7 +87,7 @@ function emitInstallLifecycle(agentId: string, phase: InstallPhase) {
   }));
 }
 
-// ─── Actions ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface StartBackgroundInstallOpts {
   agentId: string;
@@ -99,7 +99,7 @@ export interface StartBackgroundInstallOpts {
 
 /**
  * Kicks off a background install for the given agent.
- * Does NOT block — returns immediately. Progress is observable via the store.
+ * Does NOT block â€” returns immediately. Progress is observable via the store.
  */
 export function startBackgroundInstall(opts: StartBackgroundInstallOpts): void {
   if (hasActiveInstall(opts.agentId)) return;
@@ -124,7 +124,7 @@ export function dismissInstallSession(agentId: string): void {
   bump();
 }
 
-// ─── SSE Stream Consumer ────────────────────────────────────────────────────
+// â”€â”€â”€ SSE Stream Consumer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function runInstallStream(opts: StartBackgroundInstallOpts, session: InstallSession) {
   try {
@@ -161,7 +161,6 @@ async function runInstallStream(opts: StartBackgroundInstallOpts, session: Insta
         });
         emitInstallLifecycle(opts.agentId, 'complete');
       } catch {
-        // Best-effort — agent still created, user can fix config later
       }
     } else if (session.phase === 'complete') {
       // Even without a binaryPath, re-register with the adapter config; the API
@@ -192,7 +191,6 @@ async function runInstallStream(opts: StartBackgroundInstallOpts, session: Insta
       await updateAgentStatus(opts.agentId, 'error');
       emitInstallLifecycle(opts.agentId, 'error');
     } catch {
-      // best-effort
     }
     bump();
   }
@@ -242,6 +240,9 @@ function handleSSEEvent(session: InstallSession, event: string, payload: unknown
       bump();
     }
   } catch {
-    // Malformed SSE data — skip
+    // Malformed SSE data â€” skip
   }
 }
+
+
+

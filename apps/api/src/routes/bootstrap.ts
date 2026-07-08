@@ -4,14 +4,14 @@ import { z } from 'zod';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { ChannelBridge } from '../services/channelBridge.js';
+import type { ChannelBridge } from '../services/conversation/channelBridge.js';
 import type { CredentialVault } from '../services/credentialVault.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
-import { commissionAgent, type CommissionAgentInput } from '../services/agentCommission.js';
+import { commissionAgent, type CommissionAgentInput } from '../services/agent/agentCommission.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
 const roleSchema = z.enum(['orchestrator', 'manager', 'worker']);

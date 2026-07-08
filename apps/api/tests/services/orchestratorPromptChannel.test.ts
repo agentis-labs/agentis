@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildOrchestratorSystemPrompt,
   responseProfileForChannel,
-} from '../../src/services/orchestratorPrompt.js';
+} from '../../src/services/orchestrator/orchestratorPrompt.js';
 
 const baseContext = {
   workspaceId: 'ws1',

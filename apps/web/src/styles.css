@@ -12,39 +12,43 @@
   --harness-cursor: #3b82f6;
   --harness-http: #6b7280;
 
-  --color-canvas: #08090b;
-  --color-surface: #0f1014;
-  --color-surface-2: #15171c;
-  --color-surface-3: #1c1f26;
-  --color-line: #1b1d22;
-  --color-line-strong: #252830;
-  --color-text-primary: #e8eaee;
-  --color-text-secondary: #a1a8b3;
-  --color-text-muted: #6b7280;
-  --color-text-disabled: #3d4550;
-  --color-accent: #4ade80;
-  --color-accent-hover: #22c55e;
-  --color-accent-soft: rgba(74, 222, 128, 0.1);
-  --color-accent-muted: rgba(74, 222, 128, 0.25);
-  --color-on-accent: #ffffff;
+  /* ── MONOCHROME AUTHORITY — Dark Mode "The Command Center" ──────────
+     Brand is pure ink/paper (black on white). The global accent is WHITE:
+     actionable elements invert (white fill / black text). Chroma survives
+     only inside the scoped color islands (.workflow-scope, .brain-scope). */
+  --color-canvas: #0a0a0b;
+  --color-surface: #0e0e11;
+  --color-surface-2: #16161a;
+  --color-surface-3: #202025;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a6a6ad;
+  --color-text-muted: #6e6e77;
+  --color-text-disabled: #45454d;
+  --color-accent: #fafafa;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgba(255, 255, 255, 0.08);
+  --color-accent-muted: rgba(255, 255, 255, 0.22);
+  --color-on-accent: #0a0a0b;
   --color-success: #4ade80;
   --color-success-soft: rgba(74, 222, 128, 0.1);
-  --color-danger: #ef4444;
-  --color-danger-soft: rgba(239, 68, 68, 0.1);
-  --color-warn: #f59e0b;
-  --color-warn-soft: rgba(245, 158, 11, 0.1);
-  --color-info: #60a5fa;
-  --color-info-soft: rgba(96, 165, 250, 0.1);
+  --color-danger: #f26d6d;
+  --color-danger-soft: rgba(242, 109, 109, 0.11);
+  --color-warn: #e0b341;
+  --color-warn-soft: rgba(224, 179, 65, 0.11);
+  --color-info: #d4d4d8;
+  --color-info-soft: rgba(212, 212, 216, 0.1);
   --color-canvas-grid: #1b1d22;
   --color-canvas-grid-far: rgba(255, 255, 255, 0.04);
   --color-canvas-grid-near: rgba(255, 255, 255, 0.12);
-  --color-canvas-ambient: rgba(74, 222, 128, 0.022);
-  --color-home-glow-idle: rgba(139, 92, 246, 0.06);
-  --color-home-halo-idle: rgba(139, 92, 246, 0.024);
-  --color-home-glow-active: rgba(139, 92, 246, 0.11);
-  --color-home-halo-active: rgba(139, 92, 246, 0.044);
-  --color-node-surface: #15171c;
-  --color-control-hover: #1c1f26;
+  --color-canvas-ambient: rgba(255, 255, 255, 0.02);
+  --color-home-glow-idle: rgba(255, 255, 255, 0.05);
+  --color-home-halo-idle: rgba(255, 255, 255, 0.02);
+  --color-home-glow-active: rgba(255, 255, 255, 0.09);
+  --color-home-halo-active: rgba(255, 255, 255, 0.038);
+  --color-node-surface: #16161a;
+  --color-control-hover: #202025;
   --color-overlay: rgba(2, 6, 23, 0.62);
   --color-overlay-soft: rgba(2, 6, 23, 0.42);
   --color-overlay-strong: rgba(2, 6, 23, 0.78);
@@ -53,7 +57,7 @@
   --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 4px 16px rgba(0, 0, 0, 0.4);
   --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
-  --shadow-glow: 0 0 0 1px rgba(74, 222, 128, 0.3), 0 0 20px rgba(74, 222, 128, 0.15);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 22px rgba(255, 255, 255, 0.1);
   --shadow-floating: 0 24px 80px rgba(0, 0, 0, 0.62);
   --shadow-soft-inset-top: inset 0 12px 8px -8px rgba(0, 0, 0, 0.3);
   --shadow-soft-inset-bottom: inset 0 -12px 8px -8px rgba(0, 0, 0, 0.3);
@@ -65,7 +69,10 @@
   --color-terminal-button-hover: rgba(255, 255, 255, 0.1);
   --color-terminal-button-hover-text: rgba(255, 255, 255, 0.95);
   --color-terminal-body: rgba(0, 0, 0, 0.9);
-  --color-terminal-text: #4ade80;
+  /* Phosphor-semantic terminal: grey-white body text; green reserved for the
+     prompt/cursor + success lines via --color-terminal-accent. */
+  --color-terminal-text: #d4d4d8;
+  --color-terminal-accent: #4ade80;
   --rf-canvas: var(--color-canvas);
 }
 
@@ -78,60 +85,67 @@
   --harness-cursor: #2563eb;
   --harness-http: #4b5563;
 
-  --color-canvas: #f1f5f3;
+  /* ── MONOCHROME AUTHORITY — Light Mode "The Clinical Canvas" ─────────
+     Off-white paper (never blinding #fff on large fills), strict thin
+     borders carry the structure, and the accent is INK BLACK: actionable
+     elements are black-on-white. */
+  --color-canvas: #f6f6f7;
   --color-surface: #ffffff;
-  --color-surface-2: #f4f7f5;
-  --color-surface-3: #e8efeb;
-  --color-line: #b8c4bc;
-  --color-line-strong: #94a49c;
-  --color-text-primary: #102219;
-  --color-text-secondary: #496257;
-  --color-text-muted: #6e847a;
-  --color-text-disabled: #a3b4ac;
-  --color-accent: #087443;
-  --color-accent-hover: #065f38;
-  --color-accent-soft: rgba(8, 116, 67, 0.1);
-  --color-accent-muted: rgba(8, 116, 67, 0.24);
+  --color-surface-2: #f1f1f3;
+  --color-surface-3: #e8e8eb;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d1d1d6;
+  --color-text-primary: #0b0b0c;
+  --color-text-secondary: #52525b;
+  --color-text-muted: #71717a;
+  --color-text-disabled: #a1a1aa;
+  --color-accent: #111113;
+  --color-accent-hover: #000000;
+  --color-accent-soft: rgba(17, 17, 19, 0.06);
+  --color-accent-muted: rgba(17, 17, 19, 0.2);
   --color-on-accent: #ffffff;
-  --color-success: #087443;
-  --color-success-soft: rgba(8, 116, 67, 0.1);
-  --color-danger: #b63d4d;
-  --color-danger-soft: rgba(182, 61, 77, 0.09);
-  --color-warn: #946200;
-  --color-warn-soft: rgba(148, 98, 0, 0.1);
-  --color-info: #1c64b5;
-  --color-info-soft: rgba(28, 100, 181, 0.1);
-  --color-canvas-grid: #c6d5ce;
-  --color-canvas-grid-far: rgba(31, 55, 45, 0.07);
-  --color-canvas-grid-near: rgba(31, 55, 45, 0.16);
-  --color-canvas-ambient: rgba(8, 116, 67, 0.045);
-  --color-home-glow-idle: rgba(8, 116, 67, 0.045);
-  --color-home-halo-idle: rgba(8, 116, 67, 0.018);
-  --color-home-glow-active: rgba(8, 116, 67, 0.1);
-  --color-home-halo-active: rgba(8, 116, 67, 0.038);
+  --color-success: #16a34a;
+  --color-success-soft: rgba(22, 163, 74, 0.1);
+  --color-danger: #dc2626;
+  --color-danger-soft: rgba(220, 38, 38, 0.08);
+  --color-warn: #b45309;
+  --color-warn-soft: rgba(180, 83, 9, 0.1);
+  --color-info: #52525b;
+  --color-info-soft: rgba(82, 82, 91, 0.09);
+  --color-canvas-grid: #e4e4e7;
+  --color-canvas-grid-far: rgba(11, 11, 12, 0.05);
+  --color-canvas-grid-near: rgba(11, 11, 12, 0.12);
+  --color-canvas-ambient: rgba(11, 11, 12, 0.02);
+  --color-home-glow-idle: rgba(11, 11, 12, 0.035);
+  --color-home-halo-idle: rgba(11, 11, 12, 0.015);
+  --color-home-glow-active: rgba(11, 11, 12, 0.07);
+  --color-home-halo-active: rgba(11, 11, 12, 0.03);
   --color-node-surface: #ffffff;
-  --color-control-hover: #e8efeb;
+  --color-control-hover: #e8e8eb;
   --color-overlay: rgba(16, 34, 25, 0.25);
   --color-overlay-soft: rgba(16, 34, 25, 0.14);
   --color-overlay-strong: rgba(16, 34, 25, 0.38);
   --color-glass-panel: rgba(255, 255, 255, 0.9);
-  --color-glass-border: rgba(172, 190, 181, 0.72);
+  --color-glass-border: rgba(17, 17, 19, 0.1);
   --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 2px 5px rgba(16, 34, 25, 0.06), 0 12px 26px rgba(16, 34, 25, 0.07);
   --shadow-dropdown: 0 14px 36px rgba(16, 34, 25, 0.12), 0 0 0 1px rgba(172, 190, 181, 0.44);
   --shadow-modal: 0 22px 58px rgba(16, 34, 25, 0.17), 0 0 0 1px rgba(172, 190, 181, 0.36);
-  --shadow-glow: 0 0 0 1px rgba(8, 116, 67, 0.3), 0 8px 24px rgba(8, 116, 67, 0.13);
+  --shadow-glow: 0 0 0 1px rgba(17, 17, 19, 0.22), 0 8px 22px rgba(17, 17, 19, 0.1);
   --shadow-floating: 0 24px 80px rgba(16, 34, 25, 0.16);
   --shadow-soft-inset-top: inset 0 12px 8px -8px rgba(16, 34, 25, 0.1);
   --shadow-soft-inset-bottom: inset 0 -12px 8px -8px rgba(16, 34, 25, 0.1);
-  --color-terminal-header: #17251f;
-  --color-terminal-header-border: rgba(210, 221, 215, 0.3);
-  --color-terminal-label: rgba(236, 244, 240, 0.9);
-  --color-terminal-button: rgba(236, 244, 240, 0.13);
-  --color-terminal-button-text: rgba(225, 235, 230, 0.85);
-  --color-terminal-button-hover: rgba(236, 244, 240, 0.24);
+  /* Terminal stays a dark instrument panel even in light mode (a bright
+     terminal is unreadable); phosphor-semantic like dark. */
+  --color-terminal-header: #18181b;
+  --color-terminal-header-border: rgba(255, 255, 255, 0.1);
+  --color-terminal-label: rgba(244, 244, 245, 0.9);
+  --color-terminal-button: rgba(255, 255, 255, 0.08);
+  --color-terminal-button-text: rgba(228, 228, 231, 0.85);
+  --color-terminal-button-hover: rgba(255, 255, 255, 0.18);
   --color-terminal-button-hover-text: rgba(255, 255, 255, 0.96);
-  --color-terminal-body: #101913;
-  --color-terminal-text: #86efac;
+  --color-terminal-body: #101012;
+  --color-terminal-text: #d4d4d8;
+  --color-terminal-accent: #4ade80;
   --rf-canvas: var(--color-canvas);
 }
 
@@ -148,31 +162,31 @@
    labels → 13.5px body → 15px titles → 26px page titles → 32-40px numerals. */
 .s-surface {
   color-scheme: dark;
-  --color-canvas: #0a0d13;
-  --color-surface: #10141b;
-  --color-surface-2: #171c25;
-  --color-surface-3: #1e242f;
-  --color-line: rgba(255, 255, 255, 0.07);
-  --color-line-strong: rgba(255, 255, 255, 0.14);
-  --color-text-primary: #f4f6fa;
-  --color-text-secondary: #a4aec2;
-  --color-text-muted: #6c7890;
-  --color-text-disabled: #414a5e;
-  --color-accent: #597aff;
-  --color-accent-hover: #7590ff;
-  --color-accent-soft: rgba(89, 122, 255, 0.13);
-  --color-accent-muted: rgba(89, 122, 255, 0.32);
-  --color-on-accent: #ffffff;
-  --color-success: #32d583;
-  --color-success-soft: rgba(50, 213, 131, 0.13);
-  --color-warn: #fdb022;
-  --color-warn-soft: rgba(253, 176, 34, 0.13);
-  --color-danger: #f97066;
-  --color-danger-soft: rgba(249, 112, 102, 0.12);
-  --color-info: #36bffa;
-  --color-info-soft: rgba(54, 191, 250, 0.12);
-  --color-overlay: rgba(4, 8, 18, 0.66);
-  --shadow-glow: 0 0 0 1px rgba(89, 122, 255, 0.35), 0 0 24px rgba(89, 122, 255, 0.16);
+  --color-canvas: #0a0a0b;
+  --color-surface: #0e0e11;
+  --color-surface-2: #16161a;
+  --color-surface-3: #202025;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a6a6ad;
+  --color-text-muted: #6e6e77;
+  --color-text-disabled: #45454d;
+  --color-accent: #fafafa;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgba(255, 255, 255, 0.08);
+  --color-accent-muted: rgba(255, 255, 255, 0.22);
+  --color-on-accent: #0a0a0b;
+  --color-success: #4ade80;
+  --color-success-soft: rgba(74, 222, 128, 0.12);
+  --color-warn: #e0b341;
+  --color-warn-soft: rgba(224, 179, 65, 0.12);
+  --color-danger: #f26d6d;
+  --color-danger-soft: rgba(242, 109, 102, 0.12);
+  --color-info: #d4d4d8;
+  --color-info-soft: rgba(212, 212, 216, 0.1);
+  --color-overlay: rgba(4, 4, 6, 0.66);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 24px rgba(255, 255, 255, 0.1);
   --app-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.006) 46%, rgba(255, 255, 255, 0) 100%), var(--color-surface);
   --app-card-border: 1px solid rgba(255, 255, 255, 0.07);
   --app-card-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset, 0 1px 2px rgba(0, 0, 0, 0.42), 0 14px 36px -14px rgba(0, 0, 0, 0.6);
@@ -184,31 +198,31 @@
 :root.light .s-surface,
 .s-surface[data-appearance='light'] {
   color-scheme: light;
-  --color-canvas: #f9fafb;
+  --color-canvas: #f6f6f7;
   --color-surface: #ffffff;
-  --color-surface-2: #f2f4f7;
-  --color-surface-3: #eaecf0;
-  --color-line: #e4e7ec;
-  --color-line-strong: #d0d5dd;
-  --color-text-primary: #101828;
-  --color-text-secondary: #475467;
-  --color-text-muted: #667085;
-  --color-text-disabled: #98a2b3;
-  --color-accent: #465fff;
-  --color-accent-hover: #3641f5;
-  --color-accent-soft: rgba(70, 95, 255, 0.09);
-  --color-accent-muted: rgba(70, 95, 255, 0.28);
+  --color-surface-2: #f1f1f3;
+  --color-surface-3: #e8e8eb;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d1d1d6;
+  --color-text-primary: #0b0b0c;
+  --color-text-secondary: #52525b;
+  --color-text-muted: #71717a;
+  --color-text-disabled: #a1a1aa;
+  --color-accent: #111113;
+  --color-accent-hover: #000000;
+  --color-accent-soft: rgba(17, 17, 19, 0.06);
+  --color-accent-muted: rgba(17, 17, 19, 0.2);
   --color-on-accent: #ffffff;
-  --color-success: #12b76a;
-  --color-success-soft: rgba(18, 183, 106, 0.11);
-  --color-warn: #dc6803;
-  --color-warn-soft: rgba(247, 144, 9, 0.13);
-  --color-danger: #d92d20;
-  --color-danger-soft: rgba(240, 68, 56, 0.09);
-  --color-info: #0086c9;
-  --color-info-soft: rgba(54, 191, 250, 0.13);
-  --color-overlay: rgba(16, 24, 40, 0.4);
-  --shadow-glow: 0 0 0 1px rgba(70, 95, 255, 0.28), 0 8px 24px rgba(70, 95, 255, 0.12);
+  --color-success: #16a34a;
+  --color-success-soft: rgba(22, 163, 74, 0.11);
+  --color-warn: #b45309;
+  --color-warn-soft: rgba(180, 83, 9, 0.12);
+  --color-danger: #dc2626;
+  --color-danger-soft: rgba(220, 38, 38, 0.09);
+  --color-info: #52525b;
+  --color-info-soft: rgba(82, 82, 91, 0.1);
+  --color-overlay: rgba(11, 11, 12, 0.4);
+  --shadow-glow: 0 0 0 1px rgba(17, 17, 19, 0.22), 0 8px 24px rgba(17, 17, 19, 0.1);
   --app-card-bg: #ffffff;
   --app-card-border: 1px solid #e4e7ec;
   --app-card-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 10px 24px -12px rgba(16, 24, 40, 0.07);
@@ -219,36 +233,105 @@
    after; values mirror the base dark bundle above). */
 :root .s-surface[data-appearance='dark'] {
   color-scheme: dark;
-  --color-canvas: #0a0d13;
-  --color-surface: #10141b;
-  --color-surface-2: #171c25;
-  --color-surface-3: #1e242f;
-  --color-line: rgba(255, 255, 255, 0.07);
-  --color-line-strong: rgba(255, 255, 255, 0.14);
-  --color-text-primary: #f4f6fa;
-  --color-text-secondary: #a4aec2;
-  --color-text-muted: #6c7890;
-  --color-text-disabled: #414a5e;
-  --color-accent: #597aff;
-  --color-accent-hover: #7590ff;
-  --color-accent-soft: rgba(89, 122, 255, 0.13);
-  --color-accent-muted: rgba(89, 122, 255, 0.32);
-  --color-on-accent: #ffffff;
-  --color-success: #32d583;
-  --color-success-soft: rgba(50, 213, 131, 0.13);
-  --color-warn: #fdb022;
-  --color-warn-soft: rgba(253, 176, 34, 0.13);
-  --color-danger: #f97066;
-  --color-danger-soft: rgba(249, 112, 102, 0.12);
-  --color-info: #36bffa;
-  --color-info-soft: rgba(54, 191, 250, 0.12);
-  --color-overlay: rgba(4, 8, 18, 0.66);
-  --shadow-glow: 0 0 0 1px rgba(89, 122, 255, 0.35), 0 0 24px rgba(89, 122, 255, 0.16);
+  --color-canvas: #0a0a0b;
+  --color-surface: #0e0e11;
+  --color-surface-2: #16161a;
+  --color-surface-3: #202025;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a6a6ad;
+  --color-text-muted: #6e6e77;
+  --color-text-disabled: #45454d;
+  --color-accent: #fafafa;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgba(255, 255, 255, 0.08);
+  --color-accent-muted: rgba(255, 255, 255, 0.22);
+  --color-on-accent: #0a0a0b;
+  --color-success: #4ade80;
+  --color-success-soft: rgba(74, 222, 128, 0.12);
+  --color-warn: #e0b341;
+  --color-warn-soft: rgba(224, 179, 65, 0.12);
+  --color-danger: #f26d6d;
+  --color-danger-soft: rgba(242, 109, 102, 0.12);
+  --color-info: #d4d4d8;
+  --color-info-soft: rgba(212, 212, 216, 0.1);
+  --color-overlay: rgba(4, 4, 6, 0.66);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 24px rgba(255, 255, 255, 0.1);
   --app-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.006) 46%, rgba(255, 255, 255, 0) 100%), var(--color-surface);
   --app-card-border: 1px solid rgba(255, 255, 255, 0.07);
   --app-card-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset, 0 1px 2px rgba(0, 0, 0, 0.42), 0 14px 36px -14px rgba(0, 0, 0, 0.6);
   --app-tile-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--color-surface-2);
   --app-modal-shadow: 0 24px 72px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* ── Reserved color islands ─────────────────────────────────────────
+   The global shell is monochrome. Chroma survives in exactly two scoped
+   contexts, each re-pointing `--color-accent` (+ glow/terminal) locally so
+   every token consumer inside them adopts the island color with ZERO
+   component changes. Wrap the workflow canvas route in `.workflow-scope`
+   and the Brain page root in `.brain-scope`. */
+
+/* Workflow / Canvas — green = execution & flow. The running-node halo and
+   marching edges reference --color-accent, so they light green in-canvas and
+   white everywhere else, automatically. */
+.workflow-scope {
+  --color-accent: #4ade80;
+  --color-accent-hover: #22c55e;
+  --color-accent-soft: rgba(74, 222, 128, 0.12);
+  --color-accent-muted: rgba(74, 222, 128, 0.28);
+  --color-on-accent: #05130b;
+  --shadow-glow: 0 0 0 1px rgba(74, 222, 128, 0.35), 0 0 22px rgba(74, 222, 128, 0.16);
+  --color-canvas-ambient: rgba(74, 222, 128, 0.03);
+  --color-terminal-text: #4ade80;
+}
+:root[data-theme='light'] .workflow-scope,
+:root.light .workflow-scope {
+  --color-accent: #087443;
+  --color-accent-hover: #065f38;
+  --color-accent-soft: rgba(8, 116, 67, 0.1);
+  --color-accent-muted: rgba(8, 116, 67, 0.24);
+  --color-on-accent: #ffffff;
+  --shadow-glow: 0 0 0 1px rgba(8, 116, 67, 0.3), 0 8px 24px rgba(8, 116, 67, 0.13);
+  --color-canvas-ambient: rgba(8, 116, 67, 0.045);
+}
+
+/* Brain — violet = cognition. Deeper and darker than the app base, per brand
+   direction. Surfaces sink into an indigo-black; accent is a luminous violet. */
+.brain-scope {
+  --color-canvas: #08070d;
+  --color-surface: #0d0b15;
+  --color-surface-2: #14101f;
+  --color-surface-3: #1c1830;
+  --color-node-surface: #14101f;
+  --color-control-hover: #1c1830;
+  --color-accent: #8b5cf6;
+  --color-accent-hover: #a78bfa;
+  --color-accent-soft: rgba(139, 92, 246, 0.14);
+  --color-accent-muted: rgba(139, 92, 246, 0.34);
+  --color-on-accent: #ffffff;
+  --shadow-glow: 0 0 0 1px rgba(139, 92, 246, 0.35), 0 0 26px rgba(139, 92, 246, 0.14);
+  --color-canvas-ambient: rgba(139, 92, 246, 0.04);
+  --color-home-glow-idle: rgba(139, 92, 246, 0.07);
+  --color-home-halo-idle: rgba(139, 92, 246, 0.028);
+  --color-home-glow-active: rgba(139, 92, 246, 0.13);
+  --color-home-halo-active: rgba(139, 92, 246, 0.05);
+}
+:root[data-theme='light'] .brain-scope,
+:root.light .brain-scope {
+  --color-canvas: #f4f2fb;
+  --color-surface: #ffffff;
+  --color-surface-2: #f2eefb;
+  --color-surface-3: #e9e2f7;
+  --color-node-surface: #ffffff;
+  --color-control-hover: #e9e2f7;
+  --color-accent: #6d28d9;
+  --color-accent-hover: #5b21b6;
+  --color-accent-soft: rgba(109, 40, 217, 0.1);
+  --color-accent-muted: rgba(109, 40, 217, 0.26);
+  --color-on-accent: #ffffff;
+  --shadow-glow: 0 0 0 1px rgba(109, 40, 217, 0.28), 0 8px 24px rgba(109, 40, 217, 0.12);
+  --color-canvas-ambient: rgba(109, 40, 217, 0.045);
 }
 
 /* ── Kit primitives (read the `--s-*` structure vars + the palette above) ── */
@@ -712,11 +795,12 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
   padding: 0 16px;
   border-radius: 8px;
   
-  /* Use the green accent colors by default */
-  --glow-color: rgba(8, 116, 67, 0.08); 
+  /* Follow the active accent (monochrome globally; green/violet inside the
+     workflow/brain islands) via accent tokens — no hardcoded hue. */
+  --glow-color: var(--color-accent-soft);
   --accent-color: var(--color-accent);
-  --border-glow: rgba(8, 116, 67, 0.25);
-  
+  --border-glow: var(--color-accent-muted);
+
   border: 1px solid var(--border-glow);
   background: linear-gradient(135deg, var(--glow-color) 0%, var(--color-surface-2) 100%);
   color: var(--color-text-primary);
@@ -729,11 +813,6 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
   overflow: hidden;
   cursor: pointer;
   outline: none;
-}
-
-:root:not([data-theme='light']):not(.light) .btn-premium-highlight {
-  --glow-color: rgba(74, 222, 128, 0.12);
-  --border-glow: rgba(74, 222, 128, 0.3);
 }
 
 .btn-premium-highlight::before {
@@ -752,26 +831,18 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
 }
 
 .btn-premium-highlight:hover {
-  border-color: rgba(74, 222, 128, 0.55);
+  border-color: var(--color-accent);
   color: var(--color-text-primary);
-  box-shadow: 
+  box-shadow:
     0 0 20px var(--glow-color),
-    0 4px 12px rgba(74, 222, 128, 0.15),
+    0 4px 12px var(--color-accent-soft),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
   transform: translateY(-1.5px);
 }
 
-:root[data-theme='light'] .btn-premium-highlight:hover,
-:root.light .btn-premium-highlight:hover {
-  border-color: rgba(8, 116, 67, 0.55);
-  box-shadow: 
-    0 0 20px var(--glow-color),
-    0 4px 12px rgba(8, 116, 67, 0.15);
-}
-
 .btn-premium-highlight:hover::before {
   opacity: 0.8;
-  background: linear-gradient(to bottom right, var(--accent-color), rgba(74, 222, 128, 0.2));
+  background: linear-gradient(to bottom right, var(--accent-color), var(--color-accent-soft));
 }
 
 .btn-premium-highlight:active {
@@ -802,11 +873,11 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
   100% { background-position: 200% 0; }
 }
 
-/* Composer glow pulse */
+/* Composer glow pulse — follows the active accent (white globally). */
 @keyframes composer-glow-pulse {
-  0% { box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.1), 0 4px 16px rgba(0, 0, 0, 0.4); }
-  50% { box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.3), 0 0 12px rgba(74, 222, 128, 0.15), 0 4px 16px rgba(0, 0, 0, 0.4); }
-  100% { box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.1), 0 4px 16px rgba(0, 0, 0, 0.4); }
+  0% { box-shadow: 0 0 0 1px var(--color-accent-soft), 0 4px 16px rgba(0, 0, 0, 0.4); }
+  50% { box-shadow: 0 0 0 2px var(--color-accent-muted), 0 0 12px var(--color-accent-soft), 0 4px 16px rgba(0, 0, 0, 0.4); }
+  100% { box-shadow: 0 0 0 1px var(--color-accent-soft), 0 4px 16px rgba(0, 0, 0, 0.4); }
 }
 
 .composer-focused {

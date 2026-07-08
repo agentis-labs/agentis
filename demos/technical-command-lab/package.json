@@ -1,0 +1,13 @@
+{
+  "name": "agentis-technical-command-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A deterministic, OSS-safe Agentis demo workspace for technical operators.",
+  "scripts": {
+    "build:bundle": "node scripts/build-bundle.mjs",
+    "seed": "node scripts/seed-demo.mjs",
+    "mock": "node mock-services/server.mjs",
+    "doctor": "node scripts/doctor.mjs"
+  }
+}

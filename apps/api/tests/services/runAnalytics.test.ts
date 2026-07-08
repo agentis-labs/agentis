@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
-import { aggregateRunAnalytics } from '../../src/services/runAnalytics.js';
+import { aggregateRunAnalytics } from '../../src/services/run/runAnalytics.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 function seedWorkflow(ctx: TestContext, title: string, nodeId: string): string {

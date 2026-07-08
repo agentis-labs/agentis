@@ -1,7 +1,7 @@
-/**
- * ListenerInspector — structured editor for a persistent_listener trigger
- * (EXTENSIONS-AND-LISTENER-10X §4.2). Replaces the old "plain text" placeholder
- * with a three-layer wizard: SOURCE → PREDICATE → FIRE POLICY.
+﻿/**
+ * ListenerInspector â€” structured editor for a persistent_listener trigger
+ * (EXTENSIONS-AND-LISTENER-10X Â§4.2). Replaces the old "plain text" placeholder
+ * with a three-layer wizard: SOURCE â†’ PREDICATE â†’ FIRE POLICY.
  *
  * The full ListenerConfig is stored on the trigger node's `data.listenerConfig`
  * so it round-trips with the graph; when the trigger is registered the same
@@ -44,8 +44,8 @@ const SOURCE_META: Array<{ kind: SourceKind; label: string; blurb: string; disab
   { kind: 'agent_event', label: 'Agent event', blurb: 'Fire when another agent emits an event on the bus.' },
   { kind: 'workflow_event', label: 'Workflow event', blurb: 'Fire when another workflow run finishes.' },
   { kind: 'file_watch', label: 'File watch', blurb: 'Watch a path for add/change/unlink.' },
-  { kind: 'message_queue', label: 'Message queue', blurb: 'AMQP / Kafka / Redis / SQS — needs a broker add-on.', disabled: true },
-  { kind: 'db_notify', label: 'Database notify', blurb: 'Postgres LISTEN/NOTIFY — needs a pg add-on.', disabled: true },
+  { kind: 'message_queue', label: 'Message queue', blurb: 'AMQP / Kafka / Redis / SQS â€” needs a broker add-on.', disabled: true },
+  { kind: 'db_notify', label: 'Database notify', blurb: 'Postgres LISTEN/NOTIFY â€” needs a pg add-on.', disabled: true },
 ];
 
 const PREDICATE_META = [
@@ -57,7 +57,7 @@ const PREDICATE_META = [
 ];
 
 const POLICY_META = [
-  { mode: 'immediate', label: 'Immediate', blurb: '1 event → 1 run.' },
+  { mode: 'immediate', label: 'Immediate', blurb: '1 event â†’ 1 run.' },
   { mode: 'leading_edge', label: 'Leading edge', blurb: 'Fire once, ignore the burst for a cooldown. Best for agents.' },
   { mode: 'debounce', label: 'Debounce', blurb: 'Fire the latest once the stream goes quiet.' },
   { mode: 'throttle', label: 'Throttle', blurb: 'At most one run per window; newest wins.' },
@@ -141,8 +141,8 @@ export function ListenerInspector({
       </div>
       {triggerId && (
         <div className="mb-2 text-right text-[10px] text-text-muted">
-          {saveState === 'saving' && 'Saving to trigger…'}
-          {saveState === 'saved' && '✓ Saved to trigger'}
+          {saveState === 'saving' && 'Saving to triggerâ€¦'}
+          {saveState === 'saved' && 'âœ“ Saved to trigger'}
           {saveState === 'error' && <span className="text-danger">Save failed</span>}
         </div>
       )}
@@ -183,7 +183,7 @@ export function ListenerInspector({
                   value={config.source.extensionId as string ?? ''}
                   onChange={(e) => patchSource({ extensionId: e.target.value, operationName: undefined })}
                 >
-                  <option value="">— pick a listener-source extension —</option>
+                  <option value="">â€” pick a listener-source extension â€”</option>
                   {sources.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
                 {sources.length === 0 && (
@@ -206,7 +206,7 @@ export function ListenerInspector({
                       value={config.source.operationName as string ?? ''}
                       onChange={(e) => patchSource({ operationName: e.target.value })}
                     >
-                      <option value="">— operation —</option>
+                      <option value="">â€” operation â€”</option>
                       {selectedExt.operations.map((op) => <option key={op.name} value={op.name}>{op.name}</option>)}
                     </select>
                     {selectedOperation?.description && (
@@ -228,7 +228,7 @@ export function ListenerInspector({
             {(sourceKind === 'websocket' || sourceKind === 'sse') && (
               <>
                 <label className={labelCls}>URL</label>
-                <input className={inputCls} placeholder={sourceKind === 'websocket' ? 'wss://…' : 'https://…/stream'} value={config.source.url as string ?? ''} onChange={(e) => patchSource({ url: e.target.value })} />
+                <input className={inputCls} placeholder={sourceKind === 'websocket' ? 'wss://â€¦' : 'https://â€¦/stream'} value={config.source.url as string ?? ''} onChange={(e) => patchSource({ url: e.target.value })} />
               </>
             )}
 
@@ -302,7 +302,7 @@ export function ListenerInspector({
           {predicateKind === 'extension' && (
             <div className="mt-2 space-y-2">
               <select className={inputCls} value={config.predicate?.extensionId as string ?? ''} onChange={(e) => patchPredicate({ extensionId: e.target.value })}>
-                <option value="">— extension —</option>
+                <option value="">â€” extension â€”</option>
                 {sources.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
               <input className={inputCls} placeholder="operation name" value={config.predicate?.operationName as string ?? ''} onChange={(e) => patchPredicate({ operationName: e.target.value })} />
@@ -408,3 +408,6 @@ function JsonConfigEditor({
     </div>
   );
 }
+
+
+

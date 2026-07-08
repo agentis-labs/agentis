@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 
 export const ambientKindSchema = z.enum(['local', 'dev', 'staging', 'prod', 'fleet', 'custom']);
 
@@ -30,3 +30,6 @@ export const updateAmbientSchema = z.object({
   kind: ambientKindSchema.optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
 });
+
+
+

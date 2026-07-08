@@ -11,7 +11,7 @@ import { LedgerService } from '../../src/services/ledger.js';
 import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { CognitivePromotionQueueWorker } from '../../src/services/cognitivePromotionQueueWorker.js';
 import { AppStore } from '@agentis/app';

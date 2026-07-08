@@ -1,4 +1,4 @@
-import type { ToolCallData } from './toolCalls';
+﻿import type { ToolCallData } from './toolCalls';
 
 export interface ChatMessageLike {
   id: string;
@@ -140,3 +140,6 @@ function turnIdFromLocalId(id: string): string | null {
   if (id.startsWith('stream-')) return id.slice('stream-'.length);
   return null;
 }
+
+
+

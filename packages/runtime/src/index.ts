@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Runtime package seam.
  *
  * Agentis apps run inside Agentis itself. This package is the stable lifecycle
@@ -22,3 +22,6 @@ export type AgentisRuntimeBootstrap<THandle extends AgentisRuntimeHandle = Agent
 ) => Promise<THandle>;
 
 export const AGENTIS_RUNTIME_PACKAGE = '@agentis/runtime';
+
+
+

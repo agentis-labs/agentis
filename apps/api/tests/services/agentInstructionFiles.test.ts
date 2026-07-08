@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { listAgentInstructionFiles } from '../../src/services/agentInstructionFiles.js';
+import { listAgentInstructionFiles } from '../../src/services/agent/agentInstructionFiles.js';
 
 let tmp: string | null = null;
 

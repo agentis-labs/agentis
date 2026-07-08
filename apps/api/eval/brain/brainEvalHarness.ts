@@ -15,7 +15,7 @@
  */
 
 import type { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
-import type { BrainAskService } from '../../src/services/brainAskService.js';
+import type { BrainAskService } from '../../src/services/brain/brainAskService.js';
 
 export type EvalCategory =
   | 'single_hop'

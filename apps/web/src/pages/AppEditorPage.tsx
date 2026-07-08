@@ -1,13 +1,13 @@
-/**
- * AppEditorPage — the single editor for an Agentic App (route `/apps/:id`).
+﻿/**
+ * AppEditorPage â€” the single editor for an Agentic App (route `/apps/:id`).
  *
  * One primitive, one page. The familiar workflow-canvas chrome with facet tabs:
- *   Interface · Workflow · Data · Brain
+ *   Interface Â· Workflow Â· Data Â· Brain
  *
  * The Workflow facet embeds the real canvas (CanvasEngine via WorkflowCanvasPage
  * in embedded mode) with a switcher over the App's workflow set. A brand-new App
  * opens on Workflow (canvas); an App that already has an interface opens on
- * Interface. There is no separate run/build destination — the Interface facet
+ * Interface. There is no separate run/build destination â€” the Interface facet
  * carries the live preview, and public sharing is a per-surface concern.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -133,7 +133,7 @@ export function AppEditorPage() {
   const [domains, setDomains] = useState<AppEngineDomain[]>([]);
   const [agents, setAgents] = useState<AppEngineAgent[]>([]);
 
-  // Org options for the App Engine modal (Domain/Owner assignment). Auxiliary —
+  // Org options for the App Engine modal (Domain/Owner assignment). Auxiliary â€”
   // failure here must not block the editor, so it loads independently.
   useEffect(() => {
     let cancelled = false;
@@ -161,11 +161,11 @@ export function AppEditorPage() {
       setNameDraft(appRow.name);
       setSurfaces(surfaceRows);
       setCollections(collectionRows);
-      // The control-plane summary already carries id + title — no per-workflow fetch.
+      // The control-plane summary already carries id + title â€” no per-workflow fetch.
       const refs: WorkflowRef[] = workflowSummaries.map((w) => ({ id: w.id, title: w.title }));
       setWorkflows(refs);
       // Register real names so id-only surfaces (the "Viewing" pill) can resolve
-      // "App · <name>" instead of showing the raw app/workflow id.
+      // "App Â· <name>" instead of showing the raw app/workflow id.
       const { registerResourceName } = useAgentisStore.getState();
       registerResourceName('app', appRow.id, appRow.name);
       for (const w of refs) registerResourceName('workflow', w.id, w.title);
@@ -187,16 +187,15 @@ export function AppEditorPage() {
   // Keep the workspace room subscription alive so live build events reach us.
   useEffect(() => rtSubscribe('workspace', {}), []);
 
-  // Live build reveal — the core fix for "when the agent creates things it does
+  // Live build reveal â€” the core fix for "when the agent creates things it does
   // not update in realtime". When the orchestrator builds or edits a workflow
-  // this App owns, select it and switch to the Workflow facet so the operator
   // watches it stream node-by-node; on completion, refresh so a brand-new
   // workflow appears in the switcher with its final graph.
   //
   // WORKFLOW_BUILD_PHASE fires ('analyzing'/'drafting'/'repairing'/'reviewing')
   // well before the workflow row is inserted (build.ts persists it right before
   // the node-placement loop). Selecting the canvas that early 404s the embedded
-  // WorkflowCanvasPage's fetch and it never recovers — so only reveal on
+  // WorkflowCanvasPage's fetch and it never recovers â€” so only reveal on
   // CANVAS_NODE_PLACED/CANVAS_BUILD_COMPLETE, which are only ever published
   // after the row exists.
   const revealedBuildRef = useRef<string | null>(null);
@@ -208,7 +207,6 @@ export function AppEditorPage() {
     const known = workflows.some((w) => w.id === wfId);
     if (!known && payload.appId !== id) return; // not this App's build
     setSelectedWorkflowId(wfId);
-    // Reveal the Workflow facet ONCE per build so we don't yank the operator back
     // on every phase if they navigate away while it streams.
     if (revealedBuildRef.current !== wfId) {
       revealedBuildRef.current = wfId;
@@ -259,7 +257,7 @@ export function AppEditorPage() {
     }
   }, [currentSurface]);
 
-  // ── Actions ──────────────────────────────────────────────
+  // â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   const commitName = useCallback(async () => {
     setEditingName(false);
@@ -371,7 +369,7 @@ export function AppEditorPage() {
     setStatus(null);
     try {
       const name = uniqueName('surface', surfaces.map((s) => s.name));
-      // A new interface starts EMPTY and opens in Edit mode — you (or the agent on
+      // A new interface starts EMPTY and opens in Edit mode â€” you (or the agent on
       // request) build it from scratch, instead of dropping a generic template.
       await appsApi.upsertSurface(id, { name, kind: 'page', view: emptySurfaceView(), actions: [] });
       await load();
@@ -493,7 +491,7 @@ export function AppEditorPage() {
       const result = await appsApi.generateSurface(id, { prompt, surface: currentSurface.name });
       setSurfaceDraft(JSON.stringify(result.view, null, 2));
       setSurfaceActionsDraft(result.actions ?? []);
-      setStatus(result.source === 'model' ? 'Generated — review and Save' : 'Drafted a starter — review and Save');
+      setStatus(result.source === 'model' ? 'Generated â€” review and Save' : 'Drafted a starter â€” review and Save');
     } catch (e) {
       setStatus(apiErrorMessage(e));
     } finally {
@@ -530,7 +528,7 @@ export function AppEditorPage() {
     }
   }, [load]);
 
-  // ── Render ───────────────────────────────────────────────
+  // â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   if (!loaded) {
     return (
@@ -550,7 +548,7 @@ export function AppEditorPage() {
 
   return (
     <div className="flex h-full min-w-0 flex-col">
-      {/* Slim command strip — mirrors the workflow canvas chrome. */}
+      {/* Slim command strip â€” mirrors the workflow canvas chrome. */}
       <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-4 py-2">
         <button
           onClick={() => navigate('/apps')}
@@ -596,7 +594,7 @@ export function AppEditorPage() {
         >
           <Settings size={13} />
         </button>
-        <span className="text-[11px] text-text-muted">v{app.version} · {app.status}</span>
+        <span className="text-[11px] text-text-muted">v{app.version} Â· {app.status}</span>
         <div className="mx-1 h-4 w-px bg-line" />
         <AppTeamStrip appId={app.id} />
         <div className="ml-auto flex min-w-0 items-center justify-end gap-2">
@@ -612,7 +610,7 @@ export function AppEditorPage() {
         </div>
       </div>
 
-      {/* Facet body — each fills the remaining height. */}
+      {/* Facet body â€” each fills the remaining height. */}
       <div className="min-h-0 flex-1 overflow-hidden">
         {facet === 'workflow' && (
           <WorkflowFacet
@@ -669,7 +667,7 @@ export function AppEditorPage() {
   );
 }
 
-// ── Workflow facet — switcher + the real embedded canvas ─────
+// â”€â”€ Workflow facet â€” switcher + the real embedded canvas â”€â”€â”€â”€â”€
 
 function WorkflowFacet({
   workflows,
@@ -886,7 +884,7 @@ function WorkflowFacet({
   );
 }
 
-// ── Interface facet — the living app (Live) with Edit/Code as opt-in modes ──
+// â”€â”€ Interface facet â€” the living app (Live) with Edit/Code as opt-in modes â”€â”€
 
 type BuilderMode = 'live' | 'edit' | 'code';
 
@@ -945,8 +943,7 @@ function InterfaceFacet({
   const view = parseViewDraft(draft);
   const selectedNode = view ? getNodeAtPath(view, selectedPath) : null;
 
-  // A new/empty surface opens in Edit mode — there's nothing to preview Live yet,
-  // so drop the operator straight into building from scratch. A populated surface
+  // A new/empty surface opens in Edit mode â€” there's nothing to preview Live yet,
   // opens in Live. Re-evaluated only when switching surfaces, not on every edit.
   useEffect(() => {
     const v = current?.view as { type?: string; children?: unknown[] } | null | undefined;
@@ -1013,7 +1010,7 @@ function InterfaceFacet({
       <FacetEmpty
         icon={<LayoutGrid size={30} />}
         title="No interface yet"
-        body="Create a surface, then build it visually — drop sections, edit in place, or let the agent draft it from a prompt."
+        body="Create a surface, then build it visually â€” drop sections, edit in place, or let the agent draft it from a prompt."
         action={{ label: 'Create surface', busy: creating, onClick: onCreate }}
       />
     );
@@ -1023,7 +1020,7 @@ function InterfaceFacet({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Top strip: surfaces · mode · AI · save */}
+      {/* Top strip: surfaces Â· mode Â· AI Â· save */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-3 py-2">
         <div className="flex items-center gap-1 overflow-x-auto">
           {surfaces.map((surface) => (
@@ -1151,7 +1148,7 @@ function InterfaceFacet({
         </div>
 
         {mode === 'edit' && view ? (
-          <div className="flex items-center gap-1.5" title="Surface look — applies to the whole surface">
+          <div className="flex items-center gap-1.5" title="Surface look â€” applies to the whole surface">
             <select
               aria-label="Surface theme"
               value={view.style?.theme ?? 'analytics'}
@@ -1165,7 +1162,7 @@ function InterfaceFacet({
             </select>
             <select
               aria-label="Surface design language"
-              title="Design language — the whole look (radii, elevation, gradients, type scale)"
+              title="Design language â€” the whole look (radii, elevation, gradients, type scale)"
               value={view.style?.design ?? ''}
               onChange={(event) => setView({ ...view, style: { ...view.style, ...(event.target.value ? { design: event.target.value as DesignLanguage } : { design: undefined }) } })}
               className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
@@ -1192,7 +1189,7 @@ function InterfaceFacet({
               <input
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Describe a surface for the agent to build…"
+                placeholder="Describe a surface for the agent to buildâ€¦"
                 aria-label="Describe a surface"
                 className="h-8 w-full rounded-btn border border-line bg-canvas pl-7 pr-2 text-[12px] text-text-primary outline-none focus:border-accent"
               />
@@ -1229,7 +1226,7 @@ function InterfaceFacet({
             onChange={(event) => onDraftChange(event.target.value)}
             spellCheck={false}
             className="h-full w-full resize-none bg-canvas p-4 font-mono text-[12px] leading-relaxed text-text-primary outline-none"
-            placeholder="ViewNode JSON…"
+            placeholder="ViewNode JSONâ€¦"
           />
         ) : mode === 'live' ? (
           <div className="h-full overflow-auto bg-canvas">
@@ -1307,7 +1304,7 @@ function EmptyCanvasHint() {
   );
 }
 
-// ── Inspector — properties for the selected node ─────────────
+// â”€â”€ Inspector â€” properties for the selected node â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function SurfaceProperties({
   node,
@@ -1518,7 +1515,7 @@ function DataFacet({ collections, appId }: { collections: CollectionInfo[]; appI
   );
 }
 
-/** Assets produced by (or filed under) this App — screenshots, docs, exports. */
+/** Assets produced by (or filed under) this App â€” screenshots, docs, exports. */
 function AppAssets({ appId }: { appId: string }) {
   const [assets, setAssets] = useState<Artifact[]>([]);
   const [selected, setSelected] = useState<Artifact | null>(null);
@@ -1543,7 +1540,7 @@ function AppAssets({ appId }: { appId: string }) {
         </div>
       </div>
       {!loaded ? (
-        <div className="text-[12px] text-text-muted">Loading…</div>
+        <div className="text-[12px] text-text-muted">Loadingâ€¦</div>
       ) : assets.length === 0 ? (
         <FacetEmpty icon={<Boxes size={30} />} title="No assets yet" body="When this App's agents or workflows produce screenshots, docs, or exports, they appear here." />
       ) : (
@@ -1585,11 +1582,10 @@ function AppAssets({ appId }: { appId: string }) {
   );
 }
 
-// ── Brain facet — the App's intelligence (memory bound to this App) ──────────
+// â”€â”€ Brain facet â€” the App's intelligence (memory bound to this App) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function BrainFacet({ app }: { app: AppRecord }) {
-  // Scoped to the App, not a single workflow: this is the memory the operator
-  // forms and the records promoted via data_promote_memory (AGENTIC-APPS-10X §5.4).
+  // forms and the records promoted via data_promote_memory (AGENTIC-APPS-10X Â§5.4).
   // The learnings panel above surfaces "what this agent learned" (Phase M2) so the
   // improvement loop is visible, not just recorded.
   return (
@@ -1602,7 +1598,7 @@ function BrainFacet({ app }: { app: AppRecord }) {
   );
 }
 
-// ── Shared helpers ───────────────────────────────────────────
+// â”€â”€ Shared helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function FacetEmpty({
   icon,
@@ -1641,3 +1637,6 @@ function uniqueName(base: string, existing: string[]): string {
   while (existing.includes(`${base}-${n}`)) n += 1;
   return `${base}-${n}`;
 }
+
+
+

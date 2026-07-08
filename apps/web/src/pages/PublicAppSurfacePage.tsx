@@ -1,4 +1,4 @@
-/**
+﻿/**
  * PublicAppSurfacePage - renders a shared Agentic App surface read-only.
  *
  * Public links can query token-gated data, but actions and CustomView execution
@@ -113,3 +113,6 @@ export function PublicAppSurfacePage() {
     </div>
   );
 }
+
+
+

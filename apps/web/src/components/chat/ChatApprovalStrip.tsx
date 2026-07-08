@@ -1,4 +1,4 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { api } from '../../lib/api';
 import {
   refreshWorkspaceSnapshot,
@@ -7,12 +7,7 @@ import {
 } from '../../lib/workspaceData';
 import { ApprovalPreviewCard, ApprovalReviewModal } from '../shared/ApprovalReviewModal';
 
-/**
- * ChatApprovalStrip - approvals surfaced above the composer.
- *
- * Structured approvals open the shared review modal before they can be decided.
- * Truly simple approvals keep compact inline actions for fast operator flow.
- */
+
 export function ChatApprovalStrip() {
   const { approvals } = useWorkspaceData();
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -54,3 +49,5 @@ export function ChatApprovalStrip() {
     </div>
   );
 }
+
+

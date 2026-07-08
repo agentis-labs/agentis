@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildTaskRoutes } from '../../src/routes/tasks.js';
-import { AgentSessionService } from '../../src/services/agentSession.js';
+import { AgentSessionService } from '../../src/services/agent/agentSession.js';
 import { PlanService } from '../../src/services/planService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

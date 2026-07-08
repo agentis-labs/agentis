@@ -1,5 +1,5 @@
-/**
- * GenUIShowcasePage — a DEV-only gallery that renders the real AG-UI
+﻿/**
+ * GenUIShowcasePage â€” a DEV-only gallery that renders the real AG-UI
  * `ViewRenderer` against representative archetype surfaces with an in-memory
  * data client. It needs no API/model, so it's a faithful, self-contained proof
  * that the renderer produces designer-grade, themed, data-bound interfaces.
@@ -12,7 +12,7 @@ import type { DesignLanguage, ViewNode } from '@agentis/core';
 import { RuntimeProvider, ViewRenderer } from '../components/apps/ViewRenderer';
 import { DESIGN_LANGUAGES } from '../components/apps/designLanguage';
 
-// ── In-memory datasets the bound nodes read ─────────────────
+// â”€â”€ In-memory datasets the bound nodes read â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const DATA: Record<string, Array<Record<string, unknown>>> = {
   revenue: [
     { month: 'Jan', mrr: 30, expansion: 6 }, { month: 'Feb', mrr: 33, expansion: 7 },
@@ -53,21 +53,21 @@ function stubClient(): AgentisAppClient {
   } as unknown as AgentisAppClient;
 }
 
-// ── Surfaces (the new vocabulary, themed per archetype) ─────
+// â”€â”€ Surfaces (the new vocabulary, themed per archetype) â”€â”€â”€â”€â”€
 
 const ANALYTICS: ViewNode = {
   type: 'Stack',
   gap: 16,
   style: { theme: 'analytics' },
   children: [
-    { type: 'Hero', eyebrow: 'ANALYTICS', title: 'Revenue analytics', subtitle: 'Live metrics the operator keeps current — no human writing code.', actions: [{ action: 'export_report' }, { action: 'share' }] },
+    { type: 'Hero', eyebrow: 'ANALYTICS', title: 'Revenue analytics', subtitle: 'Live metrics the operator keeps current â€” no human writing code.', actions: [{ action: 'export_report' }, { action: 'share' }] },
     {
       type: 'KPIStrip',
       items: [
-        { label: 'MRR', value: '$48.2k', delta: '▲ 8.1%', tone: 'success', spark: [30, 33, 35, 38, 41, 44, 48] },
-        { label: 'Active accounts', value: '1,284', delta: '▲ 3.4%', tone: 'success', spark: [11, 12, 12, 13, 13, 14, 15] },
-        { label: 'Churn', value: '1.9%', delta: '▼ 0.3%', tone: 'danger', spark: [3, 2.6, 2.4, 2.2, 2.1, 2.0, 1.9] },
-        { label: 'NPS', value: '62', delta: '▲ 5', tone: 'accent', spark: [48, 50, 53, 55, 58, 60, 62] },
+        { label: 'MRR', value: '$48.2k', delta: 'â–² 8.1%', tone: 'success', spark: [30, 33, 35, 38, 41, 44, 48] },
+        { label: 'Active accounts', value: '1,284', delta: 'â–² 3.4%', tone: 'success', spark: [11, 12, 12, 13, 13, 14, 15] },
+        { label: 'Churn', value: '1.9%', delta: 'â–¼ 0.3%', tone: 'danger', spark: [3, 2.6, 2.4, 2.2, 2.1, 2.0, 1.9] },
+        { label: 'NPS', value: '62', delta: 'â–² 5', tone: 'accent', spark: [48, 50, 53, 55, 58, 60, 62] },
       ],
     },
     {
@@ -88,7 +88,7 @@ const CONSOLE: ViewNode = {
   gap: 16,
   style: { theme: 'operations', density: 'compact' },
   children: [
-    { type: 'Hero', eyebrow: 'OPERATOR', title: 'Mission control', subtitle: 'A dense ops command center — tabs and rails instead of one giant scroll.' },
+    { type: 'Hero', eyebrow: 'OPERATOR', title: 'Mission control', subtitle: 'A dense ops command center â€” tabs and rails instead of one giant scroll.' },
     {
       type: 'Split',
       ratio: 2,
@@ -131,12 +131,12 @@ const PIPELINE: ViewNode = {
   gap: 16,
   style: { theme: 'product' },
   children: [
-    { type: 'Hero', eyebrow: 'PIPELINE', title: 'Sales pipeline', subtitle: 'A consumer-grade board — the operator moves cards and chases the busywork.' },
+    { type: 'Hero', eyebrow: 'PIPELINE', title: 'Sales pipeline', subtitle: 'A consumer-grade board â€” the operator moves cards and chases the busywork.' },
     {
       type: 'KPIStrip',
       items: [
         { label: 'Open deals', value: '24', tone: 'accent' },
-        { label: 'Weighted', value: '$182k', delta: '▲ 12%', tone: 'success' },
+        { label: 'Weighted', value: '$182k', delta: 'â–² 12%', tone: 'success' },
         { label: 'Win rate', value: '41%', tone: 'neutral' },
         { label: 'Avg cycle', value: '18d', tone: 'neutral' },
       ],
@@ -150,7 +150,7 @@ const CODE: ViewNode = {
   gap: 16,
   style: { theme: 'operations' },
   children: [
-    { type: 'Hero', eyebrow: 'CODE SURFACE', title: 'Full-power tier', subtitle: 'When the typed grammar is not enough, the agent writes JS — sandboxed, on-brand, and live.' },
+    { type: 'Hero', eyebrow: 'CODE SURFACE', title: 'Full-power tier', subtitle: 'When the typed grammar is not enough, the agent writes JS â€” sandboxed, on-brand, and live.' },
     {
       type: 'CodeSurface',
       collections: ['accounts'],
@@ -188,7 +188,7 @@ function surfaceIndexFromHash(): number {
 export function GenUIShowcasePage() {
   const client = useMemo(() => stubClient(), []);
   const [active, setActive] = useState(surfaceIndexFromHash);
-  // `design = undefined` → let each surface's own theme pick its language; otherwise override.
+  // `design = undefined` â†’ let each surface's own theme pick its language; otherwise override.
   const [design, setDesign] = useState<DesignLanguage | undefined>(undefined);
   useEffect(() => {
     const onHash = () => setActive(surfaceIndexFromHash());
@@ -196,14 +196,13 @@ export function GenUIShowcasePage() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
   const current = SURFACES[active] ?? SURFACES[0]!;
-  // Operator override: stamp the chosen design language onto the surface root.
   const node: ViewNode = design ? { ...current.node, style: { ...current.node.style, design } } : current.node;
 
   return (
     <div className="min-h-screen bg-canvas px-6 py-6 text-text-primary">
       <div className="mx-auto max-w-6xl">
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          <span className="text-[13px] font-semibold">GenUI — agent-authored surfaces</span>
+          <span className="text-[13px] font-semibold">GenUI â€” agent-authored surfaces</span>
           <div className="flex gap-1 rounded-btn border border-line bg-surface p-1">
             {SURFACES.map((s, i) => (
               <button
@@ -244,3 +243,5 @@ export function GenUIShowcasePage() {
     </div>
   );
 }
+
+

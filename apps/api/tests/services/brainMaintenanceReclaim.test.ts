@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { BrainCompressionService } from '../../src/services/brainCompressionService.js';
-import { BrainMaintenanceService } from '../../src/services/brainMaintenanceService.js';
+import { BrainCompressionService } from '../../src/services/brain/brainCompressionService.js';
+import { BrainMaintenanceService } from '../../src/services/brain/brainMaintenanceService.js';
 import { SessionMomentService } from '../../src/services/sessionMomentService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

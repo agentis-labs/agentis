@@ -27,14 +27,14 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { validateWorkflowGraph } from '../engine/validateGraph.js';
 import { validateGraphReferences } from '../engine/validateGraphReferences.js';
-import { analyzeWorkflowReadiness } from '../services/workflowReadiness.js';
+import { analyzeWorkflowReadiness } from '../services/workflow/workflowReadiness.js';
 import { buildInitialRunState } from '../engine/initialRunState.js';
 import { hashWorkflowGraph } from '../services/graphHash.js';
-import { normalizeWorkflowGraph } from '../services/workflowGraphNormalization.js';
+import { normalizeWorkflowGraph } from '../services/workflow/workflowGraphNormalization.js';
 import { buildTemplateContext, resolveTemplateDeep } from '../engine/templateResolver.js';
-import { WorkflowTriggerDeploymentService } from '../services/workflowTriggerDeployment.js';
-import { preflightWorkflow } from '../services/workflowPreflight.js';
-import { LOOP_STAGE_LABEL, compassForWorkflow, deriveLoopStage, detectProvenDivergence, graphContentHash, readBuildLoop } from '../services/workflowCompass.js';
+import { WorkflowTriggerDeploymentService } from '../services/workflow/workflowTriggerDeployment.js';
+import { preflightWorkflow } from '../services/workflow/workflowPreflight.js';
+import { LOOP_STAGE_LABEL, compassForWorkflow, deriveLoopStage, detectProvenDivergence, graphContentHash, readBuildLoop } from '../services/workflow/workflowCompass.js';
 
 export function buildWorkflowRoutes(deps: {
   db: AgentisSqliteDb;

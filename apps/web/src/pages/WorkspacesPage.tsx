@@ -1,5 +1,5 @@
-/**
- * WorkspacesPage — workspace list with image upload + clean creation modal.
+﻿/**
+ * WorkspacesPage â€” workspace list with image upload + clean creation modal.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -318,10 +318,13 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
             disabled={!name.trim() || creating}
             className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {creating ? 'Creating…' : 'Create'}
+            {creating ? 'Creatingâ€¦' : 'Create'}
           </button>
         </footer>
       </form>
     </div>
   );
 }
+
+
+

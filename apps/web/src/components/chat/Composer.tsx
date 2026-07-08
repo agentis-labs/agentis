@@ -1,5 +1,5 @@
-/**
- * Composer — UIUX-REFACTOR §4.2.7.
+﻿/**
+ * Composer â€” UIUX-REFACTOR Â§4.2.7.
  *
  * Power-user textarea with:
  *   - `/` slash command palette (run, pause, wake, approve, history,
@@ -8,7 +8,7 @@
  *     react (e.g. open the workflow picker, navigate to /history).
  *   - `@` agent mention popover.
  *   - `#` resource reference popover (workflows, runs).
- *   - Keyboard shortcuts: ↑ to recall last sent, Shift+Enter newline,
+ *   - Keyboard shortcuts: â†‘ to recall last sent, Shift+Enter newline,
  *     Enter to send.
  */
 
@@ -43,7 +43,7 @@ interface SpeechRecognition {
   stop: () => void;
 }
 
-// Module-level draft cache — survives component unmount (panel close/reopen)
+// Module-level draft cache â€” survives component unmount (panel close/reopen)
 const _draftCache = new Map<string, string>();
 const DRAFT_STORAGE_PREFIX = 'agentis.chatDraft.v2';
 
@@ -67,7 +67,7 @@ function writeDraft(key: string, value: string): void {
   try {
     if (value) localStorage.setItem(persistedDraftKey(key), value);
     else localStorage.removeItem(persistedDraftKey(key));
-  } catch { /* storage is best-effort */ }
+  } catch {  }
 }
 
 export function clearDraft(key: string): void {
@@ -261,7 +261,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     adjustHeight();
   }, [text, adjustHeight]);
 
-  // Suggestion sources — agents for @, workflows/runs for #, slash for /.
+  // Suggestion sources â€” agents for @, workflows/runs for #, slash for /.
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
   const [workflows, setWorkflows] = useState<Array<{ id: string; title: string }>>([]);
 
@@ -369,7 +369,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
 
   async function send() {
     // ChatGPT/Gemini-style queue-then-auto-continue: while a turn is running,
-    // sending is NOT a no-op — the caller (ThreadView.handleSend) durably
+    // sending is NOT a no-op â€” the caller (ThreadView.handleSend) durably
     // queues the message and auto-dispatches it once the current turn ends.
     const value = text.trim();
     if (!value && attachments.length === 0) return;
@@ -574,7 +574,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           rows={1}
-          placeholder={placeholder ?? 'Message · / commands · @ agents · # refs'}
+          placeholder={placeholder ?? 'Message Â· / commands Â· @ agents Â· # refs'}
           className="block w-full resize-none border-0 bg-transparent px-3 pt-3 text-sm text-text-primary outline-none"
           style={{ minHeight: '46px', maxHeight: '140px', overflowY: 'auto' }}
         />
@@ -630,8 +630,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
               type="button"
               onClick={() => {
                 // While running with nothing typed, the button stops the
-                // active turn. Once the operator starts typing, it becomes a
-                // Send button again — pressing it queues the message instead
+                // Send button again â€” pressing it queues the message instead
                 // of interrupting the in-flight turn (queue-then-auto-continue).
                 if (isRunning && !hasComposedInput) {
                   onStop?.();
@@ -641,7 +640,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
               }}
               disabled={isRunning && !hasComposedInput ? !onStop : (!hasComposedInput || attachments.some(a => a.loading))}
               aria-label={isRunning && !hasComposedInput ? 'Stop agent response' : isRunning ? 'Queue message' : 'Send message'}
-              title={isRunning && hasComposedInput ? 'Queue this message — it will send once the current reply finishes' : undefined}
+              title={isRunning && hasComposedInput ? 'Queue this message â€” it will send once the current reply finishes' : undefined}
               className={clsx(
                 "grid h-7 w-7 shrink-0 place-items-center rounded-md",
                 isRunning && !hasComposedInput
@@ -659,3 +658,6 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     </div>
   );
 }
+
+
+

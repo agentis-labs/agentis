@@ -21,7 +21,7 @@
 import { Hono } from 'hono';
 import { AgentisError } from '@agentis/core';
 import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
-import type { ChannelBridge } from '../services/channelBridge.js';
+import type { ChannelBridge } from '../services/conversation/channelBridge.js';
 import type { VoiceChannelAdapter } from '../adapters/channels/voice.js';
 
 export function buildWebhookRoutes(deps: {

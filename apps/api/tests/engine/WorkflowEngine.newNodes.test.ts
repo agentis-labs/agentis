@@ -20,7 +20,7 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { WorkflowStoreService } from '../../src/services/workflowStore.js';
+import { WorkflowStoreService } from '../../src/services/workflow/workflowStore.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -693,9 +693,9 @@ describe('WorkflowEngine - checkpoint approvals', () => {
           config: {
             kind: 'transform',
             expression: JSON.stringify({
-              to: 'robsonpradodev@gmail.com',
-              subject: 'Hi Robson',
-              text: 'Hi Robson',
+              to: 'me@example.com',
+              subject: 'Hi Alex',
+              text: 'Hi Alex',
             }),
           },
         },
@@ -757,8 +757,8 @@ describe('WorkflowEngine - checkpoint approvals', () => {
     // Generic action preview — the engine describes whatever side-effecting node
     // the checkpoint guards (here an integration), connector-agnostic.
     expect(approval.summary).toContain('Send Email (agentmail');
-    expect(approval.summary).toContain('to: robsonpradodev@gmail.com');
-    expect(approval.summary).toContain('subject: Hi Robson');
+    expect(approval.summary).toContain('to: me@example.com');
+    expect(approval.summary).toContain('subject: Hi Alex');
     expect(loadRun(runId).status).toBe('WAITING');
   });
 });

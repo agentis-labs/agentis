@@ -10,7 +10,7 @@ import {
   renderOutputTemplate,
   validateWorkflowSpec,
   type WorkflowSpec,
-} from '../../src/services/workflowSpec.js';
+} from '../../src/services/workflow/workflowSpec.js';
 import type { WorkflowGraph } from '@agentis/core';
 
 function baseSpec(overrides: Partial<WorkflowSpec> = {}): WorkflowSpec {

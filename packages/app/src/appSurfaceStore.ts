@@ -1,5 +1,5 @@
-/**
- * AppSurfaceStore — persistence + mutation for AG-UI surfaces (AGENTIC-APPS-10X §4).
+﻿/**
+ * AppSurfaceStore â€” persistence + mutation for AG-UI surfaces (AGENTIC-APPS-10X Â§4).
  *
  * A surface holds an agent-authored `ViewNode` tree and the actions its
  * buttons/forms may invoke. `render` replaces the tree (ui_render); `patch`
@@ -87,7 +87,7 @@ export class AppSurfaceStore {
       .get();
   }
 
-  /** The app's real collection names — used by the layout auditor to drop dead binds. */
+  /** The app's real collection names â€” used by the layout auditor to drop dead binds. */
   private collectionNames(appId: string): string[] {
     return this.db
       .select({ name: schema.appCollections.name })
@@ -193,7 +193,7 @@ export class AppSurfaceStore {
     return surface;
   }
 
-  /** ui_render — replace the surface's full ViewNode tree. Creates the surface if absent. */
+  /** ui_render â€” replace the surface's full ViewNode tree. Creates the surface if absent. */
   delete(workspaceId: string, appId: string, name: string): void {
     this.requireApp(workspaceId, appId);
     const existing = this.rowByName(appId, name);
@@ -205,7 +205,7 @@ export class AppSurfaceStore {
     this.requireApp(workspaceId, appId);
     const parsed = viewNodeSchema.parse(view);
     // Layout floor + operability gate: auto-repair agent-authored trees before
-    // they ship. The gate (RENDERED ≠ OPERABLE) runs against the surface's
+    // they ship. The gate (RENDERED â‰  OPERABLE) runs against the surface's
     // declared actions; when none are declared yet (render-then-declare flow),
     // it defers to setActions, which re-audits with the real action set.
     const existingRow = this.rowByName(appId, name);
@@ -231,7 +231,7 @@ export class AppSurfaceStore {
     return surface;
   }
 
-  /** ui_patch — apply ops to the persisted tree. */
+  /** ui_patch â€” apply ops to the persisted tree. */
   patch(workspaceId: string, appId: string, name: string, ops: UiPatchOp[]): AppSurface {
     const current = this.get(workspaceId, appId, name);
     if (current.view == null) throw new AgentisError('VALIDATION_FAILED', `surface ${name} has no view to patch; call ui_render first`);
@@ -255,10 +255,10 @@ export class AppSurfaceStore {
   }
 
   /**
-   * ui_perform_region (Phase M3 / G12) — the agent PERFORMS a transient region
+   * ui_perform_region (Phase M3 / G12) â€” the agent PERFORMS a transient region
    * into a stable `AgentRegion` slot, live. The performed child is ephemeral: it
    * is broadcast over the realtime bus (SURFACE_RENDER carrying `region`) and the
-   * renderer drops it into the matching slot WITHOUT it being stored — so the
+   * renderer drops it into the matching slot WITHOUT it being stored â€” so the
    * stable frame never drifts. Only when `pin:true` is the child frozen into the
    * persisted tree (so a reload keeps it). `clear:true` dismisses the region
    * (and un-pins the stored slot). Every push carries an explainable `reason`.
@@ -310,10 +310,10 @@ export class AppSurfaceStore {
     return this.get(workspaceId, appId, name);
   }
 
-  /** ui_action_schema — declare the actions a surface may invoke. Declaring
+  /** ui_action_schema â€” declare the actions a surface may invoke. Declaring
    * actions re-runs the operability gate against the stored tree, so an action
    * declared AFTER the render (the common agent flow) still gets wired into a
-   * control — a declared-but-unreachable workflow action cannot persist. */
+   * control â€” a declared-but-unreachable workflow action cannot persist. */
   setActions(workspaceId: string, appId: string, name: string, actions: SurfaceAction[]): AppSurface {
     this.requireApp(workspaceId, appId);
     const parsed = actions.map((a) => surfaceActionSchema.parse(a));
@@ -349,7 +349,7 @@ export class AppSurfaceStore {
 /**
  * Apply a single ui_patch op to a plain ViewNode tree. Paths are slash-separated
  * (e.g. "children/0/title"); numeric segments index arrays. Kept deliberately
- * small — the typed-tree tier is the default; deep mutation is the exception.
+ * small â€” the typed-tree tier is the default; deep mutation is the exception.
  */
 function applyPatchOp(root: unknown, op: UiPatchOp): unknown {
   if (op.op === 'set') {
@@ -458,3 +458,6 @@ function containsCustomView(node: ViewNode): boolean {
   if (node.type === 'AgentRegion') return node.child ? containsCustomView(node.child) : false;
   return false;
 }
+
+
+

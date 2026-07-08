@@ -23,7 +23,7 @@
 
 import type { AgentAdapter, ChatMessage } from '@agentis/core';
 import { parseGeneric } from './evaluatorRuntime.js';
-import { estimateTokens } from './agentSession.js';
+import { estimateTokens } from './agent/agentSession.js';
 
 /** Model token consumption for a completion — exact when reported, else estimated. */
 export interface CompletionUsage {

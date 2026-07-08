@@ -1,10 +1,10 @@
-/**
+﻿/**
  * Shared formatting helpers for the workflow Runs / Output tabs.
  */
 
-/** "4.3s" / "1m 12s" / "820ms" — never throws. */
+/** "4.3s" / "1m 12s" / "820ms" â€” never throws. */
 export function formatDuration(ms?: number | null): string {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return 'â€”';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const totalSeconds = ms / 1000;
   if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
@@ -38,3 +38,6 @@ export interface WorkflowRunSummary {
   /** Output contract violations from the run's final output, when the workflow declared an outputContract. */
   contractViolations?: string[];
 }
+
+
+

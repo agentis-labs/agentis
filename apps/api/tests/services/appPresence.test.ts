@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { REALTIME_EVENTS, REALTIME_ROOMS, type AppPresenceUpdate } from '@agentis/core';
 import type { BusListener, EventBus } from '../../src/event-bus.js';
-import { AppPresenceService, PRESENCE_TTL_MS } from '../../src/services/appPresence.js';
-import { publishAppAgentActivity } from '../../src/services/agentWorkProgress.js';
+import { AppPresenceService, PRESENCE_TTL_MS } from '../../src/services/app/appPresence.js';
+import { publishAppAgentActivity } from '../../src/services/agent/agentWorkProgress.js';
 
 interface Captured { room: string; event: string; payload: unknown }
 

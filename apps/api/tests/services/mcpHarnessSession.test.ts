@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { McpHarnessSessionService, harnessMcpArgs, type McpHarnessServer } from '../../src/services/mcpHarnessSession.js';
+import { McpHarnessSessionService, harnessMcpArgs, type McpHarnessServer } from '../../src/services/mcp/mcpHarnessSession.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 describe('McpHarnessSessionService', () => {

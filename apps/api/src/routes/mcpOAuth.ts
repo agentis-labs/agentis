@@ -19,8 +19,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { CredentialVault } from '../services/credentialVault.js';
-import type { McpOAuthService } from '../services/mcpOAuthService.js';
-import { loadMcpServers, saveMcpServers } from '../services/mcpServerStore.js';
+import type { McpOAuthService } from '../services/mcp/mcpOAuthService.js';
+import { loadMcpServers, saveMcpServers } from '../services/mcp/mcpServerStore.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 

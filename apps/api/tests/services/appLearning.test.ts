@@ -14,9 +14,9 @@ import { schema } from '@agentis/db/sqlite';
 import { AppStore } from '@agentis/app';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
-import { MemoryReflectionService } from '../../src/services/memoryReflectionService.js';
-import { AppLearningService } from '../../src/services/appLearning.js';
-import { AppContactService } from '../../src/services/appContacts.js';
+import { MemoryReflectionService } from '../../src/services/memory/memoryReflectionService.js';
+import { AppLearningService } from '../../src/services/app/appLearning.js';
+import { AppContactService } from '../../src/services/app/appContacts.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

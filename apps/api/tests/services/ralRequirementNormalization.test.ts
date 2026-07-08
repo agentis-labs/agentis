@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
-import { normalizeGeneratedHalRequirements } from '../../src/services/agentisToolHandlers/build.js';
+import { normalizeGeneratedRalRequirements } from '../../src/services/agentisToolHandlers/build.js';
 
 function graph(nodeConfig: Record<string, unknown>): WorkflowGraph {
   return {
@@ -32,9 +32,9 @@ function agentRequires(result: WorkflowGraph): Record<string, unknown> | undefin
   return result.nodes.find((node) => node.id === 'A')?.config.requires as Record<string, unknown> | undefined;
 }
 
-describe('normalizeGeneratedHalRequirements', () => {
+describe('normalizeGeneratedRalRequirements', () => {
   it('removes accidental native-browser requirements from generic research tasks', () => {
-    const result = normalizeGeneratedHalRequirements(graph({
+    const result = normalizeGeneratedRalRequirements(graph({
       requires: { browser: true, terminal: true, unknown: true },
     }));
 
@@ -42,7 +42,7 @@ describe('normalizeGeneratedHalRequirements', () => {
   });
 
   it('preserves explicit native browser control requirements', () => {
-    const result = normalizeGeneratedHalRequirements(graph({
+    const result = normalizeGeneratedRalRequirements(graph({
       prompt: 'Use a live browser runtime to click through the checkout flow and inspect the page state.',
       requires: { browser: true, computerUse: true },
     }));
@@ -51,7 +51,7 @@ describe('normalizeGeneratedHalRequirements', () => {
   });
 
   it('strips browser from login/scrape intents — those belong to a Browser node', () => {
-    const result = normalizeGeneratedHalRequirements(graph({
+    const result = normalizeGeneratedRalRequirements(graph({
       prompt: 'Log into the careers website, fill in the search form, and scrape each candidate profile page.',
       requires: { browser: true },
     }));
@@ -61,7 +61,7 @@ describe('normalizeGeneratedHalRequirements', () => {
   });
 
   it('keeps an explicit "drive a browser" instruction', () => {
-    const result = normalizeGeneratedHalRequirements(graph({
+    const result = normalizeGeneratedRalRequirements(graph({
       prompt: 'Drive a browser to operate the legacy intranet that has no API.',
       requires: { browser: true },
     }));

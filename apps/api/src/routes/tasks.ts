@@ -13,7 +13,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { PlanService } from '../services/planService.js';
-import type { AgentSessionService } from '../services/agentSession.js';
+import type { AgentSessionService } from '../services/agent/agentSession.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 

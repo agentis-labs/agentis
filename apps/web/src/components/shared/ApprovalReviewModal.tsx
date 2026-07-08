@@ -1,15 +1,15 @@
-/**
- * Approvals — the human decision surface (INTERFACE-OVERHAUL-10X §P3).
+﻿/**
+ * Approvals â€” the human decision surface (INTERFACE-OVERHAUL-10X Â§P3).
  *
  * An approval is a DECISION DOCUMENT, not a JSON dump: the header says who is
- * asking and from where, the body says exactly what will happen (summary →
+ * asking and from where, the body says exactly what will happen (summary â†’
  * structured action/records/assets, every value through the kit formatter),
- * and the footer carries the three decisions — Approve / Reject / Instruct
+ * and the footer carries the three decisions â€” Approve / Reject / Instruct
  * differently (revise keeps the run alive with new direction). The raw payload
- * stays available, collapsed, for forensics — never the primary rendering.
+ * stays available, collapsed, for forensics â€” never the primary rendering.
  *
  * Rendered inside an App (`.s-surface`) it rides the app palette; opened from
- * platform chrome it rides the platform tokens — same component, both looks.
+ * platform chrome it rides the platform tokens â€” same component, both looks.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
@@ -82,7 +82,7 @@ export function approvalHasStructuredPayload(approval: ApprovalReview | null | u
   return Object.keys(payload).length > 0;
 }
 
-/** Inbox card — enough context to decide whether to open the full review. */
+/** Inbox card â€” enough context to decide whether to open the full review. */
 export function ApprovalPreviewCard({
   approval,
   busy,
@@ -97,8 +97,7 @@ export function ApprovalPreviewCard({
   const title = selfHeal ? 'Self-healing fix ready' : approval.title ?? approval.workflowName ?? 'Approval needed';
   // Don't repeat the workflow name when it IS the title (noise, and double-matches).
   const workflowLabel = approval.workflowName && approval.workflowName !== title ? approval.workflowName : null;
-  // Enrich the inline card with a compact "what will happen" — action + how many
-  // records/assets/changes — so the operator reads the decision without opening the
+  // Enrich the inline card with a compact "what will happen" â€” action + how many
   // modal, and still has Review for the full document.
   const cardPayload = approval.payload && typeof approval.payload === 'object' ? (approval.payload as Record<string, unknown>) : {};
   const cardPreview = cardPayload.approvalPreview && typeof cardPayload.approvalPreview === 'object' ? (cardPayload.approvalPreview as Record<string, unknown>) : null;
@@ -135,7 +134,7 @@ export function ApprovalPreviewCard({
           {workflowLabel || approval.agentName ? (
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] text-text-muted">
               {workflowLabel ? <span className="truncate">{workflowLabel}</span> : null}
-              {workflowLabel && approval.agentName ? <span aria-hidden>·</span> : null}
+              {workflowLabel && approval.agentName ? <span aria-hidden>Â·</span> : null}
               {approval.agentName ? <span className="truncate">{approval.agentName}</span> : null}
             </div>
           ) : null}
@@ -237,7 +236,7 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
         className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-line bg-canvas"
         style={{ boxShadow: 'var(--app-modal-shadow, var(--shadow-modal))' }}
       >
-        {/* Header — who is asking, from where */}
+        {/* Header â€” who is asking, from where */}
         <header className="border-b border-line bg-surface px-6 pb-4 pt-5">
           <div className="flex items-start gap-3.5">
             <span className={clsx(
@@ -274,7 +273,7 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
           </div>
         </header>
 
-        {/* Body — what exactly will happen */}
+        {/* Body â€” what exactly will happen */}
         <main className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
           {approval.summary ? (
             <section className="rounded-xl border border-line bg-surface p-4">
@@ -323,11 +322,11 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
           ) : null}
         </main>
 
-        {/* Footer — the decision bar */}
+        {/* Footer â€” the decision bar */}
         {!humanInputForm && (
           <footer className="border-t border-line bg-surface px-6 py-4">
             {instructOpen ? (
-              /* Third option — send a new instruction back to the waiting agent
+              /* Third option â€” send a new instruction back to the waiting agent
                  WITHOUT cancelling, so the run continues with your direction. */
               <div className="flex flex-col gap-2.5">
                 <label className="s-label">Instruct the agent differently</label>
@@ -342,13 +341,13 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
                     }
                   }}
                   rows={3}
-                  placeholder="Tell the agent what to do instead — it keeps working with your new direction, nothing is lost."
+                  placeholder="Tell the agent what to do instead â€” it keeps working with your new direction, nothing is lost."
                   className="s-input"
                 />
                 <div className="flex items-center gap-2">
                   {error
                     ? <span className="min-w-0 flex-1 truncate text-[12.5px] text-danger">{error}</span>
-                    : <span className="min-w-0 flex-1 text-[12px] text-text-muted">The run stays alive — the agent adjusts and continues.</span>}
+                    : <span className="min-w-0 flex-1 text-[12px] text-text-muted">The run stays alive â€” the agent adjusts and continues.</span>}
                   <button type="button" disabled={busy} onClick={() => { setInstructOpen(false); setInstruction(''); }} className="s-btn s-btn-ghost">
                     Back
                   </button>
@@ -503,7 +502,7 @@ function KeyValueGrid({ value }: { value: Record<string, unknown> }) {
   );
 }
 
-/** Raw payload — collapsed by default; forensics, never the primary rendering. */
+/** Raw payload â€” collapsed by default; forensics, never the primary rendering. */
 function RawPayload({ payload }: { payload: unknown }) {
   const [openRaw, setOpenRaw] = useState(false);
   return (
@@ -595,12 +594,14 @@ function redactValue(value: unknown, depth = 0): unknown {
 }
 
 function scalarText(value: unknown): string {
-  if (value == null || value === '') return '—';
+  if (value == null || value === '') return 'â€”';
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
 function shortId(value: string): string {
-  return value.length > 13 ? `${value.slice(0, 8)}…` : value;
+  return value.length > 13 ? `${value.slice(0, 8)}â€¦` : value;
 }
+
+

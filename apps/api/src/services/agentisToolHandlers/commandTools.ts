@@ -11,7 +11,7 @@
 
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { formatBriefing } from '../commandModel.js';
+import { formatBriefing } from '../command/commandModel.js';
 
 const NOTE_KINDS = ['decision', 'objective', 'progress', 'learning'];
 

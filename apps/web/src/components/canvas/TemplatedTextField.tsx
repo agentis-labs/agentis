@@ -1,19 +1,8 @@
-import { useRef, useState, type CSSProperties } from 'react';
+﻿import { useRef, useState, type CSSProperties } from 'react';
 import clsx from 'clsx';
 import { VariablePicker, type UpstreamNode, type VariablePickerOption } from './VariablePicker';
 
-/**
- * TemplatedTextField — input/textarea with an automatic variable picker.
- *
- * Activates the picker when the user types `{{`. Picker filters as they
- * keep typing (the substring between `{{` and the caret becomes the filter).
- * Enter/Tab inserts the highlighted option as `{{<path>}}` and closes; Escape
- * dismisses without inserting.
- *
- * Designed to be a drop-in replacement for `<input>` / `<textarea>` in any
- * inspector form field that accepts a template. Standalone — does not depend
- * on the inspector's internal state.
- */
+
 
 export interface TemplatedTextFieldProps {
   value: string;
@@ -24,9 +13,9 @@ export interface TemplatedTextFieldProps {
   rows?: number;
   className?: string;
   style?: CSSProperties;
-  /** Upstream nodes — populates `nodes.<id>` options. */
+  /** Upstream nodes â€” populates `nodes.<id>` options. */
   upstream?: UpstreamNode[];
-  /** Extra options — typically `scratchpad.*` and `store.*` known keys. */
+  /** Extra options â€” typically `scratchpad.*` and `store.*` known keys. */
   extras?: VariablePickerOption[];
   /** Monospace + lower-line-height (for code-shaped fields). */
   mono?: boolean;
@@ -100,13 +89,13 @@ export function TemplatedTextField(props: TemplatedTextFieldProps) {
     if (pickerOpen) {
       // Let the picker eat navigation keys.
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape') {
-        // The picker is rendered below — forward by triggering its handler via
+        // The picker is rendered below â€” forward by triggering its handler via
         // a synthetic event. Simplest: stash intent and let the picker pick up
         // on the next render. We instead bind keys directly here:
         e.preventDefault();
         // Trigger a pseudo-event on the picker's div via the ref-less API by
         // moving the active option in local state. We piggyback on the picker
-        // child by simulating: actually simpler — let the picker handle it via
+        // child by simulating: actually simpler â€” let the picker handle it via
         // its onKeyDown (the picker div is focused after open). To keep this
         // truly simple, we route through window.dispatchEvent on the picker.
         const evt = new KeyboardEvent('keydown', { key: e.key, bubbles: true });
@@ -126,7 +115,7 @@ export function TemplatedTextField(props: TemplatedTextFieldProps) {
     requestAnimationFrame(() => {
       const el = getEl();
       if (!el) return;
-      // Find the first `}}` at or after the previous caret — that's the end
+      // Find the first `}}` at or after the previous caret â€” that's the end
       // of the freshly inserted block.
       const idx = next.indexOf('}}', caret);
       const newCaret = idx === -1 ? next.length : idx + 2;
@@ -199,3 +188,6 @@ export function TemplatedTextField(props: TemplatedTextFieldProps) {
     </div>
   );
 }
+
+
+

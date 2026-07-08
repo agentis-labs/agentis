@@ -17,7 +17,7 @@
 import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
-import { MemoryStore, SKILL_LIBRARY_PLANE } from './memoryStore.js';
+import { MemoryStore, SKILL_LIBRARY_PLANE } from './memory/memoryStore.js';
 import type { SharedIntelligenceService } from './sharedIntelligence.js';
 
 const SKILL_LIBRARY_PLANE_LIKE = `%plane:${SKILL_LIBRARY_PLANE}%`;
@@ -267,7 +267,6 @@ export class SkillService {
     return serializeSkillMarkdown({ name: skill.name, description: skill.description, body: skill.body });
   }
 
-  // ── internals ─────────────────────────────────────────────
 
   #skillRows(workspaceId: string): Array<typeof schema.memoryEpisodes.$inferSelect> {
     return this.db.select().from(schema.memoryEpisodes)

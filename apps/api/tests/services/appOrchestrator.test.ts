@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { AppWorkflowBinding, WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
-import { AppOrchestratorService } from '../../src/services/appOrchestrator.js';
+import { AppOrchestratorService } from '../../src/services/app/appOrchestrator.js';
 import { nextCronFire, describeCron } from '../../src/services/cronNextFire.js';
 import type { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';

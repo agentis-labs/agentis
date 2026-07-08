@@ -9,7 +9,7 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 import {
   WorkspaceAwarenessService,
   formatSituationalModel,
-} from '../../src/services/workspaceAwarenessService.js';
+} from '../../src/services/workspace/workspaceAwarenessService.js';
 
 function seedAgent(ctx: TestContext, name: string, role: string, tags: string[]): string {
   const id = randomUUID();

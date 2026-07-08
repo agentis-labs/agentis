@@ -1,4 +1,4 @@
-import type { AdapterType, RuntimeConfig } from './RuntimePicker';
+﻿import type { AdapterType, RuntimeConfig } from './RuntimePicker';
 
 export type RuntimeModelField =
   | 'openclawModel'
@@ -33,3 +33,6 @@ export function withRuntimeModel(config: RuntimeConfig, adapterType: AdapterType
     [runtimeModelFieldFor(adapterType)]: model,
   } as RuntimeConfig;
 }
+
+
+

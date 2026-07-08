@@ -4,7 +4,7 @@ import { REALTIME_EVENTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext } from '../_helpers/createTestContext.js';
 import { ObservabilityService } from '../../src/services/observability.js';
-import { publishAgentWorkStep } from '../../src/services/agentWorkProgress.js';
+import { publishAgentWorkStep } from '../../src/services/agent/agentWorkProgress.js';
 
 describe('agent work progress', () => {
   it('persists non-workflow work steps with agent scope and correlation', async () => {

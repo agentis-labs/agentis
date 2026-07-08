@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Controls,
@@ -351,7 +351,7 @@ function buildGraph(
     });
   });
 
-  // Ghost orchestrator — shown when no orchestrator exists
+  // Ghost orchestrator â€” shown when no orchestrator exists
   if (options.showGhostOrchestrator) {
     nodes.push({
       id: '__ghost_orchestrator__',
@@ -479,7 +479,7 @@ function WorkerGlyph({ size = 15 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" fill="none" /></svg>;
 }
 
-// Tier-specific border colors — AGENTS-PAGE-REDESIGN.md §1.3.
+// Tier-specific border colors â€” AGENTS-PAGE-REDESIGN.md Â§1.3.
 const TIER_BORDER: Record<'orchestrator' | 'manager' | 'worker' | 'unassigned', string> = {
   orchestrator: '#8b5cf6',
   manager: '#06b6d4',
@@ -505,7 +505,7 @@ interface NodeVisualSpec {
 
 function nodeVisualSpec(role: 'orchestrator' | 'manager' | 'worker' | 'unassigned', tierCount: number, isSpecialist = false): NodeVisualSpec {
   // Specialists are deliberately compact (smaller than managers) and sized
-  // independent of the global worker count — a manager's small cluster should
+  // independent of the global worker count â€” a manager's small cluster should
   // stay readable even when the workspace has many specialists overall.
   if (isSpecialist) {
     return {
@@ -683,7 +683,7 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   return (
     <div
       role="article"
-      aria-label={`${agent.name} — ${readiness}`}
+      aria-label={`${agent.name} â€” ${readiness}`}
       className={clsx(
         'relative rounded-lg border-2 bg-surface shadow-card transition-colors',
         running && 'ring-1 ring-warn/20',
@@ -776,7 +776,7 @@ function SetupProgressBar({ session, compact = false }: { session: InstallSessio
             ? currentStep.label
             : session.phase === 'complete'
               ? 'Ready!'
-              : 'Starting install…'}
+              : 'Starting installâ€¦'}
       </div>
     </div>
   );
@@ -784,11 +784,11 @@ function SetupProgressBar({ session, compact = false }: { session: InstallSessio
 
 /** Live activity text for an agent that is currently being set up. */
 function installActivity(session: InstallSession | undefined): { text: string; tone: string } {
-  if (!session) return { text: 'setting up…', tone: 'text-cyan-400' };
+  if (!session) return { text: 'setting upâ€¦', tone: 'text-cyan-400' };
   if (session.phase === 'error') return { text: session.error ?? 'install failed', tone: 'text-danger' };
-  if (session.phase === 'complete') return { text: 'runtime installed — going live', tone: 'text-accent' };
+  if (session.phase === 'complete') return { text: 'runtime installed â€” going live', tone: 'text-accent' };
   const step = session.steps.find((s) => s.status === 'running');
-  return { text: step?.label ?? 'installing runtime…', tone: 'text-cyan-400' };
+  return { text: step?.label ?? 'installing runtimeâ€¦', tone: 'text-cyan-400' };
 }
 
 function StatusDot({ readiness }: { readiness: string }) {
@@ -811,37 +811,37 @@ function StatusDot({ readiness }: { readiness: string }) {
   return <span className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', readinessDot(readiness))} aria-label={readiness} />;
 }
 
-/** Single-sentence live activity line — AGENTS-PAGE-REDESIGN.md §1.3. */
+/** Single-sentence live activity line â€” AGENTS-PAGE-REDESIGN.md Â§1.3. */
 function liveActivity(
   agent: AgentHierarchyAgent,
   readiness: string,
 ): { text: string; tone: string } {
   if (readiness === 'setting_up') {
-    return { text: 'installing runtime…', tone: 'text-cyan-400' };
+    return { text: 'installing runtimeâ€¦', tone: 'text-cyan-400' };
   }
   if (!agent.adapterType) {
-    return { text: 'setup needed · connect harness', tone: 'text-warn' };
+    return { text: 'setup needed Â· connect harness', tone: 'text-warn' };
   }
   if (readiness === 'failed') {
     if (agent.status === 'setting_up') {
       return { text: 'setup needed - runtime missing', tone: 'text-danger' };
     }
-    return { text: 'failed — needs review', tone: 'text-danger' };
+    return { text: 'failed â€” needs review', tone: 'text-danger' };
   }
   if (readiness === 'running') {
     const task = (agent.currentTask ?? '').trim();
-    return { text: task ? `running: ${truncate(task, 34)}` : 'running…', tone: 'text-warn' };
+    return { text: task ? `running: ${truncate(task, 34)}` : 'runningâ€¦', tone: 'text-warn' };
   }
   if (readiness === 'live') {
     const tags = (agent.capabilityTags ?? []).filter(Boolean).slice(0, 2);
-    return { text: tags.length > 0 ? `ready — ${tags.join(', ')}` : 'ready for work', tone: 'text-accent' };
+    return { text: tags.length > 0 ? `ready â€” ${tags.join(', ')}` : 'ready for work', tone: 'text-accent' };
   }
   const last = agent.lastActiveAt ?? agent.lastHeartbeatAt;
-  return { text: last ? `idle — last active ${relativeTime(last)}` : 'idle', tone: 'text-text-muted' };
+  return { text: last ? `idle â€” last active ${relativeTime(last)}` : 'idle', tone: 'text-text-muted' };
 }
 
 function truncate(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+  return value.length <= max ? value : `${value.slice(0, max - 1)}â€¦`;
 }
 
 function relativeTime(iso: string): string {
@@ -969,3 +969,6 @@ function labelize(value: string | null | undefined): string {
     .replace(/[-_]+/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
+
+
+

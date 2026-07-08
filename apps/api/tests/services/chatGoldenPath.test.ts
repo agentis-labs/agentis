@@ -12,8 +12,8 @@ import type {
 } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
-import { ChatSessionExecutor } from '../../src/services/chatSessionExecutor.js';
-import { ChatToolExecutor } from '../../src/services/chatToolExecutor.js';
+import { ChatSessionExecutor } from '../../src/services/chat/chatSessionExecutor.js';
+import { ChatToolExecutor } from '../../src/services/chat/chatToolExecutor.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBuildTools } from '../../src/services/agentisToolHandlers/build.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';

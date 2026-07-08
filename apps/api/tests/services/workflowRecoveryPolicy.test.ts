@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
-import { decideRecoveryPolicy, recoveryFailureFingerprint, repairPlanFingerprint } from '../../src/services/workflowRecoveryPolicy.js';
+import { decideRecoveryPolicy, recoveryFailureFingerprint, repairPlanFingerprint } from '../../src/services/workflow/workflowRecoveryPolicy.js';
 
 function graph(kind: 'transform' | 'http_request' | 'agent_task', patch = ''): WorkflowGraph {
   return {

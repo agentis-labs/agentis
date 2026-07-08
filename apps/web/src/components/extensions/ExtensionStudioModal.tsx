@@ -1,5 +1,5 @@
-/**
- * ExtensionStudioModal — the single, modern "build an extension" surface.
+﻿/**
+ * ExtensionStudioModal â€” the single, modern "build an extension" surface.
  *
  * Shared by the Workflow canvas (via ExtensionCombobox / listener source picker)
  * and the Packages library, so creating an extension is the same fast flow
@@ -198,7 +198,7 @@ export function ExtensionStudioModal({
           </span>
           <div className="min-w-0 flex-1">
             <div className="text-[14px] font-medium text-text-primary">{editing ? 'Edit extension' : 'Build extension'}</div>
-            <div className="text-[11px] text-text-muted">Real deterministic code that runs on compute — no LLM tokens. Sandboxed (node:vm, or isolated-vm when installed).</div>
+            <div className="text-[11px] text-text-muted">Real deterministic code that runs on compute â€” no LLM tokens. Sandboxed (node:vm, or isolated-vm when installed).</div>
           </div>
           <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"><X size={16} /></button>
         </div>
@@ -219,7 +219,7 @@ export function ExtensionStudioModal({
           <div className="min-h-0 overflow-y-auto px-4 py-3">
             <label className={labelCls}>Name</label>
             <input className={inputCls} value={name} onChange={(e) => setName_(e.target.value)} />
-            <label className={`${labelCls} mt-3`}>Slug{editing && <span className="ml-1 text-text-muted">· locked</span>}</label>
+            <label className={`${labelCls} mt-3`}>Slug{editing && <span className="ml-1 text-text-muted">Â· locked</span>}</label>
             <input
               className={`${inputCls} font-mono ${editing ? 'opacity-60' : ''}`}
               value={slug}
@@ -281,7 +281,7 @@ export function ExtensionStudioModal({
             {hasListenerOp && (
               <p className="mt-3 rounded-md border border-violet-400/30 bg-violet-500/5 px-2 py-1.5 text-[10px] text-text-muted">
                 <Radio size={10} className="mr-1 inline text-violet-300" />
-                This extension exposes a listener source. Pick it in a workflow’s Persistent listener trigger to fire on emitted events.
+                This extension exposes a listener source. Pick it in a workflowâ€™s Persistent listener trigger to fire on emitted events.
               </p>
             )}
           </div>
@@ -292,7 +292,7 @@ export function ExtensionStudioModal({
           <div className="flex items-center gap-2">
             <button type="button" onClick={onClose} className="rounded-md border border-line px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary">Cancel</button>
             <button type="button" onClick={() => void submit()} disabled={saving} className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent/90 disabled:opacity-60">
-              {saving ? 'Saving…' : editing ? 'Save changes' : 'Create extension'}
+              {saving ? 'Savingâ€¦' : editing ? 'Save changes' : 'Create extension'}
             </button>
           </div>
         </div>
@@ -300,3 +300,6 @@ export function ExtensionStudioModal({
     </>
   );
 }
+
+
+

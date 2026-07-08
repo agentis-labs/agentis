@@ -1,4 +1,4 @@
-import { AgentisError } from '@agentis/core';
+﻿import { AgentisError } from '@agentis/core';
 import type { ConnectorModule } from '../types.js';
 import { bearerToken, executeHttpRequest, jsonRecordOf, requiredString, stringValue } from './http.js';
 import { normalizeEmailContent } from './emailContent.js';
@@ -113,12 +113,7 @@ export const gmailConnector: ConnectorModule = {
   },
 };
 
-/**
- * AgentMail — an email API built for agents. Unlike Gmail (which needs the
- * operator's OAuth), each agent gets its OWN inbox, so "send an email" works
- * with just an API key — no user sign-in. We auto-resolve a stable inbox (by
- * client_id) on first send, then send from it. Docs: https://docs.agentmail.to.
- */
+
 const AGENTMAIL_BASE_URL = (process.env.AGENTMAIL_BASE_URL ?? 'https://api.agentmail.to/v0').replace(/\/+$/, '');
 
 export const agentMailConnector: ConnectorModule = {
@@ -372,3 +367,6 @@ function githubHeaders(token: string): Record<string, string> {
 function base64Url(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
+
+
+

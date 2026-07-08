@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { readResidency, residencyDue, buildResidencyWake } from '../../src/services/residency.js';
-import { AgentSessionService } from '../../src/services/agentSession.js';
+import { AgentSessionService } from '../../src/services/agent/agentSession.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 
 /**
- * VariablePicker — autocomplete combobox for `{{...}}` template references.
+ * VariablePicker â€” autocomplete combobox for `{{...}}` template references.
  *
  * Renders as a portal anchored to the active text field. Walks the workflow
  * graph topology to find every node upstream of the current selection and
  * surfaces their output keys plus the standard namespaces (trigger, scratchpad,
  * store, loop).
  *
- * Used by every form field that accepts a template — agent prompts, HTTP URLs
+ * Used by every form field that accepts a template â€” agent prompts, HTTP URLs
  * and bodies, transform expressions, evaluator targets, workflow_store keys,
  * etc. Wiring it once in `<TextField hasVariablePicker>` is the future
  * end-state; this lower-level API exposes the dropdown so individual forms
@@ -20,7 +20,7 @@ export interface UpstreamNode {
   id: string;
   title: string;
   type: string;
-  /** Known output keys for this node — depends on node kind. */
+  /** Known output keys for this node â€” depends on node kind. */
   outputKeys?: string[];
 }
 
@@ -29,7 +29,7 @@ export interface VariablePickerOption {
   path: string;
   /** What the user sees in the dropdown. */
   label: string;
-  /** Origin badge (`trigger`, `scratchpad`, the node title…). */
+  /** Origin badge (`trigger`, `scratchpad`, the node titleâ€¦). */
   origin: string;
   /** Optional preview of the inferred type. */
   hint?: string;
@@ -40,11 +40,11 @@ export interface VariablePickerProps {
   value: string;
   /** Set on every keystroke. */
   onChange: (next: string) => void;
-  /** Insertion point — the index right after `{{` that started the picker. */
+  /** Insertion point â€” the index right after `{{` that started the picker. */
   caret: number;
   /** Upstream nodes for the current selection, topologically ordered. */
   upstream: UpstreamNode[];
-  /** Extra known namespaces — primarily `scratchpad`/`store` keys. */
+  /** Extra known namespaces â€” primarily `scratchpad`/`store` keys. */
   extras?: VariablePickerOption[];
   /** Called when the user dismisses without picking (Escape, blur). */
   onDismiss?: () => void;
@@ -150,7 +150,7 @@ export function VariablePicker(props: VariablePickerProps) {
     >
       <div className="border-b border-line/60 bg-surface-2 px-2 py-1 text-[10px] uppercase tracking-wider text-text-muted">
         Variables
-        {query && <span className="ml-1 normal-case tracking-normal text-text-secondary">— filter: {query}</span>}
+        {query && <span className="ml-1 normal-case tracking-normal text-text-secondary">â€” filter: {query}</span>}
       </div>
       <ul className="py-1">
         {filtered.map((option, idx) => (
@@ -174,3 +174,6 @@ export function VariablePicker(props: VariablePickerProps) {
     </div>
   );
 }
+
+
+

@@ -1,4 +1,4 @@
-export type AmbientKind = 'local' | 'dev' | 'staging' | 'prod' | 'fleet' | 'custom';
+﻿export type AmbientKind = 'local' | 'dev' | 'staging' | 'prod' | 'fleet' | 'custom';
 
 export type GatewayStatus = 'connected' | 'degraded' | 'disconnected' | 'error';
 
@@ -27,3 +27,6 @@ export interface WorkspaceContext {
   ambientId: string | null;
   user: AuthenticatedUser;
 }
+
+
+

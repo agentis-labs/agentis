@@ -1,4 +1,4 @@
-import {
+﻿import {
   Children,
   useCallback,
   useEffect,
@@ -277,7 +277,7 @@ export function WorkspaceEcosystemCanvas({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [liveWorkspaceOpen, setLiveWorkspaceOpen] = useState(false);
-  /** Domains the operator expanded past their one-band idle cap ("+N more"). */
+  
   const [expandedDomains, setExpandedDomains] = useState<ReadonlySet<string>>(new Set<string>());
   const [liveWorkspaceFrame, setLiveWorkspaceFrame] = useState<LiveWorkspaceFrame>(() => ({ ...LIVE_WORKSPACE_DEFAULT_FRAME }));
   const [isPanning, setIsPanning] = useState(false);
@@ -387,11 +387,11 @@ export function WorkspaceEcosystemCanvas({
     () => model.nodes.find((node) => node.id === selectedNodeId) ?? null,
     [model.nodes, selectedNodeId],
   );
-  // Focus (drill-in) mode: a real manager is selected — the rest of the canvas
+  // Focus (drill-in) mode: a real manager is selected â€” the rest of the canvas
   // darkens and the view scopes to that manager's subtree.
   const focusActive = Boolean(selectedNode && selectedNode.role === 'manager' && !selectedNode.ghost);
 
-  // Workspace-wide live activity spine — powers Live Workspace and the
+  // Workspace-wide live activity spine â€” powers Live Workspace and the
   // canvas's "orchestrator is working right now" liveness (nodes/edges pulse).
   const activeRunIds = useMemo(
     () => activeRuns.filter(isActiveRun).map((run) => run.id),
@@ -419,7 +419,7 @@ export function WorkspaceEcosystemCanvas({
   const liveIds = useMemo(() => liveNodeIdsFromSessions(workSessions), [workSessions]);
 
   // Canvas node ids currently working (agent-/workflow- prefixed), plus the
-  // orchestrator while it processes a request — drives node/edge pulse.
+  // orchestrator while it processes a request â€” drives node/edge pulse.
   const liveNodeIds = useMemo(() => {
     const set = new Set<string>();
     for (const a of liveIds.agentIds) set.add(`agent-${a}`);
@@ -428,8 +428,8 @@ export function WorkspaceEcosystemCanvas({
     return set;
   }, [liveIds, requestStatus.busy, model.orchestratorId]);
 
-  // nodeId → its current step/thought, for the on-canvas live caption.
-  // Work events only (runs/nodes/tools) — ambient agent chatter (status pings,
+  // nodeId â†’ its current step/thought, for the on-canvas live caption.
+  // Work events only (runs/nodes/tools) â€” ambient agent chatter (status pings,
   // chat-memory capture) must never caption a node.
   const liveCaptions = useMemo(() => {
     const map = captionMapFromSessions(workSessions);
@@ -440,7 +440,6 @@ export function WorkspaceEcosystemCanvas({
   }, [workSessions, requestStatus.busy, requestStatus.label, model.orchestratorId]);
 
   // Select a workflow's canvas node (opens its detail card) from Live Workspace
-  // while the operator remains in the canvas.
   const selectWorkflowNode = useCallback((workflowId: string) => {
     setSelectedNodeId(`workflow-${workflowId}`);
   }, []);
@@ -564,7 +563,7 @@ export function WorkspaceEcosystemCanvas({
   // The transform is driven imperatively (applyViewportToDOM) so high-frequency
   // pan/zoom never pays a React render. But unrelated re-renders (the 1s clock,
   // realtime agent updates) would otherwise reconcile the JSX transform back to
-  // the last committed `viewport` state — snapping the canvas mid-drag. This
+  // the last committed `viewport` state â€” snapping the canvas mid-drag. This
   // layout effect runs after every render and re-asserts the live viewport.
   useLayoutEffect(() => {
     applyViewportToDOM(viewportRef.current);
@@ -827,7 +826,7 @@ export function WorkspaceEcosystemCanvas({
     finishCanvasPan(drag.pointerId, false);
   }
 
-  // Wheel pan/zoom is applied imperatively for the same reason drag is — the
+  // Wheel pan/zoom is applied imperatively for the same reason drag is â€” the
   // React state commit is debounced so a burst of wheel events stays at 60fps.
   function commitWheelViewport() {
     if (wheelCommitRef.current !== null) window.clearTimeout(wheelCommitRef.current);
@@ -894,7 +893,7 @@ export function WorkspaceEcosystemCanvas({
     const willSelect = selectedNodeId !== node.id;
     setSelectedNodeId(willSelect ? node.id : null);
     if (!willSelect) {
-      // Deselecting (incl. exiting a manager focus) → animate back to overview.
+      // Deselecting (incl. exiting a manager focus) â†’ animate back to overview.
       userMovedRef.current = false;
       animateViewportTo(computeHomeViewport(containerSize, contentBounds, chatState, dockedWidth, orchestratorNode), 340);
       return;
@@ -949,7 +948,7 @@ export function WorkspaceEcosystemCanvas({
             const to = nodeMap.get(edge.to);
             if (!from || !to) return null;
             const path = edgePath(from, to, edge.type);
-            // An edge animates only when its TARGET is doing real work — the
+            // An edge animates only when its TARGET is doing real work â€” the
             // orchestrator is `from` on every command edge, so keying off the
             // source would light the whole tree whenever it's merely chatting.
             const liveEdge = liveNodeIds.has(edge.to) && edge.to !== model.orchestratorId;
@@ -1077,7 +1076,7 @@ export function WorkspaceEcosystemCanvas({
       />
 
       {/* Controls a populated canvas; in the ghost empty state (no agents)
-          there's nothing to zoom, fit, or expand — keep it clean. */}
+          there's nothing to zoom, fit, or expand â€” keep it clean. */}
       {agents.length > 0 && (
         <CanvasControls
           isFullscreen={isFullscreen}
@@ -1165,7 +1164,7 @@ export function buildCanvasModel(
     nodes.push(ghostNode('ghost-orchestrator', 'orchestrator', 'Orchestrator', 'commission your workspace orchestrator', { x: canvasSize.width / 2, y: 170 }, NODE.orchestrator));
   }
 
-  // How many specialists report to each manager — surfaced on the collapsed
+  // How many specialists report to each manager â€” surfaced on the collapsed
   // manager node so the org depth is visible without drilling in.
   const specialistCountByManager = new Map<string, number>();
   for (const worker of roles.workers) {
@@ -1292,7 +1291,7 @@ export function computeEdgeAnimation(activeLoad: number, type: 'command' | 'reso
     count,
     dur: activeLoad > 1 ? 2.3 : 3.2,
     opacity: activeLoad > 0 ? 0.72 : 0,
-    strokeColor: activeLoad > 0 ? 'rgba(74,222,128,0.64)' : 'rgba(64,70,82,0.44)',
+    strokeColor: activeLoad > 0 ? 'rgba(255,255,255,0.5)' : 'rgba(120,120,130,0.4)',
     strokeWidth: activeLoad > 0 ? 1.8 : 1.2,
   };
 }
@@ -1318,7 +1317,7 @@ function CanvasNodeCard({
   revealed: boolean;
   selected: boolean;
   dimmed: boolean;
-  /** True while a manager is focused — non-subtree nodes darken hard. */
+  /** True while a manager is focused â€” non-subtree nodes darken hard. */
   focusMode?: boolean;
   /** True while this node is emitting live activity (chat-driven work, not just formal runs). */
   live?: boolean;
@@ -1332,7 +1331,7 @@ function CanvasNodeCard({
   const elapsed = node.startedAt ? formatElapsed(node.startedAt, now) : null;
   const isAgentNode = node.kind === 'orchestrator' || node.kind === 'manager' || node.kind === 'worker';
   const isOperationalWarning = Boolean(node.outOfCredits || node.warn);
-  // A failing App/workflow card should read as a quiet RED state — a small red
+  // A failing App/workflow card should read as a quiet RED state â€” a small red
   // status dot, not a whole orange-washed card. (Agent attention/approval keeps
   // the amber warn treatment; only resource failures go minimal-red.)
   const isFailingResource = node.kind === 'workflow' && Boolean(node.warn) && !node.outOfCredits;
@@ -1506,14 +1505,14 @@ function CanvasNodeThought({
       <span className="flex items-start gap-1.5">
         <span className="mt-[3px] h-1 w-1 shrink-0 animate-pulse rounded-full bg-accent" />
         <span className="block max-h-8 overflow-hidden font-mono text-[9.5px] leading-snug text-text-secondary">
-          {node.currentTool ? `↳ ${node.currentTool}` : thought}
+          {node.currentTool ? `â†³ ${node.currentTool}` : thought}
         </span>
       </span>
     </span>
   );
 }
 
-/** Tone → text color for the live activity stream. */
+/** Tone â†’ text color for the live activity stream. */
 const ACTIVITY_TONE_CLASS: Record<RealtimeActivity['tone'], string> = {
   accent: 'text-accent',
   success: 'text-emerald-400',
@@ -1536,7 +1535,7 @@ function activityIcon(kind: RealtimeActivity['kind']) {
 }
 
 /**
- * The live mission-control stream — every meaningful thing happening across the
+ * The live mission-control stream â€” every meaningful thing happening across the
  * workspace right now: the orchestrator's thinking, tool calls, run/node
  * transitions, agent messages. This is what turns Live Workspace from a static
  * failed-runs list into "watch the work happen." Newest-first, auto-scrolls.
@@ -1578,7 +1577,7 @@ function LiveActivityStream({
               </span>
               <span className="min-w-0 flex-1 leading-snug">
                 <span className="truncate text-[12px] text-text-primary">
-                  {item.agentName ? `${item.agentName} · ` : ''}{item.title}
+                  {item.agentName ? `${item.agentName} Â· ` : ''}{item.title}
                 </span>
                 {item.detail && item.detail !== item.title && (
                   <span className="mt-0.5 block line-clamp-2 font-mono text-[11px] text-text-secondary">{item.detail}</span>
@@ -1672,8 +1671,7 @@ function LiveWorkspacePanel({
 
   if (!open) return null;
   // One card per real task: the same dispatch emits agent-, run-, and workflow-
-  // keyed events that the session builder splits apart — collapse them by the
-  // actor so the operator sees a single coherent task, not three.
+  // keyed events that the session builder splits apart â€” collapse them by the
   const activeSessions = dedupeActiveSessions(workSessions.filter((session) => session.active)).slice(0, 6);
   // Structured step tracks (the agent's task spine) keyed for per-session lookup.
   const stepIndex = buildStepIndex(activity);
@@ -1683,7 +1681,7 @@ function LiveWorkspacePanel({
   const waitingObservations = observabilityEvents
     .filter((event) => (event.status === 'waiting' || event.status === 'blocked' || event.kind === 'approval') && isRecentIso(event.createdAt, 30 * 60_000))
     .slice(0, 4);
-  // Recency gate — stale failures (days old) and re-run workflows must not keep
+  // Recency gate â€” stale failures (days old) and re-run workflows must not keep
   // nagging. Drop failed observations outside the live window, and failed runs
   // whose workflow is currently running again or finished long ago.
   const incidentObservations = observabilityEvents
@@ -1701,11 +1699,10 @@ function LiveWorkspacePanel({
   const hiddenAttentionCount = Math.max(0, allAttentionGroups.length - attentionGroups.length);
   const liveCount = Math.max(activeSessions.length, activeRuns.length, activeObservations.filter((event) => event.status !== 'waiting' && event.status !== 'blocked').length);
   const waitingCount = Math.max(approvals.length, waitingObservations.length);
-  // Issues — open backlog (exclude done/cancelled), newest scheduled first.
+  // Issues â€” open backlog (exclude done/cancelled), newest scheduled first.
   const backlogIssues = issues
     .filter((issue) => issue.status !== 'done' && issue.status !== 'cancelled' && !issue.labels?.includes('sentinel'))
     .sort((a, b) => issueScheduleRank(a) - issueScheduleRank(b));
-  // History — tasks that already ran, newest first, so the operator can come
   // back and see what happened.
   const doneIssues = issues
     .filter((issue) => issue.status === 'done' || issue.status === 'cancelled')
@@ -1873,7 +1870,7 @@ function LiveWorkspacePanel({
         <div className="flex min-w-0 items-center gap-2">
           <span className={clsx('relative flex h-3 w-3 shrink-0 items-center justify-center', !showBeacon && 'opacity-45')}>
             {showBeacon && <span className="absolute h-5 w-5 animate-ping rounded-full border border-accent/50" />}
-            <span className={clsx('relative h-2.5 w-2.5 rounded-full', showBeacon ? 'bg-accent shadow-[0_0_16px_rgba(74,222,128,0.72)]' : 'bg-text-muted')} />
+            <span className={clsx('relative h-2.5 w-2.5 rounded-full', showBeacon ? 'bg-accent shadow-[0_0_16px_var(--color-accent-muted)]' : 'bg-text-muted')} />
           </span>
           <div className="min-w-0">
             <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent">Live Workspace</div>
@@ -2037,7 +2034,7 @@ function LiveWorkspaceTechnicalFeed({
     if (!selectedId || !events.some((event) => event.id === selectedId)) setSelectedId(events[0]?.id ?? null);
   }, [events, selectedId]);
 
-  // Workspace-wide token consumption — exact count for technical review. Refreshes
+  // Workspace-wide token consumption â€” exact count for technical review. Refreshes
   // with the workspace snapshot (driven by realtime events).
   const tokenStrip = workspaceTokens != null ? (
     <div className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-canvas/45 px-3 py-1.5">
@@ -2068,7 +2065,7 @@ function LiveWorkspaceTechnicalFeed({
         <div className="flex items-center justify-between border-b border-line/70 px-3 py-2">
           <div>
             <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted">Event stream</div>
-            <div className="mt-0.5 text-[11px] text-text-secondary">{connected ? 'SSE live · replay merged' : 'Replay · reconnecting'}</div>
+            <div className="mt-0.5 text-[11px] text-text-secondary">{connected ? 'SSE live Â· replay merged' : 'Replay Â· reconnecting'}</div>
           </div>
           <span className="font-mono text-[10px] text-text-muted">{events.length}</span>
         </div>
@@ -2122,9 +2119,9 @@ function LiveWorkspaceTechnicalFeed({
             </div>
             <div className="max-h-[min(50vh,480px)] space-y-3 overflow-y-auto px-3 py-3">
               <TechnicalField label="Source" value={selected.sourceEvent} />
-              <TechnicalField label="Scope" value={compactStrings([selected.kind, selected.actorType, selected.actorId && `agent:${selected.actorId}`, selected.workflowId && `workflow:${selected.workflowId}`, selected.runId && `run:${selected.runId}`]).join(' · ')} />
-              <TechnicalField label="Correlation" value={selected.correlationId ?? '—'} />
-              {selected.progress && <TechnicalField label="Progress" value={`${selected.progress.label ? `${selected.progress.label} · ` : ''}${selected.progress.completed ?? 0}/${selected.progress.total ?? '?'}`} />}
+              <TechnicalField label="Scope" value={compactStrings([selected.kind, selected.actorType, selected.actorId && `agent:${selected.actorId}`, selected.workflowId && `workflow:${selected.workflowId}`, selected.runId && `run:${selected.runId}`]).join(' Â· ')} />
+              <TechnicalField label="Correlation" value={selected.correlationId ?? 'â€”'} />
+              {selected.progress && <TechnicalField label="Progress" value={`${selected.progress.label ? `${selected.progress.label} Â· ` : ''}${selected.progress.completed ?? 0}/${selected.progress.total ?? '?'}`} />}
               {selected.evidence.length > 0 && <TechnicalJson label={`Evidence (${selected.evidence.length})`} value={selected.evidence} />}
               <TechnicalJson label="Redacted payload" value={selected.rawPayloadRedacted} />
             </div>
@@ -2503,7 +2500,7 @@ function ActiveWorkRow({
         <span className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', dot)} />
         <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left active:scale-[0.99]">
           <div className="truncate text-[12px] font-medium text-text-primary">{session.title}</div>
-          <div className="mt-0.5 truncate text-[11px] text-text-secondary">{currentLabel ?? 'Working…'}</div>
+          <div className="mt-0.5 truncate text-[11px] text-text-secondary">{currentLabel ?? 'Workingâ€¦'}</div>
         </button>
         {total > 0 && <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">{current}/{total}</span>}
         <button
@@ -2528,7 +2525,7 @@ function ActiveWorkRow({
           <div className="mb-2 flex items-center gap-1.5 text-[9.5px] text-text-muted">
             <Bot size={10} className="text-accent" />
             <span className="truncate">{agentName}</span>
-            {elapsed && <span className="font-mono tabular-nums">· {elapsed}</span>}
+            {elapsed && <span className="font-mono tabular-nums">Â· {elapsed}</span>}
           </div>
           {hasSteps ? (
             <ol className="space-y-1.5">
@@ -2553,7 +2550,7 @@ function ActiveWorkRow({
               ))}
             </ol>
           ) : (
-            <div className="line-clamp-3 text-[10px] italic text-text-muted">{thought ?? 'Working…'}</div>
+            <div className="line-clamp-3 text-[10px] italic text-text-muted">{thought ?? 'Workingâ€¦'}</div>
           )}
         </div>
       )}
@@ -2653,7 +2650,7 @@ function BacklogScheduleSection({
       {doneIssues.length > 0 && (
         <div className="mt-1 border-t border-line/50 pt-1.5">
           <button type="button" onClick={() => setShowHistory((value) => !value)} className="flex w-full items-center justify-between text-[10px] text-text-muted hover:text-text-secondary">
-            <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={11} className="text-text-muted" /> History · {doneIssues.length} done</span>
+            <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={11} className="text-text-muted" /> History Â· {doneIssues.length} done</span>
             <ChevronDown size={12} className={clsx('transition-transform', showHistory && 'rotate-180')} />
           </button>
           {showHistory && (
@@ -2759,7 +2756,7 @@ function ScheduledIssueRow({
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 font-mono text-[9px] text-text-muted">
           <span className="truncate">{issue.identifier}</span>
           {agent && <span className="inline-flex items-center gap-0.5"><Bot size={9} className="text-accent" />{agent.name}</span>}
-          {schedule && <span className={clsx('inline-flex items-center gap-0.5', schedule.overdue ? 'text-warn' : 'text-text-muted')}><Clock size={9} />{schedule.label}{issue.recurrenceCron ? ' · repeats' : ''}</span>}
+          {schedule && <span className={clsx('inline-flex items-center gap-0.5', schedule.overdue ? 'text-warn' : 'text-text-muted')}><Clock size={9} />{schedule.label}{issue.recurrenceCron ? ' Â· repeats' : ''}</span>}
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1">
@@ -2847,7 +2844,7 @@ function ScheduleTaskForm({ agents, onCreated }: { agents: WorkspaceAgent[]; onC
         value={title}
         onChange={(event) => setTitle(event.target.value)}
         onKeyDown={(event) => { if (event.key === 'Escape') { setOpen(false); } }}
-        placeholder="What should happen…"
+        placeholder="What should happenâ€¦"
         className="w-full bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
       />
       <div className="mt-2 grid grid-cols-2 gap-1.5">
@@ -2951,13 +2948,13 @@ function ProgressRing({ progress }: { progress: number }) {
   const dashOffset = circumference * (1 - clamp(progress, 0, 1));
   return (
     <svg className="pointer-events-none absolute -inset-1 h-13 w-13" viewBox="0 0 44 44" aria-hidden="true">
-      <circle cx="22" cy="22" r={radius} fill="none" stroke="rgba(74,222,128,0.16)" strokeWidth="2" />
+      <circle cx="22" cy="22" r={radius} fill="none" stroke="var(--color-accent-soft)" strokeWidth="2" />
       <circle
         cx="22"
         cy="22"
         r={radius}
         fill="none"
-        stroke="rgba(74,222,128,0.9)"
+        stroke="var(--color-accent)"
         strokeWidth="2"
         strokeLinecap="round"
         strokeDasharray={circumference}
@@ -3330,7 +3327,7 @@ function buildResourceNodes(
 
   let index = 0;
 
-  // ── Phase 1: resolve each workflow's domain + state (no placement yet) ──
+  // â”€â”€ Phase 1: resolve each workflow's domain + state (no placement yet) â”€â”€
   interface WorkflowEntry {
     workflow: HomeWorkflow;
     wfLabel: string;
@@ -3344,7 +3341,7 @@ function buildResourceNodes(
     laneGroupKey: string;
     failed: WorkspaceFailedRun | undefined;
     groupKey: string;
-    /** 0 = needs attention (failed), 1 = active/running, 2 = idle — floats problems up. */
+    /** 0 = needs attention (failed), 1 = active/running, 2 = idle â€” floats problems up. */
     statePriority: number;
   }
   const entries: WorkflowEntry[] = resourceWorkflows.map((workflow) => {
@@ -3374,11 +3371,11 @@ function buildResourceNodes(
       if (!workflowSpaceName) workflowSpaceName = sourceNode?.spaceName ?? null;
       if (!workflowAccent) workflowAccent = sourceNode?.accent;
     }
-    // The owning specialist normally wins the anchor over the domain manager —
+    // The owning specialist normally wins the anchor over the domain manager â€”
     // the specialist is who actually runs the workflow. BUT an explicit domain
     // assignment is authoritative: if the resource is placed in a domain whose
     // manager is NOT the owner's manager, the domain wins, so it never drifts
-    // into an unrelated manager's cluster (e.g. an App in General › SEO must not
+    // into an unrelated manager's cluster (e.g. an App in General â€º SEO must not
     // surface under Marketing just because its owner reports there).
     const ownerAnchorId = ownerSourceId && sourceXById.has(ownerSourceId) && isWorkflowAnchorSource(ownerSourceId, sourceNodeById)
       ? ownerSourceId
@@ -3439,7 +3436,7 @@ function buildResourceNodes(
         )),
     );
     // A focused manager's siblings are dimmed out of the way, so give its subtree
-    // a wide lane to fan into a real pyramid (2 → 3 → 4 …) instead of a column.
+    // a wide lane to fan into a real pyramid (2 â†’ 3 â†’ 4 â€¦) instead of a column.
     const geometry = focusedManagerGroup
       ? focusedWorkflowGeometry(groupEntries[0]?.anchoredSourceId)
       : laneKind === 'manager-workflows'
@@ -3495,8 +3492,8 @@ function buildResourceNodes(
           expanded
             ? 'Collapse this domain back to one row.'
             : `${hidden.length} idle workflow${hidden.length === 1 ? '' : 's'} collapsed.`,
-          ...hidden.slice(0, 6).map((h) => `· ${h.wfLabel}`),
-          hidden.length > 6 ? `· …and ${hidden.length - 6} more` : undefined,
+          ...hidden.slice(0, 6).map((h) => `Â· ${h.wfLabel}`),
+          hidden.length > 6 ? `Â· â€¦and ${hidden.length - 6} more` : undefined,
         ]),
       });
     }
@@ -3519,7 +3516,7 @@ function buildResourceNodes(
     const pos = bandPos.get(workflow.id) ?? positions(index++);
     const appMeta = workflow.app ?? null;
     const appSubtitle = appMeta
-      ? `App · ${appMeta.workflowCount} workflow${appMeta.workflowCount === 1 ? '' : 's'}`
+      ? `App Â· ${appMeta.workflowCount} workflow${appMeta.workflowCount === 1 ? '' : 's'}`
       : null;
     const appIconImage = appMeta && isImageIcon(appMeta.icon) ? appMeta.icon ?? undefined : undefined;
     resources.push({
@@ -3702,10 +3699,10 @@ function buildResourceNodes(
 function resolveResourceCollisions(resources: CanvasNode[]): CanvasNode[] {
   const placed: CanvasNode[] = [];
 
-  // No two resource cards may ever overlap — a hard invariant. The band packer
+  // No two resource cards may ever overlap â€” a hard invariant. The band packer
   // keeps nodes apart *within* a lane, but sibling lanes (and subdomain/fallback
-  // anchors) can land on overlapping x-slots, so every node — App/workflow cards
-  // included — gets a final nudge-down pass against everything already placed.
+  // anchors) can land on overlapping x-slots, so every node â€” App/workflow cards
+  // included â€” gets a final nudge-down pass against everything already placed.
   return resources.map((resource) => {
     let y = resource.y;
     while (placed.some((other) => nodesOverlap({ ...resource, y }, other))) {
@@ -3739,7 +3736,7 @@ function shouldRevealKnowledgeNodes(selectedNodeId: string | null, agents: Works
   const agent = agents.find((item) => item.id === agentId);
   const role = agent ? normalizeRole(agent) : null;
   // Authority tiers (orchestrator + managers) own shared workspace memory, so
-  // selecting either reveals the knowledge layer — and it persists as you drill
+  // selecting either reveals the knowledge layer â€” and it persists as you drill
   // down the chain of command. Specialists don't surface workspace-wide knowledge.
   return role === 'orchestrator' || role === 'manager';
 }
@@ -3820,7 +3817,7 @@ function sourceBelongsToManager(sourceId: string, managerId: string, sourceNodeB
   if (!source || !manager) return false;
   if (source.spaceId && manager.spaceId && source.spaceId === manager.spaceId) return true;
   if (source.role !== 'worker' || !source.agent || !manager.agent) return false;
-  // Shared Domain ⇒ same authority subtree (mirrors findParentManager). A
+  // Shared Domain â‡’ same authority subtree (mirrors findParentManager). A
   // specialist owning a Subdomain of the manager's Domain belongs to it even
   // when reportsTo points elsewhere.
   const sourceDomain = stringField(source.agent, ['domainId']);
@@ -3877,7 +3874,7 @@ const BRANCH_GAP = 40;
  * Uniform horizontal stride between sibling branches. The non-overlap guarantee
  * is structural, not spacing-based: every branch gets a symmetric lane exactly
  * `stride` wide, and `maxBranchColumns` caps each lane's workflow columns to fit
- * that width — so nodes can never cross into a neighbour no matter how tightly
+ * that width â€” so nodes can never cross into a neighbour no matter how tightly
  * managers pack. Few branches get roomy 2-column lanes; as the row fills up the
  * stride tapers toward a single column, so even ~15 managers stay compact.
  */
@@ -3923,10 +3920,10 @@ function packTopBranches(count: number, canvasWidth: number): BranchSlot[] {
 
 /**
  * Resolve the orchestrator's top-level branches (manager node ids + their
- * spaceIds, the space→manager map, and a per-branch workflow tally) without
+ * spaceIds, the spaceâ†’manager map, and a per-branch workflow tally) without
  * needing any x positions. Shared by buildCanvasModel (authoritative placement)
  * and computeVirtualCanvasSize (so the virtual canvas is wide enough). The
- * workflow tally only *sizes* slots — placement stays authoritative in
+ * workflow tally only *sizes* slots â€” placement stays authoritative in
  * buildResourceNodes, and undersizing merely makes a lane taller, never
  * overlapping.
  */
@@ -3967,7 +3964,7 @@ function deriveTopBranchLayout(
     managerNodeIds.push(id);
     if (space) spaceSourceIds.set(space.id, id);
   }
-  // Subdomains (e.g. General › SEO) don't have their own top-branch lane — their
+  // Subdomains (e.g. General â€º SEO) don't have their own top-branch lane â€” their
   // resources cluster under the SAME manager as their parent Domain. Map each
   // subdomain id onto the parent domain's source so an App assigned to a
   // subdomain still anchors beneath the right manager (instead of falling
@@ -4083,7 +4080,7 @@ function findParentManager(agent: WorkspaceAgent, managerNodeIds: string[], mana
   if (managerNodeIds.length === 0) return null;
   const record = agent as unknown as Record<string, unknown>;
   // Domain responsibility is authoritative for the org tree: a specialist that
-  // owns a Domain (or a Subdomain of one) sits under that Domain's manager —
+  // owns a Domain (or a Subdomain of one) sits under that Domain's manager â€”
   // even if its raw `reportsTo` still points at a different manager. This keeps
   // the canvas consistent with where the specialist's work/Apps actually live.
   const domainId = stringField(record, ['domainId']);
@@ -4143,10 +4140,10 @@ function isImageIcon(icon: string | null | undefined): boolean {
 }
 
 /**
- * Collapse Apps into single canvas resource units. Each App with ≥1 workflow
+ * Collapse Apps into single canvas resource units. Each App with â‰¥1 workflow
  * becomes one entry (labelled/routed as the App, clustered by the App's
- * domain/owner), anchored on a representative workflow — a currently-running one
- * if any, else the first — so run liveness still lights the node. Workflows with
+ * domain/owner), anchored on a representative workflow â€” a currently-running one
+ * if any, else the first â€” so run liveness still lights the node. Workflows with
  * no App (or whose App is missing) pass through as bare workflow nodes.
  */
 function collapseAppsIntoResourceWorkflows(data: EcosystemData, activeWorkflowIds: Set<string>): HomeWorkflow[] {
@@ -4182,13 +4179,9 @@ function activeRunSubtitle(run: WorkspaceActiveRun): string {
   return 'running now';
 }
 
+
 /**
- * Live Workspace run row: the live agent reasoning / current
- * step / progress for one active run, streamed via the activity spine. This is
- * the operator-facing surface for following active execution.
- */
-/**
- * Live Workspace run card: an immersive view of one running workflow —
+ * Live Workspace run card: an immersive view of one running workflow â€”
  * pulsing live beacon, elapsed + step progress, the agent currently working, and a
  * scrolling LIVE REASONING TERMINAL streaming the agent's thoughts and tool calls
  * as they happen. Click to open the full run; Stop to halt it. Fed by the
@@ -4211,7 +4204,7 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
   const pct = progress && progress.total > 0 ? Math.min(100, (progress.completed / progress.total) * 100) : null;
   const agentName = feed.find((a) => a.agentName)?.agentName;
   const nodeTitle = feed.find((a) => a.nodeTitle)?.nodeTitle;
-  // Live terminal: the most recent meaningful steps, oldest→newest (terminal order).
+  // Live terminal: the most recent meaningful steps, oldestâ†’newest (terminal order).
   const lines = feed
     .filter((a) => a.kind === 'message' || a.kind === 'tool' || a.kind === 'agent' || a.kind === 'node')
     .slice(0, 6)
@@ -4236,7 +4229,7 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}
-      className="group cursor-pointer overflow-hidden rounded-xl border border-accent/25 bg-gradient-to-b from-surface/70 to-canvas/55 shadow-[0_0_22px_rgba(74,222,128,0.06)] transition hover:border-accent/45 hover:shadow-[0_0_30px_rgba(74,222,128,0.12)]"
+      className="group cursor-pointer overflow-hidden rounded-xl border border-accent/25 bg-gradient-to-b from-surface/70 to-canvas/55 shadow-[0_0_22px_var(--color-accent-soft)] transition hover:border-accent/45 hover:shadow-[0_0_30px_var(--color-accent-muted)]"
     >
       {/* Header: live beacon + name + elapsed/steps + stop */}
       <div className="flex items-center gap-2.5 px-3 pt-2.5 pb-2">
@@ -4250,7 +4243,7 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
             {elapsed && <span className="font-mono tabular-nums">{elapsed}</span>}
             {progress && (
               <>
-                {elapsed && <span className="opacity-50">·</span>}
+                {elapsed && <span className="opacity-50">Â·</span>}
                 <span className="font-mono tabular-nums">{progress.completed}/{progress.total} steps</span>
               </>
             )}
@@ -4271,7 +4264,7 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
       {/* Glowing progress rail */}
       <div className="h-[3px] w-full bg-line/50">
         <div
-          className="h-full bg-accent shadow-[0_0_8px_rgba(74,222,128,0.6)] transition-all duration-700"
+          className="h-full bg-accent shadow-[0_0_8px_var(--color-accent-muted)] transition-all duration-700"
           style={{ width: pct != null ? `${pct}%` : '0%' }}
         />
       </div>
@@ -4296,7 +4289,7 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
       >
         {lines.length === 0 ? (
           <div className="flex items-center gap-1.5 font-mono text-[10px] text-text-muted">
-            <Loader2 size={10} className="animate-spin text-accent" /> awaiting the agent’s first move…
+            <Loader2 size={10} className="animate-spin text-accent" /> awaiting the agentâ€™s first moveâ€¦
           </div>
         ) : (
           <div className="space-y-1">
@@ -4325,7 +4318,7 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
   );
 }
 
-/** Kind → glyph for the live reasoning terminal. */
+/** Kind â†’ glyph for the live reasoning terminal. */
 function ActivityGlyph({ kind }: { kind: string }) {
   if (kind === 'tool') return <Wrench size={10} className="text-sky-400" />;
   if (kind === 'node') return <Workflow size={10} className="text-violet-400" />;
@@ -4526,3 +4519,6 @@ const PHASE_ORDER: Record<EntrancePhase, number> = {
   resources: 5,
   complete: 6,
 };
+
+
+

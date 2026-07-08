@@ -1,5 +1,5 @@
-/**
- * EmptyState — every empty state follows this pattern:
+﻿/**
+ * EmptyState â€” every empty state follows this pattern:
  * icon (48px, text-muted) + title + description + CTA.
  *
  * No empty state is ever blank gray text.
@@ -50,3 +50,6 @@ export function EmptyState({
     </div>
   );
 }
+
+
+

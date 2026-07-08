@@ -23,11 +23,11 @@ import {
 } from '@agentis/core';
 import type { AgentAdapter, AgentRequirements, ExtensionManifest, RealtimeEventName, WorkflowGraph, WorkflowGraphPatch, WorkflowNode } from '@agentis/core';
 import { AppStore } from '@agentis/app';
-import { AppStaffingService } from '../appStaffing.js';
-import { WORKFLOW_DESIGN_DOCTRINE } from '../workflowDesignDoctrine.js';
-import { auditWorkflowRobustness } from '../workflowRobustnessAudit.js';
-import { WORKFLOW_PATTERNS, getWorkflowPattern } from '../workflowPatterns.js';
-import { recordWorkflowLesson, recallWorkflowLessons, renderPlaybookLessons } from '../workflowPlaybook.js';
+import { AppStaffingService } from '../app/appStaffing.js';
+import { WORKFLOW_DESIGN_DOCTRINE } from '../workflow/workflowDesignDoctrine.js';
+import { auditWorkflowRobustness } from '../workflow/workflowRobustnessAudit.js';
+import { WORKFLOW_PATTERNS, getWorkflowPattern } from '../workflow/workflowPatterns.js';
+import { recordWorkflowLesson, recallWorkflowLessons, renderPlaybookLessons } from '../workflow/workflowPlaybook.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { validateWorkflowGraph } from '../../engine/validateGraph.js';
@@ -37,8 +37,8 @@ import { deriveIntentManifest, checkIntentIntegrity, type IntentManifest } from 
 import { PackagerService } from '../packager.js';
 import { assembleCreationBrief, preflightAndEnrich, buildTeamRoster, planWorkflow, type CreationBrief, type WorkflowPlan, type PreflightWarning } from '../creationPipeline.js';
 import { AdapterStructuredCompleter, type StructuredCompleter } from '../structuredCompleter.js';
-import { analyzeWorkflowReadiness } from '../workflowReadiness.js';
-import { preflightWorkflow } from '../workflowPreflight.js';
+import { analyzeWorkflowReadiness } from '../workflow/workflowReadiness.js';
+import { preflightWorkflow } from '../workflow/workflowPreflight.js';
 import { listIntegrationManifests } from '../integrationRegistry.js';
 import { repairIntegrationOperations } from '../integrationOperationRepair.js';
 import { scheduleFromNaturalLanguage } from '../scheduleFromNaturalLanguage.js';
@@ -50,11 +50,11 @@ import {
   graphContentHash,
   readBuildLoop,
   stampBuildLoop,
-} from '../workflowCompass.js';
-import { deriveSpecDraft, readWorkflowSpec, validateWorkflowSpec, type WorkflowSpec } from '../workflowSpec.js';
-import { unwrapReturnEnvelope } from '../workflowVerdict.js';
-import { deliverWorkflow } from '../workflowDeliveryOrchestrator.js';
-import { generateEdgeCases, readWorkflowTests, type WorkflowTestCase } from '../workflowTestGenerator.js';
+} from '../workflow/workflowCompass.js';
+import { deriveSpecDraft, readWorkflowSpec, validateWorkflowSpec, type WorkflowSpec } from '../workflow/workflowSpec.js';
+import { unwrapReturnEnvelope } from '../workflow/workflowVerdict.js';
+import { deliverWorkflow } from '../workflow/workflowDeliveryOrchestrator.js';
+import { generateEdgeCases, readWorkflowTests, type WorkflowTestCase } from '../workflow/workflowTestGenerator.js';
 import { connectorCatalog } from '@agentis/integrations';
 import { stringify as yamlStringify } from 'yaml';
 import { WORKFLOW_FILE_API_VERSION, type WorkflowFile } from '@agentis/core';
@@ -1632,7 +1632,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // F7 — materialize the cast: commission a real specialist agent per role and
   // pin it to its node, so the team is real and visible right after the build.
   if (!existingWorkflow) {
-    workingGraph = normalizeGeneratedHalRequirements(workingGraph);
+    workingGraph = normalizeGeneratedRalRequirements(workingGraph);
   }
   const casting = materializeCast(workingGraph, deps, args.workspaceId, args.userId);
   workingGraph = casting.graph;
@@ -2330,7 +2330,7 @@ export function materializeCast(
     // Respect a pin ONLY when it targets a real specialist — never the orchestrator.
     if (cfg.agentId && !nonExecutorIds.has(cfg.agentId)) return n;
 
-    // Hard HAL requirements → a CONNECTED capable WORKER (a freshly-seeded role is an
+    // Hard RAL requirements → a CONNECTED capable WORKER (a freshly-seeded role is an
     // offline placeholder that can't satisfy them). Never the orchestrator/manager.
     const requires = normalizeAgentRequirements(cfg.requires);
     if (requiredAffordanceKeys(requires).length > 0) {
@@ -2429,7 +2429,7 @@ function pickExistingSpecialist(
 /**
  * The first CONNECTED workspace agent whose live runtime satisfies `requires`,
  * preferring one whose role matches `preferRole`. Used by the cast so a node with
- * hard HAL requirements routes to a runtime that can actually do the work instead
+ * hard RAL requirements routes to a runtime that can actually do the work instead
  * of an offline role placeholder.
  */
 function findConnectedCapableAgent(
@@ -2458,19 +2458,19 @@ function findConnectedCapableAgent(
  * node without them — which then makes the canvas autosave fail with
  * VALIDATION_FAILED on a graph the build just produced. Backfilled from the kind.
  */
-const HAL_REQUIREMENT_NODE_KINDS = new Set(['agent_task', 'agent_session', 'agent_swarm', 'dynamic_swarm']);
+const RAL_REQUIREMENT_NODE_KINDS = new Set(['agent_task', 'agent_session', 'agent_swarm', 'dynamic_swarm']);
 
-export function normalizeGeneratedHalRequirements(graph: WorkflowGraph): WorkflowGraph {
+export function normalizeGeneratedRalRequirements(graph: WorkflowGraph): WorkflowGraph {
   let changed = false;
   const nodes = graph.nodes.map((node) => {
     const cfg = node.config as unknown as Record<string, unknown>;
     const kind = typeof cfg.kind === 'string' ? cfg.kind : '';
-    if (!HAL_REQUIREMENT_NODE_KINDS.has(kind)) return node;
+    if (!RAL_REQUIREMENT_NODE_KINDS.has(kind)) return node;
 
     const original = cfg.requires;
     const normalized = normalizeAgentRequirements(original);
     const next: AgentRequirements = { ...normalized };
-    const text = halRequirementIntentText(node, cfg);
+    const text = ralRequirementIntentText(node, cfg);
 
     if (next.browser === true && !mentionsNativeBrowserControl(text)) {
       delete next.browser;
@@ -2494,7 +2494,7 @@ export function normalizeGeneratedHalRequirements(graph: WorkflowGraph): Workflo
   return changed ? { ...graph, nodes } : graph;
 }
 
-function halRequirementIntentText(node: WorkflowNode, cfg: Record<string, unknown>): string {
+function ralRequirementIntentText(node: WorkflowNode, cfg: Record<string, unknown>): string {
   return [
     node.title,
     cfg.prompt,
@@ -2508,7 +2508,7 @@ function halRequirementIntentText(node: WorkflowNode, cfg: Record<string, unknow
 }
 
 function mentionsNativeBrowserControl(text: string): boolean {
-  // Reserve a HAL native-browser REQUIREMENT for EXPLICIT agent-owned, stateful
+  // Reserve a RAL native-browser REQUIREMENT for EXPLICIT agent-owned, stateful
   // browser control. Ordinary web automation — login, fill a form, scrape a page,
   // screenshot, PDF — is the platform `browser` node's job and must NOT mint a
   // requires.browser (those would route to a scarce native runtime that usually
@@ -3697,7 +3697,7 @@ const SYNTHESIS_ARCHITECT_PREAMBLE = [
   '13. Recurring Workflows Remember — for `cron` or `persistent_listener` triggers that accumulate state',
   '    (deduplication, tracking a last-run cursor, appending to a running log), add a `workflow_store` read',
   '    node near the start and a `workflow_store` write node near the end so each run builds on the last.',
-  '14. HAL Requirements Are Hard Routing - `requires` on an agent node is ONLY for native runtime',
+  '14. RAL Requirements Are Hard Routing - `requires` on an agent node is ONLY for native runtime',
   '    powers advertised by AgentAdapter.capabilities(). Web search and URL reading are specialist tools;',
   '    screenshots/rendering/live page work belongs in a `browser` workflow node unless the agent itself',
   '    must control a native browser or computer-use runtime.',
@@ -3782,7 +3782,7 @@ export const SYNTHESIS_SYSTEM_PROMPT = [
   '                  a specialist: a built-in (planner|researcher|coder|reviewer|analyst|writer|monitor|architect|debugger|deployer)',
   '                  OR a custom slug (e.g. "frontend_architect", "tax_analyst") which is auto-created as an on-demand specialist.',
   '                  Prefer agentRole over a blank agentId so the task is runnable without manual binding. Set useRoleTools:false',
-  '                  ONLY for a pure one-shot rewrite/format with no reasoning. `requires` is hard HAL runtime routing,',
+  '                  ONLY for a pure one-shot rewrite/format with no reasoning. `requires` is hard RAL runtime routing,',
   '                  not normal tool intent. Do not set requires.browser for research, web search, URL reading, scraping,',
   '                  qualification, curation, analysis, or writing. For ordinary web automation — open a page, log in, fill a',
   '                  form, scrape, screenshot, or render a PDF — use a `browser` node (platform headless Chromium), NOT',
@@ -3868,7 +3868,7 @@ export const SYNTHESIS_SYSTEM_PROMPT = [
   '- Use `artifact_save` to persist a file (report.html, data.csv) the operator can download.',
   '- For "open a browser" / "screenshot" / live page rendering, use a `browser` node:',
   '  produce HTML in a transform, then browser serve_html with htmlPath:"content", then return_output renderAs:"html".',
-  '- HAL runtime requirements (`requires`) are rare. Web search uses specialist tools; URL fetch/scrape uses',
+  '- RAL runtime requirements (`requires`) are rare. Web search uses specialist tools; URL fetch/scrape uses',
   '  http_request/browser nodes; only native browser/computer-control agent tasks need requires.browser/computerUse.',
   '- Choosing the intelligence node: default to `agent_task` (a capable tool-using agent) for a focused reasoning task.',
   '  Set `useSession: true` on the agent_task when the work must delegate to sub-specialists, run many steps, or keep',

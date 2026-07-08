@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BookOpen, ChevronDown, Crown, Download, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, Users, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -28,7 +28,7 @@ interface EpisodeRow {
 
 type MemoryOrigin = 'imported' | 'learned' | 'operator';
 
-/** Where a memory came from — drives the provenance badge in the Memory tab. */
+/** Where a memory came from â€” drives the provenance badge in the Memory tab. */
 function memoryOrigin(ep: EpisodeRow): MemoryOrigin {
   const harnessMeta = (ep.metadata?.harness ?? (ep.metadata?.provenance as Record<string, unknown> | undefined)?.adapterType) != null;
   if (ep.source === 'harness_ingest' || harnessMeta || ep.tags.includes('imported')) return 'imported';
@@ -62,7 +62,7 @@ export function AgentBrainPanel() {
   const loadAgents = useCallback(async () => {
     const data = await api<{ agents: AgentRow[] }>('/v1/agents');
     setAgents(data.agents);
-    // Default to the orchestrator — the always-on workspace brain owner.
+    // Default to the orchestrator â€” the always-on workspace brain owner.
     setAgentId((current) =>
       current || data.agents.find((a) => subjectTier(a.role) === 'orchestrator')?.id || data.agents[0]?.id || '',
     );
@@ -70,12 +70,10 @@ export function AgentBrainPanel() {
 
   const loadMemory = useCallback(async (id: string) => {
     if (!id) { setEntries([]); setEpisodes([]); return; }
-    // The agent's real Brain content lives in the episodic substrate — imported
-    // harness memory + lessons learned. Filter by the episode's `agentId` column
+    // The agent's real Brain content lives in the episodic substrate â€” imported
     // (the agent that actually executed the run), not `scopeId`: scopeId is the
     // App id for App-owned runs, so a scopeId-only filter would silently miss
     // every episode formed while this agent worked inside an App. The
-    // agent_memories notes are operator-authored. Both are shown, each with a
     // provenance badge.
     const [mem, eps] = await Promise.all([
       api<{ entries: MemoryEntry[] }>(`/v1/brain/agents/${id}/memory`).catch(() => ({ entries: [] as MemoryEntry[] })),
@@ -101,7 +99,7 @@ export function AgentBrainPanel() {
     try {
       await importAgents([{ externalId: current.importOrigin.externalId }]);
       await Promise.all([loadMemory(agentId), loadImports()]);
-      toast.success('Pulled new memory', 'The provider memory was merged into this agent’s Brain.');
+      toast.success('Pulled new memory', 'The provider memory was merged into this agentâ€™s Brain.');
     } catch (error) {
       toast.error('Could not pull memory', apiErrorMessage(error));
     } finally {
@@ -238,8 +236,8 @@ export function AgentBrainPanel() {
 }
 
 /**
- * Provider→Brain strip (Solution 2): makes the harness→agent-brain memory flow
- * visible — source harness, how much has been pulled, what's pending upstream,
+ * Providerâ†’Brain strip (Solution 2): makes the harnessâ†’agent-brain memory flow
+ * visible â€” source harness, how much has been pulled, what's pending upstream,
  * and an approval-gated pull, right where you inspect the agent's mind.
  */
 function ProviderBrainStrip({
@@ -262,7 +260,7 @@ function ProviderBrainStrip({
       <div className="flex items-center gap-2 text-[12px]">
         <Icon className="h-4 w-4 text-text-secondary" aria-label={label} />
         <span className="font-medium text-text-primary">{label}</span>
-        <span className="text-text-muted">→ Agent Brain</span>
+        <span className="text-text-muted">â†’ Agent Brain</span>
       </div>
       <span className="text-[12px] text-text-muted">{memoryCount} {memoryCount === 1 ? 'memory' : 'memories'} pulled</span>
       {pendingCount > 0 ? (
@@ -278,7 +276,7 @@ function ProviderBrainStrip({
           disabled={pulling}
           onClick={onPull}
         >
-          {pulling ? 'Pulling…' : pendingCount > 0 ? 'Pull updates' : 'Re-sync'}
+          {pulling ? 'Pullingâ€¦' : pendingCount > 0 ? 'Pull updates' : 'Re-sync'}
         </Button>
       </div>
     </div>
@@ -288,7 +286,7 @@ function ProviderBrainStrip({
 /** Provenance badge for a memory entry in the Memory tab (Solution 3). */
 function OriginBadge({ origin, harness }: { origin: MemoryOrigin; harness?: string | null }) {
   if (origin === 'imported') {
-    return <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">imported{harness ? ` · ${harnessOf(harness).label}` : ''}</span>;
+    return <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">imported{harness ? ` Â· ${harnessOf(harness).label}` : ''}</span>;
   }
   if (origin === 'operator') {
     return <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">operator note</span>;
@@ -322,7 +320,7 @@ const TIER_TABS: Array<{ key: SubjectTier; label: string }> = [
 /**
  * Modal subject picker for Agent Brain. Keeps the page calm by default and
  * scales past a 50-specialist workspace via tabs + search, instead of a single
- * giant dropdown (SPECIALISTS-10X §UI/UX → Brain Page Subject Picker).
+ * giant dropdown (SPECIALISTS-10X Â§UI/UX â†’ Brain Page Subject Picker).
  */
 function BrainSubjectPicker({
   agents,
@@ -398,7 +396,7 @@ function BrainSubjectPicker({
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search specialists, abilities, tools…"
+            placeholder="Search specialists, abilities, toolsâ€¦"
             className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
           />
         </label>
@@ -407,7 +405,7 @@ function BrainSubjectPicker({
           {rows.length === 0 ? (
             <p className="px-5 py-10 text-center text-[12px] text-text-muted">
               {tier === 'orchestrator'
-                ? 'No orchestrator yet — commission one from the Agents page.'
+                ? 'No orchestrator yet â€” commission one from the Agents page.'
                 : `No ${tier === 'manager' ? 'managers' : 'specialists'} match.`}
             </p>
           ) : (
@@ -428,7 +426,7 @@ function BrainSubjectPicker({
                     <div className="truncate text-[13px] font-medium text-text-primary">{a.name}</div>
                     <div className="truncate text-[11px] text-text-muted">
                       {a.role ? <span className="font-mono">{a.role === 'worker' ? 'specialist' : a.role}</span> : 'agent'}
-                      {a.capabilityTags && a.capabilityTags.length > 0 && ` · ${a.capabilityTags.slice(0, 3).join(', ')}`}
+                      {a.capabilityTags && a.capabilityTags.length > 0 && ` Â· ${a.capabilityTags.slice(0, 3).join(', ')}`}
                     </div>
                   </div>
                   {isSel && <span className="text-[11px] text-accent">current</span>}
@@ -457,3 +455,6 @@ function ScopeToggle({
     </div>
   );
 }
+
+
+

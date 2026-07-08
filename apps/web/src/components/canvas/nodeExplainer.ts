@@ -1,7 +1,7 @@
-/**
- * explainNode — a plain-language, CONFIG-SPECIFIC sentence describing what a
+﻿/**
+ * explainNode â€” a plain-language, CONFIG-SPECIFIC sentence describing what a
  * node does in *this* workflow. The inspector previously showed only a generic
- * per-kind blurb ("Calls an external service…"); this reads the node's actual
+ * per-kind blurb ("Calls an external serviceâ€¦"); this reads the node's actual
  * config so the user sees "Emails the digest to you every morning (0 9 * * *)"
  * instead of decoding raw fields. User-friendly, not dumbed-down.
  */
@@ -14,7 +14,7 @@ function str(v: unknown): string {
 }
 function truncate(s: string, n = 90): string {
   const t = s.replace(/\s+/g, ' ').trim();
-  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+  return t.length > n ? `${t.slice(0, n - 1)}â€¦` : t;
 }
 function humanize(s: string): string {
   return s.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -58,17 +58,17 @@ export function explainNode(kind: string, config: Record<string, unknown>, opts:
       return `${action} via ${label}${to ? ` to ${to}` : ''}.`;
     }
     case 'notify':
-      return 'Sends the result to you — delivered to your account, no setup needed.';
+      return 'Sends the result to you â€” delivered to your account, no setup needed.';
     case 'parallel':
       return 'Runs the branches below at the same time, then joins their results.';
     case 'merge':
       return 'Combines the parallel branches back into a single result.';
     case 'transform':
-      return 'Reshapes the data deterministically — no AI, no tokens spent.';
+      return 'Reshapes the data deterministically â€” no AI, no tokens spent.';
     case 'filter':
       return 'Keeps only the items that match a condition.';
     case 'evaluator':
-      return 'Scores the previous step and gates what happens next — a quality guard.';
+      return 'Scores the previous step and gates what happens next â€” a quality guard.';
     case 'guardrails':
       return 'Checks the output against safety/policy rules before it continues.';
     case 'knowledge':
@@ -86,7 +86,7 @@ export function explainNode(kind: string, config: Record<string, unknown>, opts:
     case 'loop':
       return 'Repeats the downstream steps once for each item.';
     case 'pursue':
-      return 'Pursues an objective — re-runs a cohort, measures progress, and reflects when stuck until done, stalled, or out of budget.';
+      return 'Pursues an objective â€” re-runs a cohort, measures progress, and reflects when stuck until done, stalled, or out of budget.';
     case 'converge':
       return 'Re-runs a cohort of agents until a goal is met, stalls, or hits its budget.';
     case 'wait': {
@@ -96,7 +96,7 @@ export function explainNode(kind: string, config: Record<string, unknown>, opts:
     case 'router':
       return 'Sends the run down different branches based on a condition.';
     case 'extension_task': {
-      // Prefer the resolved human name, then a readable slug — never a raw UUID.
+      // Prefer the resolved human name, then a readable slug â€” never a raw UUID.
       const extId = str(config.extensionId) || str(config.extension);
       const extSlug = str(config.extensionSlug);
       const resolved = opts.resolveExtensionName?.(extId || extSlug);
@@ -107,16 +107,19 @@ export function explainNode(kind: string, config: Record<string, unknown>, opts:
       const opRaw = str(config.operationName) || str(config.operation);
       const op = opRaw && !isIdLike(opRaw) ? opRaw : '';
       return ext
-        ? `Runs the ${humanize(ext)}${op ? ` · ${humanize(op)}` : ''} extension operation.`
+        ? `Runs the ${humanize(ext)}${op ? ` Â· ${humanize(op)}` : ''} extension operation.`
         : op ? `Runs the ${humanize(op)} extension operation.` : 'Runs an extension operation.';
     }
     case 'subflow':
       return 'Runs a reusable sub-workflow as a single step.';
     case 'browser':
-      return 'Controls a real browser — render a page or capture a screenshot.';
+      return 'Controls a real browser â€” render a page or capture a screenshot.';
     case 'scratchpad':
       return 'Holds working variables for the run.';
     default:
       return `${nodeKindMeta(kind).label} step.`;
   }
 }
+
+
+

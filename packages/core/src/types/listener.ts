@@ -1,12 +1,12 @@
-/**
- * Listener Runtime contract — EXTENSIONS-AND-LISTENER-10X §1.
+﻿/**
+ * Listener Runtime contract â€” EXTENSIONS-AND-LISTENER-10X Â§1.
  *
  * A persistent_listener trigger is composed of three independent, swappable
  * layers:
  *
- *   SOURCE      — where events come from (websocket, sse, http_poll, extension,…)
- *   PREDICATE   — should this event fire the workflow? (always, jsonpath, agent,…)
- *   FIRE POLICY — how matching events become workflow runs (immediate, batch,…)
+ *   SOURCE      â€” where events come from (websocket, sse, http_poll, extension,â€¦)
+ *   PREDICATE   â€” should this event fire the workflow? (always, jsonpath, agent,â€¦)
+ *   FIRE POLICY â€” how matching events become workflow runs (immediate, batch,â€¦)
  *
  * The shapes live in @agentis/core so the engine, the API validators, and the
  * dashboard wizard all agree on one schema. The runtime implementation
@@ -14,7 +14,7 @@
  * in apps/api/src/engine/listener.
  */
 
-// ── Layer 1: Source ──────────────────────────────────────────────────────────
+// â”€â”€ Layer 1: Source â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type ListenerSourceKind =
   | 'websocket'
@@ -130,7 +130,7 @@ export interface CursorConfig {
   cursorParamName?: string; // e.g. 'since', 'after', 'page_token'
 }
 
-// ── Layer 2: Predicate ───────────────────────────────────────────────────────
+// â”€â”€ Layer 2: Predicate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type ListenerPredicateKind = 'always' | 'jsonpath' | 'jmespath' | 'extension' | 'agent';
 
@@ -158,7 +158,7 @@ export type ListenerPredicate =
       cacheWindowMs?: number;
     }
   | {
-      // Semantic judgment — the Agentis-exclusive capability.
+      // Semantic judgment â€” the Agentis-exclusive capability.
       kind: 'agent';
       agentId: string;
       prompt: string;
@@ -173,7 +173,7 @@ export interface PredicateResult {
   reason?: string;
 }
 
-// ── Layer 3: Fire policy ─────────────────────────────────────────────────────
+// â”€â”€ Layer 3: Fire policy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type FirePolicyMode = 'immediate' | 'batch' | 'debounce' | 'throttle' | 'leading_edge';
 
@@ -189,7 +189,7 @@ export type FirePolicy =
   | { mode: 'throttle'; windowMs: number }
   | { mode: 'leading_edge'; cooldownMs: number };
 
-// ── The composed config ──────────────────────────────────────────────────────
+// â”€â”€ The composed config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface ListenerConfig {
   source: ListenerSource;
@@ -219,7 +219,7 @@ export function isListenerConfigV2(config: unknown): config is ListenerConfig {
   );
 }
 
-// ── Runtime-facing contracts ─────────────────────────────────────────────────
+// â”€â”€ Runtime-facing contracts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface ListenerHealth {
   connected: boolean;
@@ -258,3 +258,6 @@ export interface SourceDriver {
   /** True while the underlying transport is connected/healthy. */
   isConnected(): boolean;
 }
+
+
+

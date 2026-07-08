@@ -1,4 +1,4 @@
-import { Info, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
+﻿import { Info, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
 import { Button } from '../shared/Button';
 import type { KnowledgeDocumentRow } from './types';
 
@@ -50,3 +50,6 @@ export function DocumentRow({
     </div>
   );
 }
+
+
+

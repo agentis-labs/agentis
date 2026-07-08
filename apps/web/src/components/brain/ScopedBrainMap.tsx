@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useMemo, useState } from 'react';
 import type { BrainGraph, BrainNode, BrainResponse } from '@agentis/core';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -118,3 +118,6 @@ export function ScopedBrainMap({
     </div>
   );
 }
+
+
+

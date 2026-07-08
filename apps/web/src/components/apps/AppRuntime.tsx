@@ -1,9 +1,9 @@
-/**
- * AppRuntime — the end-user shell + renderer for an Agentic App
- * (APP-INTERFACE-10X §2.1).
+﻿/**
+ * AppRuntime â€” the end-user shell + renderer for an Agentic App
+ * (APP-INTERFACE-10X Â§2.1).
  *
  * An App no longer renders as a bare tab bar over one scrolling column: the
- * runtime OWNS product chrome — sidebar page navigation, a topbar with the live
+ * runtime OWNS product chrome â€” sidebar page navigation, a topbar with the live
  * operations cluster (active-run pulse, pending approvals), and a slide-over ops
  * drawer (Runs / Agent activity / Approvals / Rules) available on every page.
  * Chrome is DERIVED, never agent-authored: agents author page content, so every
@@ -40,7 +40,7 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
   const [allowCustomCode, setAllowCustomCode] = useState(false);
   const [uiState, setUiState] = useState<Record<string, unknown>>({});
   const uiStateRef = useRef(uiState);
-  // Real routing (INTERFACE-OVERHAUL-10X §2.3): the active page lives in the URL
+  // Real routing (INTERFACE-OVERHAUL-10X Â§2.3): the active page lives in the URL
   // (`?page=<surface>`), so browser back/forward, refresh and sharing all work.
   const [searchParams, setSearchParams] = useSearchParams();
   const urlPage = searchParams.get('page');
@@ -85,7 +85,7 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
     };
   }, [appId, reloadKey]);
 
-  // Derive the active surface from the loaded list — switching pages is instant
+  // Derive the active surface from the loaded list â€” switching pages is instant
   // (no re-fetch); a SURFACE_RENDER/PATCH event bumps reloadKey to refresh views.
   const surface = useMemo(
     () => (surfaces ?? []).find((s) => s.name === activeSurfaceName) ?? surfaces?.[0] ?? null,
@@ -97,7 +97,7 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
       const payload = env.payload as { appId?: string; region?: string } | undefined;
       if (payload?.appId && payload.appId !== appId) return;
       // Performed-region pushes (Phase M3) carry a `region` and are handled in
-      // place by the matching AgentRegion node — a full reload would wipe the
+      // place by the matching AgentRegion node â€” a full reload would wipe the
       // transient (un-pinned) content, so skip it here.
       if (payload?.region) return;
       setReloadKey((k) => k + 1);
@@ -194,13 +194,12 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
   );
 }
 
-// ── App Shell ─────────────────────────────────────────────────
+// â”€â”€ App Shell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Live ops status for the shell topbar: active runs + pending approvals. */
 function useOpsStatus(appId: string): { runningRuns: number; waitingRuns: number; pendingApprovals: number } {
   const { workflows } = useAppWorkflows(appId);
   // A run parked WAITING/PAUSED (e.g. blocked on a rate limit, or paused by the
-  // operator) is NOT running — nothing is executing. Count those separately so
   // the shell pill never claims "running" for a run that is merely in-flight.
   const active = (workflows ?? []).filter((w) => w.activeRun && isActiveRunStatus(w.activeRun.status));
   const runningRuns = active.filter((w) => (w.activeRun?.status ?? '').toUpperCase() === 'RUNNING').length;
@@ -227,7 +226,6 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
   const [collapsed, setCollapsed] = useState(false);
 
   // The ops drawer is deep-linkable (`?ops=runs|activity|approvals|rules`) so
-  // notifications and approval chips can land the operator on the exact pane.
   const [searchParams, setSearchParams] = useSearchParams();
   const opsParam = searchParams.get('ops');
   const drawer: DrawerTab | null = opsParam === 'runs' || opsParam === 'activity' || opsParam === 'approvals' || opsParam === 'rules' ? opsParam : null;
@@ -243,7 +241,7 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
   }, [setSearchParams]);
 
   // Run feedback: a workflow action that starts a run announces itself (see
-  // useActionInvoker) — surface a live chip that deep-links into the ops drawer.
+  // useActionInvoker) â€” surface a live chip that deep-links into the ops drawer.
   const [runToast, setRunToast] = useState<{ runId: string; action: string } | null>(null);
   useEffect(() => {
     const onRunStarted = (e: Event) => {
@@ -275,7 +273,7 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
       className="s-surface relative flex h-full min-h-[60vh] w-full overflow-hidden bg-canvas text-text-primary"
       {...(appearance ? { 'data-appearance': appearance } : {})}
     >
-      {/* Sidebar — the app's pages */}
+      {/* Sidebar â€” the app's pages */}
       {showSidebar ? (
         <aside
           className={clsx(
@@ -407,7 +405,7 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
         </main>
       </div>
 
-      {/* Run-started chip — the click → run feedback loop */}
+      {/* Run-started chip â€” the click â†’ run feedback loop */}
       {runToast ? (
         <div className="s-panel absolute bottom-5 right-5 z-40 flex items-center gap-3 px-4 py-3">
           <span className="s-pulse h-2 w-2 shrink-0 rounded-full bg-success text-success" aria-hidden />
@@ -428,7 +426,7 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
         </div>
       ) : null}
 
-      {/* Ops drawer — Runs / Agent activity / Approvals / Rules on every page */}
+      {/* Ops drawer â€” Runs / Agent activity / Approvals / Rules on every page */}
       {drawer ? (
         <div className="absolute inset-0 z-30 flex justify-end bg-overlay-soft" role="presentation" onClick={() => setDrawer(null)}>
           <div
@@ -482,13 +480,13 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
   );
 }
 
-/** Humanize a surface name for navigation ("lead_inbox" → "Lead inbox"). */
+/** Humanize a surface name for navigation ("lead_inbox" â†’ "Lead inbox"). */
 function surfaceLabel(name: string): string {
   const s = name.replace(/[_-]+/g, ' ').trim();
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/** Icon heuristic for a page — derived from the surface name + kind, never authored. */
+/** Icon heuristic for a page â€” derived from the surface name + kind, never authored. */
 function surfaceIcon(surface: AppSurface): ReactNode {
   const n = surface.name.toLowerCase();
   const size = 15;
@@ -522,3 +520,5 @@ function setPath(source: Record<string, unknown>, path: string, value: unknown):
     [head]: setPath(child && typeof child === 'object' && !Array.isArray(child) ? child as Record<string, unknown> : {}, rest.join('.'), value),
   };
 }
+
+

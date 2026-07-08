@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ViewRenderer - renders an agent-authored AG-UI ViewNode tree.
  *
  * Agents emit typed UI intent. The renderer owns pixels, state, navigation,
@@ -10,7 +10,7 @@
  * hoverable, text nodes edit inline, and interactive elements (buttons/forms) are
  * inert so editing never fires a real action. Data binding still runs, so tables
  * and charts show real rows while you design. The canvas is therefore pixel-true
- * to production — there is no separate "preview" render path to drift from.
+ * to production â€” there is no separate "preview" render path to drift from.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Activity, AlertTriangle, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Copy, Download, ExternalLink, FileText, Globe2, Image as ImageIcon, Loader2, MapPin, MessageSquare, Pin, Play, Search, Send, Sparkles, Trash2, Workflow, Wrench, X } from 'lucide-react';
@@ -54,7 +54,7 @@ interface RuntimeCtx {
 
 const Ctx = createContext<RuntimeCtx | null>(null);
 
-/** Runtime context accessor — exported for block modules (ops/archetype blocks). */
+/** Runtime context accessor â€” exported for block modules (ops/archetype blocks). */
 export const useRuntime = () => {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('ViewRenderer used outside an AppRuntime');
@@ -65,7 +65,7 @@ export function RuntimeProvider({ value, children }: { value: RuntimeCtx; childr
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-// ── Edit mode (WYSIWYG builder) ─────────────────────────────
+// â”€â”€ Edit mode (WYSIWYG builder) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Wired by the builder canvas. Present == design mode (interactions inert). */
 export interface SurfaceEditContext {
@@ -78,7 +78,7 @@ export interface SurfaceEditContext {
 }
 
 const EditCtx = createContext<SurfaceEditContext | null>(null);
-/** True when rendering inside an elevated (boxed) container — nested boxes flatten. */
+/** True when rendering inside an elevated (boxed) container â€” nested boxes flatten. */
 const BoxedCtx = createContext(false);
 
 export function SurfaceEditProvider({ value, children }: { value: SurfaceEditContext; children: React.ReactNode }) {
@@ -132,7 +132,7 @@ function displayString(value: unknown): string {
 
 /**
  * Resolve a value for DISPLAY. Returns the text PLUS the binding path when a
- * binding that was supposed to resolve came back empty — so the renderer surfaces
+ * binding that was supposed to resolve came back empty â€” so the renderer surfaces
  * a visible "unbound" marker instead of silently rendering nothing (the silent
  * data-binding failure that made broken apps look merely empty).
  */
@@ -152,7 +152,7 @@ function UnboundMarker({ path }: { path: string }) {
       className="inline-flex items-center gap-1 rounded bg-danger/10 px-1.5 py-0.5 align-middle text-[11px] font-medium text-danger"
       title={`Unbound data: "${path}" did not resolve. Check that the source node/field exists and ran.`}
     >
-      ⚠ unbound: {path}
+      âš  unbound: {path}
     </span>
   );
 }
@@ -166,11 +166,11 @@ function useResolvedScope(row?: Record<string, unknown>): ResolveScope {
   return useMemo(() => ({ row, state: uiState }), [row, uiState]);
 }
 
-// ── Shared bind store — the deduped data plane (INTERFACE-OVERHAUL-10X §2.4) ──
+// â”€â”€ Shared bind store â€” the deduped data plane (INTERFACE-OVERHAUL-10X Â§2.4) â”€â”€
 // One store per app client: identical binds (collection + RESOLVED filter +
 // sort + limit) share one subscription and ONE fetch per data revision. A
 // uiState change that does not alter a bind's resolved filter refetches
-// nothing (the old hook keyed on the WHOLE uiState — every keystroke refetched
+// nothing (the old hook keyed on the WHOLE uiState â€” every keystroke refetched
 // every bound view), and revision refetches keep the previous rows on screen
 // (live update without skeleton flicker).
 
@@ -293,7 +293,7 @@ export function useActionInvoker() {
 
       const result = await client.actions.invoke(action, args);
       // Run feedback loop: a workflow action that started a run announces it, so
-      // the shell can surface a live "run started" chip → ops drawer deep link.
+      // the shell can surface a live "run started" chip â†’ ops drawer deep link.
       if (isRecord(result) && typeof (result as { runId?: unknown }).runId === 'string') {
         window.dispatchEvent(new CustomEvent('agentis:run-started', {
           detail: { runId: (result as { runId: string }).runId, action },
@@ -313,7 +313,7 @@ export function ViewRenderer({
 }: {
   node: ViewNode;
   scope?: Record<string, unknown>;
-  /** Index path from the surface root — used by the builder for selection. */
+  /** Index path from the surface root â€” used by the builder for selection. */
   path?: number[];
   /** False inside data-bound row templates, where children are not editable. */
   editable?: boolean;
@@ -326,7 +326,7 @@ export function ViewRenderer({
   // At the root the surface is self-contained: use its own theme/design/density and
   // let resolveTheme apply the theme's preset design when none is set (so e.g. a
   // `product` theme leads with `soft`, not the context default). Don't fall back to
-  // the inherited (context-default) design here — that would override the theme.
+  // the inherited (context-default) design here â€” that would override the theme.
   const effective = isRoot
     ? resolveTheme(node.style?.theme, node.style?.design, node.style?.density)
     : inherited;
@@ -334,7 +334,7 @@ export function ViewRenderer({
   let content = renderContent();
   if (isRoot) {
     // The root carries the design system scope: `.s-surface` re-points the token
-    // palette (appearance-aware — platform theme or per-app pin), the design vars
+    // palette (appearance-aware â€” platform theme or per-app pin), the design vars
     // add structure, and an optional root accent re-brands the app's accent hue.
     const appearance = node.style?.appearance && node.style.appearance !== 'auto' ? node.style.appearance : undefined;
     const rootAccent = node.style?.accent && node.style.accent !== 'accent' ? accentColor(node.style.accent) : undefined;
@@ -545,7 +545,7 @@ function MapViewBlock({ node, scope }: { node: Extract<ViewNode, { type: 'MapVie
                 <div className="text-[12px] font-medium text-text-primary">{pin.label}</div>
                 <div className="text-[11px] text-text-muted">
                   {pin.lat != null && pin.lng != null ? `${pin.lat}, ${pin.lng}` : 'Location'}
-                  {pin.value != null ? ` · ${String(resolveBindable(pin.value, scope) ?? '-')}` : ''}
+                  {pin.value != null ? ` Â· ${String(resolveBindable(pin.value, scope) ?? '-')}` : ''}
                 </div>
               </div>
             ))}
@@ -637,7 +637,7 @@ function CodeViewerBlock({ node }: { node: Extract<ViewNode, { type: 'CodeViewer
   return (
     <PanelShell title={node.title ?? 'Code'} icon={<Code2 size={14} />}>
       <div className="mb-2 flex items-center justify-between text-[11px] text-text-muted">
-        <span>{node.language ?? 'text'}{node.diff ? ' · diff' : ''}</span>
+        <span>{node.language ?? 'text'}{node.diff ? ' Â· diff' : ''}</span>
       </div>
       <pre className="max-h-96 overflow-auto rounded-btn border border-line bg-canvas p-3 font-mono text-[12px] leading-relaxed text-text-secondary">
         {node.code}
@@ -673,7 +673,7 @@ function MediaGalleryBlock({ node, scope }: { node: Extract<ViewNode, { type: 'M
   );
 }
 
-// ── Sandboxed surfaces (CustomView + CodeSurface) — one hardened boundary ─────
+// â”€â”€ Sandboxed surfaces (CustomView + CodeSurface) â€” one hardened boundary â”€â”€â”€â”€â”€
 //
 // Both render agent-authored code in a null-origin `sandbox="allow-scripts"`
 // iframe with CSP `connect-src 'none'` (zero network egress). Data + actions
@@ -832,7 +832,7 @@ function CodeSurfaceFrame({ node }: { node: Extract<ViewNode, { type: 'CodeSurfa
     return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${CODE_SURFACE_TOKENS}</style></head><body>${body}</body></html>`;
   }, [node.code]);
 
-  if (!allowCustomCode) return <SandboxBlocked label="Code surface blocked by app policy — enable custom-coded views in the App engine." />;
+  if (!allowCustomCode) return <SandboxBlocked label="Code surface blocked by app policy â€” enable custom-coded views in the App engine." />;
   return <iframe title="Code surface" ref={frameRef} sandbox="allow-scripts" srcDoc={srcDoc} className="w-full rounded-card border border-line bg-canvas" style={{ height: node.height ?? 360 }} />;
 }
 
@@ -861,7 +861,7 @@ function ActionButton({
       type="button"
       disabled={busy}
       onClick={async () => {
-        if (editing) return; // inert in the builder canvas — selection is handled by the wrapper
+        if (editing) return; // inert in the builder canvas â€” selection is handled by the wrapper
         setBusy(true);
         try {
           await invoke(action, resolveArgs(args, resolvedScope));
@@ -877,11 +877,11 @@ function ActionButton({
   );
 }
 
-/** Column keys whose values read as a status — auto-rendered as a toned pill. */
+/** Column keys whose values read as a status â€” auto-rendered as a toned pill. */
 function isStatusKey(key: string): boolean {
   return /^(status|stage|state|priority|severity|tier|phase)$/i.test(key);
 }
-/** First textual column → gets an avatar + emphasis (the row's identity). */
+/** First textual column â†’ gets an avatar + emphasis (the row's identity). */
 function isNameKey(key: string): boolean {
   return /^(name|title|account|company|customer|user|client|agent|owner|label)$/i.test(key);
 }
@@ -902,8 +902,8 @@ const TABLE_PAGE_SIZE = 10;
 function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   const { rows, loading } = useBoundRows(node.bind);
   const editing = useContext(EditCtx);
-  // Client-side over the bound rows: click a header to sort (asc → desc → off),
-  // a filter box, and pagination — all kick in only for sizeable tables.
+  // Client-side over the bound rows: click a header to sort (asc â†’ desc â†’ off),
+  // a filter box, and pagination â€” all kick in only for sizeable tables.
   const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
@@ -922,7 +922,7 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   const toggleSort = (key: string) => setSort((s) => (s?.key === key ? (s.dir === 'asc' ? { key, dir: 'desc' } : null) : { key, dir: 'asc' }));
   if (loading) return <SkeletonRows />;
   const identityCol = node.columns.find((c) => isNameKey(c.key))?.key ?? node.columns[0]?.key;
-  // Numeric columns right-align (header + cells) — classified from a sample of rows.
+  // Numeric columns right-align (header + cells) â€” classified from a sample of rows.
   const numericCols = new Set(
     node.columns
       .filter((c) => !c.format && c.key !== identityCol && rows.slice(0, 6).some((r) => classifyValue(r[c.key], c.key) === 'number'))
@@ -942,7 +942,7 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
           <input
             value={query}
             onChange={(e) => { setQuery(e.target.value); setPage(0); }}
-            placeholder="Filter…"
+            placeholder="Filterâ€¦"
             className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-muted focus:outline-none"
             aria-label="Filter rows"
           />
@@ -1011,7 +1011,7 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
       </table>
       {paginate ? (
         <div className="flex items-center justify-between border-t border-line px-3 py-2 text-[11px] text-text-muted">
-          <span className="tabular-nums">{current * TABLE_PAGE_SIZE + 1}–{Math.min((current + 1) * TABLE_PAGE_SIZE, filtered.length)} of {filtered.length}</span>
+          <span className="tabular-nums">{current * TABLE_PAGE_SIZE + 1}â€“{Math.min((current + 1) * TABLE_PAGE_SIZE, filtered.length)} of {filtered.length}</span>
           <div className="flex items-center gap-1">
             <button type="button" disabled={current === 0} onClick={() => setPage(current - 1)} className="inline-flex h-6 w-6 items-center justify-center rounded-btn border border-line text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-40" aria-label="Previous page"><ChevronLeft size={13} /></button>
             <span className="px-1 tabular-nums">{current + 1} / {pageCount}</span>
@@ -1033,7 +1033,7 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
 }
 
 /**
- * RecordDrawer — the default row drill-in (INTERFACE-OVERHAUL-10X §P4): every
+ * RecordDrawer â€” the default row drill-in (INTERFACE-OVERHAUL-10X Â§P4): every
  * table row opens a detail panel with all fields through the kit formatter,
  * inline editing when the surface declares an `<collection>.update` data
  * action, and the row's declared actions. No more dead rows.
@@ -1154,11 +1154,11 @@ function RecordDrawer({ collection, row, identityKey, rowActions, onClose }: {
 
 /** A tiny initials chip for the identity column (no image source needed). */
 function AvatarChip({ name }: { name: string }) {
-  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p.charAt(0).toUpperCase()).join('') || '·';
+  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p.charAt(0).toUpperCase()).join('') || 'Â·';
   return <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[9px] font-semibold text-accent">{initials}</span>;
 }
 
-/** A designed empty state — intentional, not an error. Used by tables/boards/lists. */
+/** A designed empty state â€” intentional, not an error. Used by tables/boards/lists. */
 export function EmptyState({ label, hint }: { label: string; hint?: string }) {
   return (
     <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
@@ -1200,7 +1200,7 @@ function BoundChart({ node }: { node: Extract<ViewNode, { type: 'Chart' }> }) {
   );
 }
 
-/** Shared field styling — the kit input (styles.css .s-input). */
+/** Shared field styling â€” the kit input (styles.css .s-input). */
 const FORM_INPUT = 's-input';
 
 function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
@@ -1241,7 +1241,7 @@ function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
               <textarea required={f.required} placeholder={f.placeholder} rows={3} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} className={FORM_INPUT} />
             ) : f.type === 'select' ? (
               <select required={f.required} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} className={FORM_INPUT}>
-                <option value="">Select…</option>
+                <option value="">Selectâ€¦</option>
                 {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             ) : (
@@ -1250,12 +1250,12 @@ function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
           </label>
         );
       })}
-      <button type="submit" disabled={busy} className="s-btn s-btn-primary mt-1 w-fit">{busy ? <Loader2 size={13} className="animate-spin" /> : null}{busy ? 'Saving…' : node.submitLabel ?? 'Submit'}</button>
+      <button type="submit" disabled={busy} className="s-btn s-btn-primary mt-1 w-fit">{busy ? <Loader2 size={13} className="animate-spin" /> : null}{busy ? 'Savingâ€¦' : node.submitLabel ?? 'Submit'}</button>
     </form>
   );
 }
 
-// ── Agent-native composites — the agentic core of a surface ──────────────────
+// â”€â”€ Agent-native composites â€” the agentic core of a surface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface ActivityItem { id: string; icon: ReactNode; label: string; tone: 'default' | 'accent' | 'success' | 'danger' | 'warning'; at: string; }
 
@@ -1396,7 +1396,7 @@ function BoundBoard({ node }: { node: Extract<ViewNode, { type: 'DataBoard' }> }
   );
 }
 
-// ── GenUI Renaissance — layout, content & viz nodes ──────────────────────────
+// â”€â”€ GenUI Renaissance â€” layout, content & viz nodes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function prettifyAction(name: string): string {
   const spaced = name.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
@@ -1407,7 +1407,7 @@ function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' 
   const { density } = useTheme();
   const value = resolveDisplay(node.value, scope);
   // Overflow defense: a WORD value ("ACCOMPLISHED", "world verified") never renders
-  // as a 32px numeral — it becomes a humanized tone pill. Numerals auto-fit their
+  // as a 32px numeral â€” it becomes a humanized tone pill. Numerals auto-fit their
   // type step to the value length so they can't wrap mid-word or clip.
   const wordy = !value.unbound && isWordyMetric(value.text);
   const deltaRaw = node.delta != null ? String(resolveBindable(node.delta, scope) ?? '') : '';
@@ -1423,10 +1423,10 @@ function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' 
         ) : (
           <span
             className={clsx('s-num min-w-0', textClasses({ tone: node.style?.tone }))}
-            style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(value.text || '—')})` }}
+            style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(value.text || 'â€”')})` }}
             title={value.text.length > 12 ? value.text : undefined}
           >
-            {value.text || '—'}
+            {value.text || 'â€”'}
           </span>
         )}
         {deltaRaw ? <span className={clsx('rounded-full px-2 py-0.5 text-[11.5px] font-medium tabular-nums', deltaTone)}>{deltaRaw}</span> : null}
@@ -1448,13 +1448,7 @@ function CalloutView({ node }: { node: Extract<ViewNode, { type: 'Callout' }> })
   );
 }
 
-/**
- * AgentRegion (Phase M3 / G12) — a stable slot the operator places once; the
- * agent PERFORMS a transient ViewNode into it live over the realtime bus. The
- * frame never moves; performed content is explainable (a `reason`), dismissable,
- * and pinnable. Un-pinned performances are ephemeral (not stored); pinning freezes
- * the child into the surface so it survives a reload.
- */
+
 type PerformedRegion = { view: ViewNode | null; reason?: string; pinned: boolean };
 
 function AgentRegionView({ node, scope, path }: { node: Extract<ViewNode, { type: 'AgentRegion' }>; scope?: Record<string, unknown>; path: number[] }) {
@@ -1485,7 +1479,6 @@ function AgentRegionView({ node, scope, path }: { node: Extract<ViewNode, { type
         if (body.clear) setPerformed(null);
         else if (body.pin) setPerformed((prev) => (prev ? { ...prev, pinned: true } : prev));
       } catch {
-        // best-effort operator control; surface stays as-is on failure
       } finally {
         setBusy(false);
       }
@@ -1497,7 +1490,7 @@ function AgentRegionView({ node, scope, path }: { node: Extract<ViewNode, { type
   if (!performed || !performed.view) {
     return (
       <div className="rounded-card border border-dashed border-line/70 px-3 py-2 text-[11px] text-text-muted">
-        <span className="inline-flex items-center gap-1.5"><Sparkles size={12} /> {node.title ?? 'Agent region'} · {node.placeholder ?? 'the agent composes here'}</span>
+        <span className="inline-flex items-center gap-1.5"><Sparkles size={12} /> {node.title ?? 'Agent region'} Â· {node.placeholder ?? 'the agent composes here'}</span>
       </div>
     );
   }
@@ -1517,7 +1510,7 @@ function AgentRegionView({ node, scope, path }: { node: Extract<ViewNode, { type
             type="button"
             disabled={busy}
             onClick={() => void act({ pin: !performed.pinned })}
-            title={performed.pinned ? 'Pinned — click to keep performing live' : 'Pin (freeze into the surface)'}
+            title={performed.pinned ? 'Pinned â€” click to keep performing live' : 'Pin (freeze into the surface)'}
             className={clsx('rounded p-1 hover:bg-surface-2', performed.pinned ? 'text-accent' : 'text-text-muted')}
           >
             <Pin size={13} />
@@ -1529,7 +1522,7 @@ function AgentRegionView({ node, scope, path }: { node: Extract<ViewNode, { type
       </div>
       <div className="p-3">
         {/* Performed content is transient (not part of the editable stored tree),
-            so it renders inert in edit mode — keep the region's own path. */}
+            so it renders inert in edit mode â€” keep the region's own path. */}
         <ViewRenderer node={performed.view} scope={scope} path={path} editable={false} />
       </div>
     </div>
@@ -1600,10 +1593,10 @@ function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStr
                 return (
                   <span
                     className="min-w-0 font-semibold leading-tight text-text-primary"
-                    style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(v.text || '—')})`, letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums' }}
+                    style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(v.text || 'â€”')})`, letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums' }}
                     title={v.text.length > 12 ? v.text : undefined}
                   >
-                    {v.text || '—'}
+                    {v.text || 'â€”'}
                   </span>
                 );
               })()}
@@ -1623,7 +1616,7 @@ function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStr
 
 /**
  * Hero = the PAGE HEADER (kit anatomy): breadcrumb-grade eyebrow, a real page
- * title, supporting copy, and the ACTION BAR on the right — the operability
+ * title, supporting copy, and the ACTION BAR on the right â€” the operability
  * gate's synthesis target for workflow actions. Clean header over content;
  * no gradient banner card (the old hero panel read as decoration).
  */
@@ -1773,14 +1766,14 @@ function TimelineView({ node }: { node: Extract<ViewNode, { type: 'Timeline' }> 
   return <TimelineList title={node.title} items={node.items ?? []} />;
 }
 
-// ── Domain composites — conversational, media, marketing, scheduling ─────────
+// â”€â”€ Domain composites â€” conversational, media, marketing, scheduling â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function ChatBubble({ role, content, at }: { role: string; content: string; at?: string }) {
   const mine = role === 'user';
   return (
     <div className={clsx('max-w-[85%] rounded-card border border-line px-3 py-2 text-[12px]', mine ? 'ml-auto bg-accent-soft text-accent' : 'bg-canvas text-text-secondary')}>
       <div className="mb-0.5 flex items-center gap-2 text-[10px] uppercase tracking-wide text-text-muted">
-        <span>{role}</span>{at ? <span>· {at}</span> : null}
+        <span>{role}</span>{at ? <span>Â· {at}</span> : null}
       </div>
       <div className="whitespace-pre-wrap leading-relaxed">{content}</div>
     </div>
@@ -1809,7 +1802,7 @@ function Composer({ placeholder, label, onSend, extraArgs }: { placeholder?: str
         value={text}
         onChange={(event) => setText(event.target.value)}
         onClick={(event) => event.stopPropagation()}
-        placeholder={placeholder ?? 'Type a message…'}
+        placeholder={placeholder ?? 'Type a messageâ€¦'}
         disabled={Boolean(editing)}
         className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60"
       />
@@ -1844,9 +1837,8 @@ function ChatShell({ title, channel, messages, send, placeholder, sendArgs }: { 
   );
 }
 
-// ── Live conversations (Living Apps Phase 1) ────────────────────
+// â”€â”€ Live conversations (Living Apps Phase 1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Hooks over the REAL conversations spine (App-scoped), refreshed on the same
-// realtime events the dispatcher emits — so the operator watches threads live.
 const LIVE_EVENTS = [
   REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
   REALTIME_EVENTS.CONVERSATION_MESSAGE_SENT,
@@ -1876,12 +1868,12 @@ function useLiveMessages(appId: string, conversationId: string | null) {
   return { messages, loading };
 }
 
-// ── Live co-presence (Living Apps G9) ───────────────────────────
+// â”€â”€ Live co-presence (Living Apps G9) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Ephemeral, over the EXISTING realtime bus. `usePresence` heartbeats while the
 // console is open (and which thread it focuses) and listens for the broadcast
 // roster; `useAgentActivity` surfaces the resident agent's live thinking/typing.
 
-/** Decode the operator's own userId from the access JWT, to filter self out of the roster. */
+
 function selfUserId(): string | null {
   try {
     const token = tokens.access();
@@ -1902,7 +1894,6 @@ function usePresence(appId: string, conversationId: string | null): AppPresenceV
   const editing = useContext(EditCtx);
   const meId = useMemo(() => selfUserId(), []);
   useEffect(() => {
-    // Presence is for the live operator console, not the edit-mode preview.
     if (editing) return;
     let active = true;
     const beat = () => { void appsApi.presence(appId, conversationId).then((v) => { if (active) setViewers(v); }).catch(() => {}); };
@@ -1937,7 +1928,7 @@ function useAgentActivity(appId: string, conversationId: string | null): AppAgen
   return state;
 }
 
-/** A subtle "N viewing" row — calm co-presence, not a dashboard. */
+/** A subtle "N viewing" row â€” calm co-presence, not a dashboard. */
 function PresenceRow({ viewers }: { viewers: AppPresenceViewer[] }) {
   if (viewers.length === 0) return null;
   const label = viewers.length === 1
@@ -1951,13 +1942,13 @@ function PresenceRow({ viewers }: { viewers: AppPresenceViewer[] }) {
   );
 }
 
-/** A calm "agent is thinking/typing…" line, shown only while a turn runs. */
+/** A calm "agent is thinking/typingâ€¦" line, shown only while a turn runs. */
 function AgentActivityLine({ state }: { state: AppAgentActivity['state'] | null }) {
   if (!state) return null;
   return (
     <div className="flex items-center gap-1.5 px-3 py-1 text-[11px] italic text-accent">
       <Loader2 size={11} className="animate-spin" />
-      <span>{state === 'thinking' ? 'Agent is thinking…' : 'Agent is typing…'}</span>
+      <span>{state === 'thinking' ? 'Agent is thinkingâ€¦' : 'Agent is typingâ€¦'}</span>
     </div>
   );
 }
@@ -2021,7 +2012,7 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
             >
               <div className="flex items-center gap-2">
                 {row.needsAttention ? (
-                  <span className="shrink-0 text-warn" title={row.needsAttentionReason ?? 'Needs you'}>◆</span>
+                  <span className="shrink-0 text-warn" title={row.needsAttentionReason ?? 'Needs you'}>â—†</span>
                 ) : null}
                 <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-text-primary">{row.title}</span>
                 {row.channel ? <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[9px] capitalize text-text-muted">{row.channel}</span> : null}
@@ -2174,7 +2165,7 @@ function MediaGenView({ node, scope }: { node: Extract<ViewNode, { type: 'MediaG
             try { await invoke(generate.action, { prompt: value, ...resolveArgs(generate.args, scope) }); setPrompt(''); } finally { setBusy(false); }
           }}
         >
-          <input value={prompt} onChange={(event) => setPrompt(event.target.value)} onClick={(event) => event.stopPropagation()} placeholder={node.placeholder ?? 'Describe what to generate…'} disabled={Boolean(editing)} className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60" />
+          <input value={prompt} onChange={(event) => setPrompt(event.target.value)} onClick={(event) => event.stopPropagation()} placeholder={node.placeholder ?? 'Describe what to generateâ€¦'} disabled={Boolean(editing)} className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60" />
           <button type="submit" disabled={Boolean(editing) || !prompt.trim() || busy} className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-on-accent disabled:opacity-50">
             {busy ? <Loader2 size={13} className="animate-spin" /> : <ImageIcon size={13} />} Generate
           </button>
@@ -2188,7 +2179,7 @@ function MediaGenView({ node, scope }: { node: Extract<ViewNode, { type: 'MediaG
 function MediaGenGallery({ node, bind }: { node: Extract<ViewNode, { type: 'MediaGen' }>; bind: DataBind }) {
   const { rows, loading } = useBoundRows(bind);
   if (loading) return <SkeletonRows />;
-  if (rows.length === 0) return <div className="rounded-btn border border-dashed border-line p-6 text-center text-[12px] text-text-muted">No media yet — generate something above.</div>;
+  if (rows.length === 0) return <div className="rounded-btn border border-dashed border-line p-6 text-center text-[12px] text-text-muted">No media yet â€” generate something above.</div>;
   return (
     <div className="grid grid-cols-2 gap-2 @2xl:grid-cols-3">
       {rows.map((row, i) => {
@@ -2219,7 +2210,7 @@ function FunnelShell({ title, stages }: { title?: string; stages: FunnelStage[] 
             <div key={i}>
               <div className="mb-0.5 flex items-center justify-between text-[11px]">
                 <span className="text-text-secondary">{stage.label}</span>
-                <span className="tabular-nums text-text-muted">{stage.value.toLocaleString()}{conv != null ? ` · ${conv}%` : ''}</span>
+                <span className="tabular-nums text-text-muted">{stage.value.toLocaleString()}{conv != null ? ` Â· ${conv}%` : ''}</span>
               </div>
               <div className="mx-auto h-6 rounded-btn bg-accent" style={{ width: `${Math.max(8, (stage.value / max) * 100)}%` }} />
             </div>
@@ -2322,7 +2313,7 @@ function GaugeView({ node, scope }: { node: Extract<ViewNode, { type: 'Gauge' }>
   );
 }
 
-/** All cell/value rendering delegates to the kit formatter (format.tsx) — links,
+/** All cell/value rendering delegates to the kit formatter (format.tsx) â€” links,
  * humanized status pills, relative dates, grouped numerals, safe truncation. */
 function formatCell(value: unknown, format?: string, key?: string): React.ReactNode {
   return formatDisplay(value, { format, key });
@@ -2354,18 +2345,18 @@ export function useDataRevision(appId: string): number {
   return rev;
 }
 
-// ── Built-in block registry ──────────────────────────────────
+// â”€â”€ Built-in block registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Every ViewNode kind registers its renderer here. This replaces the former
 // 52-case `switch` with an OPEN seam (see ./blocks/registry): the same
 // `registerBlock` API is public, so an agent/plugin/workspace can add or override
 // a block kind. Layout primitives recurse via `ctx.renderChild`; everything else
 // delegates to its existing view component (unchanged), so no surface drifts.
 //
-// Each renderer narrows `node` with a control-flow check on `node.type` — the
+// Each renderer narrows `node` with a control-flow check on `node.type` â€” the
 // registry already guarantees the kind, but `ViewNode` is `Base & { style? }` (an
-// intersection) so `Extract<ViewNode, …>` can't narrow it; CFA is the reliable seam.
+// intersection) so `Extract<ViewNode, â€¦>` can't narrow it; CFA is the reliable seam.
 
-/** Visible fallback for an unregistered kind — never silently render nothing. */
+/** Visible fallback for an unregistered kind â€” never silently render nothing. */
 function UnknownBlock({ node }: { node: ViewNode }) {
   return (
     <div className="rounded border border-dashed border-line bg-surface-2 px-3 py-2 text-[12px] text-text-muted">
@@ -2383,7 +2374,7 @@ function gapsFor(theme: ResolvedTheme, node: ViewNode): { layout: string | numbe
   return { base, layout: explicit ?? v, child: v };
 }
 
-// Layout primitives — recurse through ctx.renderChild.
+// Layout primitives â€” recurse through ctx.renderChild.
 registerBlock('Stack', (node, ctx) => {
   if (node.type !== 'Stack') return null;
   const { layout } = gapsFor(ctx.theme, node);
@@ -2413,10 +2404,10 @@ registerBlock('Grid', (node, ctx) => {
   const { layout, base } = gapsFor(ctx.theme, node);
   const cols = node.columns;
   // Intrinsically responsive: auto-fit tracks the grid's CONTAINER width (editor
-  // panel, Split pane, …) not the viewport, so it never overflows. With explicit
+  // panel, Split pane, â€¦) not the viewport, so it never overflows. With explicit
   // `columns`, size the min cell so the surface's full width yields ~that many
-  // columns, collapsing to fewer as the container narrows. `min(100%, …)` guards
-  // against containers narrower than one cell (→ single column, no overflow).
+  // columns, collapsing to fewer as the container narrows. `min(100%, â€¦)` guards
+  // against containers narrower than one cell (â†’ single column, no overflow).
   const minCell = cols
     ? Math.max(160, Math.floor((ctx.theme.contentWidth - base * (cols - 1)) / cols))
     : 240;
@@ -2439,7 +2430,7 @@ registerBlock('Grid', (node, ctx) => {
 
 registerBlock('Card', (node, ctx) => {
   if (node.type !== 'Card') return null;
-  // Nested cards flatten — a box inside a box renders borderless (no triple frames).
+  // Nested cards flatten â€” a box inside a box renders borderless (no triple frames).
   const { child } = gapsFor(ctx.theme, node);
   const elevation = node.style?.elevation ?? (ctx.boxed ? 'flat' : 'raised');
   const isBox = elevation !== 'flat';
@@ -2471,7 +2462,7 @@ registerBlock('Section', (node, ctx) => {
   );
 });
 
-// Text leaves — bind through resolveDisplay so an unresolved binding shows a marker.
+// Text leaves â€” bind through resolveDisplay so an unresolved binding shows a marker.
 registerBlock('Heading', (node, ctx) => {
   if (node.type !== 'Heading') return null;
   const { text, unbound } = resolveDisplay(node.value, ctx.resolvedScope);
@@ -2510,7 +2501,6 @@ registerBlock('MediaGallery', (node, ctx) => (node.type === 'MediaGallery' ? <Me
 registerBlock('MediaGen', (node, ctx) => (node.type === 'MediaGen' ? <MediaGenView node={node} scope={ctx.resolvedScope} /> : null));
 registerBlock('Gauge', (node, ctx) => (node.type === 'Gauge' ? <GaugeView node={node} scope={ctx.resolvedScope} /> : null));
 
-// Raw-scope + path blocks (containers/interactive that recurse internally).
 registerBlock('Hero', (node, ctx) => (node.type === 'Hero' ? <HeroView node={node} scope={ctx.scope} /> : null));
 registerBlock('Toolbar', (node, ctx) => (node.type === 'Toolbar' ? <ToolbarView node={node} scope={ctx.scope} path={ctx.path} /> : null));
 registerBlock('Tabs', (node, ctx) => (node.type === 'Tabs' ? <TabsView node={node} scope={ctx.scope} path={ctx.path} /> : null));
@@ -2521,7 +2511,6 @@ registerBlock('Button', (node, ctx) => (node.type === 'Button'
   ? <ActionButton label={node.label} action={node.action.action} args={node.action.args} scope={ctx.scope} variant={node.variant} />
   : null));
 
-// Self-contained blocks (data binding + state handled internally).
 registerBlock('Timeline', (node) => (node.type === 'Timeline' ? <TimelineView node={node} /> : null));
 registerBlock('Table', (node) => (node.type === 'Table' ? <BoundTable node={node} /> : null));
 registerBlock('List', (node) => (node.type === 'List' ? <BoundList node={node} /> : null));
@@ -2543,7 +2532,10 @@ registerBlock('CustomView', (node) => (node.type === 'CustomView' ? <CustomViewF
 registerBlock('CodeSurface', (node) => (node.type === 'CodeSurface' ? <CodeSurfaceFrame node={node} /> : null));
 
 // Legacy kinds from removed grammar eras heal in place on READ (stored trees
-// upgrade at the persistence seam on their next write — see core genuiAudit).
+// upgrade at the persistence seam on their next write â€” see core genuiAudit).
 registerBlock('AgentConsole', (node) => (
   <ActivityStreamView node={{ type: 'ActivityStream', title: (node as { title?: string }).title } as Extract<ViewNode, { type: 'ActivityStream' }>} />
 ));
+
+
+

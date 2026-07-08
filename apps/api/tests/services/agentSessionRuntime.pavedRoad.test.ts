@@ -6,8 +6,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import type { ChatToolCall, SessionAdapter, SessionStepResult, ToolDefinition } from '@agentis/core';
-import { AgentSessionService } from '../../src/services/agentSession.js';
-import { AgentSessionRuntime, type SessionRunContext } from '../../src/services/agentSessionRuntime.js';
+import { AgentSessionService } from '../../src/services/agent/agentSession.js';
+import { AgentSessionRuntime, type SessionRunContext } from '../../src/services/agent/agentSessionRuntime.js';
 import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

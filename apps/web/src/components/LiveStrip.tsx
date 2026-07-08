@@ -1,9 +1,4 @@
-/**
- * Bottom live strip - sticky operator situational awareness.
- *
- * Active agents, active runs, pending approvals (only when any), gateway health,
- * latest activity.
- */
+﻿
 
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
@@ -83,3 +78,5 @@ export function LiveStrip() {
     </div>
   );
 }
+
+

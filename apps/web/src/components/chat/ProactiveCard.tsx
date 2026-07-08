@@ -1,13 +1,4 @@
-/**
- * ProactiveCard — UIUX-REFACTOR §9.
- *
- * Rich content blocks an agent can push into a conversation thread to
- * reduce cognitive load on the operator. The agent sends a card via
- * message metadata; this component renders title + body + optional list
- * + a row of action buttons. Each action is dispatched as an
- * `agentis:proactive-action` window event so consumers (slash dispatcher,
- * route handlers, custom plug-ins) can respond.
- */
+﻿
 
 import { ChevronRight } from 'lucide-react';
 
@@ -80,3 +71,6 @@ export function ProactiveCard({ data }: { data: ProactiveCardData }) {
     </div>
   );
 }
+
+
+

@@ -1,5 +1,5 @@
-/**
- * Realtime event names — V1-SPEC §12.
+﻿/**
+ * Realtime event names â€” V1-SPEC Â§12.
  *
  * The room set + event family are a closed enumeration. The dashboard's
  * `useRealtime()` hook uses these names directly; do not introduce magic
@@ -28,7 +28,7 @@ export const REALTIME_EVENTS = {
   AGENT_WORK_STEP: 'agent.work.step',
   AGENT_WAKE_REQUESTED: 'agent.wake.requested',
   AGENT_PROACTIVE_PUSH: 'agent.proactive.push',
-  /** Imported agents have accrued new harness memory available to pull (P4). */
+  
   HARNESS_IMPORT_UPDATES: 'harness.import.updates',
 
   // Management layer
@@ -92,7 +92,7 @@ export const REALTIME_EVENTS = {
   BUDGET_PHASE_EXCEEDED: 'budget.phase_exceeded',
   BUDGET_RUN_EXCEEDED: 'budget.run_exceeded',
   BUDGET_WORKSPACE_EXCEEDED: 'budget.workspace_exceeded',
-  /** Builder Session §3/§9 — the cast specialist team, emitted before the graph streams. */
+  /** Builder Session Â§3/Â§9 â€” the cast specialist team, emitted before the graph streams. */
   WORKFLOW_TEAM_ROSTER: 'workflow.team_roster',
 
   // Contracts
@@ -135,15 +135,14 @@ export const REALTIME_EVENTS = {
   ARTIFACT_UPDATED: 'artifact.updated',
   ARTIFACT_DELETED: 'artifact.deleted',
 
-  // AG-UI — Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN §4)
+  // AG-UI â€” Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN Â§4)
   // SURFACE_RENDER: full ViewNode tree replaced. SURFACE_PATCH: fine-grained ops.
   SURFACE_RENDER: 'app.surface_render',
   SURFACE_PATCH: 'app.surface_patch',
-  // App Datastore (§5) — a record changed; bound views refetch. { appId, collection, op, id }.
+  // App Datastore (Â§5) â€” a record changed; bound views refetch. { appId, collection, op, id }.
   DATA_CHANGED: 'app.data_changed',
 
-  // Live co-presence (LIVING-APPS-10X §6/G9) — EPHEMERAL, never persisted.
-  // APP_PRESENCE_UPDATED: the current roster of operators viewing an App/thread,
+  // Live co-presence (LIVING-APPS-10X Â§6/G9) â€” EPHEMERAL, never persisted.
   //   broadcast on heartbeat + on join/leave. Payload: AppPresenceUpdate.
   // APP_AGENT_ACTIVITY: the resident agent's live thinking/typing on a thread
   //   while a turn runs, surfaced in the App console. Payload: AppAgentActivity.
@@ -162,14 +161,11 @@ export const REALTIME_EVENTS = {
   LEDGER_EVENT: 'ledger.event',
   COMMAND_INDEX_UPDATED: 'command.index.updated',
 
-  // Blackboard — durable, identity-tagged inter-agent shared state
-  // (AGENT-COOPERATION-10X). One event per entry so the operator Blackboard
   // panel streams facts, channel messages, and claims live.
   // Payload: { runId, entry: BlackboardEntry }.
   BLACKBOARD_ENTRY: 'blackboard.entry',
 
-  // Convergence loop (`converge` node) — one event per iteration so the
-  // operator iteration timeline updates live. Payload:
+  // Convergence loop (`converge` node) â€” one event per iteration so the
   // { runId, nodeId, iteration, verdict, continue, spend, stalled }.
   CONVERGE_ITERATION: 'converge.iteration',
   CONVERGE_SETTLED: 'converge.settled',
@@ -191,7 +187,7 @@ export const REALTIME_EVENTS = {
   // Payload: { conversationId, agentId, item, action: 'added'|'dispatched'|'discarded' }.
   CONVERSATION_QUEUE_UPDATED: 'conversation.queue.updated',
 
-  // Channel bridge (Batch 4 / V1-SPEC §0.3 #24, §11)
+  // Channel bridge (Batch 4 / V1-SPEC Â§0.3 #24, Â§11)
   CHANNEL_MESSAGE_RECEIVED: 'channel.message.received',
   CHANNEL_MESSAGE_SENT: 'channel.message.sent',
   CHANNEL_CONNECTION_STATUS: 'channel.connection.status',
@@ -215,10 +211,10 @@ export const REALTIME_EVENTS = {
   CANVAS_EDGE_CONNECTED: 'canvas.edge.connected',
   CANVAS_BUILD_COMPLETE: 'canvas.build.complete',
 
-  // Workflow creation pipeline — inspectable phase narration (analyzing →
-  // planning → drafting → repairing → reviewing → building → complete) plus
+  // Workflow creation pipeline â€” inspectable phase narration (analyzing â†’
+  // planning â†’ drafting â†’ repairing â†’ reviewing â†’ building â†’ complete) plus
   // each repair action and reviewer critique, so the chat can show a live,
-  // fully-inspectable build timeline. (10X-CREATION-SWARM-PLAN §6.)
+  // fully-inspectable build timeline. (10X-CREATION-SWARM-PLAN Â§6.)
   WORKFLOW_BUILD_PHASE: 'workflow.build.phase',
   WORKFLOW_BUILD_REPAIR: 'workflow.build.repair',
   WORKFLOW_BUILD_CRITIQUE: 'workflow.build.critique',
@@ -248,7 +244,7 @@ export const REALTIME_ROOMS = {
   user: (userId: string) => `user:${userId}`,
   workspace: (workspaceId: string) => `workspace:${workspaceId}`,
   workflow: (workflowId: string) => `workflow:${workflowId}`,
-  /** Agentic App room — surface renders/patches + datastore changes. */
+  /** Agentic App room â€” surface renders/patches + datastore changes. */
   app: (appId: string) => `app:${appId}`,
   run: (runId: string) => `run:${runId}`,
   gateway: (gatewayId: string) => `gateway:${gatewayId}`,
@@ -262,21 +258,21 @@ export interface RealtimeEnvelope<TName extends RealtimeEventName = RealtimeEven
   payload: unknown;
   /** ISO-8601 server timestamp the event was emitted at. */
   emittedAt: string;
-  /** Optional correlation id for tracing client → server → adapter chains. */
+  /** Optional correlation id for tracing client â†’ server â†’ adapter chains. */
   correlationId?: string;
 }
 
-// ── Live co-presence payloads (LIVING-APPS-10X §6/G9 · ephemeral) ──────────────
+// â”€â”€ Live co-presence payloads (LIVING-APPS-10X Â§6/G9 Â· ephemeral) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/** One operator viewing an App (and optionally a specific thread). Ephemeral. */
+
 export interface AppPresenceViewer {
-  /** Stable per-viewer id (the operator's userId). */
+  
   userId: string;
   /** Human-readable label for the presence row. */
   name: string;
   /** The thread the viewer currently has open, if any. */
   conversationId?: string | null;
-  /** ISO-8601 of the last heartbeat — the client can dim stale rows. */
+  /** ISO-8601 of the last heartbeat â€” the client can dim stale rows. */
   at: string;
 }
 
@@ -288,15 +284,18 @@ export interface AppPresenceUpdate {
 
 /**
  * The resident agent's live activity on a thread while a turn runs, surfaced in
- * the App console (G9 — "agent is thinking…"). Ephemeral; `state:'idle'` clears.
+ * the App console (G9 â€” "agent is thinkingâ€¦"). Ephemeral; `state:'idle'` clears.
  */
 export interface AppAgentActivity {
   appId: string;
   conversationId: string;
   agentId?: string;
-  /** thinking → the agent is reasoning; typing → composing a reply; idle → done. */
+  /** thinking â†’ the agent is reasoning; typing â†’ composing a reply; idle â†’ done. */
   state: 'thinking' | 'typing' | 'idle';
   /** A short, calm label for the indicator line (e.g. a clipped reasoning snippet). */
   label?: string;
   at: string;
 }
+
+
+

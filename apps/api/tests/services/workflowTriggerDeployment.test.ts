@@ -3,8 +3,8 @@ import { eq } from 'drizzle-orm';
 import type { WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
-import { WorkflowTriggerDeploymentService } from '../../src/services/workflowTriggerDeployment.js';
-import { graphContentHash } from '../../src/services/workflowCompass.js';
+import { WorkflowTriggerDeploymentService } from '../../src/services/workflow/workflowTriggerDeployment.js';
+import { graphContentHash } from '../../src/services/workflow/workflowCompass.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

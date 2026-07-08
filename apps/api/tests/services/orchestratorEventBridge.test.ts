@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
-import { OrchestratorEventBridge } from '../../src/services/orchestratorEventBridge.js';
+import { OrchestratorEventBridge } from '../../src/services/orchestrator/orchestratorEventBridge.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 describe('OrchestratorEventBridge', () => {

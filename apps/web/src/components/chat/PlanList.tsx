@@ -1,4 +1,4 @@
-import { ArrowUpRight, CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
+﻿import { ArrowUpRight, CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 import type { ToolCallData } from './toolCalls';
 
@@ -161,3 +161,6 @@ function PlanStatusIcon({ status }: { status: PlanItemView['status'] }) {
   if (status === 'failed') return <XCircle size={13} className="mt-0.5 shrink-0 text-danger" />;
   return <Circle size={13} className="mt-0.5 shrink-0 text-text-muted" />;
 }
+
+
+

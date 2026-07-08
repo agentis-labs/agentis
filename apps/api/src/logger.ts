@@ -11,6 +11,7 @@
  */
 
 import type { LogLevel, Logger } from '@agentis/core';
+import { redactForLogging, redactSecretString } from './services/security/secretRedaction.js';
 
 export type { LogLevel, Logger } from '@agentis/core';
 
@@ -30,13 +31,17 @@ export function createLogger(opts: LoggerOptions = {}): Logger {
 
   function emit(lvl: LogLevel, msg: string, ctx?: Record<string, unknown>) {
     if (LEVEL_RANK[lvl] < minRank) return;
-    const record = { ts: new Date().toISOString(), level: lvl, msg, ...base, ...ctx };
+    // Mask any secret that slipped into a log message or its context before it
+    // hits stdout / a log shipper / the DB. Bounded walk — cheap on the hot path.
+    const safeMsg = redactSecretString(msg);
+    const safeCtx = ctx ? redactForLogging(ctx) : ctx;
+    const record = { ts: new Date().toISOString(), level: lvl, msg: safeMsg, ...base, ...safeCtx };
     if (pretty) {
       const color = lvl === 'error' ? '\x1b[31m' : lvl === 'warn' ? '\x1b[33m' : lvl === 'debug' ? '\x1b[90m' : '\x1b[36m';
       const reset = '\x1b[0m';
-      const ctxStr = Object.keys(ctx ?? {}).length ? ' ' + JSON.stringify(ctx) : '';
+      const ctxStr = Object.keys(safeCtx ?? {}).length ? ' ' + JSON.stringify(safeCtx) : '';
       // eslint-disable-next-line no-console
-      console.log(`${color}[${record.ts}] ${lvl.toUpperCase()}${reset} ${msg}${ctxStr}`);
+      console.log(`${color}[${record.ts}] ${lvl.toUpperCase()}${reset} ${safeMsg}${ctxStr}`);
     } else {
       // eslint-disable-next-line no-console
       console.log(JSON.stringify(record));

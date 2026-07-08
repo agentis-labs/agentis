@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+﻿import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -20,10 +20,10 @@ export interface SqliteOpenOptions {
  * enable foreign keys, and run migrations idempotently.
  *
  * Two migration layers run, in order:
- *   1. runEmbeddedMigrations — authoritative for the actual V1 schema: it
+ *   1. runEmbeddedMigrations â€” authoritative for the actual V1 schema: it
  *      execs EMBEDDED_INIT_SQL and applies the idempotent drift-patch
  *      ALTERs/rebuilds that keep pre-existing databases current.
- *   2. runSqliteMigrations — the versioned schema_migrations layer. Because
+ *   2. runSqliteMigrations â€” the versioned schema_migrations layer. Because
  *      step 1 already created the core tables, it backfills version 1 (the
  *      init) rather than re-running it, then applies any future versioned
  *      migrations. This is the authoritative *record* of applied versions.
@@ -72,7 +72,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
         name: string;
       }>;
       if (!columns.some((column) => column.name === 'scope_id')) {
-        // Polymorphic scope (workflow OR app) — no FK (see migration v92).
+        // Polymorphic scope (workflow OR app) â€” no FK (see migration v92).
         sqlite.exec('ALTER TABLE knowledge_bases ADD COLUMN scope_id TEXT');
       }
     }
@@ -82,7 +82,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // so distribution stays a single JS bundle with zero file-resolution risk.
   sqlite.exec(EMBEDDED_INIT_SQL);
 
-  // ── Idempotent column additions ─────────────────────────────────────────
+  // â”€â”€ Idempotent column additions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // For pre-existing databases, the CREATE TABLE statements above are no-ops
   // (IF NOT EXISTS), so newly added columns must be added explicitly via
   // ALTER TABLE. SQLite has no `ADD COLUMN IF NOT EXISTS`; we check
@@ -118,7 +118,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Workspace issue queue defaults.
   addColumn('workspaces', 'issue_prefix', "TEXT NOT NULL DEFAULT 'AGT'");
 
-  // Layer 5 §5.3 — workspace/day cost ceiling.
+  // Layer 5 Â§5.3 â€” workspace/day cost ceiling.
   addColumn('workspaces', 'daily_budget_cents', 'INTEGER');
 
   // Workspace metadata fields.
@@ -128,19 +128,19 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Extensions: operation-level execution audit.
   addColumn('extension_executions', 'operation_name', "TEXT NOT NULL DEFAULT 'execute'");
 
-  // Layer 6 §6.4 — pin artifacts to the workspace output gallery.
+  // Layer 6 Â§6.4 â€” pin artifacts to the workspace output gallery.
   addColumn('artifacts', 'pinned', 'INTEGER NOT NULL DEFAULT 0');
 
-  // Assets §1 (migration v90) — group artifacts by producing App + origin class.
+  // Assets Â§1 (migration v90) â€” group artifacts by producing App + origin class.
   addColumn('artifacts', 'app_id', 'TEXT REFERENCES apps(id) ON DELETE SET NULL');
   addColumn('artifacts', 'origin', "TEXT NOT NULL DEFAULT 'manual'");
 
-  // Live Workspace §C (migration v91) — issues become the schedulable backlog.
+  // Live Workspace Â§C (migration v91) â€” issues become the schedulable backlog.
   addColumn('issues', 'scheduled_for', 'TEXT');
   addColumn('issues', 'recurrence_cron', 'TEXT');
 
   // Company OS layer (migration v2): conversation messages can be linked to an
-  // issue. embedded-sql.ts predates this column — patch the drift here.
+  // issue. embedded-sql.ts predates this column â€” patch the drift here.
   addColumn('conversation_messages', 'issue_id', 'TEXT');
   addColumn('conversations', 'title', 'TEXT');
   addColumn('conversations', 'archived_at', 'TEXT');
@@ -148,18 +148,17 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   addColumn('conversations', 'channel_chat_id', 'TEXT');
   addColumn('conversations', 'permission_mode', "TEXT NOT NULL DEFAULT 'ask'");
 
-  // Living Apps Phase 0 (migration v95) — a channel/conversation can belong to an App.
+  // Living Apps Phase 0 (migration v95) â€” a channel/conversation can belong to an App.
   // Plain TEXT: this drift runs before the apps table exists, so no inline FK
   // (the Drizzle schema .references() carries the ORM relation).
   addColumn('channel_connections', 'app_id', 'TEXT');
   addColumn('conversations', 'app_id', 'TEXT');
-  // Living Apps Phase 2 (migration v96) — operator takeover state.
   addColumn('conversations', 'handoff_state', 'TEXT');
-  // Living Apps Phase 2 (migration v104) — "needs-you" flags. Both columns are on
+  // Living Apps Phase 2 (migration v104) â€” "needs-you" flags. Both columns are on
   // the embedded baseline conversations table; plain INTEGER/TEXT, no FK.
   addColumn('conversations', 'needs_attention', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('conversations', 'needs_attention_reason', 'TEXT');
-  // Living Apps Phase M2 (migration v99) — terminal relationship outcome (the
+  // Living Apps Phase M2 (migration v99) â€” terminal relationship outcome (the
   // learning loop). Plain TEXT, no FK. app_contacts is post-baseline so this is a
   // no-op until the versioned runner creates it; kept for drift safety.
   addColumn('app_contacts', 'outcome', 'TEXT');
@@ -193,7 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(workspace_
 
   // PackagerService: workflow concurrency + tagging.
   addColumn('workflows', 'max_concurrent_runs', 'INTEGER');
-  // §5.3 — per-run workflow cost ceiling.
+  // Â§5.3 â€” per-run workflow cost ceiling.
   addColumn('workflows', 'budget_cents', 'INTEGER');
   addColumn('workflows', 'concurrency_overflow', "TEXT NOT NULL DEFAULT 'queue'");
   addColumn('workflows', 'tags', "TEXT NOT NULL DEFAULT '[]'");
@@ -305,7 +304,7 @@ CREATE INDEX IF NOT EXISTS idx_schedule_due ON schedule_runs(status, scheduled_a
 
   migrateChannelDeliveriesUniqueness(sqlite);
 
-  // Cross-surface peer identity (OMNICHANNEL §5.2): one row per (workspace,
+  // Cross-surface peer identity (OMNICHANNEL Â§5.2): one row per (workspace,
   // channel kind, handle); opt-in `user_id` + `peer_key` unify the same human
   // across channels so the orchestrator recognizes them everywhere.
   sqlite.exec(`
@@ -326,7 +325,7 @@ CREATE INDEX IF NOT EXISTS idx_channel_peer_user ON channel_peer_identities(work
 CREATE INDEX IF NOT EXISTS idx_channel_peer_key ON channel_peer_identities(workspace_id, peer_key);
 `);
 
-  // Per-App outbound safety envelope counter (LIVING-APPS §7 · G7, v101). Append-only
+  // Per-App outbound safety envelope counter (LIVING-APPS Â§7 Â· G7, v101). Append-only
   // row per agent-initiated outbound send; powers the durable rolling-hour rate limit.
   sqlite.exec(`
 CREATE TABLE IF NOT EXISTS app_outbound_log (
@@ -338,7 +337,7 @@ CREATE TABLE IF NOT EXISTS app_outbound_log (
 CREATE INDEX IF NOT EXISTS idx_app_outbound_log_app_time ON app_outbound_log(app_id, sent_at);
 `);
 
-  // Per-workspace orchestrator model-role overrides (OMNICHANNEL §4.4). One row
+  // Per-workspace orchestrator model-role overrides (OMNICHANNEL Â§4.4). One row
   // per (workspace, role); api_key is vault-encrypted. Absent rows fall back to
   // the env-configured default model.
   sqlite.exec(`
@@ -354,7 +353,7 @@ CREATE TABLE IF NOT EXISTS workspace_model_config (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_model_role ON workspace_model_config(workspace_id, role);
 `);
 
-  // Vault-encrypted persistent-channel auth state (OMNICHANNEL §3.4 / §7).
+  // Vault-encrypted persistent-channel auth state (OMNICHANNEL Â§3.4 / Â§7).
   // WhatsApp (baileys) creds + signal keys live here instead of plaintext files
   // on disk. Key-value per (connection, key); value is vault ciphertext.
   sqlite.exec(`
@@ -394,7 +393,7 @@ CREATE INDEX IF NOT EXISTS idx_async_jobs_workspace ON async_jobs(workspace_id, 
   addColumn('async_jobs', 'priority', "TEXT NOT NULL DEFAULT 'normal'");
   addColumn('async_jobs', 'leased_at', 'TEXT');
 
-  // SMARTER-AGENTS-10X §VI — persistent, DB-backed agent sessions. A session is
+  // SMARTER-AGENTS-10X Â§VI â€” persistent, DB-backed agent sessions. A session is
   // a row that lives between LLM inference calls (zero tokens while tools run);
   // its messages are the episodic log, evictable to archival on compaction.
   sqlite.exec(`
@@ -855,3 +854,6 @@ ALTER TABLE channel_deliveries_next RENAME TO channel_deliveries;
 }
 
 export { schema };
+
+
+

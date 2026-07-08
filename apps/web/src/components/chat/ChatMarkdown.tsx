@@ -1,15 +1,15 @@
-import { Fragment, useState, type ReactNode } from 'react';
+﻿import { Fragment, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, ChevronUp, Copy } from 'lucide-react';
 
 /**
- * ChatMarkdown — a tiny, dependency-free Markdown renderer for assistant
+ * ChatMarkdown â€” a tiny, dependency-free Markdown renderer for assistant
  * messages. Covers the constructs an LLM actually emits in chat: headings,
  * bold/italic, inline code, fenced code blocks, ordered/unordered lists,
  * blockquotes, and links. Everything renders through React elements (never
  * `dangerouslySetInnerHTML`), so user/model text is escaped by default and
  * link hrefs are sanitized to http(s)/mailto/relative only.
  *
- * Deliberately not a full CommonMark engine — adding `react-markdown` would
+ * Deliberately not a full CommonMark engine â€” adding `react-markdown` would
  * pull a transitive tree we don't need for chat. Incomplete syntax mid-stream
  * (e.g. an unclosed ``` fence or `**bold`) degrades to literal text rather than
  * throwing, which is exactly what we want while tokens are still arriving.
@@ -43,7 +43,7 @@ function PremiumCodeBlock({ lang, content }: { lang: string; content: string }) 
           <div className="flex min-w-0 items-center gap-1.5 font-semibold text-text-primary">
             <span className="h-2 w-2 rounded-full bg-accent" />
             <span className="uppercase tracking-wider">Diff</span>
-            {filePath && <span className="truncate opacity-60">· {filePath}</span>}
+            {filePath && <span className="truncate opacity-60">Â· {filePath}</span>}
           </div>
           <button
             type="button"
@@ -206,7 +206,7 @@ function parseBlocks(input: string): Block[] {
       continue;
     }
 
-    // Blank line — block separator
+    // Blank line â€” block separator
     if (line.trim() === '') {
       i += 1;
       continue;
@@ -286,7 +286,7 @@ function parseBlocks(input: string): Block[] {
       continue;
     }
 
-    // Paragraph — accumulate until a blank line or a block-starting line
+    // Paragraph â€” accumulate until a blank line or a block-starting line
     const para: string[] = [];
     while (
       i < lines.length &&
@@ -528,3 +528,6 @@ function artifactIdFromApiHref(href: string): string | null {
   const match = href.match(/^(?:https?:\/\/[^/]+)?\/v1\/artifacts\/([0-9a-f-]{36})(?:[/?#].*)?$/i);
   return match?.[1] ?? null;
 }
+
+
+

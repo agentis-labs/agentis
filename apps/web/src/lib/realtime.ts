@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Realtime hook over socket.io.
  *
  * Single connection per session; subscribes to whatever rooms the caller
@@ -28,7 +28,7 @@ function realtimeUrl(): string | undefined {
   if (typeof window === 'undefined') return undefined;
   // Dev/preview: the front-end server (Vite 5173/4173, or a static host on 3000)
   // is NOT the API. socket.io defaults to the page origin, so without this it
-  // connects back to the front-end and receives ZERO events — the canvas/chat go
+  // connects back to the front-end and receives ZERO events â€” the canvas/chat go
   // silent during builds and runs. Redirect to the API port on the SAME host for
   // ANY local/LAN access. Override the port via VITE_AGENTIS_API_PORT. In
   // production the web is served BY the API (same origin), so page origin is
@@ -41,10 +41,10 @@ function realtimeUrl(): string | undefined {
   return undefined;
 }
 
-// ── Connection status: the realtime socket is a separate channel from the chat
+// â”€â”€ Connection status: the realtime socket is a separate channel from the chat
 // SSE stream. When it is down, the canvas stops animating and proactive pushes
 // stop arriving. Surfacing the status (instead of failing silently) is the
-// difference between "Agentis is broken" and "the live link dropped". ──────────
+// difference between "Agentis is broken" and "the live link dropped". â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export type RealtimeStatus = 'connecting' | 'connected' | 'fallback' | 'disconnected';
 let realtimeStatus: RealtimeStatus = 'connecting';
 const statusListeners = new Set<(s: RealtimeStatus) => void>();
@@ -242,7 +242,7 @@ function releaseRunStream(runId: string): void {
 /**
  * Stream one run's events from `/v1/runs/:id/stream`. The server relays raw
  * run-room envelopes with their original event names, so we emit them straight
- * through — `useRealtime` consumers handle them identically to socket events.
+ * through â€” `useRealtime` consumers handle them identically to socket events.
  * Only emits when the socket is NOT connected (avoids duplicates); reconnects
  * with backoff until released.
  */
@@ -472,3 +472,6 @@ function stringField(source: Record<string, unknown>, key: string): string | und
   const value = source[key];
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
+
+
+

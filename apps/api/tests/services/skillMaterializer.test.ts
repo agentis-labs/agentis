@@ -5,7 +5,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { SkillService } from '../../src/services/skillService.js';
 import { SkillMaterializer } from '../../src/services/skillMaterializer.js';

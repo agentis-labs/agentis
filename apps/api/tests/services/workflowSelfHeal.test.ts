@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { WorkflowGraph } from '@agentis/core';
-import { WorkflowSelfHealService, type IntentAnchor, type SelfHealInput } from '../../src/services/workflowSelfHeal.js';
+import { WorkflowSelfHealService, type IntentAnchor, type SelfHealInput } from '../../src/services/workflow/workflowSelfHeal.js';
 import type { StructuredCompleter } from '../../src/services/structuredCompleter.js';
 import { createLogger } from '../../src/logger.js';
 

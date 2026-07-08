@@ -25,8 +25,8 @@ import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBuildTools } from '../../src/services/agentisToolHandlers/build.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
-import { graphContentHash, readBuildLoop, stampBuildLoop } from '../../src/services/workflowCompass.js';
-import { WorkflowTriggerDeploymentService } from '../../src/services/workflowTriggerDeployment.js';
+import { graphContentHash, readBuildLoop, stampBuildLoop } from '../../src/services/workflow/workflowCompass.js';
+import { WorkflowTriggerDeploymentService } from '../../src/services/workflow/workflowTriggerDeployment.js';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 

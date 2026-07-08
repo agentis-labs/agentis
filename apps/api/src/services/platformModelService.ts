@@ -29,7 +29,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { CredentialVault } from './credentialVault.js';
 import type { Logger } from './../logger.js';
-import type { ModelProfile } from './orchestratorModelRouter.js';
+import type { ModelProfile } from './orchestrator/orchestratorModelRouter.js';
 
 const CACHE_TTL_MS = 15_000;
 

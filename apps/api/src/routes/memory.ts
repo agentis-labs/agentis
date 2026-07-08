@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AuthService } from '../services/auth.js';
-import type { MemoryStore } from '../services/memoryStore.js';
+import type { MemoryStore } from '../services/memory/memoryStore.js';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
-import type { BrainAskService } from '../services/brainAskService.js';
+import type { BrainAskService } from '../services/brain/brainAskService.js';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError } from '@agentis/core';
 import { requireAuth } from '../middleware/auth.js';

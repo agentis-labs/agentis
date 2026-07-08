@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { AgentisError } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { WorkspaceIntelligenceService, ContextFileName } from '../services/workspaceIntelligence.js';
+import type { WorkspaceIntelligenceService, ContextFileName } from '../services/workspace/workspaceIntelligence.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 

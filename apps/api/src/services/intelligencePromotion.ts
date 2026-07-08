@@ -35,7 +35,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { PromotedPattern, PromotionInput } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import type { MemoryStore } from './memoryStore.js';
+import type { MemoryStore } from './memory/memoryStore.js';
 
 /** Configuration knobs (all 0..1 unless noted). */
 export interface PromotionPolicy {

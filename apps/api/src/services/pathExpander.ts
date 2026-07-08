@@ -7,6 +7,58 @@ export interface SpawnTarget {
   args: string[];
 }
 
+/**
+ * Agentis-internal secrets that must NEVER be inherited by a spawned child
+ * process. Agent harnesses (Claude Code, Codex, Cursor, agy…) run with their
+ * approval gates bypassed; if the API's own `process.env` leaks into them, a
+ * prompt-injected agent can read `process.env` and exfiltrate the orchestrator
+ * key, the credential-vault master key, JWT private keys, deploy tokens, and
+ * OAuth client secrets. We strip Agentis-namespaced secrets, OAuth client
+ * credentials, and the Vercel deploy tokens.
+ *
+ * We deliberately do NOT strip generic provider keys an agent legitimately
+ * needs (ANTHROPIC_API_KEY, OPENAI_API_KEY, GH_TOKEN, …) — those pass through so
+ * the harness can still authenticate. A caller that intentionally wants to pass
+ * a secret to a child sets it explicitly in `opts.env`/`abilityEnv`, which
+ * layers on top of the redacted base and is preserved.
+ */
+const SENSITIVE_ENV_EXACT: ReadonlySet<string> = new Set([
+  'VERCEL_TOKEN',
+  'VERCEL_TEAM_ID',
+]);
+
+const SENSITIVE_ENV_PATTERNS: ReadonlyArray<RegExp> = [
+  // Any Agentis-namespaced secret-shaped var.
+  /^AGENTIS_.*(API_KEY|SECRET|PASSWORD|CREDENTIAL_KEY|PRIVATE_KEY|TOKEN)$/i,
+  /^AGENTIS_JWT_(PRIVATE|PUBLIC)_KEY$/i,
+  /^AGENTIS_(DATABASE|REDIS)_URL$/i,
+  /^AGENTIS_SEED_(PASSWORD|USERNAME)$/i,
+  // Non-namespaced Agentis synthesis key.
+  /^WORKFLOW_SYNTHESIS_API_KEY$/i,
+  // OAuth app client credentials (id + secret are both sensitive here).
+  /^OAUTH_.*_CLIENT_(SECRET|ID)$/i,
+];
+
+/** True if `key` names an Agentis-internal secret that must not reach children. */
+export function isSensitiveEnvKey(key: string): boolean {
+  if (SENSITIVE_ENV_EXACT.has(key.toUpperCase())) return true;
+  return SENSITIVE_ENV_PATTERNS.some((re) => re.test(key));
+}
+
+/**
+ * Return a copy of `env` with Agentis-internal secrets removed. Use this on the
+ * INHERITED `process.env` before spreading it into a child-process environment,
+ * so explicit per-call overrides (which layer on top) are preserved.
+ */
+export function redactSensitiveEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (isSensitiveEnvKey(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 function dedupe(entries: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -168,7 +220,14 @@ export function expandedPathEntries(env: NodeJS.ProcessEnv = process.env): strin
 export function withExpandedPath(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const expanded = buildExpandedPath(env);
   const key = pathEnvKey(env);
-  const next: NodeJS.ProcessEnv = { ...env, [key]: expanded, PATH: expanded };
+  // Strip Agentis-internal secrets before they can reach a spawned child. This
+  // is the single chokepoint every adapter/harness spawn funnels through, so any
+  // present or future spawn site is protected. The filter is by key SHAPE
+  // (Agentis-namespaced secrets, OAuth client creds, Vercel deploy tokens) and
+  // is applied to the fully-merged env — generic provider keys an agent needs
+  // (ANTHROPIC_API_KEY, OPENAI_API_KEY, GH_TOKEN, OPENCLAW_*) are NOT matched and
+  // pass through. See redactSensitiveEnv / isSensitiveEnvKey.
+  const next: NodeJS.ProcessEnv = { ...redactSensitiveEnv(env), [key]: expanded, PATH: expanded };
   if (process.platform === 'win32') next.Path = expanded;
   return next;
 }

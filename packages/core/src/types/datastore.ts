@@ -1,12 +1,12 @@
-/**
- * App Datastore — typed collections + records (AGENTIC-APPS-10X-MASTERPLAN §5).
+﻿/**
+ * App Datastore â€” typed collections + records (AGENTIC-APPS-10X-MASTERPLAN Â§5).
  *
  * Explicitly NOT the Brain (no embeddings/decay/promotion) and NOT a raw-SQL
  * surface. A collection is a typed table; a record is a schema-validated row.
  *
  * Schema is expressed with a constrained field DSL (mirrors `WorkflowContract`)
- * rather than arbitrary JSON Schema — it validates with zod, needs no new
- * dependency, and stays portable to Postgres (§10.4). Each field maps to a
+ * rather than arbitrary JSON Schema â€” it validates with zod, needs no new
+ * dependency, and stays portable to Postgres (Â§10.4). Each field maps to a
  * json_extract-addressable path in `app_records.data_json`.
  */
 
@@ -67,9 +67,9 @@ export interface CollectionInfo {
   updatedAt: string;
 }
 
-// ── Query model ─────────────────────────────────────────────
+// â”€â”€ Query model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/** Single-field comparison. Operators kept minimal + portable. */
+
 export const queryFilterSchema = z.record(
   z.union([
     z.string(),
@@ -98,7 +98,7 @@ export const dataQuerySchema = z.object({
 });
 export type DataQuery = z.infer<typeof dataQuerySchema>;
 
-// ── Tool / route input payloads ─────────────────────────────
+// â”€â”€ Tool / route input payloads â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const defineCollectionSchema = z.object({
   name: collectionNameSchema,
@@ -112,3 +112,6 @@ export const upsertRecordSchema = z.object({
   match: z.record(z.unknown()),
   record: z.record(z.unknown()),
 });
+
+
+

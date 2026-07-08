@@ -1,10 +1,4 @@
-/**
- * DeleteAgentDialog — deciding the fate of an agent's memory on deletion (B11).
- *
- * Per Brain B7 ("promote, don't lose"), the default keeps the agent's memories
- * in the workspace Brain. The operator may instead move them to another agent or
- * delete them. Identity is gone either way; only the memory disposition varies.
- */
+﻿
 
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
@@ -57,13 +51,13 @@ export function DeleteAgentDialog({ agent, allAgents, onClose, onDeleted }: {
       <div className="w-full max-w-md rounded-lg border border-line bg-surface p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2">
           <AlertTriangle size={18} className="text-danger" />
-          <h2 className="text-heading text-text-primary">Delete “{agent.name}”?</h2>
+          <h2 className="text-heading text-text-primary">Delete â€œ{agent.name}â€?</h2>
         </div>
         <p className="mt-2 text-[13px] text-text-secondary">
           The agent is removed from this workspace. {memCount === null
-            ? <span className="inline-flex items-center gap-1 text-text-muted"><Loader2 size={11} className="animate-spin" /> checking memory…</span>
+            ? <span className="inline-flex items-center gap-1 text-text-muted"><Loader2 size={11} className="animate-spin" /> checking memoryâ€¦</span>
             : hasMemory
-              ? <>It carries <b className="text-text-primary">{memCount}</b> {memCount === 1 ? 'memory' : 'memories'} — choose what happens to them.</>
+              ? <>It carries <b className="text-text-primary">{memCount}</b> {memCount === 1 ? 'memory' : 'memories'} â€” choose what happens to them.</>
               : <>It has no personal memory to preserve.</>}
         </p>
 
@@ -76,7 +70,7 @@ export function DeleteAgentDialog({ agent, allAgents, onClose, onDeleted }: {
               {disposition === 'transfer' && (
                 <select value={target} onChange={(e) => setTarget(e.target.value)}
                   className="mt-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px]" aria-label="Target agent">
-                  <option value="">Select an agent…</option>
+                  <option value="">Select an agentâ€¦</option>
                   {others.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
               )}
@@ -120,3 +114,6 @@ function DispoOption({ value, checked, onSelect, title, body, disabled, children
     </label>
   );
 }
+
+
+

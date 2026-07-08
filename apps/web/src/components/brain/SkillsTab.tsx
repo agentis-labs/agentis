@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FileCode, Plus, Trash2, Sparkles, Lightbulb } from 'lucide-react';
 import { apiErrorMessage } from '../../lib/api';
 import { skillsApi, type SkillListItem, type SkillDetail, type LinkedAtom } from '../../lib/skills';
@@ -16,11 +16,7 @@ interface Draft {
 
 const EMPTY_DRAFT: Draft = { id: null, name: '', description: '', body: '' };
 
-/**
- * Skills tab — the operator surface for Living Skills. A Skill is "body on disk,
- * metabolism in the Brain": the procedure is a real SKILL.md a harness loads
- * natively; the description + confidence + linked lessons/examples live here.
- */
+
 export function SkillsTab() {
   const [skills, setSkills] = useState<SkillListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -111,7 +107,7 @@ export function SkillsTab() {
           <FileCode size={22} className="mx-auto text-text-muted" />
           <p className="mt-3 text-[13px] text-text-secondary">No skills yet.</p>
           <p className="mx-auto mt-1 max-w-md text-[12px] leading-5 text-text-muted">
-            Author a procedure here, install a skill package, or import agents from a harness — their <span className="font-mono">SKILL.md</span> files become skills automatically.
+            Author a procedure here, install a skill package, or import agents from a harness â€” their <span className="font-mono">SKILL.md</span> files become skills automatically.
           </p>
           <div className="mt-4"><Button variant="primary" size="sm" iconLeft={<Plus size={13} />} onClick={openNew}>Create your first skill</Button></div>
         </div>
@@ -123,7 +119,7 @@ export function SkillsTab() {
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-card border border-accent/20 bg-accent-soft text-accent"><FileCode size={15} /></span>
                 <button type="button" onClick={() => void openEdit(skill.id)} className="min-w-0 flex-1 text-left">
                   <div className="truncate text-[13px] font-medium text-text-primary">{skill.name}</div>
-                  <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{skill.slug}{skill.scopeId ? ` · scoped` : ''}</div>
+                  <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{skill.slug}{skill.scopeId ? ` Â· scoped` : ''}</div>
                   {skill.description && <div className="mt-1 line-clamp-1 text-[12px] leading-5 text-text-secondary">{skill.description}</div>}
                 </button>
                 <ConfidencePill value={skill.confidence} />
@@ -142,7 +138,7 @@ export function SkillsTab() {
 function ConfidencePill({ value }: { value: number }) {
   const pct = Math.round(value * 100);
   const tone = value >= 0.6 ? 'text-accent bg-accent-soft' : value >= 0.35 ? 'text-warn bg-warn/10' : 'text-danger bg-danger/10';
-  return <span className={`shrink-0 rounded-pill px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tone}`} title="Confidence — moves with run outcomes">{pct}%</span>;
+  return <span className={`shrink-0 rounded-pill px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tone}`} title="Confidence â€” moves with run outcomes">{pct}%</span>;
 }
 
 function SkillEditor({ draft, setDraft, onSave, onCancel, saving, linked }: {
@@ -169,11 +165,11 @@ function SkillEditor({ draft, setDraft, onSave, onCancel, saving, linked }: {
           <input className={inputCls} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Triage Stripe webhooks" />
         </label>
         <label className="flex flex-col gap-1.5">
-          <span className="text-[12px] font-medium text-text-secondary">Description <span className="font-normal text-text-muted">— what an agent searches on to find it</span></span>
+          <span className="text-[12px] font-medium text-text-secondary">Description <span className="font-normal text-text-muted">â€” what an agent searches on to find it</span></span>
           <input className={inputCls} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} placeholder="Verify signatures before trusting a webhook payload." />
         </label>
         <label className="flex flex-col gap-1.5">
-          <span className="text-[12px] font-medium text-text-secondary">Procedure <span className="font-normal text-text-muted">— the SKILL.md body (Markdown)</span></span>
+          <span className="text-[12px] font-medium text-text-secondary">Procedure <span className="font-normal text-text-muted">â€” the SKILL.md body (Markdown)</span></span>
           <textarea className={`${inputCls} min-h-[240px] resize-y font-mono text-[12px] leading-5`} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} placeholder={'# Steps\n1. Recompute the HMAC.\n2. Reject on mismatch with 401.'} />
         </label>
 
@@ -198,3 +194,6 @@ function SkillEditor({ draft, setDraft, onSave, onCancel, saving, linked }: {
     </div>
   );
 }
+
+
+

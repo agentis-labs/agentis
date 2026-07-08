@@ -7,13 +7,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@agentis/db/sqlite';
-import { AgentMemoryService } from '../../src/services/agentMemory.js';
+import { AgentMemoryService } from '../../src/services/agent/agentMemory.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { FailureReflectionService } from '../../src/services/failureReflection.js';
-import { AgentToolRuntime } from '../../src/services/agentToolRuntime.js';
-import { WorkflowStoreService } from '../../src/services/workflowStore.js';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
-import { MemoryStore } from '../../src/services/memoryStore.js';
+import { AgentToolRuntime } from '../../src/services/agent/agentToolRuntime.js';
+import { WorkflowStoreService } from '../../src/services/workflow/workflowStore.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

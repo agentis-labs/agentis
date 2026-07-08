@@ -1,4 +1,4 @@
-export interface PlaybookEntry {
+﻿export interface PlaybookEntry {
   id: string;
   label: string;
   glyph: string;
@@ -24,3 +24,5 @@ export function PlaybookLibrary({ entries, onPick }: { entries: PlaybookEntry[];
     </div>
   );
 }
+
+

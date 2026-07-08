@@ -1,5 +1,5 @@
-/**
- * ChatPanel — persistent right-side orchestrator chat dock.
+﻿/**
+ * ChatPanel â€” persistent right-side orchestrator chat dock.
  *
  * The primary surface is the workspace orchestrator thread. Space managers
  * appear as scope tabs. Rooms and direct threads remain available through
@@ -453,3 +453,6 @@ function EmptyOrchestratorState({ onOpenAgents }: { onOpenAgents: () => void }) 
     </div>
   );
 }
+
+
+

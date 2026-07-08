@@ -21,9 +21,9 @@ import {
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { KnowledgeBaseService } from './knowledgeBase.js';
-import type { WorkspaceIntelligenceService } from './workspaceIntelligence.js';
-import type { AgentLibraryService } from './agentLibrary.js';
+import type { KnowledgeBaseService } from './knowledge/knowledgeBase.js';
+import type { WorkspaceIntelligenceService } from './workspace/workspaceIntelligence.js';
+import type { AgentLibraryService } from './agent/agentLibrary.js';
 import type { ExtensionLibraryService } from './extensionLibrary.js';
 
 /** Minimal deps surface — `ToolHandlerDeps` satisfies this. */

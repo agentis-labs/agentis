@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+﻿import { useMemo } from 'react';
 import { useStore, ViewportPortal } from '@xyflow/react';
 import { CheckCircle2 } from 'lucide-react';
 import clsx from 'clsx';
@@ -149,7 +149,7 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
               zIndex: 6,
             }}
           >
-            {/* Phase label — colored dot + number, then the bright name. */}
+            {/* Phase label â€” colored dot + number, then the bright name. */}
             <div
               className="inline-flex items-center gap-1.5"
               style={{
@@ -202,7 +202,6 @@ export function PhaseLayer({ phases, nodes, focusedPhaseId }: PhaseLayerProps) {
                   Error
                 </span>
               ) : status === 'completed' ? (
-                // Finished phase — the checkmark the operator was missing. Matches
                 // AgentisNode's completed styling (CheckCircle2 + text-success).
                 <span
                   className="inline-flex shrink-0 items-center gap-0.5 font-medium text-success"
@@ -226,7 +225,10 @@ function estimatedNodeWidth(node: PhaseNode): number {
 }
 
 function estimatedNodeHeight(node: PhaseNode): number {
-  // The compact card has a fixed footprint — live detail floats outside it.
+  // The compact card has a fixed footprint â€” live detail floats outside it.
   if (typeof node.height === 'number' && node.height > 0) return node.height;
   return BASE_NODE_HEIGHT;
 }
+
+
+

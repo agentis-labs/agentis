@@ -1,4 +1,4 @@
-export type ToolCallStatus = 'running' | 'success' | 'error' | 'paused' | 'stopped';
+﻿export type ToolCallStatus = 'running' | 'success' | 'error' | 'paused' | 'stopped';
 
 export interface ToolCallData {
   id: string;
@@ -9,3 +9,6 @@ export interface ToolCallData {
   result?: unknown;
   error?: string | null;
 }
+
+
+

@@ -4,7 +4,7 @@
  * instructive failure becomes a durable playbook lesson that build recalls.
  */
 import { describe, it, expect } from 'vitest';
-import { isInstructiveFailure, distillFailureLesson } from '../../src/services/workflowPlaybook.js';
+import { isInstructiveFailure, distillFailureLesson } from '../../src/services/workflow/workflowPlaybook.js';
 
 describe('isInstructiveFailure', () => {
   it('flags guard / precondition / validation rejections as instructive', () => {

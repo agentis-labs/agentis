@@ -24,7 +24,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { assertSafeUrl } from './safeUrl.js';
+import { safeFetch } from './safeFetch.js';
 import { blobRelPath, parseAssetRef } from './assetPaths.js';
 
 export type { ArtifactType };
@@ -205,15 +205,16 @@ export class ArtifactService {
   }
 
   async #fetchRemote(url: string, hint?: { filename?: string; mimeType?: string }): Promise<ResolvedArtifactBytes> {
-    const safe = await assertSafeUrl(url, { allowPrivate: false });
-    const res = await fetch(safe.toString(), { signal: AbortSignal.timeout(20_000) });
+    // safeFetch pins the connection to the IP validated at check time (defeats
+    // DNS rebinding), re-validates each redirect hop, and caps the body size.
+    const res = await safeFetch(url, { timeoutMs: 20_000, maxBytes: MAX_REMOTE_BYTES }, { allowPrivate: false });
     if (!res.ok) throw new AgentisError('VALIDATION_FAILED', `failed to fetch attachment (${res.status})`);
     const ab = await res.arrayBuffer();
     if (ab.byteLength > MAX_REMOTE_BYTES) {
       throw new AgentisError('VALIDATION_FAILED', `attachment exceeds ${MAX_REMOTE_BYTES} bytes`);
     }
     const mimeType = hint?.mimeType ?? res.headers.get('content-type')?.split(';')[0]?.trim() ?? 'application/octet-stream';
-    const filename = hint?.filename ?? filenameFromUrl(safe) ?? defaultName(mimeType);
+    const filename = hint?.filename ?? filenameFromUrl(new URL(res.url || url)) ?? defaultName(mimeType);
     return { buffer: Buffer.from(ab), mimeType, filename };
   }
 

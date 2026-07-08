@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ChatDelta, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
 import { HermesAgentAdapter } from '../../src/adapters/HermesAgentAdapter.js';
 import type { Logger } from '../../src/logger.js';
-import type { RuntimeSessionStore } from '../../src/services/runtimeSessionStore.js';
+import type { RuntimeSessionStore } from '../../src/services/runtime/runtimeSessionStore.js';
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
 

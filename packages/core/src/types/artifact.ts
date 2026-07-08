@@ -1,9 +1,9 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 
 /**
  * Canonical asset (artifact) types for the Assets library.
  *
- * Stored in `artifacts.type` — a plain TEXT column, so THIS list is the single
+ * Stored in `artifacts.type` â€” a plain TEXT column, so THIS list is the single
  * source of truth, enforced in application code (API zod + web unions + workflow
  * node configs all import from here). Adding a type here makes it first-class
  * everywhere: filters, icons, viewers, agent tools, and workflow save nodes.
@@ -43,7 +43,7 @@ export const ARTIFACT_TYPE_LABELS: Record<ArtifactType, string> = {
   archive: 'Archives',
 };
 
-/** Best-effort classification of a MIME type / filename into a first-class type. */
+
 export function artifactTypeFromMime(mime?: string | null, filename?: string | null): ArtifactType {
   const m = (mime ?? '').toLowerCase();
   const ext = (filename ?? '').toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
@@ -77,3 +77,6 @@ export function artifactTypeFromMime(mime?: string | null, filename?: string | n
   }
   return 'document';
 }
+
+
+

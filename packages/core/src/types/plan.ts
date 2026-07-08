@@ -1,4 +1,4 @@
-export type PlanStage = 'goal' | 'decisions' | 'build' | 'verify' | 'activate';
+﻿export type PlanStage = 'goal' | 'decisions' | 'build' | 'verify' | 'activate';
 export type PlanNodeKind = 'goal' | 'decision' | 'action' | 'resource' | 'gate' | 'validation';
 export type PlanRisk = 'low' | 'medium' | 'high' | 'destructive';
 export type PlanStatus =
@@ -216,3 +216,6 @@ export type PlanLifecycleEvent =
   | 'version'
   | 'approved'
   | 'execution';
+
+
+

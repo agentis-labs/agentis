@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { HarnessDetectionResult } from '../../src/services/harnessProbe.js';
-import { repairCliHarnessConfig } from '../../src/services/harnessConfigRepair.js';
+import type { HarnessDetectionResult } from '../../src/services/harness/harnessProbe.js';
+import { repairCliHarnessConfig } from '../../src/services/harness/harnessConfigRepair.js';
 
 const detectedBinaryPath = 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.2081.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.EXE';
 const staleBinaryPath = 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.513.4821.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.EXE';
@@ -17,8 +17,8 @@ const codexDetection: HarnessDetectionResult = {
   },
 };
 
-const currentClaudePath = 'C:\\Users\\antar\\AppData\\Roaming\\Claude\\claude-code\\2.1.189\\claude.exe';
-const staleClaudePath = 'C:\\Users\\antar\\AppData\\Roaming\\Claude\\claude-code\\2.1.177\\claude.exe';
+const currentClaudePath = '~/AppData\\Roaming\\Claude\\claude-code\\2.1.189\\claude.exe';
+const staleClaudePath = '~/AppData\\Roaming\\Claude\\claude-code\\2.1.177\\claude.exe';
 
 const claudeDetection: HarnessDetectionResult = {
   adapterType: 'claude_code',

@@ -22,8 +22,8 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
-import type { AppContactService } from './appContacts.js';
-import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
+import type { AppContactService } from './app/appContacts.js';
+import type { ChannelTurnDispatcher } from './conversation/channelTurnDispatcher.js';
 import type { OutboundPolicyService } from './outboundPolicy.js';
 
 /**

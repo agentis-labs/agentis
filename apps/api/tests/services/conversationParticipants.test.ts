@@ -14,9 +14,9 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentAdapter, ChatDelta, ChatTurnContext } from '@agentis/core';
 import { eq } from 'drizzle-orm';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ConversationStore } from '../../src/services/conversationStore.js';
-import { ConversationParticipantService } from '../../src/services/conversationParticipants.js';
-import { ChannelTurnDispatcher } from '../../src/services/channelTurnDispatcher.js';
+import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ConversationParticipantService } from '../../src/services/conversation/conversationParticipants.js';
+import { ChannelTurnDispatcher } from '../../src/services/conversation/channelTurnDispatcher.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 
 function chatStub(reply: string): AgentAdapter {
@@ -135,7 +135,7 @@ describe('ChannelTurnDispatcher · multi-party routing (G1)', () => {
         sawAgentId = turnCtx.agentId;
         yield { type: 'text', delta: 'specialist reply' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const result = await dispatcher.dispatch({
@@ -164,7 +164,7 @@ describe('ChannelTurnDispatcher · multi-party routing (G1)', () => {
         sawAgentId = turnCtx.agentId;
         yield { type: 'text', delta: 'primary reply' } as ChatDelta;
         yield { type: 'done', finishReason: 'stop' } as ChatDelta;
-      } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     await dispatcher.dispatch({
@@ -195,7 +195,7 @@ describe('ChannelTurnDispatcher · multi-party routing (G1)', () => {
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
       deliver: async () => {}, fallbackAdapter: () => chatStub('should not run'),
       participants,
-      runTurn: async function* () { turnRan = true; yield { type: 'done', finishReason: 'stop' } as ChatDelta; } as unknown as typeof import('../../src/services/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      runTurn: async function* () { turnRan = true; yield { type: 'done', finishReason: 'stop' } as ChatDelta; } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
     const result = await dispatcher.dispatch({

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Standard-mode PostgreSQL driver. Loaded lazily by the factory only when
  * AGENTIS_DATABASE_URL is set.
  *
@@ -27,3 +27,6 @@ export function openPg(options: PgOpenOptions): { db: AgentisPgDb; client: postg
 }
 
 export { schema };
+
+
+

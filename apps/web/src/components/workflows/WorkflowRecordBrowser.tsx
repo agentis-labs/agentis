@@ -1,8 +1,8 @@
-/**
- * WorkflowRecordBrowser — mini record browser for one `data_write` table.
+﻿/**
+ * WorkflowRecordBrowser â€” mini record browser for one `data_write` table.
  *
  * One instance per target table inside the workflow Output tab's
- * "Accumulated Records" section (WORKFLOW-PAGE-REDESIGN.md §Tab 3 §B).
+ * "Accumulated Records" section (WORKFLOW-PAGE-REDESIGN.md Â§Tab 3 Â§B).
  * Shows a key-column grid, supports Load more / View all, CSV export, and
  * a confirmed Clear.
  */
@@ -47,7 +47,7 @@ function deriveColumns(table: RecordTable): string[] {
 }
 
 function cellText(value: unknown): string {
-  if (value === null || value === undefined) return '—';
+  if (value === null || value === undefined) return 'â€”';
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
@@ -211,7 +211,7 @@ export function WorkflowRecordBrowser({
                   disabled={loading}
                   className="font-medium text-accent hover:text-accent-hover disabled:opacity-50"
                 >
-                  View all →
+                  View all â†’
                 </button>
               </>
             )}
@@ -223,3 +223,6 @@ export function WorkflowRecordBrowser({
 }
 
 export { PREVIEW_LIMIT };
+
+
+

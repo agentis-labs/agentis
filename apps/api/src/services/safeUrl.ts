@@ -75,11 +75,44 @@ export interface SafeUrlOptions {
   allowedDomains?: string[];
 }
 
+/** True when a resolved IP literal falls in a private/loopback/link-local/etc. range. */
+export function isPrivateAddress(addr: string): boolean {
+  const fam = net.isIP(addr);
+  if (fam === 4) return isPrivateIPv4(addr);
+  if (fam === 6) return isPrivateIPv6(addr);
+  return false;
+}
+
+/**
+ * A URL that passed the SSRF guard, together with the concrete IP addresses it
+ * resolved to AT CHECK TIME. Callers that actually open a socket MUST connect to
+ * one of `addresses` (see `safeFetch`) — never re-resolve the hostname — or a
+ * DNS-rebinding attacker can answer a public IP during the check and a
+ * private/loopback IP at connect time (classic TOCTOU). `addresses` is empty
+ * only when the check was skipped via `allowPrivate`.
+ */
+export interface SafeTarget {
+  url: URL;
+  addresses: string[];
+}
+
 /**
  * Validate a URL string and return the parsed `URL` if it is safe to fetch.
  * Throws `AgentisError(EXTENSION_SSRF_BLOCKED)` otherwise.
+ *
+ * NOTE: this returns the URL with its ORIGINAL hostname. Passing it to a fetch
+ * that re-resolves DNS reopens the rebinding window — prefer `safeFetch`, which
+ * pins the connection to the address validated here.
  */
 export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Promise<URL> {
+  return (await resolveSafeTarget(raw, opts)).url;
+}
+
+/**
+ * Same validation as `assertSafeUrl`, but also returns the resolved IP addresses
+ * so the caller can pin the connection and defeat DNS rebinding.
+ */
+export async function resolveSafeTarget(raw: string, opts: SafeUrlOptions = {}): Promise<SafeTarget> {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -102,7 +135,7 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
       );
     }
   }
-  if (opts.allowPrivate) return parsed;
+  if (opts.allowPrivate) return { url: parsed, addresses: [] };
 
   // Resolve the host and check every address. If the input is already a
   // literal IP, `family` is non-zero on the URL parse already.
@@ -121,6 +154,9 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
         `DNS resolution failed for ${host}: ${(err as Error).message}`,
       );
     }
+  }
+  if (addresses.length === 0) {
+    throw new AgentisError('EXTENSION_SSRF_BLOCKED', `No addresses resolved for ${host}`);
   }
   for (const addr of addresses) {
     const fam = net.isIP(addr);
@@ -145,5 +181,5 @@ export async function assertSafeUrl(raw: string, opts: SafeUrlOptions = {}): Pro
       );
     }
   }
-  return parsed;
+  return { url: parsed, addresses };
 }

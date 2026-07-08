@@ -1,10 +1,4 @@
-/**
- * FloatingTaskProgress — bottom-right card shown when the chat panel is closed
- * while an agent is mid-task (CHAT-10X-VISION §3.7). Lets the operator keep
- * working elsewhere and still see live progress; clicking re-opens the chat on
- * the working agent. Renders nothing unless the panel is hidden AND a task is
- * running, so it never overlaps the docked panel.
- */
+﻿
 
 import { Loader2, X } from 'lucide-react';
 import { useChatPanelStore } from './ChatPanelStore';
@@ -37,11 +31,11 @@ export function FloatingTaskProgress() {
         if (event.key === 'Enter' || event.key === ' ') open();
       }}
       className="fixed bottom-4 right-4 z-[60] flex w-72 max-w-[calc(100vw-2rem)] cursor-pointer flex-col gap-1.5 rounded-card border border-accent/40 bg-surface px-3 py-2.5 text-left shadow-[0_24px_60px_-24px_rgba(0,0,0,0.75)] transition hover:border-accent/70"
-      aria-label={`${agentName} is working — open chat`}
+      aria-label={`${agentName} is working â€” open chat`}
     >
       <div className="flex items-center gap-2">
         <Loader2 size={13} className="shrink-0 animate-spin text-accent" />
-        <span className="truncate text-[12px] font-semibold text-text-primary">{agentName} is working…</span>
+        <span className="truncate text-[12px] font-semibold text-text-primary">{agentName} is workingâ€¦</span>
         {total > 0 && (
           <span className="ml-auto shrink-0 text-[11px] tabular-nums text-text-muted">{done}/{total}</span>
         )}
@@ -67,3 +61,6 @@ export function FloatingTaskProgress() {
     </div>
   );
 }
+
+
+

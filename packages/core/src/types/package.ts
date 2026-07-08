@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 import { appIdentitySchema } from './app.js';
 import { appManifestSchema } from './manifest.js';
 import { upsertSurfaceSchema } from './view.js';
@@ -140,10 +140,10 @@ export const agentisPackageContentsSchema = z.object({
     )
     .default([]),
   entryWorkflowSlug: z.string().optional(),
-  // ── Agentic App facets (AGENTIC-APPS-10X §7.2) — the `.agentisapp` payload. ──
+  // â”€â”€ Agentic App facets (AGENTIC-APPS-10X Â§7.2) â€” the `.agentisapp` payload. â”€â”€
   // An `agentis` bundle becomes an App package by carrying its identity, surfaces,
   // and datastore SCHEMAS. Collections ship structure always; `seed` rows are
-  // optional and NOT auto-applied on install (empty-with-schema default, §7.2).
+  // optional and NOT auto-applied on install (empty-with-schema default, Â§7.2).
   appManifest: appIdentitySchema.partial().optional(),
   surfaces: z.array(upsertSurfaceSchema).default([]),
   collections: z
@@ -222,19 +222,17 @@ export const packageExportEnvelopeSchema = z.object({
 });
 export type PackageExportEnvelope = z.infer<typeof packageExportEnvelopeSchema>;
 
-// ── Workspace bundle (`.agentis`) ───────────────────────────────────────────
+// â”€â”€ Workspace bundle (`.agentis`) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // A whole-workspace portable bundle: every agent, app, workflow, extension,
-// ability, integration, and knowledge seed in one envelope an operator can back
 // up, share, or sell. It is the workspace-scope superset of the single-app
-// `.agentisapp` package — composed from the SAME per-entity schemas, plus an
-// `apps[]` array of self-contained AppManifests (an operator can own many apps).
+// `.agentisapp` package â€” composed from the SAME per-entity schemas, plus an
 //
 // The **profile** is the safety dimension that distinguishes the three uses, and
-// it is STRUCTURAL — what travels is decided here, never by a UI checkbox:
-//   - `backup`  → full fidelity (the manifest path is NOT used; see backup.ts).
-//   - `share`   → structure + optional sample rows; NEVER secret values; embeddings dropped.
-//   - `sell`    → like share + PII/secret scrub gate + signature/licence; NEVER secrets.
+// it is STRUCTURAL â€” what travels is decided here, never by a UI checkbox:
+//   - `backup`  â†’ full fidelity (the manifest path is NOT used; see backup.ts).
+//   - `share`   â†’ structure + optional sample rows; NEVER secret values; embeddings dropped.
+//   - `sell`    â†’ like share + PII/secret scrub gate + signature/licence; NEVER secrets.
 export const exportProfileSchema = z.enum(['backup', 'share', 'sell']);
 export type ExportProfile = z.infer<typeof exportProfileSchema>;
 
@@ -248,7 +246,7 @@ export type BundleAuthor = z.infer<typeof bundleAuthorSchema>;
 export const workspaceBundleManifestSchema = z.object({
   /** Workspace-shared specialists/agents. */
   agents: z.array(agentContentsSchema).default([]),
-  /** Workspace extensions (never `builtin` — those are host-shipped). */
+  /** Workspace extensions (never `builtin` â€” those are host-shipped). */
   extensions: z.array(extensionContentsSchema).default([]),
   /** Bare workflows (no owning App). App workflows live inside `apps[].workflows`. */
   workflows: z.array(workflowContentsSchema).default([]),
@@ -267,7 +265,7 @@ export const workspaceBundleManifestSchema = z.object({
       }),
     )
     .default([]),
-  /** Credential REQUIREMENTS the installer must fill in — never the secret values. */
+  /** Credential REQUIREMENTS the installer must fill in â€” never the secret values. */
   credentialSlots: z.array(credentialSlotSchema).default([]),
 });
 export type WorkspaceBundleManifest = z.infer<typeof workspaceBundleManifestSchema>;
@@ -281,15 +279,15 @@ export const workspaceBundleEnvelopeSchema = z.object({
   name: z.string().min(1).max(160),
   description: z.string().max(2000).nullable().optional(),
   manifest: workspaceBundleManifestSchema,
-  /** sha256 over the canonical manifest — deserialize rejects on mismatch. */
+  /** sha256 over the canonical manifest â€” deserialize rejects on mismatch. */
   checksum: z.string().regex(/^[a-f0-9]{64}$/i),
   exportedAt: z.string().datetime(),
-  // Provenance / trust — populated for `sell`.
+  // Provenance / trust â€” populated for `sell`.
   author: bundleAuthorSchema.nullable().optional(),
   license: z.string().max(8000).nullable().optional(),
   /** Base64 RSA-SHA256 signature over the canonical manifest (sell only; verified on import). */
   signature: z.string().nullable().optional(),
-  /** SPKI PEM public key the signature verifies against — travels with the bundle (self-certifying). */
+  /** SPKI PEM public key the signature verifies against â€” travels with the bundle (self-certifying). */
   signerPublicKeyPem: z.string().nullable().optional(),
 });
 export type WorkspaceBundleEnvelope = z.infer<typeof workspaceBundleEnvelopeSchema>;
@@ -318,3 +316,6 @@ export const workspaceBundlePreviewSchema = z.object({
   warnings: z.array(z.string()).default([]),
 });
 export type WorkspaceBundlePreview = z.infer<typeof workspaceBundlePreviewSchema>;
+
+
+

@@ -1,12 +1,12 @@
-/**
- * AppEngineModal — App-level settings, framed as a product control surface.
+﻿/**
+ * AppEngineModal â€” App-level settings, framed as a product control surface.
  *
  * Four tabs, ordered by what someone configuring an Agentic App actually cares
  * about: **Overview** (a friendly summary), **Identity** (name / description /
  * icon / version / lifecycle), **Access** (who can use it, sharing, entry
  * surface), and **Advanced** (custom-code policy, capability grants, and
- * read-only distribution metadata). Implementation plumbing — checksum, source,
- * raw grant JSON — lives only under Advanced, never up front.
+ * read-only distribution metadata). Implementation plumbing â€” checksum, source,
+ * raw grant JSON â€” lives only under Advanced, never up front.
  *
  * All edits map to the existing `PATCH /v1/apps/:id` contract; no new fields.
  */
@@ -37,7 +37,7 @@ import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { nestedDomainOptions } from '../shared/DomainToolbar';
 
-/** App-level run analytics — shape of `GET /v1/apps/:id/analytics`. */
+/** App-level run analytics â€” shape of `GET /v1/apps/:id/analytics`. */
 interface AppAnalytics {
   runs: number;
   successRate: number | null;
@@ -60,7 +60,7 @@ interface AppAnalytics {
   perAgent?: Array<{ agentId: string | null; name: string; tokensIn: number; tokensOut: number; totalTokens: number }>;
 }
 
-/** A field of a workflow's input contract — drives the on-demand Run inputs form. */
+/** A field of a workflow's input contract â€” drives the on-demand Run inputs form. */
 interface RunInputField {
   key: string;
   type: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'any';
@@ -191,7 +191,6 @@ export function AppEngineModal({
     }
   }, [appId]);
 
-  // Lazy-load analytics the first time the operator opens that page.
   useEffect(() => {
     if (!open || page !== 'analytics' || analytics || analyticsLoading) return;
     void loadAnalytics();
@@ -207,7 +206,7 @@ export function AppEngineModal({
     ? agents.find((agent) => agent.id === selectedDomain.managerId) ?? null
     : null;
   const orgSummary = selectedDomain
-    ? `${selectedDomain.name}${domainManager ? ` · ${domainManager.name}` : ''}`
+    ? `${selectedDomain.name}${domainManager ? ` Â· ${domainManager.name}` : ''}`
     : 'Unassigned';
   const audienceSummary = audience.length
     ? audience.map((value) => AUDIENCE_OPTIONS.find((option) => option.value === value)?.label ?? value).join(', ')
@@ -399,7 +398,7 @@ export function AppEngineModal({
                       <option value="">{domainManager ? `Domain manager (${domainManager.name})` : 'No specific owner'}</option>
                       {agents.map((agent) => (
                         <option key={agent.id} value={agent.id}>
-                          {agent.name}{agent.role ? ` · ${agent.role}` : ''}
+                          {agent.name}{agent.role ? ` Â· ${agent.role}` : ''}
                         </option>
                       ))}
                     </SelectField>
@@ -457,7 +456,7 @@ export function AppEngineModal({
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Distribution</div>
                   <InfoPanel title="Slug">{app.slug}</InfoPanel>
                   <InfoPanel title="Source">{app.source ? `${app.source.kind}:${app.source.id}` : 'Local app, no Hub source attached.'}</InfoPanel>
-                  <InfoPanel title="Installed checksum">{app.installedChecksum ?? 'None — this app was built here.'}</InfoPanel>
+                  <InfoPanel title="Installed checksum">{app.installedChecksum ?? 'None â€” this app was built here.'}</InfoPanel>
                   <InfoPanel title="Export">Export this app as a portable .agentisapp package from the editor toolbar.</InfoPanel>
                 </div>
               </div>
@@ -568,7 +567,7 @@ function EngineStat({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * App-level analytics — a rollup across every workflow the app owns. Tokens are
+ * App-level analytics â€” a rollup across every workflow the app owns. Tokens are
  * the headline signal (most runtimes are subscription harnesses with no $ cost);
  * the per-workflow table shows where consumption concentrates.
  */
@@ -625,7 +624,7 @@ function AppAnalyticsPanel({
           return;
         }
       } catch {
-        /* fall through to a plain run — the run-gate will report any missing input */
+        /* fall through to a plain run â€” the run-gate will report any missing input */
       }
       await submitRun(workflowId, {});
     },
@@ -634,7 +633,7 @@ function AppAnalyticsPanel({
   if (loading && !analytics) {
     return (
       <div className="flex items-center gap-2 py-6 text-[12px] text-text-muted">
-        <Loader2 size={14} className="animate-spin" /> Loading app analytics…
+        <Loader2 size={14} className="animate-spin" /> Loading app analyticsâ€¦
       </div>
     );
   }
@@ -649,14 +648,14 @@ function AppAnalyticsPanel({
     );
   }
   if (!analytics) return null;
-  const successLabel = analytics.successRate == null ? '–' : `${Math.round(analytics.successRate * 100)}%`;
+  const successLabel = analytics.successRate == null ? 'â€“' : `${Math.round(analytics.successRate * 100)}%`;
   return (
     <div className="space-y-4">
       {runForm ? (
         <div className="rounded-xl border border-accent/30 bg-accent-soft/20 p-3">
           <div className="mb-2 flex items-center gap-2">
             <Play size={13} className="text-accent" />
-            <span className="flex-1 truncate text-[12px] font-semibold text-text-primary">Run “{runForm.title}” — inputs</span>
+            <span className="flex-1 truncate text-[12px] font-semibold text-text-primary">Run â€œ{runForm.title}â€ â€” inputs</span>
           </div>
           <div className="space-y-2">
             {runForm.fields.map((f) => (
@@ -691,7 +690,7 @@ function AppAnalyticsPanel({
       ) : null}
       <div className="flex items-center gap-2">
         <BarChart3 size={14} className="text-accent" />
-        <span className="flex-1 text-[12px] font-semibold text-text-primary">Run analytics — all workflows</span>
+        <span className="flex-1 text-[12px] font-semibold text-text-primary">Run analytics â€” all workflows</span>
         <button
           type="button"
           onClick={onRefresh}
@@ -727,7 +726,7 @@ function AppAnalyticsPanel({
         </div>
       ) : (
         <div className="rounded-xl border border-line bg-canvas/45 px-3 py-2 text-[11.5px] text-text-muted">
-          Subscription runtime — cost is not metered. Tokens above are the spend signal.
+          Subscription runtime â€” cost is not metered. Tokens above are the spend signal.
         </div>
       )}
 
@@ -755,7 +754,7 @@ function AppAnalyticsPanel({
                     <td className="max-w-0 truncate px-3 py-1.5 text-text-primary" title={wf.title}>{wf.title}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">{wf.runs}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">
-                      {wf.successRate == null ? '–' : `${Math.round(wf.successRate * 100)}%`}
+                      {wf.successRate == null ? 'â€“' : `${Math.round(wf.successRate * 100)}%`}
                     </td>
                     <td className="px-3 py-1.5 text-right tabular-nums text-text-secondary">{formatTokens(wf.totalTokens)}</td>
                     <td className="px-2 py-1.5 text-right">
@@ -791,7 +790,7 @@ function AppAnalyticsPanel({
                   <span className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-canvas">
                     <span className="block h-full rounded-full bg-accent" style={{ width: `${Math.round(share * 100)}%` }} />
                   </span>
-                  <span className="w-16 shrink-0 text-right font-mono text-[11.5px] tabular-nums text-text-secondary" title={`${row.tokensIn} in · ${row.tokensOut} out`}>{formatTokens(row.totalTokens)}</span>
+                  <span className="w-16 shrink-0 text-right font-mono text-[11.5px] tabular-nums text-text-secondary" title={`${row.tokensIn} in Â· ${row.tokensOut} out`}>{formatTokens(row.totalTokens)}</span>
                 </div>
               );
             })}
@@ -802,7 +801,7 @@ function AppAnalyticsPanel({
   );
 }
 
-/** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
+/** Compact token count: 1234 â†’ "1.2k", 1_200_000 â†’ "1.2M". */
 function formatTokens(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '0';
   if (value < 1_000) return String(Math.round(value));
@@ -810,9 +809,9 @@ function formatTokens(value: number): string {
   return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`;
 }
 
-/** Short human duration for the analytics tiles: 49800 → "49.8s", 125000 → "2.1m". */
+/** Short human duration for the analytics tiles: 49800 â†’ "49.8s", 125000 â†’ "2.1m". */
 function formatDurationShort(ms: number | null): string {
-  if (ms == null || !Number.isFinite(ms)) return '–';
+  if (ms == null || !Number.isFinite(ms)) return 'â€“';
   if (ms < 1_000) return `${Math.round(ms)}ms`;
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
   return `${(ms / 60_000).toFixed(1)}m`;
@@ -925,3 +924,6 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.readAsDataURL(file);
   });
 }
+
+
+

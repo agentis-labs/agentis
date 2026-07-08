@@ -1,14 +1,9 @@
-/**
- * AvatarMenu — header dropdown with operator info, theme toggle, settings, sign out.
- *
- * Replaces the bare logout button. Uses initials when no avatar image
- * is available. Closes on click-outside and Escape.
- */
+﻿
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, LogOut, Package as PackageIcon } from 'lucide-react';
+import { Settings as SettingsIcon, LogOut, Package as PackageIcon, Database as DataIcon } from 'lucide-react';
 import clsx from 'clsx';
 import { ThemeToggle } from './ThemeToggle';
 import { useAgentisStore } from '../../store/agentisStore';
@@ -135,6 +130,15 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
             <button
               type="button"
               role="menuitem"
+              onClick={() => { setOpen(false); setSettingsOpen(true, 'data'); }}
+              className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+            >
+              <DataIcon size={14} />
+              Your data
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               onClick={() => { setOpen(false); setSettingsOpen(true, 'workspace'); }}
               className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
             >
@@ -157,3 +161,6 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
     </div>
   );
 }
+
+
+

@@ -34,17 +34,19 @@ import {
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
-import type { ConversationStore } from '../services/conversationStore.js';
-import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from '../services/chatPermissionMode.js';
+import type { ConversationStore } from '../services/conversation/conversationStore.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from '../services/chat/chatPermissionMode.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
-import { ChatSessionExecutor } from '../services/chatSessionExecutor.js';
-import { publishAgentWorkStep, publishChatDeltaProgress } from '../services/agentWorkProgress.js';
+import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
+import { publishAgentWorkStep, publishChatDeltaProgress } from '../services/agent/agentWorkProgress.js';
 import type { ViewportStore } from '../services/viewportStore.js';
 import type { Logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import type { EventBus } from '../event-bus.js';
+import { serializeConversationMessage, serializeQueueItem, delay, workflowIdFromViewport, serializeScopeAgent, isAdapterErrorDelta, createStreamedChatMetadata, finalizeTurnTrace, relevantTurnError, captureChatDeltaMetadata, buildPersistedChatMetadata, workflowBuildMetadataFromResult } from '../services/conversation/conversationTurnHelpers.js';
+import type { AgentRow, StreamedChatMetadata } from '../services/conversation/conversationTurnHelpers.js';
 
 const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
@@ -109,58 +111,12 @@ type ConversationRouteDeps = {
   };
 };
 
-type AgentRow = typeof schema.agents.$inferSelect;
 type ConversationRow = typeof schema.conversations.$inferSelect;
-type ConversationMessageRow = typeof schema.conversationMessages.$inferSelect;
 
-interface PersistedToolCallData {
-  id: string;
-  name: string;
-  status: 'running' | 'success' | 'error';
-  args?: unknown;
-  result?: unknown;
-  error?: string | null;
-  durationMs?: number | null;
-}
 
-interface StreamedChatMetadata {
-  turn: ChatTurnTrace;
-  activity: Array<Extract<ChatDelta, { type: 'activity' }>>;
-  toolCalls: PersistedToolCallData[];
-  toolStartedAt: Map<string, number>;
-  workflowId: string | null;
-  runId: string | null;
-  runTitle: string | null;
-  confirmation: (Omit<Extract<ChatDelta, { type: 'confirmation_required' }>, 'type'> & { status: 'pending' }) | null;
-}
 
-function serializeConversationMessage(message: ConversationMessageRow) {
-  return {
-    id: message.id,
-    role: message.authorType,
-    authorType: message.authorType,
-    authorId: message.authorId,
-    body: message.body,
-    metadata: message.metadata ?? {},
-    deliveryStatus: message.deliveryStatus,
-    createdAt: message.createdAt,
-  };
-}
 
-type QueueRow = typeof schema.conversationMessageQueue.$inferSelect;
 
-function serializeQueueItem(item: QueueRow) {
-  return {
-    id: item.id,
-    conversationId: item.conversationId,
-    workspaceId: item.workspaceId,
-    text: item.text,
-    attachments: item.attachments ?? null,
-    createdAt: item.createdAt,
-    position: item.position,
-    status: item.status,
-  };
-}
 
 /**
  * Queue-then-auto-continue mid-turn composer — module-level guard tracking
@@ -710,16 +666,7 @@ async function* withChatHeartbeats(
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
-function workflowIdFromViewport(viewport: ViewportContext | null | undefined): string | undefined {
-  if (!viewport) return undefined;
-  if (viewport.resourceKind === 'workflow' && viewport.resourceId) return viewport.resourceId;
-  if (typeof viewport.metadata?.workflowId === 'string') return viewport.metadata.workflowId;
-  return undefined;
-}
 
 function findWorkspaceOrchestrator(db: AgentisSqliteDb, workspaceId: string): AgentRow | null {
   return db
@@ -729,16 +676,6 @@ function findWorkspaceOrchestrator(db: AgentisSqliteDb, workspaceId: string): Ag
     .get() ?? null;
 }
 
-function serializeScopeAgent(agent: AgentRow) {
-  return {
-    id: agent.id,
-    name: agent.name,
-    role: agent.role,
-    status: agent.status,
-    colorHex: agent.colorHex,
-    reportsTo: agent.reportsTo,
-  };
-}
 
 function conversationHistoryForTurn(
   deps: ConversationRouteDeps,
@@ -1316,150 +1253,9 @@ async function confirmConversationAction(
   return c.json({ deltas, conversationId: conversation.id, agentId });
 }
 
-function isAdapterErrorDelta(delta: ChatDelta): delta is Extract<ChatDelta, { type: 'tool_result' }> & { error: string } {
-  return delta.type === 'tool_result'
-    && delta.id === 'adapter'
-    && delta.name === 'adapter.chat'
-    && typeof delta.error === 'string'
-    && delta.error.trim().length > 0;
-}
 
-function createStreamedChatMetadata(
-  clientTurnId: string = randomUUID(),
-  startedAt = new Date().toISOString(),
-): StreamedChatMetadata {
-  return {
-    turn: {
-      clientTurnId,
-      startedAt,
-      status: 'running',
-    },
-    activity: [],
-    toolCalls: [],
-    toolStartedAt: new Map(),
-    workflowId: null,
-    runId: null,
-    runTitle: null,
-    confirmation: null,
-  };
-}
 
-function finalizeTurnTrace(
-  state: StreamedChatMetadata,
-  finishReason: ChatFinishReason,
-  completedAt: string,
-  durationMs: number,
-): void {
-  state.turn = {
-    ...state.turn,
-    completedAt,
-    durationMs,
-    finishReason,
-    status: finishReason === 'error'
-      ? 'failed'
-      : finishReason === 'max_turns' || finishReason === 'length'
-        ? 'stopped'
-        : 'completed',
-  };
-}
 
-function relevantTurnError(state: StreamedChatMetadata, adapterError: string | null): string {
-  const toolError = [...state.toolCalls]
-    .reverse()
-    .find((call) => call.status === 'error' && call.name !== 'adapter.chat')
-    ?.error
-    ?.trim();
-  return toolError
-    || adapterError?.trim()
-    || 'The agent runtime failed before it could complete the chat turn.';
-}
 
-function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta): void {
-  if (delta.type === 'activity') {
-    state.activity = [...state.activity.filter((entry) => entry.id !== delta.id), delta].slice(-80);
-    if (delta.workflowId) state.workflowId = delta.workflowId;
-    if (delta.runId) state.runId = delta.runId;
-    return;
-  }
-  if (delta.type === 'thinking') return;
-  if (delta.type === 'tool_call') {
-    state.toolStartedAt.set(delta.id, Date.now());
-    state.toolCalls = [
-      ...state.toolCalls.filter((entry) => entry.id !== delta.id),
-      {
-        id: delta.id,
-        name: delta.name,
-        status: 'running',
-        args: delta.args,
-      },
-    ];
-    return;
-  }
-  if (delta.type === 'tool_result') {
-    const startedAt = state.toolStartedAt.get(delta.id);
-    const durationMs = startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : null;
-    const previous = state.toolCalls.find((entry) => entry.id === delta.id);
-    state.toolCalls = [
-      ...state.toolCalls.filter((entry) => entry.id !== delta.id),
-      {
-        id: delta.id,
-        name: delta.name,
-        status: delta.error ? 'error' : 'success',
-        args: previous?.args,
-        result: delta.result,
-        error: delta.error ?? null,
-        durationMs,
-      },
-    ];
-    const build = workflowBuildMetadataFromResult(delta.result);
-    if (build) {
-      state.workflowId = build.workflowId;
-      state.runId = build.runId;
-      state.runTitle = build.title ?? state.runTitle;
-    }
-    return;
-  }
-  if (delta.type === 'confirmation_required') {
-    state.confirmation = {
-      turnId: delta.turnId,
-      toolCall: delta.toolCall,
-      title: delta.title,
-      body: delta.body,
-      impact: delta.impact,
-      confirmLabel: delta.confirmLabel,
-      cancelLabel: delta.cancelLabel,
-      expiresAt: delta.expiresAt,
-      status: 'pending',
-    };
-  }
-}
 
-function buildPersistedChatMetadata(
-  source: 'chat_loop' | 'chat_confirmation',
-  state: StreamedChatMetadata,
-  clientTurnId?: string | null,
-): Record<string, unknown> {
-  return {
-    source,
-    ...(clientTurnId ? { clientTurnId } : {}),
-    turn: state.turn,
-    ...(state.activity.length > 0 ? { activity: state.activity } : {}),
-    ...(state.toolCalls.length > 0 ? { toolCalls: state.toolCalls } : {}),
-    ...(state.workflowId ? { workflowId: state.workflowId } : {}),
-    ...(state.runId ? { runId: state.runId } : {}),
-    ...(state.runTitle ? { runTitle: state.runTitle } : {}),
-    ...(state.confirmation ? { confirmation: state.confirmation } : {}),
-  };
-}
 
-function workflowBuildMetadataFromResult(result: unknown): { workflowId: string; runId: string; title?: string } | null {
-  if (!result || typeof result !== 'object') return null;
-  const value = result as { workflowId?: unknown; runId?: unknown; title?: unknown };
-  if (typeof value.workflowId !== 'string' || !value.workflowId.trim()) return null;
-  if (typeof value.runId !== 'string' || !value.runId.trim()) return null;
-  return {
-    workflowId: value.workflowId,
-    runId: value.runId,
-    ...(typeof value.title === 'string' && value.title.trim() ? { title: value.title.trim() } : {}),
-  };
-}

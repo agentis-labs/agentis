@@ -1,5 +1,5 @@
-/**
- * Drawer — modal right/left panel with overlay (heavier than DetailPanel).
+﻿/**
+ * Drawer â€” modal right/left panel with overlay (heavier than DetailPanel).
  *
  * Use for register/edit/inspector flows that need a focused workspace.
  * Overlay click + Escape close. Body scroll-locked while open.
@@ -81,3 +81,6 @@ export function Drawer({
     </div>
   );
 }
+
+
+

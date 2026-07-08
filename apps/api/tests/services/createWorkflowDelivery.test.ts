@@ -11,7 +11,7 @@ import { schemas, type WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { createWorkflowFromDescription } from '../../src/services/agentisToolHandlers/build.js';
-import { SpecialistAgentService } from '../../src/services/specialistAgents.js';
+import { SpecialistAgentService } from '../../src/services/specialist/specialistAgents.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 
 /** A minimal valid LLM-synthesized graph (trigger → agent_task → terminal). */
@@ -125,7 +125,7 @@ describe('createWorkflowFromDescription — model-assisted creation', () => {
 
     await expect(createWorkflowFromDescription(adapterDeps, {
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id, agentId: 'orchy',
-      description: 'Take a deep look into C:\\Users\\antar\\OneDrive\\Documentos\\stores and build an Agentis workflow with a rendered dashboard output.',
+      description: 'Take a deep look into ~/stores and build an Agentis workflow with a rendered dashboard output.',
       stream: false,
     })).rejects.toMatchObject({ code: 'WORKFLOW_DRAFT_REQUIRED' });
 

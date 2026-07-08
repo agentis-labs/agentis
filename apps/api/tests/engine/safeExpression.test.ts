@@ -14,8 +14,8 @@ describe('evaluateExpression', () => {
 
   it('evaluates a function body that uses `return` (the case that was failing)', () => {
     const expr = 'const to = input.email; return { to, subject: "Hi " + input.name };';
-    expect(evaluateExpression(expr, { input: { email: 'a@b.co', name: 'Robson' } }))
-      .toEqual({ to: 'a@b.co', subject: 'Hi Robson' });
+    expect(evaluateExpression(expr, { input: { email: 'a@b.co', name: 'Alex' } }))
+      .toEqual({ to: 'a@b.co', subject: 'Hi Alex' });
   });
 
   it('evaluates a multi-statement body with control flow', () => {
@@ -105,5 +105,50 @@ describe('evaluateExpression', () => {
 
   it('surfaces a clear error for a genuinely broken expression', () => {
     expect(() => evaluateExpression('const ;;; bad', { input: {} })).toThrow(/expression evaluation failed/);
+  });
+});
+
+/**
+ * Adversarial escape regression guards. The boundary is DEFENSE IN DEPTH: a
+ * static token guard AND a VM realm with `codeGeneration: { strings: false }`.
+ * These tests assert an escape fails even if one layer is bypassed — so a future
+ * edit that weakens either layer is caught.
+ */
+describe('safeExpression — sandbox hardening (adversarial)', () => {
+  it('blocks dotted constructor-chain escapes at the static guard', () => {
+    expect(() => evaluateExpression('return this.constructor.constructor("return process")()', { input: {} })).toThrow();
+    expect(() => evaluateExpression('return [].constructor.constructor("return process")()', { input: {} })).toThrow();
+    expect(() => evaluateExpression('return ({}).constructor.constructor("return process.env")()', { input: {} })).toThrow();
+  });
+
+  it('neutralizes bracket-notation constructor escapes at runtime (codeGen disabled)', () => {
+    // These strings dodge the dotted-constructor regex but must still fail —
+    // either a TypeError on the null-prototype global or EvalError from the
+    // disabled Function constructor.
+    expect(() => evaluateExpression('return this["constructor"]["constructor"]("return 1")()', { input: {} })).toThrow();
+    expect(() => evaluateExpression('return (function(){}).constructor("return 1")()', { input: {} })).toThrow();
+    expect(() => evaluateExpression('return [].map["constructor"]("return 1")()', { input: {} })).toThrow();
+  });
+
+  it('exposes NO host I/O callables inside the sandbox', () => {
+    // The evaluator injects only JSON-cloned data — never a live host function
+    // (a callable is the usual `fn.constructor.constructor` escape pivot).
+    expect(
+      evaluateExpression(
+        '({ fetch: typeof fetch, timer: typeof setTimeout, buffer: typeof Buffer, immediate: typeof setImmediate })',
+        { input: {} },
+      ),
+    ).toEqual({ fetch: 'undefined', timer: 'undefined', buffer: 'undefined', immediate: 'undefined' });
+  });
+
+  it('cannot import or dynamically require host modules', () => {
+    expect(() => evaluateExpression('return import("node:fs")', { input: {} })).toThrow(/blocked token/);
+    expect(() => evaluateExpression('return require("node:child_process")', { input: {} })).toThrow(/blocked token/);
+  });
+
+  it('cannot reach process, globalThis, or arguments via the static guard', () => {
+    for (const expr of ['process', 'globalThis', 'arguments', '({}).__proto__']) {
+      expect(() => evaluateExpression(`return ${expr}`, { input: {} }), expr).toThrow(/blocked token/);
+    }
   });
 });

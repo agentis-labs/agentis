@@ -1,5 +1,5 @@
-/**
- * ExtensionCombobox — ENGINE-10X §12.2. Local-first combobox that searches both
+﻿/**
+ * ExtensionCombobox â€” ENGINE-10X Â§12.2. Local-first combobox that searches both
  * installed extensions and the AgentisHub registry. Registry results are debounced
  * 300ms and presented as ghost rows; clicking "Install & use" runs the
  * existing install pipeline and then selects the new extension.
@@ -155,12 +155,12 @@ export function ExtensionCombobox({
         <input
           value={query}
           onChange={handleQueryChange}
-          placeholder="Search extensions or AgentisHub…"
+          placeholder="Search extensions or AgentisHubâ€¦"
           className="w-full rounded border border-line bg-surface-2 py-1 pl-6 pr-2 text-[12px]"
         />
       </div>
 
-      {/* Build a new extension inline — no leaving the canvas. */}
+      {/* Build a new extension inline â€” no leaving the canvas. */}
       <button
         type="button"
         onClick={() => setStudioOpen(true)}
@@ -184,11 +184,11 @@ export function ExtensionCombobox({
       {value && (
         <div className="flex items-center justify-between rounded border border-accent/40 bg-accent/10 px-2 py-1 text-[11px]">
           <span className="truncate text-accent">Selected: {selectedName}</span>
-          <button type="button" onClick={() => onChange('')} className="text-text-muted hover:text-danger">×</button>
+          <button type="button" onClick={() => onChange('')} className="text-text-muted hover:text-danger">Ã—</button>
         </div>
       )}
 
-      {/* Built-in extensions — always shown unless filtered out */}
+      {/* Built-in extensions â€” always shown unless filtered out */}
       {matchedBuiltins.length > 0 && (
         <div>
           <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">Built-in</div>
@@ -252,7 +252,7 @@ export function ExtensionCombobox({
                   onClick={() => void installRegistry(entry)}
                   className="shrink-0 rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/20"
                 >
-                  ⤓ Install & use
+                  â¤“ Install & use
                 </button>
               </li>
             ))}
@@ -260,7 +260,7 @@ export function ExtensionCombobox({
         </div>
       )}
 
-      {/* Suggest button — only when there's a query */}
+      {/* Suggest button â€” only when there's a query */}
       {hasQuery && (
         <button
           type="button"
@@ -269,7 +269,7 @@ export function ExtensionCombobox({
           className="inline-flex w-full items-center justify-center gap-1.5 rounded border border-line bg-surface-2 py-1 text-[11px] text-text-primary hover:border-accent/40 disabled:opacity-60"
         >
           <Wand2 size={11} className="text-accent" />
-          {suggesting ? 'Thinking…' : 'Suggest with agent'}
+          {suggesting ? 'Thinkingâ€¦' : 'Suggest with agent'}
         </button>
       )}
 
@@ -334,3 +334,6 @@ function ExtensionOptionRow({
     </li>
   );
 }
+
+
+

@@ -1,4 +1,4 @@
-import type { IntegrationManifest } from './types.js';
+﻿import type { IntegrationManifest } from './types.js';
 
 type ManifestSeed = Omit<IntegrationManifest, 'version' | 'nodeConfig' | 'builtin' | 'runtime'> & {
   runtime?: IntegrationManifest['runtime'];
@@ -20,7 +20,7 @@ const seeds: ManifestSeed[] = [
   manifest('webhook_send', 'Webhook Send', 'Core', 'Send signed outbound webhook payloads.', ['send'], { type: 'shared_secret', fields: ['secret'] }, undefined, 'implemented'),
   manifest('slack', 'Slack', 'Communication', 'Post messages and reactions to Slack workspaces.', ['send_message', 'add_reaction'], bearerCredential, 'https://api.slack.com/methods', 'implemented'),
   manifest('gmail', 'Gmail', 'Communication', 'Send Gmail messages through the Google API.', ['send_email'], oauthCredential, 'https://developers.google.com/gmail/api/reference/rest', 'implemented'),
-  manifest('agentmail', 'AgentMail', 'Communication', 'Email built for agents — each agent gets its own inbox to send and receive mail with just an API key (no user OAuth).', ['send_message', 'create_inbox', 'list_inboxes', 'list_messages'], bearerCredential, 'https://docs.agentmail.to/llms.txt', 'implemented'),
+  manifest('agentmail', 'AgentMail', 'Communication', 'Email built for agents â€” each agent gets its own inbox to send and receive mail with just an API key (no user OAuth).', ['send_message', 'create_inbox', 'list_inboxes', 'list_messages'], bearerCredential, 'https://docs.agentmail.to/llms.txt', 'implemented'),
   manifest('github', 'GitHub', 'Code', 'Create issues, comment, and trigger GitHub Actions workflows.', ['create_issue', 'comment_issue', 'trigger_workflow', 'get_run_status'], bearerCredential, 'https://docs.github.com/rest', 'implemented'),
   manifest('google_sheets', 'Google Sheets', 'Productivity', 'Read, append, update, and clear spreadsheet ranges.', ['append_row', 'read_range', 'update_range', 'clear_range'], oauthCredential, 'https://developers.google.com/sheets/api/reference/rest', 'implemented'),
   manifest('email_smtp', 'SMTP Email', 'Communication', 'Send email through a configured SMTP transport.', ['send_email'], { type: 'smtp', fields: ['host', 'port', 'username', 'password'] }),
@@ -91,7 +91,7 @@ const seeds: ManifestSeed[] = [
   manifest('mixpanel', 'Mixpanel', 'Analytics', 'Track events, get reports, and create cohorts.', ['track_event', 'get_report', 'create_cohort'], apiKeyCredential),
   manifest('rss_feed', 'RSS Feed', 'Web', 'Fetch and parse RSS or Atom feed items.', ['fetch_feed', 'parse_items'], noCredential),
 
-  // WORKFLOW-UPDATE — n8n-inspired high-value integrations.
+  // WORKFLOW-UPDATE â€” n8n-inspired high-value integrations.
   // Communication
   manifest('teams', 'Microsoft Teams', 'Communication', 'Send channel messages and create channels.', ['send_message', 'create_channel'], oauthCredential),
   manifest('whatsapp', 'WhatsApp Business', 'Communication', 'Send WhatsApp messages and templates via the Business API.', ['send_message', 'send_template'], bearerCredential),
@@ -146,3 +146,6 @@ function manifest(
 ): ManifestSeed {
   return { service, name, category, description, operations, credentialSchema, docsUrl, icon: service, runtime };
 }
+
+
+

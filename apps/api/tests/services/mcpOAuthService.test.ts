@@ -6,7 +6,7 @@
  * resource (RFC8707), then exchanges the code.
  */
 import { describe, it, expect } from 'vitest';
-import { McpOAuthService } from '../../src/services/mcpOAuthService.js';
+import { McpOAuthService } from '../../src/services/mcp/mcpOAuthService.js';
 
 const SERVER = 'https://mcp.example.com/mcp';
 const AS = 'https://auth.example.com';

@@ -8,8 +8,8 @@ import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { Logger } from '../logger.js';
 import type { LedgerService } from './ledger.js';
-import type { ConversationStore } from './conversationStore.js';
-import { publishAgentWorkStep } from './agentWorkProgress.js';
+import type { ConversationStore } from './conversation/conversationStore.js';
+import { publishAgentWorkStep } from './agent/agentWorkProgress.js';
 import { buildInitialRunState } from '../engine/initialRunState.js';
 
 export interface IssueCreateArgs {

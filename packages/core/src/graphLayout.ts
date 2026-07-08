@@ -1,7 +1,7 @@
-/**
+﻿/**
  * Deterministic left-to-right layered layout for workflow graphs.
  *
- * AI-synthesized graphs come with arbitrary, often sprawling node positions —
+ * AI-synthesized graphs come with arbitrary, often sprawling node positions â€”
  * which makes the canvas unreadable and impossible to frame at any zoom. This
  * is a dependency-free Sugiyama-style layout: assign each node to a layer by its
  * longest path from a source, then order nodes within a layer by the barycenter
@@ -10,7 +10,7 @@
  * Pure and shape-agnostic: the core routine needs only node ids and edges, so it
  * is shared by the build pipeline (apps/api, on the persisted graph) and the
  * canvas "Tidy" action (apps/web, on React-Flow nodes). Assumes an (almost)
- * acyclic graph — `repairGraph` removes cycles before this runs — but degrades
+ * acyclic graph â€” `repairGraph` removes cycles before this runs â€” but degrades
  * gracefully if a cycle remains.
  */
 
@@ -80,7 +80,7 @@ export function computeLayeredLayout(
   const layers = [...byLayer.keys()].sort((a, b) => a - b);
 
   // Barycenter ordering: left-to-right, so each layer sorts by the average
-  // position of its already-placed parents — fewer crossings, tidier columns.
+  // position of its already-placed parents â€” fewer crossings, tidier columns.
   const indexInLayer = new Map<string, number>();
   for (const l of layers) byLayer.get(l)!.forEach((id, i) => indexInLayer.set(id, i));
   const barycenter = (id: string): number => {
@@ -117,3 +117,6 @@ export function layoutWorkflowGraph<G extends WorkflowGraph>(graph: G, opts?: La
     }),
   };
 }
+
+
+

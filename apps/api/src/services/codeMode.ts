@@ -108,7 +108,6 @@ export class CodeModeService {
     return { count, groups };
   }
 
-  // ── internals ──────────────────────────────────────────────────────────
 
   #buildSandbox(
     ctx: AgentisToolContext,

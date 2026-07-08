@@ -1,20 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import { Plus, Trash2, ChevronRight } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 
-/**
- * EventChainsPanel — manage event-driven workflow chains.
- *
- * Backend: `workflow_event_subscriptions` table + EventChainService. When a
- * source workflow emits an event (RUN_COMPLETED, NODE_COMPLETED), the chain
- * service finds matching subscriptions and enqueues the target workflow with
- * a templated input mapping.
- *
- * This panel shows both directions for the workflow operators are editing:
- *   - Incoming: which workflows trigger this one
- *   - Outgoing: which workflows this one triggers
- */
+
 
 interface Subscription {
   id: string;
@@ -46,8 +35,8 @@ const EVENT_TYPES = [
 
 const COALESCE_POLICIES = [
   { value: 'always_enqueue', label: 'Always enqueue (no coalescing)' },
-  { value: 'coalesce_pending', label: 'Coalesce — skip if one pending' },
-  { value: 'latest_only', label: 'Latest only — drop earlier pending' },
+  { value: 'coalesce_pending', label: 'Coalesce â€” skip if one pending' },
+  { value: 'latest_only', label: 'Latest only â€” drop earlier pending' },
 ] as const;
 
 export function EventChainsPanel({ workflowId }: EventChainsPanelProps) {
@@ -144,7 +133,7 @@ export function EventChainsPanel({ workflowId }: EventChainsPanelProps) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-auto">
       {loading ? (
-        <div className="text-[12px] text-text-muted">Loading…</div>
+        <div className="text-[12px] text-text-muted">Loadingâ€¦</div>
       ) : (
         <>
           {/* Incoming */}
@@ -184,13 +173,13 @@ export function EventChainsPanel({ workflowId }: EventChainsPanelProps) {
           {creating && (
             <div className="rounded-md border border-accent/40 bg-surface-2 p-2.5">
               <div className="mb-2 text-[11px] font-medium text-text-primary">
-                {creating === 'incoming' ? 'Run this workflow after…' : 'When this workflow fires, also run…'}
+                {creating === 'incoming' ? 'Run this workflow afterâ€¦' : 'When this workflow fires, also runâ€¦'}
               </div>
               <div className="grid gap-2">
                 {creating === 'incoming' ? (
                   <Field label="Source workflow">
                     <select className={inputCls} value={draftSource} onChange={(e) => setDraftSource(e.target.value)}>
-                      <option value="">— Pick a workflow —</option>
+                      <option value="">â€” Pick a workflow â€”</option>
                       {workflows.filter((w) => w.id !== workflowId).map((wf) => (
                         <option key={wf.id} value={wf.id}>{labelFor(wf.id)}</option>
                       ))}
@@ -199,7 +188,7 @@ export function EventChainsPanel({ workflowId }: EventChainsPanelProps) {
                 ) : (
                   <Field label="Target workflow">
                     <select className={inputCls} value={draftTarget} onChange={(e) => setDraftTarget(e.target.value)}>
-                      <option value="">— Pick a workflow —</option>
+                      <option value="">â€” Pick a workflow â€”</option>
                       {workflows.filter((w) => w.id !== workflowId).map((wf) => (
                         <option key={wf.id} value={wf.id}>{labelFor(wf.id)}</option>
                       ))}
@@ -337,3 +326,6 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
     </div>
   );
 }
+
+
+

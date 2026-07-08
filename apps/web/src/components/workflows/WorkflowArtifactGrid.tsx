@@ -1,6 +1,6 @@
-/**
- * WorkflowArtifactGrid — the artifact card grid for a run's Output tab
- * (WORKFLOW-10X-MASTERPLAN §6.3 OutputGallery, V1).
+﻿/**
+ * WorkflowArtifactGrid â€” the artifact card grid for a run's Output tab
+ * (WORKFLOW-10X-MASTERPLAN Â§6.3 OutputGallery, V1).
  *
  * Renders every artifact a run produced (via artifact_save / artifact_collect)
  * as a card with a type glyph, name, size, and actions. HTML artifacts expand
@@ -70,7 +70,7 @@ function ArtifactCard({ artifact }: { artifact: RunArtifact }) {
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-medium text-text-primary" title={name}>{name}</div>
           <div className="text-[11px] uppercase tracking-wide text-text-muted">
-            {artifact.type} · {formatBytes(size)}
+            {artifact.type} Â· {formatBytes(size)}
           </div>
         </div>
         {canPreview(artifact) && (
@@ -170,3 +170,6 @@ export function WorkflowArtifactGrid({ artifacts }: { artifacts: RunArtifact[] }
     </section>
   );
 }
+
+
+

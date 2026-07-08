@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Embedded migration SQL.
  *
  * Inlined as a string literal so the embedded driver works whether Agentis
@@ -736,6 +736,9 @@ CREATE TABLE IF NOT EXISTS personal_brain_grants (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(user_id, agent_id)
 );
--- ── Fleet / Organization layer (v12) ──────────────────────────────────────
+-- â”€â”€ Fleet / Organization layer (v12) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 `;
+
+
+

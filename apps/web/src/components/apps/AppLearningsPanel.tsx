@@ -1,12 +1,4 @@
-/**
- * AppLearningsPanel — "what this agent learned" for an Agentic App.
- *
- * The `/v1/apps/:id/learnings` endpoint has recorded graded lessons and
- * graduated abilities for a while (AppLearningService, Phase M2), but no UI ever
- * read it, so operators were blind to whether an App agent was actually getting
- * better. This compact panel surfaces the recent lessons + graduated abilities
- * in the App's Brain facet.
- */
+﻿
 import { useEffect, useState } from 'react';
 import { Lightbulb, Sparkles } from 'lucide-react';
 import { appsApi, type AppLearnings } from '../../lib/appsApi';
@@ -89,3 +81,4 @@ export function AppLearningsPanel({ appId }: { appId: string }) {
     </section>
   );
 }
+

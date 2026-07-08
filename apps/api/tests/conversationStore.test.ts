@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { AgentisError, REALTIME_EVENTS } from '@agentis/core';
 import { openSqlite, schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
-import { ConversationStore } from '../src/services/conversationStore.js';
+import { ConversationStore } from '../src/services/conversation/conversationStore.js';
 import { createInProcessEventBus, type EventBus } from '../src/event-bus.js';
 
 let db: AgentisSqliteDb;

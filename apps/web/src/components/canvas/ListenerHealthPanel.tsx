@@ -1,5 +1,5 @@
-/**
- * ListenerHealthPanel — EXTENSIONS-AND-LISTENER-10X §4.3.
+﻿/**
+ * ListenerHealthPanel â€” EXTENSIONS-AND-LISTENER-10X Â§4.3.
  *
  * The live diagnostic surface for an active listener: connection state, event /
  * fire / skip counters, last-fired, and a "Fire now" test button. Polls
@@ -51,7 +51,7 @@ export function ListenerHealthPanel({ triggerId }: { triggerId: string }) {
   };
 
   if (error && !health) {
-    return <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] text-text-muted">Listener not active — register and activate the trigger to see live health.</div>;
+    return <div className="mb-3 rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] text-text-muted">Listener not active â€” register and activate the trigger to see live health.</div>;
   }
   if (!health) return null;
 
@@ -82,7 +82,7 @@ export function ListenerHealthPanel({ triggerId }: { triggerId: string }) {
           disabled={busy}
           className="rounded-pill border border-line bg-canvas px-2 py-0.5 text-[10px] text-text-secondary hover:border-accent/50 hover:text-text-primary disabled:opacity-50"
         >
-          {busy ? 'Firing…' : 'Fire now'}
+          {busy ? 'Firingâ€¦' : 'Fire now'}
         </button>
       </div>
     </div>
@@ -99,9 +99,12 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 function rel(iso?: string): string {
-  if (!iso) return '—';
+  if (!iso) return 'â€”';
   const diff = Date.now() - Date.parse(iso);
   if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
   if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
   return `${Math.round(diff / 3_600_000)}h ago`;
 }
+
+
+

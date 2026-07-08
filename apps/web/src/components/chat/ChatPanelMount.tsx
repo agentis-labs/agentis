@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from 'react';
+﻿import { lazy, Suspense, useEffect } from 'react';
 import type { ViewportContext } from '@agentis/core';
 import { useChatPanelStore } from './ChatPanelStore';
 import { FloatingTaskProgress } from './FloatingTaskProgress';
@@ -81,3 +81,6 @@ function ChatPanelFallback({ width, fullscreen }: { width: number; fullscreen?: 
     </aside>
   );
 }
+
+
+

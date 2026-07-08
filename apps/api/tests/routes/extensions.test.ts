@@ -9,7 +9,7 @@ import path from 'node:path';
 import { schema } from '@agentis/db/sqlite';
 import { buildExtensionRoutes } from '../../src/routes/extensions.js';
 import { ExtensionLibraryService } from '../../src/services/extensionLibrary.js';
-import { WorkspaceVolumeService } from '../../src/services/workspaceVolume.js';
+import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVolume.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

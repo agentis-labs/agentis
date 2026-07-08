@@ -1,4 +1,4 @@
-import {
+﻿import {
   AgentisError,
   appManifestSchema,
   dataQuerySchema,
@@ -137,3 +137,6 @@ export class AppTestHarness {
 function objectIncludes(record: Record<string, unknown>, expected: Record<string, unknown>): boolean {
   return Object.entries(expected).every(([key, value]) => Object.is(record[key], value));
 }
+
+
+

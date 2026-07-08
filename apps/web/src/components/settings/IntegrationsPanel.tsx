@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+﻿import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { CheckCircle2, ExternalLink, Key, Plus, Search, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -212,7 +212,7 @@ export function IntegrationsPanel() {
                       {(manifest as { readiness?: string }).readiness === 'needs_setup' && (
                         <span
                           className="inline-flex shrink-0 items-center gap-1 rounded-pill border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium text-amber-400"
-                          title="No native runtime yet — this connector falls back to a generic HTTP call (needs a raw URL). For a working path, connect its MCP server in Connections and use an mcp node."
+                          title="No native runtime yet â€” this connector falls back to a generic HTTP call (needs a raw URL). For a working path, connect its MCP server in Connections and use an mcp node."
                         >
                           Needs setup
                         </span>
@@ -421,3 +421,6 @@ function CredentialDialog({
     </div>
   );
 }
+
+
+

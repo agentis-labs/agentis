@@ -1,10 +1,4 @@
-/**
- * Skills API client — the operator surface for Living Skills (the /v1/skills route).
- *
- * A Skill is a Brain `skill` atom: a name + discoverable description + a SKILL.md
- * body (the procedure), carrying a live confidence score that moves with run
- * outcomes. Examples are `skill`-library `example` atoms.
- */
+﻿
 
 import { api } from './api';
 
@@ -48,3 +42,6 @@ export const skillsApi = {
     api<{ skill: SkillDetail }>(`/v1/skills/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   remove: (id: string) => api<{ ok: boolean }>(`/v1/skills/${id}`, { method: 'DELETE' }),
 };
+
+
+

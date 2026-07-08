@@ -24,10 +24,10 @@ import { AgentisError, AGENT_AFFORDANCES, type AgentAffordance } from '@agentis/
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { CredentialVault } from '../services/credentialVault.js';
-import type { McpToolBridge } from '../services/mcpToolBridge.js';
-import { McpClient } from '../services/mcpClient.js';
-import { loadMcpServers, resolveMcpServerHeaders, saveMcpServers, type McpServerConfig } from '../services/mcpServerStore.js';
-import { MCP_SERVER_CATALOG } from '../services/mcpServerCatalog.js';
+import type { McpToolBridge } from '../services/mcp/mcpToolBridge.js';
+import { McpClient } from '../services/mcp/mcpClient.js';
+import { loadMcpServers, resolveMcpServerHeaders, saveMcpServers, type McpServerConfig } from '../services/mcp/mcpServerStore.js';
+import { MCP_SERVER_CATALOG } from '../services/mcp/mcpServerCatalog.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 

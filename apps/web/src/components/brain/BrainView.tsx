@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ArrowRight } from 'lucide-react';
 import { REALTIME_EVENTS, type BrainGraph, type BrainNode, type BrainResponse } from '@agentis/core';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -175,7 +175,7 @@ export function BrainView({
   const isEmptyBrain = brain.layers.knowledge.length === 0 && brain.layers.memory.length === 0 && brain.layers.judgment.length === 0;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="brain-scope flex h-full flex-col">
       {intelligence?.degraded && (
         <div className="flex shrink-0 items-center gap-3 border-b border-amber-400/20 bg-amber-500/10 px-5 py-2.5 text-[12px] text-amber-100">
           <AlertTriangle size={14} className="shrink-0 text-amber-300" />
@@ -253,3 +253,6 @@ export function BrainView({
     </div>
   );
 }
+
+
+

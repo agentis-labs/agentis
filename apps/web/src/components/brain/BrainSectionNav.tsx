@@ -1,4 +1,4 @@
-import { BookOpen, Brain, FileCode, Network, Sparkles } from 'lucide-react';
+﻿import { BookOpen, Brain, FileCode, Network, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
 import type { ReactNode } from 'react';
 
@@ -45,3 +45,6 @@ export function BrainSectionNav({
     </div>
   );
 }
+
+
+

@@ -18,7 +18,7 @@ import { ScratchpadService } from '../../src/services/scratchpad.js';
 import { ActivityFeedService } from '../../src/services/activityFeed.js';
 import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
-import { WorkspaceStoreService } from '../../src/services/workspaceStore.js';
+import { WorkspaceStoreService } from '../../src/services/workspace/workspaceStore.js';
 import { AuditTrailService } from '../../src/services/auditTrail.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';

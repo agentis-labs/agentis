@@ -1,12 +1,12 @@
-/**
- * Postgres dialect — Agentis standard mode.
+﻿/**
+ * Postgres dialect â€” Agentis standard mode.
  *
  * Activated when AGENTIS_DATABASE_URL is set. Uses the `postgres` driver +
  * Drizzle's pg-core dialect. Schema mirrors the SQLite version with native
  * types (`uuid`, `jsonb`, `timestamptz`, `boolean`).
  *
  * NOTE: Standard mode is opt-in. Embedded mode is the default for V1
- * (V1-SPEC §3.1). This module is loaded lazily by db/factory.ts only when
+ * (V1-SPEC Â§3.1). This module is loaded lazily by db/factory.ts only when
  * AGENTIS_DATABASE_URL is present, so the SQLite-only path doesn't pull in
  * `postgres` at runtime.
  */
@@ -68,11 +68,9 @@ export const ambients = pgTable('ambients', {
 
 // The remaining tables follow the same name-and-shape mapping as
 // sqlite/schema.ts. They are stubbed here for parity; flesh out as standard
-// mode is exercised. Embedded mode is the V1 launch path (V1-SPEC §3.1).
+// mode is exercised. Embedded mode is the V1 launch path (V1-SPEC Â§3.1).
 //
 // DEBT: full PG schema parity. Triggered when:
-//   - First operator runs in standard mode end-to-end, OR
-//   - Hub publish flow needs server-side PG behavior (jsonb operators).
 
 export const workflows = pgTable('workflows', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -83,7 +81,7 @@ export const workflows = pgTable('workflows', {
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   hubEntryId: text('hub_entry_id'),
   hubVersion: text('hub_version'),
-  /** Agentic App that owns this workflow (AGENTIC-APPS-10X §3). Null = bare workflow. */
+  /** Agentic App that owns this workflow (AGENTIC-APPS-10X Â§3). Null = bare workflow. */
   appId: uuid('app_id').references(() => apps.id, { onDelete: 'set null' }),
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
@@ -93,11 +91,10 @@ export const workflows = pgTable('workflows', {
   ...baseTimestamps(),
 });
 
-// ── Agentic Apps (AGENTIC-APPS-10X-MASTERPLAN §3/§4/§5) ──────────────────────
-// Mirrored here on creation per §10.4 ("every new table ships on both paths").
+// â”€â”€ Agentic Apps (AGENTIC-APPS-10X-MASTERPLAN Â§3/Â§4/Â§5) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Mirrored here on creation per Â§10.4 ("every new table ships on both paths").
 // The wider ~40-table PG parity remains deferred debt (see note above); these
-// are PG-portable by design — the only non-portable bit is the AppDatastore's
-// json_extract filter, isolated for a mechanical swap to jsonb operators.
+// are PG-portable by design â€” the only non-portable bit is the AppDatastore's
 
 export const apps = pgTable('apps', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -240,3 +237,6 @@ export const ledgerEvents = pgTable('ledger_events', {
   payload: jsonb('payload').notNull().default(sql`'{}'::jsonb`),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+
+

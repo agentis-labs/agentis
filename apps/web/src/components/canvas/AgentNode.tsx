@@ -1,5 +1,5 @@
-/**
- * AgentNode — V1-SPEC §3.3 spec-named agent canvas node.
+﻿/**
+ * AgentNode â€” V1-SPEC Â§3.3 spec-named agent canvas node.
  *
  * Specialised rendering for `agent_task` nodes. Carries the agent's color
  * dot in the glyph slot so the canvas reads as a constellation when the
@@ -43,12 +43,12 @@ export function AgentNode({ data }: { data: AgentNodeData }) {
             color: data.agentColorHex ?? '#aaa',
           }}
         >
-          ◎
+          â—Ž
         </span>
         <div className="leading-tight">
           <div className="text-sm text-text-primary">{data.label}</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
-            {data.agentName ? `agent · ${data.agentName}` : data.type}
+            {data.agentName ? `agent Â· ${data.agentName}` : data.type}
           </div>
         </div>
       </div>
@@ -58,3 +58,6 @@ export function AgentNode({ data }: { data: AgentNodeData }) {
     </div>
   );
 }
+
+
+

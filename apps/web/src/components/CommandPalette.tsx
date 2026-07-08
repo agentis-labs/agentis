@@ -1,7 +1,7 @@
-/**
+﻿/**
  * Cmd+K command palette.
  *
- * Opens on ⌘K / Ctrl+K. Queries /v1/command/search and navigates to the
+ * Opens on âŒ˜K / Ctrl+K. Queries /v1/command/search and navigates to the
  * selected result's href. Backed by CommandIndex (workflows, agents,
  * gateways, runs, approvals, extensions, conversations).
  */
@@ -103,7 +103,7 @@ export function CommandPalette() {
               if (hit) go(hit);
             }
           }}
-          placeholder="Search apps, agents, workflows, runs, approvals…"
+          placeholder="Search apps, agents, workflows, runs, approvalsâ€¦"
           className="w-full border-b border-line bg-transparent px-4 py-3 text-sm outline-none"
         />
         <div className="max-h-80 overflow-auto">
@@ -130,10 +130,13 @@ export function CommandPalette() {
           ))}
         </div>
         <div className="flex items-center justify-between border-t border-line px-4 py-2 text-[10px] text-text-muted">
-          <span>↑↓ navigate · ↵ open · esc close</span>
-          <span>⌘K</span>
+          <span>â†‘â†“ navigate Â· â†µ open Â· esc close</span>
+          <span>âŒ˜K</span>
         </div>
       </div>
     </div>
   );
 }
+
+
+

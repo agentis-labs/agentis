@@ -4,8 +4,8 @@ import { schema } from '@agentis/db/sqlite';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
-import { MemoryReflectionService } from '../../src/services/memoryReflectionService.js';
-import { BrainAskService } from '../../src/services/brainAskService.js';
+import { MemoryReflectionService } from '../../src/services/memory/memoryReflectionService.js';
+import { BrainAskService } from '../../src/services/brain/brainAskService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;

@@ -1,4 +1,4 @@
-import type { ObservabilityEvent } from './observability';
+﻿import type { ObservabilityEvent } from './observability';
 import type { RealtimeActivity } from './realtimeActivity';
 import type { WorkspaceActiveRun, WorkspaceFailedRun } from './workspaceData';
 
@@ -348,3 +348,6 @@ function stringFromRecord(source: Record<string, unknown>, keys: string[]): stri
 function looksTerminalOrHistorical(value: string): boolean {
   return /\b(completed|finished|failed|updated|changed|resolved|cancelled|canceled)\b/i.test(value);
 }
+
+
+

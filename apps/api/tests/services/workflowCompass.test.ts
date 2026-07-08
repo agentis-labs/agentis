@@ -16,7 +16,7 @@ import {
   readBuildLoop,
   stampBuildLoop,
   type BuildLoopState,
-} from '../../src/services/workflowCompass.js';
+} from '../../src/services/workflow/workflowCompass.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 function graph(expression = '({ out: input.value })'): WorkflowGraph {

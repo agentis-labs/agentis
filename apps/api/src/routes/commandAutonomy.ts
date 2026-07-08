@@ -14,7 +14,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { isWorkspaceAutonomyEnabled, setWorkspaceAutonomy } from '../services/commandHeartbeat.js';
+import { isWorkspaceAutonomyEnabled, setWorkspaceAutonomy } from '../services/command/commandHeartbeat.js';
 
 const putSchema = z.object({ enabled: z.boolean() });
 

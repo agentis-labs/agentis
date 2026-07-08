@@ -2,7 +2,7 @@
  * Per-turn CLB stage metrics (NATIVE-ADVANCEMENT Phase A instrumentation).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { recordTurn, getTurnMetrics, resetToolMetrics, type TurnSample } from '../src/services/chatMetrics.js';
+import { recordTurn, getTurnMetrics, resetToolMetrics, type TurnSample } from '../src/services/chat/chatMetrics.js';
 
 function sample(overrides: Partial<TurnSample> = {}): TurnSample {
   return {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+﻿import { useCallback, useEffect, useState } from 'react';
 import { Archive, Clock, GitMerge, RefreshCw, Scissors, ShieldAlert } from 'lucide-react';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api } from '../../lib/api';
@@ -250,3 +250,6 @@ function formatTime(iso: string): string {
   if (Number.isNaN(date.getTime())) return '';
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date);
 }
+
+
+

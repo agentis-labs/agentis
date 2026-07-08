@@ -4,13 +4,13 @@ import { eq } from 'drizzle-orm';
 import type { AdapterCapabilities, AgentAdapter, AdapterHealthStatus, ChatDelta, ChatInvocationOptions, ChatMessage, NormalizedAgentEvent, NormalizedTask, ToolDefinition } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
-import { ChatSessionExecutor } from '../../src/services/chatSessionExecutor.js';
-import { ChatToolExecutor } from '../../src/services/chatToolExecutor.js';
+import { ChatSessionExecutor } from '../../src/services/chat/chatSessionExecutor.js';
+import { ChatToolExecutor } from '../../src/services/chat/chatToolExecutor.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { createInProcessEventBus } from '../../src/event-bus.js';
 import { createLogger } from '../../src/logger.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
-import { OrchestratorModelRouter } from '../../src/services/orchestratorModelRouter.js';
+import { OrchestratorModelRouter } from '../../src/services/orchestrator/orchestratorModelRouter.js';
 import { routeModelForTask, type ModelRoutingDecision } from '../../src/services/modelRoutingPolicy.js';
 
 class FakeChatAdapter implements AgentAdapter {
@@ -126,7 +126,7 @@ describe('ChatSessionExecutor', () => {
         return {
           workflowId: 'wf_direct',
           runId: toolCtx.runId,
-          title: typeof args.title === 'string' ? args.title : 'Email Robson',
+          title: typeof args.title === 'string' ? args.title : 'Email Alex',
           description: args.description,
           nodeCount: 5,
           edgeCount: 4,
@@ -136,8 +136,8 @@ describe('ChatSessionExecutor', () => {
           deliveryPreview: [
             {
               service: 'agentmail',
-              to: 'robsonpradodev@gmail.com',
-              summary: 'Agentmail -> robsonpradodev@gmail.com',
+              to: 'me@example.com',
+              summary: 'Agentmail -> me@example.com',
             },
           ],
         };
@@ -371,8 +371,8 @@ describe('ChatSessionExecutor', () => {
           id: 'build-agent-draft',
           name: 'agentis.build_workflow',
           args: {
-            title: 'Email Robson',
-            description: 'build a workflow that sends Hi Robson to my email robsonpradodev@gmail.com',
+            title: 'Email Alex',
+            description: 'build a workflow that sends Hi Alex to my email me@example.com',
             graphDraft: {
               version: 1,
               nodes: [
@@ -391,7 +391,7 @@ describe('ChatSessionExecutor', () => {
       yield { type: 'done', finishReason: 'stop' };
     });
 
-    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'build a workflow that sends Hi Robson to my email robsonpradodev@gmail.com', {
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'build a workflow that sends Hi Alex to my email me@example.com', {
       workspaceId: 'ws_1',
       agentId: 'agent_1',
       userId: 'user_1',
@@ -403,7 +403,7 @@ describe('ChatSessionExecutor', () => {
     expect(directBuildToolCalls).toBe(1);
     expect(directBuildToolRunIds).toEqual(['build_turn_build_1']);
     expect(directBuildToolArgs[0]).toMatchObject({
-      title: 'Email Robson',
+      title: 'Email Alex',
       graphDraft: expect.objectContaining({ version: 1 }),
     });
     expect(deltas).toContainEqual(expect.objectContaining({

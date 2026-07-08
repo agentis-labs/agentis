@@ -1,5 +1,5 @@
-/**
- * Baseline types — Layer 4 of the Memory Architecture.
+﻿/**
+ * Baseline types â€” Layer 4 of the Memory Architecture.
  *
  *
  * The wedge already exposes a `WorkflowBaselineSnapshot` for per-workflow
@@ -69,3 +69,6 @@ export interface BaselineAnomaly {
   reason: string;
   detectedAt: string;
 }
+
+
+

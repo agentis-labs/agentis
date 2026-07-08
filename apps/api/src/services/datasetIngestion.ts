@@ -50,8 +50,8 @@ import {
   type ChunkingStrategy,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import type { KnowledgeStore } from './knowledgeStore.js';
-import type { MemoryStore } from './memoryStore.js';
+import type { KnowledgeStore } from './knowledge/knowledgeStore.js';
+import type { MemoryStore } from './memory/memoryStore.js';
 import type { EvaluatorExampleStore } from './evaluatorExampleStore.js';
 
 // ────────────────────────────────────────────────────────────

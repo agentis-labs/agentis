@@ -1,10 +1,10 @@
-/**
- * AppDatastore — typed collection + record persistence (AGENTIC-APPS-10X §5).
+﻿/**
+ * AppDatastore â€” typed collection + record persistence (AGENTIC-APPS-10X Â§5).
  *
  * Records are validated against the collection's field schema on write. Queries
  * filter via SQLite json_extract over `data_json` (V1; a later pass projects
  * indexed fields into generated columns for scale). This is the App's
- * operational data store — distinct from the Brain, which handles memory.
+ * operational data store â€” distinct from the Brain, which handles memory.
  *
  * All methods are workspace-scoped and resolve the collection by (appId, name).
  */
@@ -29,7 +29,7 @@ import { z } from 'zod';
 type CollectionRow = typeof schema.appCollections.$inferSelect;
 type RecordRow = typeof schema.appRecords.$inferSelect;
 
-/** Server-side aggregation request (masterplan 4.1) — drives Chart/DataBoard at scale. */
+/** Server-side aggregation request (masterplan 4.1) â€” drives Chart/DataBoard at scale. */
 export interface AggregateInput {
   filter?: DataQuery['filter'];
   /** Field to group by (json field). Omitted = one total over all matching rows. */
@@ -53,13 +53,13 @@ const FILTER_OPS = new Set(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'i
 export type DataChangeOp = 'insert' | 'update' | 'delete';
 
 export class AppDatastore {
-  /** Optional realtime sink — bound views refetch on DATA_CHANGED. */
+  /** Optional realtime sink â€” bound views refetch on DATA_CHANGED. */
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly onChange?: (args: { workspaceId: string; appId: string; collection: string; op: DataChangeOp; id: string }) => void,
   ) {}
 
-  // ── Collections ─────────────────────────────────────────────
+  // â”€â”€ Collections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   defineCollection(workspaceId: string, appId: string, input: DefineCollectionInput): CollectionInfo {
     this.requireApp(workspaceId, appId);
@@ -95,7 +95,7 @@ export class AppDatastore {
       .map((r) => this.toCollectionInfo(r));
   }
 
-  // ── Records ─────────────────────────────────────────────────
+  // â”€â”€ Records â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   insert(workspaceId: string, appId: string, collection: string, record: Record<string, unknown>, userId?: string): CollectionRecord {
     const col = this.requireCollection(workspaceId, appId, collection);
@@ -233,7 +233,7 @@ export class AppDatastore {
 
   /**
    * Server-side aggregation (count/sum/avg/min/max, optional group-by) over a
-   * collection. Replaces client-side grouping of a capped fetch — Charts and
+   * collection. Replaces client-side grouping of a capped fetch â€” Charts and
    * DataBoards are now correct over the full collection, not just the first page.
    */
   aggregate(workspaceId: string, appId: string, collection: string, input: AggregateInput): AggregateBucket[] {
@@ -278,7 +278,6 @@ export class AppDatastore {
     return [{ group: null, value: Number(row?.value ?? 0) }];
   }
 
-  // ── Internals ───────────────────────────────────────────────
 
   private requireApp(workspaceId: string, appId: string): void {
     const row = this.db
@@ -379,7 +378,7 @@ export class AppDatastore {
           throw new AgentisError('VALIDATION_FAILED', `unknown filter op: ${op}`);
       }
     }
-    // Bare value → equality.
+    // Bare value â†’ equality.
     return sql`${path} = ${this.scalar(raw)}`;
   }
 
@@ -502,3 +501,6 @@ function indexValueColumns(value: string | number | boolean): {
   if (typeof value === 'boolean') return { valueText: null, valueNumber: null, valueBoolean: value };
   return { valueText: value, valueNumber: null, valueBoolean: null };
 }
+
+
+

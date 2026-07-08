@@ -258,7 +258,6 @@ export class AcpClient {
     }
   }
 
-  // ── internals ──────────────────────────────────────────────────────────────
 
   #updateHandler: ((update: AcpSessionUpdate, sessionId: string) => void) | undefined;
 

@@ -1,18 +1,10 @@
-import { useMemo, useState } from 'react';
+﻿import { useMemo, useState } from 'react';
 import { Plus } from 'lucide-react';
 import clsx from 'clsx';
 import type { UpstreamNode } from './VariablePicker';
 import { generateFieldExpression, type ExpressionDialect, type FieldSource } from './fieldExpression';
 
-/**
- * FieldPicker — the *visual* answer to "where does this value come from?".
- *
- * Instead of hand-writing `ctx.nodes.fetch.data[0].name`, the operator picks a
- * step and (optionally) one of its output fields; we generate the correct
- * expression for the field's dialect (`js` for transform/filter/evaluator,
- * `template` for templated text fields). Raw expressions remain available — this
- * is an assistive affordance layered on top of the existing field.
- */
+
 
 export interface FieldPickerProps {
   /** Upstream nodes for the selected node, topologically ordered. */
@@ -26,7 +18,7 @@ export interface FieldPickerProps {
 
 const SPECIAL_STEPS = [
   { value: 'trigger', label: 'Trigger inputs' },
-  { value: 'input', label: 'This step’s input' },
+  { value: 'input', label: 'This stepâ€™s input' },
 ] as const;
 
 export function FieldPicker({ upstream, dialect, onInsert, className }: FieldPickerProps) {
@@ -75,7 +67,7 @@ export function FieldPicker({ upstream, dialect, onInsert, className }: FieldPic
           }}
           className="h-7 rounded-input border border-line bg-surface px-1.5 text-[11px] text-text-primary focus:border-accent focus:outline-none"
         >
-          <option value="">Pick a step…</option>
+          <option value="">Pick a stepâ€¦</option>
           {SPECIAL_STEPS.map((s) => (
             <option key={s.value} value={s.value}>
               {s.label}
@@ -135,3 +127,5 @@ export function FieldPicker({ upstream, dialect, onInsert, className }: FieldPic
     </div>
   );
 }
+
+
