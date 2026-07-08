@@ -20,13 +20,13 @@
   },
   "dependencies": {
     "@agentis/core": "workspace:*",
-    "better-sqlite3": "^12.4.1",
-    "drizzle-orm": "^0.34.0",
+    "better-sqlite3": "^12.11.1",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
-    "drizzle-kit": "^0.25.0",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.5.4"
   }
 }
