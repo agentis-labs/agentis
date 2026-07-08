@@ -209,7 +209,7 @@ export function GenUIShowcasePage() {
                 key={s.key}
                 type="button"
                 onClick={() => { window.location.hash = s.key; setActive(i); }}
-                className={`rounded-[6px] px-3 py-1.5 text-[12px] font-medium ${i === active ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'}`}
+                className={`rounded-[6px] px-3 py-1.5 text-[12px] font-medium ${i === active ? 'bg-accent text-on-accent' : 'text-text-secondary hover:text-text-primary'}`}
               >
                 {s.label}
               </button>
@@ -219,7 +219,7 @@ export function GenUIShowcasePage() {
             <button
               type="button"
               onClick={() => setDesign(undefined)}
-              className={`rounded-[6px] px-2.5 py-1.5 text-[11px] font-medium ${design === undefined ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'}`}
+              className={`rounded-[6px] px-2.5 py-1.5 text-[11px] font-medium ${design === undefined ? 'bg-accent text-on-accent' : 'text-text-secondary hover:text-text-primary'}`}
             >
               Auto
             </button>
@@ -229,7 +229,7 @@ export function GenUIShowcasePage() {
                 type="button"
                 title={d.hint}
                 onClick={() => setDesign(d.id)}
-                className={`rounded-[6px] px-2.5 py-1.5 text-[11px] font-medium ${design === d.id ? 'bg-accent text-white' : 'text-text-secondary hover:text-text-primary'}`}
+                className={`rounded-[6px] px-2.5 py-1.5 text-[11px] font-medium ${design === d.id ? 'bg-accent text-on-accent' : 'text-text-secondary hover:text-text-primary'}`}
               >
                 {d.label}
               </button>

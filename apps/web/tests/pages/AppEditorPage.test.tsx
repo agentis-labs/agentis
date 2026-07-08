@@ -28,6 +28,11 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+function realtimeStreamResponse(path: string, method: string): Response | null {
+  if (path === '/v1/workspaces/ws-1/canvas/stream' && method === 'GET') return new Response(null, { status: 204 });
+  return null;
+}
+
 function appRecord(overrides: Record<string, unknown> = {}) {
   return {
     id: 'app-1',
@@ -40,7 +45,7 @@ function appRecord(overrides: Record<string, unknown> = {}) {
     entrySurfaceId: null,
     icon: null,
     manifest: { slug: 'store-outreach', name: 'Store outreach', version: '0.1.0', capabilities: [], requiredPlugins: [] },
-    policy: { audience: [], shareable: false, customCode: 'disabled', grants: [] },
+    policy: { customCode: 'disabled', grants: [] },
     source: null,
     installedChecksum: null,
     createdBy: 'u-1',
@@ -91,6 +96,8 @@ describe('<AppEditorPage />', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [] });
@@ -130,6 +137,8 @@ describe('<AppEditorPage />', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow(surfaceName)] });
@@ -152,7 +161,9 @@ describe('<AppEditorPage />', () => {
     renderEditor('interface');
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'surface' })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: 'Rename surface' }));
+    // Rename lives in the page's ⋯ menu (sidebar row).
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }));
     const surfaceInput = screen.getByLabelText('Surface name');
     await userEvent.clear(surfaceInput);
     await userEvent.type(surfaceInput, 'Main dashboard');
@@ -187,6 +198,8 @@ describe('<AppEditorPage />', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow('surface')] });
@@ -225,6 +238,8 @@ describe('<AppEditorPage />', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow('surface')] });
       if (path === '/v1/apps/app-1/collections' && method === 'GET') return jsonResponse({ data: [] });
@@ -244,6 +259,8 @@ describe('<AppEditorPage />', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow('surface')] });
@@ -276,6 +293,8 @@ describe('<AppEditorPage />', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') {
@@ -297,12 +316,14 @@ describe('<AppEditorPage />', () => {
     expect(screen.getByText('Waiting for activity...')).toBeInTheDocument();
   });
 
-  it('opens the App engine and saves identity and access settings without raw plumbing', async () => {
+  it('opens the App engine and saves settings from the merged Overview page', async () => {
     let appState = appRecord();
     let lastPatch: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
 
       if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appState });
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow('Dashboard')] });
@@ -327,15 +348,11 @@ describe('<AppEditorPage />', () => {
     await userEvent.click(screen.getByRole('button', { name: 'App engine' }));
 
     const dialog = screen.getByRole('dialog', { name: 'App engine' });
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Identity' }));
+    // Overview is the default, merged (identity + entry surface + organization) page.
     await userEvent.clear(within(dialog).getByLabelText('Name'));
     await userEvent.type(within(dialog).getByLabelText('Name'), 'Store Command Center');
     await userEvent.type(within(dialog).getByLabelText('Description'), 'Operator-facing store app.');
-    await userEvent.type(within(dialog).getByLabelText('Icon, image URL, or emoji'), 'S');
-
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Access' }));
     await userEvent.selectOptions(within(dialog).getByLabelText('Entry surface'), 'surface-1');
-    await userEvent.click(within(dialog).getByLabelText('Shareable via public link'));
 
     await userEvent.click(within(dialog).getByRole('button', { name: 'Advanced' }));
     await userEvent.click(within(dialog).getByLabelText('Allow custom-coded views'));
@@ -346,9 +363,8 @@ describe('<AppEditorPage />', () => {
       expect(lastPatch).toMatchObject({
         name: 'Store Command Center',
         description: 'Operator-facing store app.',
-        icon: 'S',
         entrySurfaceId: 'surface-1',
-        policy: { shareable: true, customCode: 'allowed', grants: [] },
+        policy: { customCode: 'allowed', grants: [] },
       });
     });
     expect(screen.getByRole('button', { name: 'Store Command Center' })).toBeInTheDocument();

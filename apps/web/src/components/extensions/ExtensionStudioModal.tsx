@@ -291,7 +291,7 @@ export function ExtensionStudioModal({
           <span className="text-[11px] text-danger">{error}</span>
           <div className="flex items-center gap-2">
             <button type="button" onClick={onClose} className="rounded-md border border-line px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary">Cancel</button>
-            <button type="button" onClick={() => void submit()} disabled={saving} className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent/90 disabled:opacity-60">
+            <button type="button" onClick={() => void submit()} disabled={saving} className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-on-accent hover:bg-accent/90 disabled:opacity-60">
               {saving ? 'Saving…' : editing ? 'Save changes' : 'Create extension'}
             </button>
           </div>

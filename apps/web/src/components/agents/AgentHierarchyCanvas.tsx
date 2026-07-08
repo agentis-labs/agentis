@@ -388,7 +388,7 @@ function buildGraph(
         target: relationship.target,
         type: 'smoothstep',
         animated: agent?.status === 'busy' || Boolean(agent?.currentTaskId),
-        style: { stroke: agent?.colorHex ?? '#6366f1', strokeWidth: 1.5 },
+        style: { stroke: 'var(--color-line-strong)', strokeWidth: 1.5 },
       } satisfies Edge;
     });
 
@@ -480,13 +480,6 @@ function WorkerGlyph({ size = 15 }: { size?: number }) {
 }
 
 // Tier-specific border colors — AGENTS-PAGE-REDESIGN.md §1.3.
-const TIER_BORDER: Record<'orchestrator' | 'manager' | 'worker' | 'unassigned', string> = {
-  orchestrator: '#8b5cf6',
-  manager: '#06b6d4',
-  worker: '#2a2c34',
-  unassigned: '#2a2c34',
-};
-
 interface NodeVisualSpec {
   width: number;
   padding: number;
@@ -674,6 +667,17 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   // For a specialist the badge is its Subdomain (its area of responsibility).
   const domainName = agent.subdomainName ?? agent.spaceName ?? agent.spaceTag ?? null;
   const domainColor = agent.spaceColorHex ?? null;
+  // Node color: a manager wears the color of the domain it owns (neutral when the
+  // domain has none); the orchestrator is theme-neutral (white on dark / black on
+  // light); specialists stay neutral. See the /home canvas for the same rule.
+  const neutralColor = 'var(--color-line-strong)';
+  const nodeColor = settingUp
+    ? '#06b6d4'
+    : role === 'orchestrator'
+      ? 'var(--color-accent)'
+      : role === 'manager'
+        ? domainColor ?? neutralColor
+        : neutralColor;
   const subtitle = settingUp 
     ? 'setting up runtime' 
     : role === 'worker' 
@@ -692,8 +696,8 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
       style={{
         width: visual.width,
         padding: visual.padding,
-        borderColor: settingUp ? '#06b6d4' : TIER_BORDER[role],
-        boxShadow: settingUp ? '0 0 16px rgba(6, 182, 212, 0.08)' : running ? `0 0 12px ${TIER_BORDER[role]}22` : undefined,
+        borderColor: nodeColor,
+        boxShadow: settingUp ? '0 0 16px rgba(6, 182, 212, 0.08)' : running ? `0 0 12px color-mix(in srgb, ${nodeColor} 22%, transparent)` : undefined,
       }}
     >
       <Handle type="target" position={Position.Top} className="!border-line !bg-surface" style={{ width: visual.handle, height: visual.handle }} />
@@ -703,7 +707,7 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
             'flex shrink-0 items-center justify-center rounded-md bg-canvas overflow-hidden',
             settingUp && 'animate-pulse',
           )}
-          style={{ width: visual.glyph, height: visual.glyph, color: settingUp ? '#06b6d4' : TIER_BORDER[role] }}
+          style={{ width: visual.glyph, height: visual.glyph, color: nodeColor }}
         >
           {settingUp
             ? <Loader2 size={visual.icon} className="animate-spin" />
@@ -942,7 +946,7 @@ function readinessOf(agent: AgentHierarchyAgent) {
 }
 
 function readinessDot(readiness: string) {
-  if (readiness === 'live') return 'bg-accent';
+  if (readiness === 'live') return 'bg-emerald-500';
   if (readiness === 'running') return 'bg-warn';
   if (readiness === 'setting_up') return 'bg-cyan-500';
   if (readiness === 'failed') return 'bg-danger';

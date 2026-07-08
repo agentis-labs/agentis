@@ -50,7 +50,7 @@ function permissionSummary(manifest: AppManifest): string[] {
   if (manifest.policy.customCode === 'allowed' || manifest.surfaces.some((surface) => hasCustomView(surface.view ?? null))) {
     permissions.add('custom-code');
   }
-  if (manifest.policy.shareable || manifest.policy.audience.includes('public') || manifest.surfaces.some((surface) => surface.shareable || surface.kind === 'public')) {
+  if (manifest.surfaces.some((surface) => surface.shareable || surface.kind === 'public')) {
     permissions.add('public-share');
   }
   for (const grant of manifest.policy.grants) {

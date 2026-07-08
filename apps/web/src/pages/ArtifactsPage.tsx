@@ -10,7 +10,7 @@
  * Note: the asset *type* set is fixed by the `artifacts.type` DB enum
  * (html | image | document | code | data) — every producer maps into one of these.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Frame, FileText, Image as ImageIcon, Code2, Database, Globe, Trash2, Search,
@@ -67,7 +67,14 @@ const ORIGIN_META: Record<ArtifactOrigin, { label: string; plural: string; icon:
   manual: { label: 'Manual', plural: 'Manual', icon: Hand },
 };
 
-const ORIGIN_ORDER: ArtifactOrigin[] = ['agent', 'app', 'workflow', 'channel', 'manual'];
+// Workflows live inside Apps, so their outputs are attributed to Apps — there is
+// no separate "Workflows" source. `normOrigin` folds the legacy workflow origin.
+const ORIGIN_ORDER: ArtifactOrigin[] = ['agent', 'app', 'channel', 'manual'];
+
+function normOrigin(a: Artifact): ArtifactOrigin {
+  const o = (a.origin ?? 'manual') as ArtifactOrigin;
+  return o === 'workflow' ? 'app' : o;
+}
 
 export function ArtifactsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -92,6 +99,28 @@ export function ArtifactsPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  // Resolve producer ids → names so every asset can be labelled with the specific
+  // agent/app that generated it (not just the origin type).
+  const [sourceNames, setSourceNames] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    void (async () => {
+      const [ag, ap] = await Promise.all([
+        apiCached<{ agents: Array<{ id: string; name: string }> }>('/v1/agents').catch(() => ({ agents: [] })),
+        apiCached<{ data: Array<{ id: string; name: string }> }>('/v1/apps').catch(() => ({ data: [] })),
+      ]);
+      const map = new Map<string, string>();
+      for (const a of ag.agents ?? []) map.set(a.id, a.name);
+      for (const a of ap.data ?? []) map.set(a.id, a.name);
+      setSourceNames(map);
+    })();
+  }, []);
+
+  const nameFor = useCallback((a: Artifact): string | null => {
+    if (a.appId && sourceNames.get(a.appId)) return sourceNames.get(a.appId)!;
+    if (a.agentId && sourceNames.get(a.agentId)) return sourceNames.get(a.agentId)!;
+    return null;
+  }, [sourceNames]);
 
   useEffect(() => {
     const openId = searchParams.get('open');
@@ -119,14 +148,14 @@ export function ArtifactsPage() {
   const sourceCounts = useMemo(() => {
     const counts = new Map<ArtifactOrigin, number>();
     for (const a of typeMatched) {
-      const o = (a.origin ?? 'manual') as ArtifactOrigin;
+      const o = normOrigin(a);
       counts.set(o, (counts.get(o) ?? 0) + 1);
     }
     return counts;
   }, [typeMatched]);
 
   const filtered = useMemo(
-    () => (originFilter === 'all' ? typeMatched : typeMatched.filter((a) => (a.origin ?? 'manual') === originFilter)),
+    () => (originFilter === 'all' ? typeMatched : typeMatched.filter((a) => normOrigin(a) === originFilter)),
     [typeMatched, originFilter],
   );
 
@@ -136,7 +165,7 @@ export function ArtifactsPage() {
     if (originFilter !== 'all') return null;
     const byOrigin = new Map<ArtifactOrigin, Artifact[]>();
     for (const a of filtered) {
-      const origin = (a.origin ?? 'manual') as ArtifactOrigin;
+      const origin = normOrigin(a);
       const bucket = byOrigin.get(origin) ?? [];
       bucket.push(a);
       byOrigin.set(origin, bucket);
@@ -252,13 +281,13 @@ export function ArtifactsPage() {
                         <h2 className="text-[12px] font-medium text-text">{meta.plural}</h2>
                         <span className="text-[11px] text-text-muted">{items.length}</span>
                       </div>
-                      <CardGrid items={items} onOpen={open} onDelete={deleteArtifact} />
+                      <CardGrid items={items} onOpen={open} onDelete={deleteArtifact} nameFor={nameFor} />
                     </section>
                   );
                 })}
               </div>
             ) : (
-              <CardGrid items={filtered} onOpen={open} onDelete={deleteArtifact} />
+              <CardGrid items={filtered} onOpen={open} onDelete={deleteArtifact} nameFor={nameFor} />
             )}
           </div>
         </div>
@@ -282,15 +311,17 @@ function CardGrid({
   items,
   onOpen,
   onDelete,
+  nameFor,
 }: {
   items: Artifact[];
   onOpen: (a: Artifact) => void;
   onDelete: (id: string) => void;
+  nameFor: (a: Artifact) => string | null;
 }) {
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
       {items.map((a) => (
-        <ArtifactCard key={a.id} artifact={a} onOpen={onOpen} onDelete={onDelete} />
+        <ArtifactCard key={a.id} artifact={a} onOpen={onOpen} onDelete={onDelete} sourceName={nameFor(a)} />
       ))}
     </div>
   );
@@ -300,10 +331,12 @@ function ArtifactCard({
   artifact: a,
   onOpen,
   onDelete,
+  sourceName,
 }: {
   artifact: Artifact;
   onOpen: (a: Artifact) => void;
   onDelete: (id: string) => void;
+  sourceName: string | null;
 }) {
   const Icon = TYPE_ICONS[a.type] ?? Frame;
   const asset = useAssetUrl(a.type === 'image' ? a : null, { thumbnail: true });
@@ -335,6 +368,16 @@ function ArtifactCard({
           <div className="mt-0.5 text-[9px] uppercase tracking-wider text-text-muted">
             {a.type} · {new Date(a.createdAt).toLocaleDateString()}
           </div>
+          {(() => {
+            const OriginIcon = ORIGIN_META[normOrigin(a)].icon;
+            const label = sourceName ?? ORIGIN_META[normOrigin(a)].label;
+            return (
+              <div className="mt-1 flex items-center gap-1 text-[10px] text-text-muted" title={`Generated by ${label}`}>
+                <OriginIcon size={10} className="shrink-0" />
+                <span className="truncate">{label}</span>
+              </div>
+            );
+          })()}
         </button>
         <button
           type="button"

@@ -229,6 +229,9 @@ export function RuntimeNativePanel({
         </div>
       )}
 
+      {/* Resource/files browser lives only in the Instructions tab — the Runtime
+          tab no longer duplicates it (it was the slow, repeated section). */}
+      {mode === 'resources' && (
       <div className="grid min-h-[520px] overflow-hidden rounded-card border border-line bg-surface lg:grid-cols-[300px_1fr]">
         <aside className="border-b border-line bg-surface-2/45 lg:border-b-0 lg:border-r">
           <div className="border-b border-line p-3">
@@ -290,6 +293,7 @@ export function RuntimeNativePanel({
           )}
         </section>
       </div>
+      )}
 
       {mode === 'overview' && (
         <div className="grid gap-4 xl:grid-cols-2">
@@ -508,7 +512,7 @@ function ContextStack({ layers }: { layers: EffectiveContextLayer[] }) {
         <h3 className="text-[12px] font-semibold text-text-primary">Effective context</h3>
         <span className="ml-auto text-[10px] text-text-muted">highest precedence first</span>
       </div>
-      <div className="p-3">
+      <div className="max-h-[300px] overflow-y-auto p-3">
         {layers.length === 0 ? (
           <p className="px-2 py-6 text-center text-[12px] text-text-muted">No effective context layers detected.</p>
         ) : layers.map((layer) => (
@@ -537,43 +541,95 @@ function SessionList({
   sessions: RuntimeSessionInfo[];
   onClose: (sessionKey: string) => void;
 }) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const allSelected = sessions.length > 0 && selected.size === sessions.length;
+
+  function toggle(key: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(sessions.map((s) => s.sessionKey)));
+  }
+  function detachSelected() {
+    for (const key of selected) onClose(key);
+    setSelected(new Set());
+  }
+
   return (
     <section className="rounded-card border border-line bg-surface">
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">
         <Activity size={14} className="text-accent" />
         <h3 className="text-[12px] font-semibold text-text-primary">Conversation sessions</h3>
-        <span className="ml-auto text-[10px] text-text-muted">{sessions.length} attached</span>
+        {selected.size > 0 ? (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-[10px] text-text-muted">{selected.size} selected</span>
+            <button
+              type="button"
+              onClick={detachSelected}
+              className="inline-flex items-center gap-1 rounded-md border border-danger/30 bg-danger-soft px-1.5 py-0.5 text-[10px] font-medium text-danger hover:bg-danger/15"
+            >
+              <Trash2 size={11} /> Detach
+            </button>
+            <button type="button" onClick={() => setSelected(new Set())} className="text-[10px] text-text-muted hover:text-text-primary">Clear</button>
+          </div>
+        ) : (
+          <span className="ml-auto text-[10px] text-text-muted">{sessions.length} attached</span>
+        )}
       </div>
-      <div className="p-3">
-        {sessions.length === 0 ? (
+      {sessions.length === 0 ? (
+        <div className="p-3">
           <p className="px-2 py-6 text-center text-[12px] text-text-muted">
             A runtime session will appear after the first conversation turn.
           </p>
-        ) : sessions.map((session) => (
-          <div key={session.id} className="group flex items-center gap-3 border-b border-line/70 px-2 py-2.5 last:border-0">
-            <span className={`h-2 w-2 rounded-full ${
-              session.status === 'error' || session.status === 'stale' ? 'bg-warning' : 'bg-success'
-            }`} />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-mono text-[11px] text-text-primary" title={session.sessionKey}>
-                {session.sessionKey}
-              </span>
-              <span className="text-[10px] text-text-muted">
-                {session.status} · used {formatRelative(session.lastUsedAt)}
-                {session.selectedModel ? ` · ${session.selectedModel}` : ''}
-              </span>
-            </span>
-            <button
-              type="button"
-              onClick={() => onClose(session.sessionKey)}
-              className="rounded-md p-1.5 text-text-muted opacity-0 hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
-              aria-label="Detach runtime session"
-            >
-              <Trash2 size={12} />
-            </button>
+        </div>
+      ) : (
+        <>
+          <label className="flex items-center gap-2 border-b border-line/70 px-4 py-1.5 text-[10px] text-text-muted">
+            <input type="checkbox" checked={allSelected} onChange={toggleAll} className="h-3.5 w-3.5 rounded border-line bg-surface text-accent" />
+            Select all
+          </label>
+          <div className="max-h-[300px] overflow-y-auto p-3">
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                className={`group flex items-center gap-3 rounded-md border-b border-line/70 px-2 py-2.5 last:border-0 ${selected.has(session.sessionKey) ? 'bg-accent-soft/40' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(session.sessionKey)}
+                  onChange={() => toggle(session.sessionKey)}
+                  className="h-3.5 w-3.5 shrink-0 rounded border-line bg-surface text-accent"
+                  aria-label={`Select session ${session.sessionKey}`}
+                />
+                <span className={`h-2 w-2 shrink-0 rounded-full ${
+                  session.status === 'error' || session.status === 'stale' ? 'bg-warning' : 'bg-success'
+                }`} />
+                <button type="button" onClick={() => toggle(session.sessionKey)} className="min-w-0 flex-1 text-left">
+                  <span className="block truncate font-mono text-[11px] text-text-primary" title={session.sessionKey}>
+                    {session.sessionKey}
+                  </span>
+                  <span className="text-[10px] text-text-muted">
+                    {session.status} · used {formatRelative(session.lastUsedAt)}
+                    {session.selectedModel ? ` · ${session.selectedModel}` : ''}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onClose(session.sessionKey)}
+                  className="rounded-md p-1.5 text-text-muted opacity-0 hover:bg-danger/10 hover:text-danger group-hover:opacity-100"
+                  aria-label="Detach runtime session"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      )}
     </section>
   );
 }

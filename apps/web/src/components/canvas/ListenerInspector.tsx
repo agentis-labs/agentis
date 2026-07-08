@@ -132,7 +132,7 @@ export function ListenerInspector({
               key={label}
               type="button"
               onClick={() => setStep(n)}
-              className={`flex-1 rounded-pill px-2 py-1 ${step === n ? 'bg-accent text-white' : 'bg-canvas text-text-muted hover:text-text-secondary'}`}
+              className={`flex-1 rounded-pill px-2 py-1 ${step === n ? 'bg-accent text-on-accent' : 'bg-canvas text-text-muted hover:text-text-secondary'}`}
             >
               {n}. {label}
             </button>

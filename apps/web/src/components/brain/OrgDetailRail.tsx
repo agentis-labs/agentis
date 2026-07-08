@@ -208,7 +208,7 @@ export function OrgDetailRail({ node, onClose, onChanged }: {
         <button
           type="button"
           onClick={discussInChat}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-btn bg-accent px-3 py-2 text-[12px] font-semibold text-white hover:opacity-90"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-btn bg-accent px-3 py-2 text-[12px] font-semibold text-on-accent hover:opacity-90"
         >
           <MessageSquare size={13} /> Discuss in chat
         </button>

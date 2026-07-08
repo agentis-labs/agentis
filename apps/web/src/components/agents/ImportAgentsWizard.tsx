@@ -1,14 +1,15 @@
 ﻿/**
- * ImportAgentsWizard — "Bring your agents" full transition (AGENT-TRANSITION B9/P7).
+ * ImportAgentsWizard — "Bring your agents" full import (AGENT-TRANSITION B9/P7).
  *
- * Master/detail: a grouped, searchable roster (left) + a per-agent transition
- * manifest (right). One transition brings an agent's whole self — identity +
- * harness logo + runtime + memories + skills(→abilities) — pre-connected. Scales
- * to dozens; one clear primary CTA. Imported agents land online and complete.
+ * Master/detail: a grouped, searchable roster (left) + a per-agent import
+ * manifest (right). One import brings an agent's whole self — identity +
+ * harness logo + runtime + memories + skills (stored as Brain skill atoms) —
+ * pre-connected. Scales to dozens; one clear primary CTA. Imported agents land
+ * online and complete.
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Sparkles, Check, AlertCircle, Loader2, Search, FolderTree, Zap, ChevronRight, ChevronDown, RefreshCw } from 'lucide-react';
+import { Sparkles, Check, AlertCircle, Loader2, Search, FolderTree, Zap, ChevronRight, ChevronDown, RefreshCw, Info } from 'lucide-react';
 import { apiErrorMessage } from '../../lib/api';
 import {
   discoverImportableAgents,
@@ -44,7 +45,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
   const [scanning, setScanning] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<{ agents: number; atoms: number; abilities: number } | null>(null);
+  const [done, setDone] = useState<{ agents: number; atoms: number; skills: number } | null>(null);
   const [showImported, setShowImported] = useState(false);
   const [previewCache, setPreviewCache] = useState<Map<string, AgentImportPreview>>(new Map());
 
@@ -93,7 +94,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
         acceptedSkillPaths: overrides.get(id)?.acceptedSkillPaths,
       }));
       const res = await importAgents(specs);
-      setDone({ agents: res.imported.length, atoms: res.totalAtoms, abilities: res.totalAbilities });
+      setDone({ agents: res.imported.length, atoms: res.totalAtoms, skills: res.totalAbilities });
       onImported?.();
       if (only) setUpdates((p) => { const n = new Map(p); n.delete(only); return n; });
     } catch (e) {
@@ -116,14 +117,25 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
       open={open}
       onClose={onClose}
       width="xl"
-      title={<span className="flex items-center gap-2"><Sparkles size={16} className="text-accent" /> Bring your agents</span>}
+      title={(
+        <span className="flex items-center gap-2">
+          <Sparkles size={16} className="text-accent" /> Bring your agents
+          <span
+            className="inline-flex cursor-help text-text-muted"
+            aria-label="About importing"
+            title="Memories merge into Agentis (new written, known reinforced; later pulls bring only fresh changes). The provider stays as the runtime, but identity, memories, and skills become operator-owned Agentis data you can inspect, edit, and move."
+          >
+            <Info size={13} />
+          </span>
+        </span>
+      )}
       subtitle={agents && agents.length > 0
-        ? `Found ${totals.count} agent${totals.count === 1 ? '' : 's'} · ${totals.memories} memories · ${totals.skills} skills → abilities`
+        ? `Found ${totals.count} agent${totals.count === 1 ? '' : 's'} · ${totals.memories} memories · ${totals.skills} skills`
         : 'Import agents you already run outside Agentis — identity, memory and skills.'}
       footer={done ? (
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-[13px] text-success">
-            <Check size={14} /> Transitioned {done.agents} agent{done.agents === 1 ? '' : 's'} · {done.atoms} memories · {done.abilities} abilities.
+            <Check size={14} /> Imported {done.agents} agent{done.agents === 1 ? '' : 's'} · {done.atoms} memories · {done.skills} skills.
           </span>
           <Button size="sm" onClick={onClose}>Done</Button>
         </div>
@@ -133,7 +145,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
           <div className="flex gap-2">
             <Button size="sm" variant="secondary" onClick={() => void scan()} loading={scanning} iconLeft={<RefreshCw size={13} />}>Re-scan</Button>
             <Button size="sm" onClick={() => void runImport()} loading={importing} disabled={selected.size === 0}>
-              Transition {selected.size > 0 ? selected.size : ''} agent{selected.size === 1 ? '' : 's'}
+              Import {selected.size > 0 ? selected.size : ''} agent{selected.size === 1 ? '' : 's'}
             </Button>
           </div>
         </div>
@@ -239,7 +251,7 @@ function RosterRow({ agent, Icon, checked, active, onToggle, onFocus }: {
   const chips = [s.memoryFiles > 0 ? `${s.memoryFiles} mem` : null, s.skills > 0 ? `${s.skills} skills` : null, s.workspaceFiles > 0 ? `${s.workspaceFiles} rules` : null].filter(Boolean).join(' · ');
   return (
     <div className={`flex items-center gap-2.5 px-2.5 py-2 ${active ? 'border-l-2 border-accent bg-surface' : 'border-l-2 border-transparent'}`}>
-      <input type="checkbox" checked={checked} onChange={onToggle} aria-label={`Transition ${agent.name}`} />
+      <input type="checkbox" checked={checked} onChange={onToggle} aria-label={`Import ${agent.name}`} />
       <button type="button" onClick={onFocus} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-surface"><Icon className="h-3.5 w-3.5" /></span>
         <span className="min-w-0 flex-1">
@@ -310,7 +322,7 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
         <span className="flex h-9 w-9 items-center justify-center rounded-full border border-line bg-surface"><Icon className="h-5 w-5" /></span>
         <div className="min-w-0 flex-1">
           <div className="truncate text-subheading text-text-primary">{agent.name}</div>
-          <div className="text-[12px] text-text-muted">Everything here connects to this agent on transition.</div>
+          <div className="text-[12px] text-text-muted">Everything here connects to this agent on import.</div>
         </div>
         {agent.alreadyImported
           ? <span className="rounded bg-surface px-2 py-0.5 text-[11px] text-success">imported</span>
@@ -319,17 +331,8 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
 
       <div className="mt-3 grid grid-cols-3 gap-2">
         <Metric label="Identity" value={agent.persona ? '✓ persona' : '—'} />
-        <Metric label="Memories" value={String(memoryCount)} />
-        <Metric label="Skills → abilities" value={String(skillCount)} />
-      </div>
-
-      <div className="mt-3 grid gap-2 md:grid-cols-2">
-        <HelpCard title="Memories update here">
-          Selected memories are merged into Agentis. New memories are written, known memories are reinforced or skipped, and future pulls only bring in fresh changes.
-        </HelpCard>
-        <HelpCard title="Operator-owned after import">
-          The provider stays as the runtime, but the agent identity, memories, and abilities become operator-owned Agentis data you can inspect, edit, and move.
-        </HelpCard>
+        <Metric label="Memories" value={loading && !preview ? '…' : String(memoryCount)} />
+        <Metric label="Skills" value={loading && !preview ? '…' : String(skillCount)} />
       </div>
 
       <Section label="Runtime">
@@ -363,16 +366,16 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
       )}
 
       {preview && preview.skills.length > 0 && (
-        <Section label={`Skills → abilities · ${preview.skills.length}`}>
+        <Section label={`Skills · ${preview.skills.length}`}>
           <div className="max-h-[300px] space-y-1.5 overflow-y-auto pr-1">
             {preview.skills.map((s) => (
               <label key={s.path} className="flex items-start gap-2 rounded border border-line bg-bg p-2">
-                <input type="checkbox" className="mt-0.5" checked={acceptedSkills.has(s.path)} disabled={s.alreadyImported} onChange={() => toggleSkill(s.path)} aria-label={`Transition skill ${s.name}`} />
+                <input type="checkbox" className="mt-0.5" checked={acceptedSkills.has(s.path)} disabled={s.alreadyImported} onChange={() => toggleSkill(s.path)} aria-label={`Import skill ${s.name}`} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2 text-[10.5px] text-text-muted">
                     <Zap size={11} className="text-accent" />
                     {s.origin === 'marketplace' && <span className="rounded bg-surface px-1.5 py-0.5">marketplace</span>}
-                    {s.alreadyImported && <span className="text-success">already an ability</span>}
+                    {s.alreadyImported && <span className="text-success">already a skill</span>}
                   </span>
                   <span className="mt-0.5 block text-[12px] font-medium text-text-primary">{s.name}</span>
                   {s.description && <span className="block whitespace-pre-wrap break-words text-[11px] leading-relaxed text-text-muted">{s.description}</span>}
@@ -391,17 +394,6 @@ function Metric({ label, value }: { label: string; value: string }) {
     <div className="rounded-md bg-surface p-2.5">
       <div className="text-[11px] text-text-muted">{label}</div>
       <div className="mt-0.5 text-[14px] font-medium text-text-primary">{value}</div>
-    </div>
-  );
-}
-function HelpCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="flex gap-2 rounded-md border border-accent/25 bg-accent/10 p-2.5">
-      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-accent/40 text-[12px] font-bold text-accent">!</span>
-      <span className="min-w-0">
-        <span className="block text-[12px] font-semibold text-text-primary">{title}</span>
-        <span className="mt-0.5 block text-[11.5px] leading-relaxed text-text-secondary">{children}</span>
-      </span>
     </div>
   );
 }

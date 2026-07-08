@@ -29,7 +29,8 @@ import { APP_TEMPLATES } from '../lib/appTemplates';
 import { api, apiCached, peekCached, apiErrorMessage } from '../lib/api';
 import { AppEngineModal, type AppEngineAgent, type AppEngineDomain } from '../components/apps/AppEngineModal';
 import { ExtensionsModal } from '../components/extensions/ExtensionsModal';
-import { DomainToolbar, type DomainToolbarSelection } from '../components/shared/DomainToolbar';
+import { DomainToolbar, nestedDomainOptions, type DomainToolbarSelection } from '../components/shared/DomainToolbar';
+import { DomainEditorSheet, type DomainOption, type DomainManagerOption } from '../components/agents/DomainEditorSheet';
 
 interface WorkflowRow {
   id: string;
@@ -71,6 +72,7 @@ export function AppsPage() {
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [templateId, setTemplateId] = useState('blank');
+  const [createDomainId, setCreateDomainId] = useState('');
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [query, setQuery] = useState('');
@@ -175,10 +177,12 @@ export function AppsPage() {
       const app = await appsApi.create({
         name: trimmed,
         createEntryWorkflow: true,
+        ...(createDomainId ? { domainId: createDomainId } : {}),
         ...(template?.graph ? { entryWorkflowGraph: template.graph } : {}),
       });
       setName('');
       setTemplateId('blank');
+      setCreateDomainId('');
       setCreateOpen(false);
       navigate(`/apps/${app.id}?facet=workflow`);
     } catch (e) {
@@ -392,6 +396,14 @@ export function AppsPage() {
           name={name}
           busy={creating}
           templateId={templateId}
+          domains={domains}
+          managers={agents.filter((agent) => agent.role === 'manager')}
+          domainId={createDomainId}
+          onDomainChange={setCreateDomainId}
+          onDomainCreated={(domain) => {
+            setDomains((current) => [...current.filter((item) => item.id !== domain.id), domain as DomainRow]);
+            setCreateDomainId(domain.id);
+          }}
           onTemplateChange={setTemplateId}
           onNameChange={setName}
           onCreate={() => void createApp()}
@@ -526,6 +538,11 @@ function CreateAppDialog({
   name,
   busy,
   templateId,
+  domains,
+  managers,
+  domainId,
+  onDomainChange,
+  onDomainCreated,
   onTemplateChange,
   onNameChange,
   onCreate,
@@ -534,11 +551,21 @@ function CreateAppDialog({
   name: string;
   busy: boolean;
   templateId: string;
+  domains: DomainRow[];
+  managers: DomainManagerOption[];
+  domainId: string;
+  onDomainChange: (id: string) => void;
+  onDomainCreated: (domain: DomainOption) => void;
   onTemplateChange: (id: string) => void;
   onNameChange: (name: string) => void;
   onCreate: () => void;
   onClose: () => void;
 }) {
+  const [domainEditorOpen, setDomainEditorOpen] = useState(false);
+  function handleDomainChange(value: string) {
+    if (value === '__create__') setDomainEditorOpen(true);
+    else onDomainChange(value);
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay/70 p-4 backdrop-blur-sm">
       <form
@@ -562,6 +589,20 @@ function CreateAppDialog({
             placeholder="Store outreach"
             className="mt-1.5 h-9 w-full rounded-input border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent"
           />
+          <label className="mt-4 block text-[12px] font-medium text-text-secondary" htmlFor="new-app-domain">Domain</label>
+          <select
+            id="new-app-domain"
+            value={domainId}
+            onChange={(event) => handleDomainChange(event.target.value)}
+            className="mt-1.5 h-9 w-full rounded-input border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent"
+          >
+            <option value="">Unassigned</option>
+            {nestedDomainOptions(domains).map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+            <option value="__create__">Create new domain…</option>
+          </select>
+
           <div className="mt-4 text-[12px] font-medium text-text-secondary">Start from</div>
           <div className="mt-1.5 grid grid-cols-1 gap-1.5">
             {APP_TEMPLATES.map((template) => (
@@ -587,6 +628,16 @@ function CreateAppDialog({
           </button>
         </div>
       </form>
+      <DomainEditorSheet
+        open={domainEditorOpen}
+        managers={managers}
+        parentOptions={domains.filter((domain) => !domain.parentDomainId) as DomainOption[]}
+        onClose={() => setDomainEditorOpen(false)}
+        onSaved={(domain) => {
+          setDomainEditorOpen(false);
+          if (domain) onDomainCreated(domain);
+        }}
+      />
     </div>
   );
 }

@@ -49,7 +49,7 @@ describe('<RuntimeNativePanel />', () => {
     vi.unstubAllGlobals();
   });
 
-  it('renders real runtime resources, saves with a checksum, and detaches sessions', async () => {
+  it('renders real runtime resources and saves with a checksum (Instructions tab)', async () => {
     const calls: Array<{ url: string; method: string; body?: string }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -95,18 +95,17 @@ describe('<RuntimeNativePanel />', () => {
       return jsonResponse({});
     }));
 
+    // The resource/files browser + editor live in the Instructions tab
+    // (mode="resources"); the Runtime overview no longer duplicates them.
     render(
       <ToastProvider>
-        <RuntimeNativePanel agentId="a1" />
+        <RuntimeNativePanel agentId="a1" mode="resources" />
       </ToastProvider>,
     );
 
-    await waitFor(() => expect(screen.getByText('Hermes Agent')).toBeInTheDocument());
-    expect(screen.getByText('4 discovered resources')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('4 discovered resources')).toBeInTheDocument());
     expect(screen.getAllByText('SOUL.md').length).toBeGreaterThan(0);
     expect(screen.getByText('skills/research/SKILL.md')).toBeInTheDocument();
-    expect(screen.getByText('Conversation sessions')).toBeInTheDocument();
-    expect(screen.getByText('conv-1')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /^SOUL\.md/i }));
     const editor = await screen.findByDisplayValue('# Native soul');
@@ -122,13 +121,6 @@ describe('<RuntimeNativePanel />', () => {
         expectedChecksum: 'soul-checksum',
       });
     });
-
-    await userEvent.click(screen.getByRole('button', { name: 'Detach runtime session' }));
-    await waitFor(() => expect(screen.queryByText('conv-1')).not.toBeInTheDocument());
-    expect(calls).toContainEqual(expect.objectContaining({
-      url: '/v1/agents/a1/runtime/sessions/conv-1',
-      method: 'DELETE',
-    }));
   });
 });
 

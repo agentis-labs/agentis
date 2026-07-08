@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+﻿import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { REALTIME_EVENTS } from '@agentis/core';
 import clsx from 'clsx';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
@@ -46,12 +46,37 @@ export function CanvasActivityPopover({ node, screenPos }: { node: CanvasNode | 
     }));
   }, [node, rows]);
 
+  const ref = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
+
+  // Keep the popover inside the canvas viewport: flip to the cursor's left when
+  // it would overflow the right edge, and clamp vertically. Measured pre-paint
+  // against the positioned ancestor (the canvas container) so there's no flicker.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !screenPos) { setCoords(null); return; }
+    const parent = el.offsetParent as HTMLElement | null;
+    const boundsW = parent?.clientWidth ?? window.innerWidth;
+    const boundsH = parent?.clientHeight ?? window.innerHeight;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const margin = 12;
+    let left = screenPos.x + 18;
+    let top = screenPos.y - 24;
+    if (left + w > boundsW - margin) left = screenPos.x - 18 - w; // flip left of cursor
+    if (left < margin) left = margin;
+    if (top + h > boundsH - margin) top = boundsH - margin - h;
+    if (top < margin) top = margin;
+    setCoords({ left, top });
+  }, [screenPos?.x, screenPos?.y, displayRows]);
+
   if (!node || !screenPos) return null;
 
   return (
     <div
+      ref={ref}
       className="pointer-events-none absolute z-50 w-72 rounded-card border border-line bg-surface/95 p-3 shadow-dropdown backdrop-blur-md"
-      style={{ left: screenPos.x + 18, top: screenPos.y - 24 }}
+      style={coords ?? { left: screenPos.x + 18, top: screenPos.y - 24, visibility: 'hidden' }}
     >
       <div className="text-[10px] font-semibold uppercase text-text-muted">{kindLabel(node.kind)}</div>
       <div className="mt-0.5 truncate text-[13px] font-semibold text-text-primary">{node.title}</div>

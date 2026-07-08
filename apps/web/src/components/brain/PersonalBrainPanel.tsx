@@ -1152,7 +1152,7 @@ export function PersonalBrainPanel() {
                               <button
                                 type="button"
                                 onClick={handleAddTempFolder}
-                                className="px-1.5 h-5 rounded bg-accent text-[10px] font-semibold text-white hover:bg-accent/80 transition-colors"
+                                className="px-1.5 h-5 rounded bg-accent text-[10px] font-semibold text-on-accent hover:bg-accent/80 transition-colors"
                               >
                                 Add
                               </button>

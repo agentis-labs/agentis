@@ -124,6 +124,9 @@ export interface BrainGraphOptions {
   excludeKinds?: KnowledgeAtomKind[];
   minConfidence?: number;
   limit?: number;
+  /** Upper clamp for `limit`. Defaults to MAX_GRAPH_LIMIT; the visual graph raises
+   *  it to GRAPH_RENDER_CAP so it can show every atom. */
+  maxLimit?: number;
   /**
    * §C7 — row-level access. When set, retrieval enforces team privacy: an
    * episode is visible only if it is `shared` OR belongs to this requester's own
@@ -204,7 +207,14 @@ export interface BrainSummary {
 }
 
 const DEFAULT_GRAPH_LIMIT = 200;
+// Bound for search / auto-linker candidate scans (retrieval quality, not display).
 const MAX_GRAPH_LIMIT = 500;
+// The Brain MAP renders on a bespoke <canvas> + d3-force simulation (the Obsidian
+// approach), so node count is not the bottleneck and there is no product reason to
+// hide atoms — it shows every atom. Node responses carry no embeddings, so the
+// payload stays light regardless of count. This is only a query sanity valve
+// (matches the quarantine cap), NOT a "show fewer of your notes" limit.
+const GRAPH_RENDER_CAP = 20_000;
 const HIGH_SIMILARITY = 0.86;
 const RELATED_SIMILARITY = 0.52;
 const GLOBAL_CONFIDENCE_THRESHOLD = 0.7;
@@ -2057,11 +2067,13 @@ export class SharedIntelligenceService {
     const scope = options.scope ?? 'workspace';
     const scopeId = options.scopeId ?? null;
     const includeWorkspace = options.includeWorkspace ?? scope !== 'scoped';
-    const limit = Math.min(Math.max(options.limit ?? DEFAULT_GRAPH_LIMIT, 1), MAX_GRAPH_LIMIT);
+    // No product cap: the graph shows every atom (up to the render sanity valve)
+    // unless a caller explicitly asks for fewer.
+    const limit = Math.min(Math.max(options.limit ?? GRAPH_RENDER_CAP, 1), GRAPH_RENDER_CAP);
     const minConfidence = clamp01(options.minConfidence ?? 0);
     const kindFilter = options.kinds && options.kinds.length > 0 ? new Set(options.kinds) : null;
 
-    const atoms = this.loadAtoms(workspaceId, { scope, scopeId, includeWorkspace, limit, kinds: options.kinds, minConfidence });
+    const atoms = this.loadAtoms(workspaceId, { scope, scopeId, includeWorkspace, limit, maxLimit: GRAPH_RENDER_CAP, kinds: options.kinds, minConfidence });
     const atomByKey = new Map(atoms.map((atom) => [atomKey(atom.kind, atom.id), atom] as const));
 
     const linkRows = this.db.select().from(schema.knowledgeLinks)
@@ -2523,7 +2535,7 @@ export class SharedIntelligenceService {
   }
 
   private loadAtoms(workspaceId: string, options: BrainGraphOptions): AtomCandidate[] {
-    const limit = Math.min(Math.max(options.limit ?? DEFAULT_GRAPH_LIMIT, 1), MAX_GRAPH_LIMIT);
+    const limit = Math.min(Math.max(options.limit ?? DEFAULT_GRAPH_LIMIT, 1), options.maxLimit ?? MAX_GRAPH_LIMIT);
     const perKind = Math.max(12, Math.ceil(limit / 4));
     const scopeId = options.scopeId ?? null;
     const scope = options.scope ?? 'workspace';

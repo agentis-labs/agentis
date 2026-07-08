@@ -5,12 +5,17 @@ import { useToast } from '../shared/Toast';
 import { ModelChooser } from './ModelChooser';
 import {
   configToRuntimeConfig,
+  DEFAULT_RUNTIME_CONFIG,
   isV1AdapterType,
   runtimeConfigToAdapterConfig,
   runtimeModelFor,
   type AdapterType,
 } from './RuntimePicker';
 import { runtimeModelValue, withRuntimeModel } from './runtimeModelField';
+import { HARNESS } from './harnessMeta';
+
+// The runtimes a local Agentis workspace can drive. Order = most common first.
+const RUNTIME_OPTIONS: AdapterType[] = ['claude_code', 'codex', 'cursor', 'antigravity', 'hermes_agent', 'openclaw', 'http'];
 
 interface AgentRecord {
   id: string;
@@ -121,6 +126,34 @@ export function SelectedAgentModelControl({
     }
   }
 
+  async function updateRuntime(nextAdapter: AdapterType) {
+    if (!agent || nextAdapter === effectiveAdapterType) return;
+    const previous = agent;
+    // Switch harness with that runtime's default config + model. Advanced
+    // per-runtime settings (binary paths, cwd…) live in the Runtime tab.
+    const nextConfig = runtimeConfigToAdapterConfig(nextAdapter, DEFAULT_RUNTIME_CONFIG);
+    const nextModel = runtimeModelFor(nextAdapter, DEFAULT_RUNTIME_CONFIG);
+    setSaving(true);
+    try {
+      // Dedicated rebind endpoint — swaps the runtime binding without touching the
+      // agent's identity, Brain, or hierarchy (Track R).
+      await api(`/v1/agents/${agent.id}/runtime`, {
+        method: 'POST',
+        body: JSON.stringify({ adapterType: nextAdapter, config: nextConfig, runtimeModel: nextModel }),
+      });
+      const updated = { ...agent, adapterType: nextAdapter, config: nextConfig, runtimeModel: nextModel };
+      setAgent(updated);
+      setSelectedModel(runtimeModelValue(configToRuntimeConfig(nextAdapter, nextConfig), nextAdapter));
+      toast.success('Runtime updated');
+      onUpdated?.();
+    } catch (error) {
+      setAgent(previous);
+      toast.error('Runtime update failed', apiErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const disabled = loading || saving || catalogLoading || !agent;
   const statusBody = loading
     ? 'Loading the current runtime model and saved adapter settings.'
@@ -131,9 +164,21 @@ export function SelectedAgentModelControl({
   return (
     <section className={variant === 'drawer' ? 'space-y-2' : 'mb-3 border-b border-line/70 pb-3'}>
       <div className="flex items-center gap-2">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">Runtime model</div>
+        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">Runtime</div>
         {(loading || saving) && <Loader2 size={12} className="animate-spin text-text-muted" />}
       </div>
+      <select
+        aria-label="Runtime"
+        value={effectiveAdapterType}
+        onChange={(event) => void updateRuntime(event.target.value as AdapterType)}
+        disabled={disabled}
+        className="h-8 w-full rounded-input border border-line bg-surface-2 px-2.5 text-[12px] text-text-primary outline-none focus:border-accent disabled:opacity-50"
+      >
+        {RUNTIME_OPTIONS.map((adapter) => (
+          <option key={adapter} value={adapter}>{HARNESS[adapter]?.label ?? adapter}</option>
+        ))}
+      </select>
+      <div className="pt-0.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">Model</div>
       <ModelChooser
         adapterType={effectiveAdapterType}
         agentId={agentId}

@@ -1856,7 +1856,7 @@ function McpForm({ data, update }: { data: Record<string, unknown>; update: Node
             <button
               type="button"
               onClick={() => setSettingsOpen(true, 'mcp')}
-              className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-white hover:bg-accent/90"
+              className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-on-accent hover:bg-accent/90"
             >
               Mount an MCP server →
             </button>

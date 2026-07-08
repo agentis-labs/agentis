@@ -18,14 +18,12 @@ import {
   BarChart3,
   Boxes,
   FileText,
-  Image as ImageIcon,
   Loader2,
   Play,
   Plus,
   RefreshCw,
   Save,
   Settings,
-  ShieldCheck,
   SlidersHorizontal,
   Trash2,
   Upload,
@@ -99,23 +97,13 @@ export interface AppEngineAgent {
   role?: string | null;
 }
 
-type AppEnginePage = 'overview' | 'analytics' | 'identity' | 'access' | 'advanced';
-type Audience = AppRecord['policy']['audience'][number];
+type AppEnginePage = 'overview' | 'analytics' | 'advanced';
 type CapabilityGrant = AppRecord['policy']['grants'][number];
 
 const ENGINE_PAGES: Array<{ id: AppEnginePage; label: string; icon: ReactNode }> = [
   { id: 'overview', label: 'Overview', icon: <Settings size={13} /> },
   { id: 'analytics', label: 'Analytics', icon: <BarChart3 size={13} /> },
-  { id: 'identity', label: 'Identity', icon: <ImageIcon size={13} /> },
-  { id: 'access', label: 'Access', icon: <ShieldCheck size={13} /> },
   { id: 'advanced', label: 'Advanced', icon: <SlidersHorizontal size={13} /> },
-];
-
-const AUDIENCE_OPTIONS: Array<{ value: Audience; label: string; hint: string }> = [
-  { value: 'operator', label: 'Operators', hint: 'The agents/people running the app' },
-  { value: 'executive', label: 'Team', hint: 'Workspace members with a stake' },
-  { value: 'customer', label: 'Customers', hint: 'External end-users you invite' },
-  { value: 'public', label: 'Public link', hint: 'Anyone with a share link' },
 ];
 
 export function AppEngineModal({
@@ -139,13 +127,11 @@ export function AppEngineModal({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [version, setVersion] = useState('');
-  const [status, setStatus] = useState<AppRecord['status']>('draft');
+  const [status, setStatus] = useState<AppRecord['status']>('active');
   const [icon, setIcon] = useState('');
   const [domainId, setDomainId] = useState('');
   const [ownerAgentId, setOwnerAgentId] = useState('');
   const [entrySurfaceId, setEntrySurfaceId] = useState('');
-  const [audience, setAudience] = useState<Audience[]>([]);
-  const [shareable, setShareable] = useState(false);
   const [customCode, setCustomCode] = useState<AppRecord['policy']['customCode']>('disabled');
   const [grants, setGrants] = useState<CapabilityGrant[]>([]);
   const [saving, setSaving] = useState(false);
@@ -166,8 +152,6 @@ export function AppEngineModal({
     setDomainId(app.domainId ?? '');
     setOwnerAgentId(app.ownerAgentId ?? '');
     setEntrySurfaceId(app.entrySurfaceId ?? '');
-    setAudience(app.policy.audience);
-    setShareable(app.policy.shareable);
     setCustomCode(app.policy.customCode);
     setGrants(app.policy.grants);
     setError(null);
@@ -177,6 +161,25 @@ export function AppEngineModal({
   }, [app, open]);
 
   const appId = app?.id ?? null;
+  const [exporting, setExporting] = useState(false);
+  const exportApp = useCallback(async () => {
+    if (!app) return;
+    setExporting(true);
+    try {
+      const envelope = await api<{ data: unknown }>(`/v1/apps/${app.id}/export`).then((r) => r.data);
+      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${app.slug || 'app'}.agentisapp`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to export app');
+    } finally {
+      setExporting(false);
+    }
+  }, [app]);
   const loadAnalytics = useCallback(async () => {
     if (!appId) return;
     setAnalyticsLoading(true);
@@ -199,18 +202,11 @@ export function AppEngineModal({
   if (!open || !app) return null;
 
   const trimmedIcon = icon.trim();
-  const entrySurface = surfaces.find((surface) => surface.id === entrySurfaceId) ?? null;
   const selectedDomain = domains.find((domain) => domain.id === domainId) ?? null;
   const selectedOwner = agents.find((agent) => agent.id === ownerAgentId) ?? null;
   const domainManager = selectedDomain?.managerId
     ? agents.find((agent) => agent.id === selectedDomain.managerId) ?? null
     : null;
-  const orgSummary = selectedDomain
-    ? `${selectedDomain.name}${domainManager ? ` · ${domainManager.name}` : ''}`
-    : 'Unassigned';
-  const audienceSummary = audience.length
-    ? audience.map((value) => AUDIENCE_OPTIONS.find((option) => option.value === value)?.label ?? value).join(', ')
-    : 'Workspace members only';
 
   async function submit(event: { preventDefault: () => void }) {
     event.preventDefault();
@@ -228,8 +224,6 @@ export function AppEngineModal({
         ownerAgentId: ownerAgentId || null,
         entrySurfaceId: entrySurfaceId || null,
         policy: {
-          audience,
-          shareable,
           customCode,
           grants: grants.filter((grant) => grant.capability.trim()),
         },
@@ -251,14 +245,6 @@ export function AppEngineModal({
     } finally {
       event.currentTarget.value = '';
     }
-  }
-
-  function toggleAudience(value: Audience) {
-    setAudience((current) => (
-      current.includes(value)
-        ? current.filter((item) => item !== value)
-        : [...current, value]
-    ));
   }
 
   return (
@@ -327,59 +313,31 @@ export function AppEngineModal({
             ) : null}
 
             {page === 'overview' && (
-              <div className="grid gap-3 md:grid-cols-2">
-                <EngineStat label="Status" value={status} />
-                <EngineStat label="Version" value={`v${version || app.version}`} />
-                <EngineStat label="Surfaces" value={String(surfaces.length)} />
-                <EngineStat label="Domain" value={orgSummary} />
-                <EngineStat label="Who can use it" value={audienceSummary} />
-                <InfoPanel className="md:col-span-2" title="What this app does">
-                  {description || 'No description yet. Add one in Identity so operators understand what this app does.'}
-                </InfoPanel>
-                <InfoPanel title="Entry surface">
-                  {entrySurface ? entrySurface.name : 'No entry surface selected.'}
-                </InfoPanel>
-                <InfoPanel title="Sharing & code">
-                  {shareable ? 'Public link enabled' : 'Workspace only'}; {customCode === 'allowed' ? 'custom-coded views allowed' : 'custom code off'}
-                </InfoPanel>
-              </div>
-            )}
-
-            {page === 'analytics' && (
-              <AppAnalyticsPanel
-                analytics={analytics}
-                loading={analyticsLoading}
-                error={analyticsError}
-                onRefresh={() => void loadAnalytics()}
-              />
-            )}
-
-            {page === 'identity' && (
               <div className="space-y-4">
                 <div className="flex items-start gap-4 rounded-xl border border-line bg-canvas/45 p-3">
-                  <AppIconPreview icon={trimmedIcon} size="lg" />
+                  <IconUploadField icon={trimmedIcon} onPick={() => fileInputRef.current?.click()} onClear={() => setIcon('')} />
+                  <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void loadIconFile(event)} />
                   <div className="min-w-0 flex-1 space-y-2">
                     <TextField label="Name" value={name} onChange={setName} />
-                    <TextField label="Icon, image URL, or emoji" value={icon} onChange={setIcon} placeholder="Store icon, https://..., or data:image/..." />
-                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void loadIconFile(event)} />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-                    >
-                      <Upload size={13} /> Upload image
-                    </button>
+                    <TextareaField label="Description" value={description} onChange={setDescription} rows={3} />
                   </div>
                 </div>
-                <TextareaField label="Description" value={description} onChange={setDescription} rows={5} />
                 <div className="grid gap-3 md:grid-cols-2">
                   <TextField label="Version" value={version} onChange={setVersion} />
                   <SelectField label="Lifecycle status" value={status} onChange={(value) => setStatus(value as AppRecord['status'])}>
-                    <option value="draft">draft</option>
-                    <option value="published">published</option>
+                    <option value="active">active</option>
                     <option value="archived">archived</option>
                   </SelectField>
                 </div>
+                <SelectField label="Entry surface" value={entrySurfaceId} onChange={setEntrySurfaceId}>
+                  <option value="">No entry surface</option>
+                  {surfaces.map((surface) => (
+                    <option key={surface.id} value={surface.id}>{surface.name}</option>
+                  ))}
+                </SelectField>
+                {surfaces.length === 0 ? (
+                  <InfoPanel title="No surfaces yet">Build a surface in the Interface tab before choosing an entry surface.</InfoPanel>
+                ) : null}
                 <div className="space-y-3 border-t border-line pt-3">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Organization</div>
                   <p className="-mt-1 text-[11px] text-text-muted">
@@ -407,42 +365,30 @@ export function AppEngineModal({
                     <p className="text-[11px] text-text-muted">This app is owned by {selectedOwner.name}.</p>
                   ) : null}
                 </div>
+                <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium text-text-primary">Export app</div>
+                    <div className="text-[11px] text-text-muted">Download a portable .agentisapp package.</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void exportApp()}
+                    disabled={exporting}
+                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
+                  >
+                    {exporting ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Export
+                  </button>
+                </div>
               </div>
             )}
 
-            {page === 'access' && (
-              <div className="space-y-4">
-                <div>
-                  <div className="mb-1 text-[12px] font-semibold text-text-primary">Who can use this app</div>
-                  <div className="mb-2 text-[11px] text-text-muted">Leave all unchecked for workspace members only.</div>
-                  <div className="grid gap-2 md:grid-cols-2">
-                    {AUDIENCE_OPTIONS.map((item) => (
-                      <label key={item.value} className="flex items-start gap-2 rounded-card border border-line bg-canvas/45 px-3 py-2 text-[12px] text-text-secondary">
-                        <input
-                          type="checkbox"
-                          checked={audience.includes(item.value)}
-                          onChange={() => toggleAudience(item.value)}
-                          className="mt-0.5 h-4 w-4 rounded border-line bg-surface text-accent"
-                        />
-                        <span className="min-w-0">
-                          <span className="block font-medium text-text-primary">{item.label}</span>
-                          <span className="block text-[11px] text-text-muted">{item.hint}</span>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <ToggleField label="Shareable via public link" checked={shareable} onChange={setShareable} />
-                <SelectField label="Entry surface" value={entrySurfaceId} onChange={setEntrySurfaceId}>
-                  <option value="">No entry surface</option>
-                  {surfaces.map((surface) => (
-                    <option key={surface.id} value={surface.id}>{surface.name}</option>
-                  ))}
-                </SelectField>
-                {surfaces.length === 0 ? (
-                  <InfoPanel title="No surfaces yet">Build a surface in the Interface tab before choosing an entry surface.</InfoPanel>
-                ) : null}
-              </div>
+            {page === 'analytics' && (
+              <AppAnalyticsPanel
+                analytics={analytics}
+                loading={analyticsLoading}
+                error={analyticsError}
+                onRefresh={() => void loadAnalytics()}
+              />
             )}
 
             {page === 'advanced' && (
@@ -457,7 +403,6 @@ export function AppEngineModal({
                   <InfoPanel title="Slug">{app.slug}</InfoPanel>
                   <InfoPanel title="Source">{app.source ? `${app.source.kind}:${app.source.id}` : 'Local app, no Hub source attached.'}</InfoPanel>
                   <InfoPanel title="Installed checksum">{app.installedChecksum ?? 'None — this app was built here.'}</InfoPanel>
-                  <InfoPanel title="Export">Export this app as a portable .agentisapp package from the editor toolbar.</InfoPanel>
                 </div>
               </div>
             )}
@@ -537,6 +482,42 @@ function GrantsEditor({ grants, onChange }: { grants: CapabilityGrant[]; onChang
       >
         <Plus size={13} /> Add grant
       </button>
+    </div>
+  );
+}
+
+/**
+ * Editable app image — mirrors the operator avatar UX: click (or hover) the
+ * photo itself to upload; no separate button or URL text box. Emoji/URL icons
+ * still render if the app already had one.
+ */
+function IconUploadField({ icon, onPick, onClear }: { icon: string; onPick: () => void; onClear: () => void }) {
+  const isImage = icon.startsWith('http://') || icon.startsWith('https://') || icon.startsWith('data:image/');
+  return (
+    <div className="shrink-0">
+      <button
+        type="button"
+        onClick={onPick}
+        aria-label="Upload app image"
+        title="Click to upload an image"
+        className="group relative flex h-20 w-20 items-center justify-center overflow-hidden rounded-xl border border-line bg-canvas text-text-secondary"
+      >
+        {isImage ? (
+          <img src={icon} alt="" className="h-full w-full object-cover" />
+        ) : icon ? (
+          <span className="px-2 text-center text-[24px]">{icon}</span>
+        ) : (
+          <Boxes size={24} />
+        )}
+        <span className="absolute inset-0 hidden items-center justify-center bg-black/55 text-white group-hover:flex">
+          <Upload size={18} />
+        </span>
+      </button>
+      {isImage ? (
+        <button type="button" onClick={onClear} className="mt-1 block w-full text-center text-[10px] text-text-muted hover:text-text-primary">
+          Remove
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -680,7 +661,7 @@ function AppAnalyticsPanel({
               type="button"
               onClick={() => submitRun(runForm.workflowId, coerceRunInputs(runForm.fields, formValues))}
               disabled={launching === runForm.workflowId}
-              className="inline-flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-white hover:bg-accent/90 disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-on-accent hover:bg-accent/90 disabled:opacity-50"
             >
               {launching === runForm.workflowId ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
               Run

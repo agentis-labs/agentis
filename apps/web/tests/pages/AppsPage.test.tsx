@@ -35,7 +35,7 @@ function appRecord() {
     entrySurfaceId: null,
     icon: null,
     manifest: { slug: 'store-desk', name: 'Store desk', version: '0.1.0', capabilities: [], requiredPlugins: [] },
-    policy: { audience: [], shareable: false, customCode: 'disabled', grants: [] },
+    policy: { customCode: 'disabled', grants: [] },
     source: null,
     installedChecksum: null,
     createdBy: 'u-1',

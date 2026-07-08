@@ -499,21 +499,6 @@ export function AppEditorPage() {
     }
   }, [currentSurface, id]);
 
-  const exportApp = useCallback(async () => {
-    try {
-      const envelope = await appsApi.exportApp(id);
-      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${app?.slug ?? 'app'}.agentisapp`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setStatus(apiErrorMessage(e));
-    }
-  }, [app, id]);
-
   const deleteWorkflow = useCallback(async (workflowId: string) => {
     setBusy('workflow');
     setStatus(null);
@@ -600,13 +585,6 @@ export function AppEditorPage() {
         <div className="ml-auto flex min-w-0 items-center justify-end gap-2">
           {status ? <span className="max-w-[180px] truncate text-[11px] text-text-muted">{status}</span> : null}
           <SegmentedControl segments={FACETS} value={facet} onChange={setFacet} size="sm" className="min-w-0 flex-wrap justify-end" />
-          <button
-            type="button"
-            onClick={() => void exportApp()}
-            className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-line px-2.5 text-[12px] text-text-secondary transition-colors hover:bg-canvas hover:text-text-primary"
-          >
-            <Upload size={13} /> Export
-          </button>
         </div>
       </div>
 
@@ -1019,15 +997,29 @@ function InterfaceFacet({
   const rootEmpty = !view || (canHaveChildren(view) && view.children.length === 0);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Top strip: surfaces · mode · AI · save */}
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-3 py-2">
-        <div className="flex items-center gap-1 overflow-x-auto">
+    <div className="flex h-full min-h-0">
+      {/* Inner sidebar: the interface's pages live here (not in a top header), so
+          the surface itself gets the full width. Add + mode also live here. */}
+      <aside className="flex w-48 shrink-0 flex-col border-r border-line bg-surface">
+        <div className="flex items-center justify-between px-3 py-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Pages</span>
+          <button
+            type="button"
+            onClick={onCreate}
+            disabled={creating}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+            aria-label="Add surface"
+            title="Add page"
+          >
+            {creating ? <Loader2 size={12} className="animate-spin" /> : <Plus size={13} />}
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
           {surfaces.map((surface) => (
             <div
               key={surface.id}
               className={clsx(
-                'group flex shrink-0 items-center rounded-btn text-[12px]',
+                'group flex items-center rounded-btn text-[12px]',
                 selected === surface.name ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-canvas hover:text-text-primary',
               )}
             >
@@ -1041,7 +1033,7 @@ function InterfaceFacet({
                     if (event.key === 'Enter') void commitSurfaceRename(surface.name);
                     if (event.key === 'Escape') setRenamingSurface(null);
                   }}
-                  className="h-7 w-36 rounded-md border border-line bg-canvas px-2 text-[12px] text-text-primary outline-none focus:border-accent"
+                  className="h-7 w-full rounded-md border border-line bg-canvas px-2 text-[12px] text-text-primary outline-none focus:border-accent"
                   aria-label="Surface name"
                 />
               ) : (
@@ -1049,22 +1041,11 @@ function InterfaceFacet({
                   type="button"
                   onClick={() => { onSelect(surface.name); setSelectedPath([]); }}
                   onContextMenu={(e) => { e.preventDefault(); setMenuOpenSurface(surface.name); }}
-                  className="h-7 max-w-44 truncate px-2.5 text-left"
+                  className="h-7 min-w-0 flex-1 truncate px-2 text-left"
                 >
                   {surface.name}
                 </button>
               )}
-              {renamingSurface !== surface.name ? (
-                <button
-                  type="button"
-                  onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
-                  className="rounded-btn p-1 text-text-muted opacity-0 hover:bg-canvas hover:text-text-primary group-hover:opacity-100"
-                  title={`Rename ${surface.name}`}
-                  aria-label={`Rename ${surface.name}`}
-                >
-                  <Pencil size={11} />
-                </button>
-              ) : null}
               {renamingSurface !== surface.name ? (
                 <DropdownMenu.Root open={menuOpenSurface === surface.name} onOpenChange={(open) => setMenuOpenSurface(open ? surface.name : null)}>
                   <DropdownMenu.Trigger asChild>
@@ -1117,20 +1098,9 @@ function InterfaceFacet({
               ) : null}
             </div>
           ))}
-          <button
-            type="button"
-            onClick={onCreate}
-            disabled={creating}
-            className="inline-flex h-7 shrink-0 items-center rounded-btn border border-line px-1.5 text-text-secondary hover:bg-canvas disabled:opacity-50"
-            aria-label="Add surface"
-          >
-            {creating ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
-          </button>
         </div>
-
-        <div className="mx-1 h-5 w-px bg-line" />
-
-        <div className="inline-flex rounded-btn border border-line bg-canvas p-0.5">
+        {/* Mode: view Live, Edit visually, or hand-edit the Code. */}
+        <div className="grid grid-cols-3 gap-0.5 border-t border-line p-1.5">
           {([
             { id: 'live', label: 'Live', icon: <Eye size={13} /> },
             { id: 'edit', label: 'Edit', icon: <SquareStack size={13} /> },
@@ -1140,87 +1110,91 @@ function InterfaceFacet({
               key={segment.id}
               type="button"
               onClick={() => setMode(segment.id)}
-              className={clsx('inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px]', mode === segment.id ? 'bg-surface text-text-primary' : 'text-text-muted hover:text-text-primary')}
+              className={clsx('inline-flex h-7 items-center justify-center gap-1 rounded-md text-[11px]', mode === segment.id ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-primary')}
             >
               {segment.icon} {segment.label}
             </button>
           ))}
         </div>
+      </aside>
 
-        {mode === 'edit' && view ? (
-          <div className="flex items-center gap-1.5" title="Surface look — applies to the whole surface">
-            <select
-              aria-label="Surface theme"
-              value={view.style?.theme ?? 'analytics'}
-              onChange={(event) => setView({ ...view, style: { ...view.style, theme: event.target.value as 'operations' | 'analytics' | 'product' | 'editorial' } })}
-              className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+      {/* Main column: contextual edit toolbar (only when editing) + body. */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {mode !== 'live' ? (
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-3 py-2">
+            {mode === 'edit' && view ? (
+              <div className="flex items-center gap-1.5" title="Surface look — applies to the whole surface">
+                <select
+                  aria-label="Surface theme"
+                  value={view.style?.theme ?? 'analytics'}
+                  onChange={(event) => setView({ ...view, style: { ...view.style, theme: event.target.value as 'operations' | 'analytics' | 'product' | 'editorial' } })}
+                  className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+                >
+                  <option value="operations">Operations</option>
+                  <option value="analytics">Analytics</option>
+                  <option value="product">Product</option>
+                  <option value="editorial">Editorial</option>
+                </select>
+                <select
+                  aria-label="Surface design language"
+                  title="Design language — the whole look (radii, elevation, gradients, type scale)"
+                  value={view.style?.design ?? ''}
+                  onChange={(event) => setView({ ...view, style: { ...view.style, ...(event.target.value ? { design: event.target.value as DesignLanguage } : { design: undefined }) } })}
+                  className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+                >
+                  <option value="">Auto (by theme)</option>
+                  {DESIGN_LANGUAGES.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+                </select>
+                <select
+                  aria-label="Surface density"
+                  value={view.style?.density ?? 'comfortable'}
+                  onChange={(event) => setView({ ...view, style: { ...view.style, density: event.target.value as 'comfortable' | 'compact' } })}
+                  className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
+                >
+                  <option value="comfortable">Comfortable</option>
+                  <option value="compact">Compact</option>
+                </select>
+              </div>
+            ) : null}
+
+            {mode === 'edit' ? (
+              <form onSubmit={(event) => void submitPrompt(event)} className="ml-auto flex min-w-[220px] flex-1 items-center gap-1.5 sm:max-w-md">
+                <div className="relative flex-1">
+                  <Sparkles size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+                  <input
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    placeholder="Describe a surface for the agent to build…"
+                    aria-label="Describe a surface"
+                    className="h-8 w-full rounded-btn border border-line bg-canvas pl-7 pr-2 text-[12px] text-text-primary outline-none focus:border-accent"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={generating || !prompt.trim()}
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+                >
+                  {generating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} Generate
+                </button>
+              </form>
+            ) : (
+              <div className="ml-auto" />
+            )}
+
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={!current || busy}
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-50"
             >
-              <option value="operations">Operations</option>
-              <option value="analytics">Analytics</option>
-              <option value="product">Product</option>
-              <option value="editorial">Editorial</option>
-            </select>
-            <select
-              aria-label="Surface design language"
-              title="Design language — the whole look (radii, elevation, gradients, type scale)"
-              value={view.style?.design ?? ''}
-              onChange={(event) => setView({ ...view, style: { ...view.style, ...(event.target.value ? { design: event.target.value as DesignLanguage } : { design: undefined }) } })}
-              className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
-            >
-              <option value="">Auto (by theme)</option>
-              {DESIGN_LANGUAGES.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
-            </select>
-            <select
-              aria-label="Surface density"
-              value={view.style?.density ?? 'comfortable'}
-              onChange={(event) => setView({ ...view, style: { ...view.style, density: event.target.value as 'comfortable' | 'compact' } })}
-              className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
-            >
-              <option value="comfortable">Comfortable</option>
-              <option value="compact">Compact</option>
-            </select>
+              {busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} Save
+            </button>
           </div>
         ) : null}
 
-        {mode === 'edit' ? (
-          <form onSubmit={(event) => void submitPrompt(event)} className="ml-auto flex min-w-[220px] flex-1 items-center gap-1.5 sm:max-w-md">
-            <div className="relative flex-1">
-              <Sparkles size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
-              <input
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Describe a surface for the agent to build…"
-                aria-label="Describe a surface"
-                className="h-8 w-full rounded-btn border border-line bg-canvas pl-7 pr-2 text-[12px] text-text-primary outline-none focus:border-accent"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={generating || !prompt.trim()}
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
-            >
-              {generating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} Generate
-            </button>
-          </form>
-        ) : (
-          <div className="ml-auto" />
-        )}
-
-        {mode !== 'live' ? (
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={!current || busy}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-50"
-          >
-            {busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} Save
-          </button>
-        ) : null}
-      </div>
-
-      {/* Body */}
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {mode === 'code' ? (
+        {/* Body */}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {mode === 'code' ? (
           <textarea
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}
@@ -1252,6 +1226,7 @@ function InterfaceFacet({
         ) : (
           <div className="flex h-full items-center justify-center text-text-muted">No surface selected</div>
         )}
+        </div>
       </div>
     </div>
   );

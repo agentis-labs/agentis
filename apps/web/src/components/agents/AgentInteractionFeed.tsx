@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { MessageSquare, GitBranch, RefreshCw } from 'lucide-react';
+import { MessageSquare, GitBranch, RefreshCw, ChevronRight } from 'lucide-react';
 import { listInteractions, type InteractionEvent } from '../../lib/connections';
 import { apiErrorMessage } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
@@ -21,6 +21,7 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
   const [events, setEvents] = useState<InteractionEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -55,21 +56,42 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
         <p className="text-[13px] text-text-muted">No agent-to-agent interactions yet. They appear here as agents delegate, hand off, and message each other.</p>
       ) : (
         <ol className="space-y-2" aria-label="interaction timeline">
-          {events.map((e) => (
-            <li key={e.id} className="flex gap-2.5 rounded-lg border border-line bg-surface p-2.5">
-              <span className={`mt-0.5 ${e.kind === 'message' ? 'text-info' : 'text-accent'}`}>
-                {e.kind === 'message' ? <MessageSquare size={15} /> : <GitBranch size={15} />}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 text-[11px] text-text-muted">
-                  <span className="font-mono">{e.actor.id ?? e.actor.type}</span>
-                  <span className="rounded bg-bg px-1.5 py-0.5">{e.eventType}</span>
-                  <span className="ml-auto">{formatTime(e.at)}</span>
-                </div>
-                <div className="mt-0.5 truncate text-[13px] text-text-secondary" title={e.summary}>{e.summary}</div>
-              </div>
-            </li>
-          ))}
+          {events.map((e) => {
+            const expanded = expandedId === e.id;
+            return (
+              <li key={e.id} className="rounded-lg border border-line bg-surface">
+                <button
+                  type="button"
+                  onClick={() => setExpandedId(expanded ? null : e.id)}
+                  aria-expanded={expanded}
+                  className="flex w-full gap-2.5 p-2.5 text-left"
+                >
+                  <span className={`mt-0.5 ${e.kind === 'message' ? 'text-info' : 'text-accent'}`}>
+                    {e.kind === 'message' ? <MessageSquare size={15} /> : <GitBranch size={15} />}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 text-[11px] text-text-muted">
+                      <span className="font-mono">{e.actor.id ?? e.actor.type}</span>
+                      <span className="rounded bg-bg px-1.5 py-0.5">{e.eventType}</span>
+                      <span className="ml-auto">{formatTime(e.at)}</span>
+                    </div>
+                    <div className={`mt-0.5 text-[13px] text-text-secondary ${expanded ? 'whitespace-pre-wrap break-words' : 'truncate'}`}>{e.summary}</div>
+                  </div>
+                  <ChevronRight size={14} className={`mt-0.5 shrink-0 text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                </button>
+                {expanded && (
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line/70 px-2.5 py-2 text-[11px]">
+                    <dt className="text-text-muted">Kind</dt><dd className="text-text-secondary">{e.kind}</dd>
+                    <dt className="text-text-muted">Event</dt><dd className="font-mono text-text-secondary">{e.eventType}</dd>
+                    <dt className="text-text-muted">Actor</dt><dd className="font-mono text-text-secondary">{e.actor.type}{e.actor.id ? ` · ${e.actor.id}` : ''}</dd>
+                    {e.entity ? (<><dt className="text-text-muted">Entity</dt><dd className="font-mono text-text-secondary">{e.entity.type} · {e.entity.id}</dd></>) : null}
+                    {e.roomId ? (<><dt className="text-text-muted">Room</dt><dd className="font-mono text-text-secondary">{e.roomId}</dd></>) : null}
+                    <dt className="text-text-muted">When</dt><dd className="text-text-secondary">{new Date(e.at).toLocaleString()}</dd>
+                  </dl>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

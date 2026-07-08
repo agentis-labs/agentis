@@ -1082,7 +1082,6 @@ export function WorkspaceEcosystemCanvas({
           isFullscreen={isFullscreen}
           liveCount={liveHudCount}
           liveActive={liveHudCount > 0}
-          hasAttention={fleetCounts.attentionCount > 0}
           focusActive={focusActive}
           onZoomIn={() => zoomByStep(1.2)}
           onZoomOut={() => zoomByStep(1 / 1.2)}
@@ -1363,7 +1362,7 @@ function CanvasNodeCard({
     top: node.y,
     width: node.width,
     height: node.height,
-    '--node-accent': node.accent ?? 'rgba(167,139,250,0.85)',
+    '--node-accent': node.accent ?? 'var(--color-line-strong)',
     animationDelay: `${index * 34}ms`,
   } as CSSProperties;
 
@@ -1392,7 +1391,7 @@ function CanvasNodeCard({
                   ? 'border-dashed border-line bg-surface/45 text-text-muted'
                   : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
         isLive && !node.warn && !node.outOfCredits && 'home-orchestrator-aura',
-        selected && 'ring-2 ring-violet-300/55',
+        selected && 'ring-2 ring-accent/55',
         // Visual hierarchy at scale: idle workflows recede so the ones that are
         // running or failing carry the eye. (Focus-dimming below still wins.)
         node.kind === 'workflow' && !isLive && !node.warn && !node.ghost && !selected && 'opacity-75 saturate-[0.85]',
@@ -1868,12 +1867,13 @@ function LiveWorkspacePanel({
         onPointerDown={handleHeaderPointerDown}
       >
         <div className="flex min-w-0 items-center gap-2">
-          <span className={clsx('relative flex h-3 w-3 shrink-0 items-center justify-center', !showBeacon && 'opacity-45')}>
-            {showBeacon && <span className="absolute h-5 w-5 animate-ping rounded-full border border-accent/50" />}
-            <span className={clsx('relative h-2.5 w-2.5 rounded-full', showBeacon ? 'bg-accent shadow-[0_0_16px_var(--color-accent-muted)]' : 'bg-text-muted')} />
+          {/* When something is happening we keep it calm: a single steady green
+              dot + what's happening. No pulsing ring / accent over-styling. */}
+          <span className="relative flex h-3 w-3 shrink-0 items-center justify-center">
+            <span className={clsx('relative h-2.5 w-2.5 rounded-full', showBeacon ? 'bg-emerald-500' : 'bg-text-muted/60')} />
           </span>
           <div className="min-w-0">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent">Live Workspace</div>
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">Live Workspace</div>
             <h2 className="mt-0.5 truncate text-[15px] font-semibold leading-tight text-text-primary">
               {requestStatus.busy
                 ? 'Work in progress'
@@ -2005,11 +2005,10 @@ const OBSERVATION_TONE_BORDER: Record<ObservationTone, string> = {
 function LiveWorkspaceEmptyState() {
   return (
     <div className="mt-2.5 flex min-h-[130px] flex-col items-center justify-center rounded-xl border border-line/70 bg-canvas/35 px-4 py-4 text-center">
-      <div className="flex h-11 w-11 animate-pulse items-center justify-center rounded-xl border border-accent/20 bg-accent/5 text-accent">
+      <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-line/60 bg-canvas/40 text-text-muted">
         <CheckCircle2 size={20} />
       </div>
-      <div className="mt-2 text-[13px] font-medium text-text-primary">Office quiet.</div>
-      <div className="mt-0.5 text-[11px] text-text-secondary">No live runs or decisions.</div>
+      <div className="mt-2 text-[13px] font-medium text-text-primary">Workspace is quiet</div>
     </div>
   );
 }
@@ -3112,9 +3111,12 @@ function agentNode(
     status: agent.status,
     operationalState,
     route: `/agents/${agent.id}`,
+    // Managers take their color from the DOMAIN they own (undefined = neutral when
+    // the domain has no color); the orchestrator is theme-neutral (white on dark,
+    // black on light); specialists stay neutral (undefined).
     accent: role === 'manager'
-      ? domainAccent ?? '#06b6d4'
-      : stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? '#a78bfa' : undefined),
+      ? domainAccent ?? undefined
+      : stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? 'var(--color-accent)' : undefined),
     imageUrl: imageFromRecord(record, ['avatarUrl', 'avatarDataUrl', 'imageUrl', 'imageDataUrl', 'iconUrl', 'photoUrl', 'pictureUrl']),
     icon: role === 'orchestrator' ? <BrainCircuit size={20} /> : role === 'manager' ? <ShieldCheck size={18} /> : <Bot size={18} />,
     currentTask: stringField(record, ['currentTask', 'currentTaskId']),

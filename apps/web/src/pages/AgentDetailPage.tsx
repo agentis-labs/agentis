@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine } from 'lucide-react';
+import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine, Pencil, Check, X as XIcon } from 'lucide-react';
 import { api, apiErrorMessage } from '../lib/api';
 import { openRunModal } from '../lib/runModal';
 import { useToast } from '../components/shared/Toast';
@@ -26,9 +26,9 @@ import { DeleteAgentDialog } from '../components/agents/DeleteAgentDialog';
 import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
 import { useAgentInstallSession } from '../hooks/useBackgroundInstall';
 
-type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'interactions' | 'history';
+type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'history';
 
-/** Map legacy tab values (overview / connections) onto the redesigned set. */
+/** Map legacy tab values (overview / connections / interactions) onto the redesigned set. */
 function normalizeTab(raw: string | null): TabKey {
   switch (raw) {
     case 'overview':
@@ -37,11 +37,13 @@ function normalizeTab(raw: string | null): TabKey {
     case 'connections':
     case 'runtime':
       return 'runtime';
+    // Interactions merged into History.
+    case 'interactions':
+    case 'history':
+      return 'history';
     case 'instructions':
     case 'memory':
     case 'channels':
-    case 'interactions':
-    case 'history':
       return raw;
     default:
       return 'identity';
@@ -257,7 +259,6 @@ export function AgentDetailPage() {
           { value: 'runtime',      label: 'Runtime' },
           { value: 'memory',       label: 'Memory' },
           { value: 'channels',     label: 'Channels' },
-          { value: 'interactions', label: 'Interactions' },
           { value: 'history',      label: 'History' },
         ]}
         className="px-6"
@@ -269,7 +270,6 @@ export function AgentDetailPage() {
         {tab === 'runtime' && <RuntimeTab agent={agent} allAgents={allAgents} onChange={refresh} />}
         {tab === 'memory' && <MemoryTab agent={agent} />}
         {tab === 'channels' && <AgentChannelsTab agentId={agent.id} agentName={agent.name} />}
-        {tab === 'interactions' && <AgentInteractionFeed agentId={agent.id} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
       </div>
       {deleteOpen && (
@@ -620,31 +620,33 @@ function HistoryTab({ agent }: { agent: AgentDetail }) {
     return () => { cancelled = true; };
   }, [agent.id]);
 
-  if (loading) return <Skeleton height={300} />;
-
-  if (runs.length === 0) {
-    return (
-      <EmptyState
-        icon={<FileText size={48} />}
-        title="No history yet"
-        body="Runs and activity for this agent will appear here."
-      />
-    );
-  }
   return (
-    <div className="space-y-1">
-      {runs.map((r) => (
-        <button
-          key={r.id}
-          type="button"
-          onClick={() => openRunModal({ runId: r.id, source: 'agent-history' })}
-          className="flex w-full items-center gap-3 rounded-md border border-line bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-2"
-        >
-          <StatusBadge status={r.status} size="sm" />
-          <span className="flex-1 truncate text-[13px] text-text-primary">{r.workflowName ?? 'Workflow run'}</span>
-          <span className="text-[11px] text-text-muted">{relativeTime(r.startedAt)}</span>
-        </button>
-      ))}
+    <div className="space-y-6">
+      <section className="space-y-2">
+        <h3 className="text-subheading text-text-primary">Runs</h3>
+        {loading ? (
+          <Skeleton height={160} />
+        ) : runs.length === 0 ? (
+          <p className="text-[13px] text-text-muted">No runs yet. Workflow runs for this agent will appear here.</p>
+        ) : (
+          <div className="space-y-1">
+            {runs.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => openRunModal({ runId: r.id, source: 'agent-history' })}
+                className="flex w-full items-center gap-3 rounded-md border border-line bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-2"
+              >
+                <StatusBadge status={r.status} size="sm" />
+                <span className="flex-1 truncate text-[13px] text-text-primary">{r.workflowName ?? 'Workflow run'}</span>
+                <span className="text-[11px] text-text-muted">{relativeTime(r.startedAt)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+      {/* Agent↔agent interactions merged into History (former Interactions tab). */}
+      <AgentInteractionFeed agentId={agent.id} />
     </div>
   );
 }
@@ -670,6 +672,9 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
   const confirm = useConfirm();
   const [entries, setEntries] = useState<AgentMemoryRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -704,9 +709,47 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
     try {
       await api(`/v1/brain/agents/${agent.id}/memory/${id}`, { method: 'DELETE' });
       setEntries((prev) => prev.filter((e) => e.id !== id));
+      setSelected((prev) => { const next = new Set(prev); next.delete(id); return next; });
     } catch (err) {
       toast.error('Failed to delete entry', err instanceof Error ? err.message : undefined);
     }
+  }
+
+  async function deleteSelected() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    const ok = await confirm({
+      title: `Delete ${ids.length} ${ids.length === 1 ? 'memory' : 'memories'}?`,
+      body: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    const results = await Promise.allSettled(
+      ids.map((id) => api(`/v1/brain/agents/${agent.id}/memory/${id}`, { method: 'DELETE' })),
+    );
+    const deleted = new Set(ids.filter((_, i) => results[i]?.status === 'fulfilled'));
+    setEntries((prev) => prev.filter((e) => !deleted.has(e.id)));
+    setSelected(new Set());
+    if (deleted.size < ids.length) toast.error('Some memories could not be deleted');
+    else toast.success(`Deleted ${deleted.size} ${deleted.size === 1 ? 'memory' : 'memories'}`);
+  }
+
+  async function saveEdit(id: string) {
+    const content = editDraft.trim();
+    if (!content) return;
+    try {
+      await api(`/v1/brain/atoms/memory/${id}`, { method: 'PATCH', body: JSON.stringify({ content }) });
+      setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, content } : e)));
+      setEditingId(null);
+      toast.success('Memory updated');
+    } catch (err) {
+      toast.error('Failed to update memory', err instanceof Error ? err.message : undefined);
+    }
+  }
+
+  function toggle(id: string) {
+    setSelected((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   }
 
   if (loading) return <Skeleton height={300} />;
@@ -728,30 +771,82 @@ function MemoryTab({ agent }: { agent: AgentDetail }) {
     bySection.set(e.section, list);
   }
 
+  const allSelected = entries.length > 0 && selected.size === entries.length;
+
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <p className="text-[12px] text-text-muted">
-          {entries.length} {entries.length === 1 ? 'memory' : 'memories'} this agent carries across every workflow it runs.
-        </p>
-        <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={clearAll}>Clear all</Button>
+      <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-[12px] text-text-muted">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            onChange={() => setSelected(allSelected ? new Set() : new Set(entries.map((e) => e.id)))}
+            className="h-3.5 w-3.5 rounded border-line bg-surface text-accent"
+          />
+          {selected.size > 0
+            ? `${selected.size} selected`
+            : `${entries.length} ${entries.length === 1 ? 'memory' : 'memories'} this agent carries across every workflow it runs.`}
+        </label>
+        {selected.size > 0 ? (
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={deleteSelected}>Delete selected</Button>
+            <button type="button" onClick={() => setSelected(new Set())} className="text-[12px] text-text-muted hover:text-text-primary">Clear</button>
+          </div>
+        ) : (
+          <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={clearAll}>Clear all</Button>
+        )}
       </div>
       {[...bySection.entries()].map(([section, rows]) => (
         <section key={section}>
           <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wide text-text-muted">{section}</h3>
           <div className="space-y-1.5">
             {rows.map((e) => (
-              <div key={e.id} className="group flex items-start gap-3 rounded-md border border-line bg-surface px-4 py-2.5">
-                <span className="flex-1 text-[13px] leading-snug text-text-primary">{e.content}</span>
+              <div key={e.id} className={`group flex items-start gap-3 rounded-md border border-line bg-surface px-4 py-2.5 ${selected.has(e.id) ? 'ring-1 ring-accent/40' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(e.id)}
+                  onChange={() => toggle(e.id)}
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-line bg-surface text-accent"
+                  aria-label="Select memory"
+                />
+                {editingId === e.id ? (
+                  <div className="flex-1 space-y-1.5">
+                    <textarea
+                      value={editDraft}
+                      onChange={(ev) => setEditDraft(ev.target.value)}
+                      rows={3}
+                      autoFocus
+                      className="w-full resize-y rounded-md border border-line bg-canvas px-2.5 py-1.5 text-[13px] leading-snug text-text-primary outline-none focus:border-accent"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => void saveEdit(e.id)} className="inline-flex items-center gap-1 rounded-btn bg-accent px-2 py-1 text-[11px] font-medium text-on-accent hover:bg-accent-hover"><Check size={12} /> Save</button>
+                      <button type="button" onClick={() => setEditingId(null)} className="inline-flex items-center gap-1 rounded-btn px-2 py-1 text-[11px] text-text-muted hover:bg-surface-2"><XIcon size={12} /> Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <span className="flex-1 whitespace-pre-wrap break-words text-[13px] leading-snug text-text-primary">{e.content}</span>
+                )}
                 <span className="shrink-0 text-[11px] text-text-muted">{relativeTime(e.createdAt)}</span>
-                <button
-                  type="button"
-                  onClick={() => removeOne(e.id)}
-                  className="shrink-0 text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
-                  aria-label="Delete memory"
-                >
-                  <Trash2 size={13} />
-                </button>
+                {editingId === e.id ? null : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => { setEditingId(e.id); setEditDraft(e.content); }}
+                      className="shrink-0 text-text-muted opacity-0 transition-opacity hover:text-text-primary group-hover:opacity-100"
+                      aria-label="Edit memory"
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeOne(e.id)}
+                      className="shrink-0 text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+                      aria-label="Delete memory"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </>
+                )}
               </div>
             ))}
           </div>

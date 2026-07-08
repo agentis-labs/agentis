@@ -239,7 +239,7 @@ export function AgentCreateWizard({
   const [runtimeAdvanced, setRuntimeAdvanced] = useState(false);
   const [playbook, setPlaybook] = useState('');
   const [capabilityTags, setCapabilityTags] = useState<string[]>([]);
-  const [monthlyBudget, setMonthlyBudget] = useState('500');
+  const [monthlyBudget, setMonthlyBudget] = useState('100');
   const [avatarDataUrl, setAvatarDataUrl] = useState<string | null>(null);
   const [channelsOpen, setChannelsOpen] = useState(false);
   const [channels, setChannels] = useState<Record<ChannelKind, ChannelDraft>>(cloneChannels());
@@ -293,7 +293,7 @@ export function AgentCreateWizard({
     setRuntimeAdvanced(false);
     setPlaybook('');
     setCapabilityTags([]);
-    setMonthlyBudget('500');
+    setMonthlyBudget('100');
     setAvatarDataUrl(null);
     setChannelsOpen(false);
     setChannels(cloneChannels());

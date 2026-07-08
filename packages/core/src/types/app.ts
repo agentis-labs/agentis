@@ -2,8 +2,17 @@
 
 import { z } from 'zod';
 
-export const appStatusSchema = z.enum(['draft', 'published', 'archived']);
+// Local, single-operator lifecycle: an app either exists and is usable (`active`)
+// or is retired (`archived`). Publishing ("draft"→"published") is a Hub concept
+// and lives there, not in the local runtime. Legacy `draft`/`published` rows are
+// coerced to `active` on read (see normalizeAppStatus).
+export const appStatusSchema = z.enum(['active', 'archived']);
 export type AppStatus = z.infer<typeof appStatusSchema>;
+
+/** Map any stored/legacy status string to the current lifecycle. */
+export function normalizeAppStatus(value: unknown): AppStatus {
+  return value === 'archived' ? 'archived' : 'active';
+}
 
 export const appMemberRoleSchema = z.enum(['operator', 'worker']);
 export type AppMemberRole = z.infer<typeof appMemberRoleSchema>;
@@ -75,10 +84,6 @@ export const appOutboundPolicySchema = z.object({
 export type AppOutboundPolicy = z.infer<typeof appOutboundPolicySchema>;
 
 export const appPolicySchema = z.object({
-  /** Who may open the App's surfaces. Empty = workspace members only. */
-  audience: z.array(z.enum(['operator', 'executive', 'customer', 'public'])).default([]),
-  /** Public-share toggle for the entry surface. */
-  shareable: z.boolean().default(false),
   /** CustomView/compiled-code escape hatch. Disabled by default for portable OSS apps. */
   customCode: z.enum(['disabled', 'allowed']).default('disabled'),
   

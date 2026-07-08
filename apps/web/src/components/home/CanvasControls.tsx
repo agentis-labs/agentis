@@ -11,7 +11,6 @@ export function CanvasControls({
   isFullscreen,
   liveCount = 0,
   liveActive = false,
-  hasAttention = false,
   focusActive = false,
   onZoomIn,
   onZoomOut,
@@ -23,7 +22,6 @@ export function CanvasControls({
   isFullscreen: boolean;
   liveCount?: number;
   liveActive?: boolean;
-  hasAttention?: boolean;
   focusActive?: boolean;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -60,7 +58,7 @@ export function CanvasControls({
           icon={isFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
         />
         <Divider />
-        <LivePuckButton liveCount={liveCount} active={liveActive} hasAttention={hasAttention} onClick={onOpenLiveWorkspace} />
+        <LivePuckButton liveCount={liveCount} active={liveActive} onClick={onOpenLiveWorkspace} />
       </div>
     </div>
   );
@@ -87,12 +85,10 @@ function PuckButton({ label, icon, onClick }: { label: string; icon: React.React
 function LivePuckButton({
   liveCount,
   active,
-  hasAttention,
   onClick,
 }: {
   liveCount: number;
   active: boolean;
-  hasAttention: boolean;
   onClick: () => void;
 }) {
   return (
@@ -112,12 +108,6 @@ function LivePuckButton({
         {active && <span className="absolute h-5 w-5 animate-ping rounded-full border border-accent/45" />}
         <RadioTower size={15} className="relative" />
       </span>
-      {hasAttention && (
-        <span
-          aria-label="Live Workspace needs attention"
-          className="absolute left-1 top-1 h-2 w-2 rounded-full border border-canvas bg-warn shadow-[0_0_10px_rgba(245,158,11,0.7)]"
-        />
-      )}
       {liveCount > 0 && (
         <span className="absolute -right-1 -top-1 min-w-[16px] rounded-full border border-canvas bg-accent px-1 text-center font-mono text-[9px] font-semibold leading-[15px] text-canvas shadow-[0_0_12px_rgba(74,222,128,0.45)]">
           {liveCount > 9 ? '9+' : liveCount}

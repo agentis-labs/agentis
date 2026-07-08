@@ -102,7 +102,7 @@ export function CanvasComposerOverlay({
     <div
       data-canvas-control
       className={clsx(
-        'absolute left-1/2 bottom-6 z-40 w-[min(640px,calc(100%-32px))] -translate-x-1/2 transition-opacity duration-300',
+        'absolute left-1/2 top-6 z-40 w-[min(640px,calc(100%-32px))] -translate-x-1/2 transition-opacity duration-300',
         dimmed ? 'opacity-30' : 'opacity-100',
       )}
     >
@@ -129,7 +129,7 @@ export function CanvasComposerOverlay({
             <ChevronDown size={12} className="text-text-muted" />
           </button>
           {pickerOpen && recipients.length > 0 && (
-            <div className="absolute left-0 bottom-full z-50 mb-2 max-h-56 w-64 overflow-y-auto rounded-[14px] border border-line/80 bg-surface shadow-dropdown animate-in fade-in slide-in-from-bottom-2 duration-200">
+            <div className="absolute left-0 top-full z-50 mt-2 max-h-56 w-64 overflow-y-auto rounded-[14px] border border-line/80 bg-surface shadow-dropdown animate-in fade-in slide-in-from-top-2 duration-200">
               {recipients.map((entry) => (
                 <button
                   key={entry.id}

@@ -214,7 +214,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       },
       handler: (args, ctx) => {
         const appId = resolveAppId(args, ctx);
-        const updated = store.update(ctx.workspaceId, appId, { status: args.restore === true ? 'draft' : 'archived' });
+        const updated = store.update(ctx.workspaceId, appId, { status: args.restore === true ? 'active' : 'archived' });
         return { appId: updated.id, name: updated.name, status: updated.status, archived: updated.status === 'archived' };
       },
     },

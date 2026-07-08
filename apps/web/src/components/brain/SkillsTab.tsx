@@ -1,5 +1,5 @@
-﻿import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FileCode, Plus, Trash2, Sparkles, Lightbulb } from 'lucide-react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FileCode, Plus, Trash2, Sparkles, Lightbulb, Upload } from 'lucide-react';
 import { apiErrorMessage } from '../../lib/api';
 import { skillsApi, type SkillListItem, type SkillDetail, type LinkedAtom } from '../../lib/skills';
 import { Button } from '../shared/Button';
@@ -141,6 +141,29 @@ function ConfidencePill({ value }: { value: number }) {
   return <span className={`shrink-0 rounded-pill px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${tone}`} title="Confidence — moves with run outcomes">{pct}%</span>;
 }
 
+/** Parse a SKILL.md: YAML-ish frontmatter (name/description) + Markdown body. */
+function parseSkillMarkdown(text: string, filename: string): { name: string; description: string; body: string } {
+  let name = '';
+  let description = '';
+  let body = text;
+  const fm = /^---\s*\n([\s\S]*?)\n---\s*\n?/.exec(text);
+  if (fm) {
+    body = text.slice(fm[0].length);
+    for (const line of fm[1]!.split('\n')) {
+      const m = /^\s*(name|description|title)\s*:\s*(.+?)\s*$/i.exec(line);
+      if (!m) continue;
+      const value = m[2]!.replace(/^["']|["']$/g, '');
+      if (/name|title/i.test(m[1]!) && !name) name = value;
+      else if (/description/i.test(m[1]!)) description = value;
+    }
+  }
+  if (!name) {
+    const h1 = /^#\s+(.+)$/m.exec(body);
+    name = h1 ? h1[1]!.trim() : filename.replace(/\.md$/i, '').replace(/[-_]/g, ' ');
+  }
+  return { name, description, body: body.trim() };
+}
+
 function SkillEditor({ draft, setDraft, onSave, onCancel, saving, linked }: {
   draft: Draft;
   setDraft: (d: Draft) => void;
@@ -150,16 +173,30 @@ function SkillEditor({ draft, setDraft, onSave, onCancel, saving, linked }: {
   linked: { examples: LinkedAtom[]; lessons: LinkedAtom[] };
 }) {
   const inputCls = 'w-full rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent';
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  async function loadFile(file: File) {
+    const text = await file.text();
+    const parsed = parseSkillMarkdown(text, file.name);
+    setDraft({ ...draft, name: draft.name || parsed.name, description: draft.description || parsed.description, body: parsed.body });
+  }
+
   return (
     <div className="mx-auto max-w-3xl px-6 py-5">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-subheading text-text-primary">{draft.id ? 'Edit skill' : 'New skill'}</h2>
         <div className="flex gap-2">
+          <input ref={fileRef} type="file" accept=".md,text/markdown,text/plain" className="hidden" onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void loadFile(f); e.currentTarget.value = ''; }} />
+          <Button variant="ghost" size="sm" iconLeft={<Upload size={13} />} onClick={() => fileRef.current?.click()} disabled={saving}>Upload SKILL.md</Button>
           <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>Cancel</Button>
           <Button variant="primary" size="sm" onClick={onSave} loading={saving} disabled={saving || !draft.name.trim()}>Save</Button>
         </div>
       </div>
-      <div className="flex flex-col gap-4">
+      <div
+        className="flex flex-col gap-4"
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) void loadFile(f); }}
+      >
         <label className="flex flex-col gap-1.5">
           <span className="text-[12px] font-medium text-text-secondary">Name</span>
           <input className={inputCls} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="e.g. Triage Stripe webhooks" />

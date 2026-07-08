@@ -274,7 +274,7 @@ export function AgentQuickDetailPanel({
             onClick={() => window.dispatchEvent(new CustomEvent('agentis:chat-panel-open', {
               detail: { agentId: agent.id, name: agent.name, mode: 'fullscreen' },
             }))}
-            className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
+            className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-medium text-on-accent transition-opacity hover:opacity-90"
           >
             <MessageCircle size={13} /> Talk
           </button>

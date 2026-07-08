@@ -21,7 +21,7 @@ beforeEach(async () => {
   packager = new AppPackager(ctx.db);
   const store = new AppStore(ctx.db);
   appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Helpdesk Pro' }).id;
-  store.update(ctx.workspace.id, appId, { version: '1.2.0', policy: { shareable: true } });
+  store.update(ctx.workspace.id, appId, { version: '1.2.0', policy: { customCode: 'allowed' } });
 
   const data = new AppDatastore(ctx.db);
   data.defineCollection(ctx.workspace.id, appId, { name: 'tickets', schema: { fields: [{ key: 'subject', type: 'string', required: true }] } });
@@ -56,7 +56,7 @@ describe('AppPackager — IR projection', () => {
 
     // version + policy carried; collection recreated EMPTY (private row did not travel).
     expect(m2.identity.version).toBe('1.2.0');
-    expect(m2.policy.shareable).toBe(true);
+    expect(m2.policy.customCode).toBe('allowed');
     const data = new AppDatastore(ctx.db);
     expect(data.query(ctx.workspace.id, newId, 'tickets', { limit: 50 }).rows).toHaveLength(0);
   });

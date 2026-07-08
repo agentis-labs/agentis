@@ -1649,7 +1649,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           type="button"
           onClick={() => setRunDialogOpen(true)}
           disabled={running}
-          className="absolute bottom-4 right-4 z-30 inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[12px] font-semibold text-white shadow-lg transition-colors hover:bg-accent/90 disabled:opacity-60"
+          className="absolute bottom-4 right-4 z-30 inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[12px] font-semibold text-on-accent shadow-lg transition-colors hover:bg-accent/90 disabled:opacity-60"
           title="Run this workflow"
         >
           <Play size={14} /> {running ? 'Running…' : 'Run workflow'}
