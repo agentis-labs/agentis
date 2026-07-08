@@ -50,9 +50,9 @@
     "@agentis/sdk": "workspace:*",
     "@hono/node-server": "^1.13.1",
     "@hono/zod-openapi": "^0.16.0",
-    "@scalar/hono-api-reference": "^0.5.150",
+    "@scalar/hono-api-reference": "^0.11.9",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^12.4.1",
+    "better-sqlite3": "^12.11.1",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.28",
     "jose": "^5.9.3",
@@ -66,7 +66,7 @@
     "@agentis/db": "workspace:*",
     "@agentis/web": "workspace:*",
     "tsup": "^8.5.1",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.0",
     "typescript": "^5.5.4"
   }
 }
