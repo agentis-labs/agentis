@@ -1,0 +1,72 @@
+{
+  "name": "@agentis-ai/cli",
+  "version": "0.1.3",
+  "description": "Agentis — the operating system for agentic software. Run `npx @agentis-ai/cli up` to start.",
+  "license": "Apache-2.0",
+  "author": "Robson Prado <robsonpradodev>",
+  "homepage": "https://github.com/agentis-labs/agentis#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentis-labs/agentis.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/agentis-labs/agentis/issues"
+  },
+  "keywords": [
+    "agentis",
+    "agent",
+    "dashboard",
+    "workflow",
+    "automation",
+    "ambient",
+    "ai"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "agentis": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'ok'",
+    "test": "echo 'no tests yet'",
+    "prepack": "node scripts/prepack.mjs"
+  },
+  "dependencies": {
+    "@agentis/sdk": "workspace:*",
+    "@hono/node-server": "^1.13.1",
+    "@hono/zod-openapi": "^0.16.0",
+    "@scalar/hono-api-reference": "^0.5.150",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.4.1",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.28",
+    "jose": "^5.9.3",
+    "postgres": "^3.4.4",
+    "socket.io": "^4.8.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@agentis/api": "workspace:*",
+    "@agentis/core": "workspace:*",
+    "@agentis/db": "workspace:*",
+    "@agentis/web": "workspace:*",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

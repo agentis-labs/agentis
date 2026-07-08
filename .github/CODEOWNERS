@@ -1,0 +1,28 @@
+# Code ownership — security-critical seams require maintainer review.
+#
+# GitHub enforces this only when "Require review from Code Owners" is enabled in
+# branch protection for the default branch. Turn that on so a single PR cannot
+# land changes to the sandboxing, credential, or CI paths without review.
+
+# Default: any change gets a maintainer's eyes.
+*                                       @agentis-labs/maintainers
+
+# ── Arbitrary-code-execution surface ────────────────────────────────────────
+/apps/api/src/adapters/                 @agentis-labs/security @agentis-labs/maintainers
+/apps/api/src/extensions/               @agentis-labs/security @agentis-labs/maintainers
+/apps/api/src/engine/safeExpression.ts  @agentis-labs/security @agentis-labs/maintainers
+
+# ── Network / SSRF ──────────────────────────────────────────────────────────
+/apps/api/src/services/safeUrl.ts       @agentis-labs/security @agentis-labs/maintainers
+/apps/api/src/services/safeFetch.ts     @agentis-labs/security @agentis-labs/maintainers
+
+# ── Secrets & auth ──────────────────────────────────────────────────────────
+/apps/api/src/services/credentialVault.ts   @agentis-labs/security @agentis-labs/maintainers
+/apps/api/src/secrets.ts                     @agentis-labs/security @agentis-labs/maintainers
+/apps/api/src/services/pathExpander.ts       @agentis-labs/security @agentis-labs/maintainers
+/apps/api/src/middleware/auth.ts             @agentis-labs/security @agentis-labs/maintainers
+
+# ── CI / supply chain ───────────────────────────────────────────────────────
+/.github/                               @agentis-labs/security @agentis-labs/maintainers
+/scripts/check-security-invariants.mjs  @agentis-labs/security @agentis-labs/maintainers
+/pnpm-lock.yaml                         @agentis-labs/maintainers

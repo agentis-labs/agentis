@@ -1,0 +1,323 @@
+/**
+ * MCP server surface — Agentis as an MCP provider (UNIVERSAL-HARNESS §5, Pillar 5).
+ *
+ * Two layers, one source of truth:
+ *
+ *   1. Workflow publication (REST convenience):
+ *        POST /v1/mcp/publish    { workflowId, slug? }  → mark a workflow published
+ *        POST /v1/mcp/unpublish  { workflowId }
+ *        GET  /v1/mcp/tools                              → list published tools
+ *        POST /v1/mcp/tools/:slug { inputs }             → run it, await, return output
+ *
+ *   2. Protocol-compliant MCP endpoint (JSON-RPC 2.0, Streamable HTTP shape):
+ *        POST /v1/mcp/rpc        { jsonrpc, method, params, id }
+ *        GET  /v1/mcp/server-card                        → discovery metadata
+ *      Methods: `initialize`, `tools/list`, `tools/call`. The tool surface is the
+ *      union of (a) the workspace's published workflows and (b) the
+ *      MCP-exposed entries of the shared AgentisToolRegistry — so external MCP
+ *      clients (Claude Code, Cursor, Codex) call the exact same tools the engine
+ *      and chat use. No second tool table.
+ *
+ * Publication state lives in `workflow.settings.mcp`.
+ */
+
+import { Hono } from 'hono';
+import { and, eq } from 'drizzle-orm';
+import {
+  AgentisError,
+  type AgentisToolContext,
+  type WorkflowGraph,
+} from '@agentis/core';
+import { schema } from '@agentis/db/sqlite';
+import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { AuthService } from '../services/auth.js';
+import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
+import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
+import { AGENTIS_MCP_SERVER_INSTRUCTIONS } from '../services/orchestrator/orchestratorPrompt.js';
+import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWorkflow.js';
+import { requireAuth } from '../middleware/auth.js';
+import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
+
+interface McpSettings { published?: boolean; slug?: string }
+
+const WORKFLOW_TOOL_PREFIX = 'agentis__';
+const PROTOCOL_VERSION = '2025-06-18';
+const MCP_CAPABILITIES = {
+  tools: { listChanged: false },
+  resources: { listChanged: false },
+};
+
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || 'workflow';
+}
+
+function mcpOf(settings: unknown): McpSettings {
+  const s = settings && typeof settings === 'object' ? (settings as Record<string, unknown>).mcp : undefined;
+  return s && typeof s === 'object' ? (s as McpSettings) : {};
+}
+
+export interface McpRoutesDeps {
+  db: AgentisSqliteDb;
+  auth: AuthService;
+  engine: WorkflowEngine;
+  /** Shared tool registry — the same tools chat and the engine use. */
+  toolRegistry?: AgentisToolRegistry;
+}
+
+export function buildMcpRoutes(deps: McpRoutesDeps) {
+  const app = new Hono();
+  app.use('*', requireAuth(deps), requireWorkspace(deps));
+
+  // ── Workflow publication (REST convenience) ──────────────────────────────
+  app.post('/publish', async (c) => {
+    const ws = getWorkspace(c);
+    const body = (await c.req.json().catch(() => ({}))) as { workflowId?: string; slug?: string };
+    if (!body.workflowId) throw new AgentisError('VALIDATION_FAILED', 'workflowId is required');
+    const wf = deps.db.select().from(schema.workflows)
+      .where(and(eq(schema.workflows.id, body.workflowId), eq(schema.workflows.workspaceId, ws.workspaceId))).get();
+    if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${body.workflowId} not found`);
+    const slug = slugify(body.slug ?? wf.title);
+    const clash = deps.db.select({ id: schema.workflows.id, settings: schema.workflows.settings })
+      .from(schema.workflows).where(eq(schema.workflows.workspaceId, ws.workspaceId)).all()
+      .find((r) => r.id !== wf.id && mcpOf(r.settings).slug === slug && mcpOf(r.settings).published);
+    if (clash) throw new AgentisError('RESOURCE_CONFLICT', `MCP slug '${slug}' is already in use`);
+    const settings = { ...(wf.settings as Record<string, unknown> ?? {}), mcp: { published: true, slug } };
+    deps.db.update(schema.workflows).set({ settings, updatedAt: new Date().toISOString() }).where(eq(schema.workflows.id, wf.id)).run();
+    return c.json({ workflowId: wf.id, toolName: `${WORKFLOW_TOOL_PREFIX}${slug}`, slug, endpoint: `/v1/mcp/tools/${slug}` });
+  });
+
+  app.post('/unpublish', async (c) => {
+    const ws = getWorkspace(c);
+    const body = (await c.req.json().catch(() => ({}))) as { workflowId?: string };
+    const wf = body.workflowId ? deps.db.select().from(schema.workflows)
+      .where(and(eq(schema.workflows.id, body.workflowId), eq(schema.workflows.workspaceId, ws.workspaceId))).get() : null;
+    if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', 'workflow not found');
+    const settings = { ...(wf.settings as Record<string, unknown> ?? {}), mcp: { published: false } };
+    deps.db.update(schema.workflows).set({ settings, updatedAt: new Date().toISOString() }).where(eq(schema.workflows.id, wf.id)).run();
+    return c.json({ workflowId: wf.id, published: false });
+  });
+
+  app.get('/tools', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ tools: listWorkflowTools(deps.db, ws.workspaceId) });
+  });
+
+  app.post('/tools/:slug', async (c) => {
+    const ws = getWorkspace(c);
+    const slug = c.req.param('slug');
+    const body = (await c.req.json().catch(() => ({}))) as { inputs?: Record<string, unknown> };
+    const wf = findPublishedBySlug(deps.db, ws.workspaceId, slug);
+    if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `no published MCP tool '${slug}'`);
+    const result = await runPublishedWorkflow({
+      db: deps.db, engine: deps.engine,
+      workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
+      workflowId: wf.id, graph: wf.graph as WorkflowGraph, inputs: body.inputs ?? {},
+    });
+    return c.json({ runId: result.runId, status: result.status, output: result.output });
+  });
+
+  // ── Discovery card ───────────────────────────────────────────────────────
+  app.get('/server-card', (c) => {
+    const ws = getWorkspace(c);
+    const tools = collectMcpTools(deps, ws.workspaceId);
+    return c.json({
+      protocolVersion: PROTOCOL_VERSION,
+      serverInfo: { name: 'agentis', version: '1.0.0' },
+      capabilities: MCP_CAPABILITIES,
+      toolCount: tools.length,
+      endpoint: '/v1/mcp/rpc',
+      instructions: AGENTIS_MCP_SERVER_INSTRUCTIONS,
+    });
+  });
+
+  // ── Protocol-compliant JSON-RPC endpoint ──────────────────────────────────
+  app.post('/rpc', async (c) => {
+    const ws = getWorkspace(c);
+    const agentId = resolveMcpAgentId(deps.db, ws.workspaceId, c.req.header('x-agentis-agent'));
+    const body = (await c.req.json().catch(() => null)) as JsonRpcRequest | null;
+    if (!body || body.jsonrpc !== '2.0' || typeof body.method !== 'string') {
+      return c.json(rpcError(body?.id ?? null, -32600, 'Invalid Request'));
+    }
+    const id = body.id ?? null;
+
+    try {
+      switch (body.method) {
+        case 'initialize':
+          return c.json(rpcResult(id, {
+            protocolVersion: PROTOCOL_VERSION,
+            serverInfo: { name: 'agentis', version: '1.0.0' },
+            capabilities: MCP_CAPABILITIES,
+            // PAVED-ROAD P2 — deliver the doctrine at the door. MCP clients
+            // surface `instructions` to the model as system context, so an
+            // external harness gets the build loop + data-flow contract instead
+            // of a flat pile of ~70 undocumented tool names.
+            instructions: AGENTIS_MCP_SERVER_INSTRUCTIONS,
+          }));
+        case 'notifications/initialized':
+          // Notification — no response body expected, but return 202-style ack.
+          return c.body(null, 202);
+        case 'resources/list':
+          return c.json(rpcResult(id, { resources: [] }));
+        case 'resources/templates/list':
+          return c.json(rpcResult(id, { resourceTemplates: [] }));
+        case 'tools/list':
+          return c.json(rpcResult(id, { tools: collectMcpTools(deps, ws.workspaceId).map(toMcpDescriptor) }));
+        case 'tools/call': {
+          const params = (body.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+          if (!params.name) return c.json(rpcError(id, -32602, 'tools/call requires params.name'));
+          const result = await callMcpTool(deps, { ...ws, agentId }, params.name, params.arguments ?? {});
+          return c.json(rpcResult(id, result));
+        }
+        default:
+          return c.json(rpcError(id, -32601, `Method not found: ${body.method}`));
+      }
+    } catch (err) {
+      // §F7 — an AgentisError carries a code + directive remediation the platform
+      // wrote for exactly this failure. Return it as JSON-RPC error `data` instead
+      // of discarding everything but the message under a bare -32603.
+      if (err instanceof AgentisError) {
+        return c.json(rpcError(id, -32603, err.message, {
+          code: err.code,
+          ...(err.remediation ? { remediation: err.remediation } : {}),
+          ...(err.details ? { details: err.details } : {}),
+        }));
+      }
+      const message = err instanceof Error ? err.message : 'internal error';
+      return c.json(rpcError(id, -32603, message));
+    }
+  });
+
+  return app;
+}
+
+// ─── Tool collection (published workflows + registry) ───────────────────────
+
+interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  kind: 'workflow' | 'registry';
+  /** workflow slug or registry tool id. */
+  ref: string;
+}
+
+function collectMcpTools(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
+  const tools: McpTool[] = listWorkflowTools(deps.db, workspaceId).map((t) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.inputSchema,
+    kind: 'workflow' as const,
+    ref: t.slug,
+  }));
+  if (deps.toolRegistry) {
+    for (const def of deps.toolRegistry.catalog({ mcpOnly: true }).tools) {
+      tools.push({
+        name: def.id,
+        description: def.description,
+        inputSchema: (def.inputSchema && typeof def.inputSchema === 'object'
+          ? def.inputSchema
+          : { type: 'object' }) as Record<string, unknown>,
+        kind: 'registry',
+        ref: def.id,
+      });
+    }
+  }
+  return tools;
+}
+
+function listWorkflowTools(db: AgentisSqliteDb, workspaceId: string) {
+  return db.select().from(schema.workflows).where(eq(schema.workflows.workspaceId, workspaceId)).all()
+    .map((r) => ({ r, mcp: mcpOf(r.settings) }))
+    .filter((x) => x.mcp.published && x.mcp.slug)
+    .map(({ r, mcp }) => ({
+      name: `${WORKFLOW_TOOL_PREFIX}${mcp.slug}`,
+      slug: mcp.slug!,
+      workflowId: r.id,
+      description: r.description ?? r.title,
+      inputSchema: inputSchemaFor(r.graph as WorkflowGraph),
+      endpoint: `/v1/mcp/tools/${mcp.slug}`,
+    }));
+}
+
+function findPublishedBySlug(db: AgentisSqliteDb, workspaceId: string, slug: string) {
+  return db.select().from(schema.workflows).where(eq(schema.workflows.workspaceId, workspaceId)).all()
+    .find((r) => { const m = mcpOf(r.settings); return Boolean(m.published && m.slug === slug); });
+}
+
+function resolveMcpAgentId(db: AgentisSqliteDb, workspaceId: string, agentId?: string): string | undefined {
+  if (!agentId) return undefined;
+  const agent = db
+    .select({ id: schema.agents.id })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (!agent) throw new AgentisError('CROSS_WORKSPACE_ACCESS', 'Agent not in workspace');
+  return agent.id;
+}
+
+function toMcpDescriptor(t: McpTool) {
+  return { name: t.name, description: t.description, inputSchema: t.inputSchema };
+}
+
+/** Execute an MCP tool call → MCP `content` result shape. */
+async function callMcpTool(
+  deps: McpRoutesDeps,
+  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string },
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  // Workflow tool?
+  if (name.startsWith(WORKFLOW_TOOL_PREFIX)) {
+    const slug = name.slice(WORKFLOW_TOOL_PREFIX.length);
+    const wf = findPublishedBySlug(deps.db, ws.workspaceId, slug);
+    if (!wf) return textResult(`No published MCP workflow tool '${name}'`, true);
+    const result = await runPublishedWorkflow({
+      db: deps.db, engine: deps.engine,
+      workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
+      workflowId: wf.id, graph: wf.graph as WorkflowGraph, inputs: args,
+    });
+    const ok = result.status === 'COMPLETED' || result.status === 'COMPLETED_WITH_CONTRACT_VIOLATION';
+    return textResult(JSON.stringify({ runId: result.runId, status: result.status, output: result.output }), !ok);
+  }
+
+  // Registry tool?
+  if (deps.toolRegistry?.has(name)) {
+    const def = deps.toolRegistry.get(name);
+    if (!def?.mcpExposed) return textResult(`Tool '${name}' is not exposed over MCP`, true);
+    const ctx: AgentisToolContext = {
+      workspaceId: ws.workspaceId,
+      userId: ws.user.id,
+      ambientId: ws.ambientId,
+      ...(ws.agentId ? { agentId: ws.agentId } : {}),
+      caller: 'mcp',
+    };
+    const res = await deps.toolRegistry.execute({ id: '', toolId: name, arguments: args }, ctx);
+    // §F7 — hand the agent the directive: code + message + remediation + details, not a bare enum.
+    return res.ok
+      ? textResult(JSON.stringify(res.output))
+      : textResult(JSON.stringify({
+          error: res.errorMessage,
+          code: res.errorCode,
+          ...(res.remediation ? { remediation: res.remediation } : {}),
+          ...(res.details ? { details: res.details } : {}),
+        }), true);
+  }
+
+  return textResult(`Unknown tool '${name}'`, true);
+}
+
+function textResult(text: string, isError = false): { content: Array<{ type: 'text'; text: string }>; isError?: boolean } {
+  return { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) };
+}
+
+// ─── JSON-RPC helpers ───────────────────────────────────────────────────────
+
+interface JsonRpcRequest { jsonrpc?: string; id?: string | number | null; method?: string; params?: unknown }
+
+function rpcResult(id: string | number | null, result: unknown) {
+  return { jsonrpc: '2.0', id, result };
+}
+
+function rpcError(id: string | number | null, code: number, message: string, data?: Record<string, unknown>) {
+  return { jsonrpc: '2.0', id, error: { code, message, ...(data ? { data } : {}) } };
+}

@@ -1,0 +1,18 @@
+﻿import { cn } from '../../lib/utils';
+
+interface IconProps { className?: string }
+
+export function HttpIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={cn(className)} aria-hidden>
+      <circle cx="16" cy="16" r="14" stroke="#3b82f6" strokeWidth="2" />
+      <ellipse cx="16" cy="16" rx="6" ry="14" stroke="#3b82f6" strokeWidth="1.5" />
+      <line x1="2" y1="16" x2="30" y2="16" stroke="#3b82f6" strokeWidth="1.5" />
+      <line x1="4" y1="9" x2="28" y2="9" stroke="#3b82f6" strokeWidth="1" opacity="0.6" />
+      <line x1="4" y1="23" x2="28" y2="23" stroke="#3b82f6" strokeWidth="1" opacity="0.6" />
+    </svg>
+  );
+}
+
+
+

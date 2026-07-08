@@ -1,0 +1,10 @@
+ALTER TABLE `abilities` ADD `mode` text DEFAULT 'compiled' NOT NULL;
+ALTER TABLE `abilities` ADD `slash_command` text;
+ALTER TABLE `abilities` ADD `command_dispatch` text;
+ALTER TABLE `abilities` ADD `command_tool_name` text;
+ALTER TABLE `abilities` ADD `env_keys` text DEFAULT '[]' NOT NULL;
+ALTER TABLE `abilities` ADD `env_secret_ids` text DEFAULT '[]' NOT NULL;
+ALTER TABLE `abilities` ADD `gate` text;
+ALTER TABLE `abilities` ADD `min_relevance_score` real;
+ALTER TABLE `abilities` ADD `preferred_model` text;
+CREATE UNIQUE INDEX `abilities_slash_command_unique` ON `abilities` (`workspace_id`,`slash_command`);

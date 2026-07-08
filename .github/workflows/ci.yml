@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+# Cancel in-progress runs when a new commit lands on the same PR/branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test (api)
+        run: pnpm --filter @agentis/api test
+
+      # Contract grep — Brain / Apps / Memory-OS must stay out of v1.0 src.
+      # If any of these tokens reappear in source code we fail loudly.
+      - name: Brain/Apps contract grep
+        run: |
+          set -e
+          hits=$(grep -rEn \
+            "\b(BrainPromotion|SessionAtom|peer_representation|dreaming|dialectic|collectiveBrain|appInstances|workspaceBrain|MemoryEntry|memoryPlanes)\b" \
+            apps/api/src apps/web/src packages/core/src packages/db/src \
+            packages/integrations/src packages/sdk/src packages/cli/src \
+            2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Brain/Apps tokens reappeared in v1.0 source:"
+            echo "$hits"
+            exit 1
+          fi

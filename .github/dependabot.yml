@@ -1,0 +1,28 @@
+# Dependabot — automated dependency + GitHub Actions updates.
+#
+# `github-actions` updates also convert mutable tag pins (actions/checkout@v4) to
+# immutable commit SHAs over time, hardening the supply chain against a moved tag.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # Batch low-risk minor/patch bumps into one PR to reduce noise; majors and
+      # anything flagged as a security update still come through individually.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - ci

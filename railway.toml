@@ -1,0 +1,11 @@
+# Railway deploy descriptor. Used by the "Deploy on Railway" README button.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "pnpm --filter @agentis/api start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30

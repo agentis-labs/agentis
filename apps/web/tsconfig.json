@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "outDir": "dist",
+    "rootDir": "src",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"]
+  },
+  "include": ["src/**/*"],
+  "exclude": [
+    "src/components/ChatPanel/**",
+    "src/components/AvatarDropdown.tsx",
+    "src/components/WorkspaceCard.tsx",
+    "src/components/WorkspaceContextBlock.tsx",
+    "src/components/canvas/CanvasNarration.tsx",
+    "src/components/canvas/CanvasTabs.tsx",
+    "src/components/canvas/XRayPanel.tsx",
+    "src/components/home/HomeLauncher.tsx",
+    "src/hooks/useSpaces.ts",
+    "src/lib/viewportContext.ts"
+  ]
+}

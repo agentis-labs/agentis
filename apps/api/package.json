@@ -1,0 +1,58 @@
+{
+  "name": "@agentis/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bootstrap": "./src/bootstrap.ts",
+    "./backup": "./src/services/backup.ts",
+    "./defaultDataDir": "./src/defaultDataDir.ts"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:once": "tsx src/index.ts",
+    "start": "node --experimental-strip-types src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'ok'",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@agentis/app": "workspace:*",
+    "@agentis/core": "workspace:*",
+    "@agentis/db": "workspace:*",
+    "@agentis/integrations": "workspace:*",
+    "@agentis/runtime": "workspace:*",
+    "@hono/node-server": "^1.13.1",
+    "@hono/zod-openapi": "^0.16.0",
+    "@huggingface/transformers": "^4.2.0",
+    "@scalar/hono-api-reference": "^0.5.150",
+    "baileys": "7.0.0-rc13",
+    "bcryptjs": "^2.4.3",
+    "discord.js": "^14.16.0",
+    "drizzle-orm": "^0.45.2",
+    "exceljs": "^4.4.0",
+    "gpt-tokenizer": "^3.4.0",
+    "grammy": "^1.30.0",
+    "hono": "^4.12.28",
+    "jose": "^5.9.3",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.60.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.0",
+    "yaml": "^2.9.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/qrcode": "^1.5.5",
+    "better-sqlite3": "^12.4.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4",
+    "vitest": "^3.2.7"
+  }
+}

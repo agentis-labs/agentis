@@ -1,0 +1,1018 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --shadow-chat-bubble: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --harness-codex: #10b981;
+  --harness-claude: #8b5cf6;
+  --harness-cursor: #3b82f6;
+  --harness-http: #6b7280;
+
+  /* ── MONOCHROME AUTHORITY — Dark Mode "The Command Center" ──────────
+     Brand is pure ink/paper (black on white). The global accent is WHITE:
+     actionable elements invert (white fill / black text). Chroma survives
+     only inside the scoped color islands (.workflow-scope, .brain-scope). */
+  --color-canvas: #0a0a0b;
+  --color-surface: #0e0e11;
+  --color-surface-2: #16161a;
+  --color-surface-3: #202025;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a6a6ad;
+  --color-text-muted: #6e6e77;
+  --color-text-disabled: #45454d;
+  --color-accent: #fafafa;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgba(255, 255, 255, 0.08);
+  --color-accent-muted: rgba(255, 255, 255, 0.22);
+  --color-on-accent: #0a0a0b;
+  --color-success: #4ade80;
+  --color-success-soft: rgba(74, 222, 128, 0.1);
+  --color-danger: #f26d6d;
+  --color-danger-soft: rgba(242, 109, 109, 0.11);
+  --color-warn: #e0b341;
+  --color-warn-soft: rgba(224, 179, 65, 0.11);
+  --color-info: #d4d4d8;
+  --color-info-soft: rgba(212, 212, 216, 0.1);
+  --color-canvas-grid: #1b1d22;
+  --color-canvas-grid-far: rgba(255, 255, 255, 0.04);
+  --color-canvas-grid-near: rgba(255, 255, 255, 0.12);
+  --color-canvas-ambient: rgba(255, 255, 255, 0.02);
+  --color-home-glow-idle: rgba(255, 255, 255, 0.05);
+  --color-home-halo-idle: rgba(255, 255, 255, 0.02);
+  --color-home-glow-active: rgba(255, 255, 255, 0.09);
+  --color-home-halo-active: rgba(255, 255, 255, 0.038);
+  --color-node-surface: #16161a;
+  --color-control-hover: #202025;
+  --color-overlay: rgba(2, 6, 23, 0.62);
+  --color-overlay-soft: rgba(2, 6, 23, 0.42);
+  --color-overlay-strong: rgba(2, 6, 23, 0.78);
+  --color-glass-panel: rgba(12, 14, 18, 0.94);
+  --color-glass-border: rgba(37, 40, 48, 0.8);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 22px rgba(255, 255, 255, 0.1);
+  --shadow-floating: 0 24px 80px rgba(0, 0, 0, 0.62);
+  --shadow-soft-inset-top: inset 0 12px 8px -8px rgba(0, 0, 0, 0.3);
+  --shadow-soft-inset-bottom: inset 0 -12px 8px -8px rgba(0, 0, 0, 0.3);
+  --color-terminal-header: rgba(0, 0, 0, 0.95);
+  --color-terminal-header-border: rgba(255, 255, 255, 0.1);
+  --color-terminal-label: rgba(255, 255, 255, 0.8);
+  --color-terminal-button: rgba(255, 255, 255, 0.05);
+  --color-terminal-button-text: rgba(255, 255, 255, 0.6);
+  --color-terminal-button-hover: rgba(255, 255, 255, 0.1);
+  --color-terminal-button-hover-text: rgba(255, 255, 255, 0.95);
+  --color-terminal-body: rgba(0, 0, 0, 0.9);
+  /* Phosphor-semantic terminal: grey-white body text; green reserved for the
+     prompt/cursor + success lines via --color-terminal-accent. */
+  --color-terminal-text: #d4d4d8;
+  --color-terminal-accent: #4ade80;
+  --rf-canvas: var(--color-canvas);
+}
+
+:root[data-theme='light'],
+:root.light {
+  color-scheme: light;
+  --shadow-chat-bubble: 0 4px 12px rgba(16, 34, 25, 0.06), 0 0 0 1px rgba(16, 34, 25, 0.08);
+  --harness-codex: #059669;
+  --harness-claude: #7c3aed;
+  --harness-cursor: #2563eb;
+  --harness-http: #4b5563;
+
+  /* ── MONOCHROME AUTHORITY — Light Mode "The Clinical Canvas" ─────────
+     Off-white paper (never blinding #fff on large fills), strict thin
+     borders carry the structure, and the accent is INK BLACK: actionable
+     elements are black-on-white. */
+  --color-canvas: #f6f6f7;
+  --color-surface: #ffffff;
+  --color-surface-2: #f1f1f3;
+  --color-surface-3: #e8e8eb;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d1d1d6;
+  --color-text-primary: #0b0b0c;
+  --color-text-secondary: #52525b;
+  --color-text-muted: #71717a;
+  --color-text-disabled: #a1a1aa;
+  --color-accent: #111113;
+  --color-accent-hover: #000000;
+  --color-accent-soft: rgba(17, 17, 19, 0.06);
+  --color-accent-muted: rgba(17, 17, 19, 0.2);
+  --color-on-accent: #ffffff;
+  --color-success: #16a34a;
+  --color-success-soft: rgba(22, 163, 74, 0.1);
+  --color-danger: #dc2626;
+  --color-danger-soft: rgba(220, 38, 38, 0.08);
+  --color-warn: #b45309;
+  --color-warn-soft: rgba(180, 83, 9, 0.1);
+  --color-info: #52525b;
+  --color-info-soft: rgba(82, 82, 91, 0.09);
+  --color-canvas-grid: #e4e4e7;
+  --color-canvas-grid-far: rgba(11, 11, 12, 0.05);
+  --color-canvas-grid-near: rgba(11, 11, 12, 0.12);
+  --color-canvas-ambient: rgba(11, 11, 12, 0.02);
+  --color-home-glow-idle: rgba(11, 11, 12, 0.035);
+  --color-home-halo-idle: rgba(11, 11, 12, 0.015);
+  --color-home-glow-active: rgba(11, 11, 12, 0.07);
+  --color-home-halo-active: rgba(11, 11, 12, 0.03);
+  --color-node-surface: #ffffff;
+  --color-control-hover: #e8e8eb;
+  --color-overlay: rgba(16, 34, 25, 0.25);
+  --color-overlay-soft: rgba(16, 34, 25, 0.14);
+  --color-overlay-strong: rgba(16, 34, 25, 0.38);
+  --color-glass-panel: rgba(255, 255, 255, 0.9);
+  --color-glass-border: rgba(17, 17, 19, 0.1);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 2px 5px rgba(16, 34, 25, 0.06), 0 12px 26px rgba(16, 34, 25, 0.07);
+  --shadow-dropdown: 0 14px 36px rgba(16, 34, 25, 0.12), 0 0 0 1px rgba(172, 190, 181, 0.44);
+  --shadow-modal: 0 22px 58px rgba(16, 34, 25, 0.17), 0 0 0 1px rgba(172, 190, 181, 0.36);
+  --shadow-glow: 0 0 0 1px rgba(17, 17, 19, 0.22), 0 8px 22px rgba(17, 17, 19, 0.1);
+  --shadow-floating: 0 24px 80px rgba(16, 34, 25, 0.16);
+  --shadow-soft-inset-top: inset 0 12px 8px -8px rgba(16, 34, 25, 0.1);
+  --shadow-soft-inset-bottom: inset 0 -12px 8px -8px rgba(16, 34, 25, 0.1);
+  /* Terminal stays a dark instrument panel even in light mode (a bright
+     terminal is unreadable); phosphor-semantic like dark. */
+  --color-terminal-header: #18181b;
+  --color-terminal-header-border: rgba(255, 255, 255, 0.1);
+  --color-terminal-label: rgba(244, 244, 245, 0.9);
+  --color-terminal-button: rgba(255, 255, 255, 0.08);
+  --color-terminal-button-text: rgba(228, 228, 231, 0.85);
+  --color-terminal-button-hover: rgba(255, 255, 255, 0.18);
+  --color-terminal-button-hover-text: rgba(255, 255, 255, 0.96);
+  --color-terminal-body: #101012;
+  --color-terminal-text: #d4d4d8;
+  --color-terminal-accent: #4ade80;
+  --rf-canvas: var(--color-canvas);
+}
+
+/* ── Agentis App Interface — the flagship design system ──────────────
+   INTERFACE-OVERHAUL-10X: `.s-surface` scopes the App palette. Every token the
+   blocks already consume (`--color-*`) is re-pointed here, so the whole app —
+   shell chrome and page content — renders on the neutral ink/paper palette with
+   the Agentis blue accent, independent of the platform's emerald chrome.
+
+   Dark is the base bundle; the light bundle activates with the platform theme
+   or a per-app `data-appearance` pin. Appearance-dependent PAINT lives in the
+   `--app-*` tokens consumed by designLanguage.ts; that file contributes only
+   STRUCTURE (radius/pad/gap/type scale). Type scale doctrine: 11px tracked
+   labels → 13.5px body → 15px titles → 26px page titles → 32-40px numerals. */
+.s-surface {
+  color-scheme: dark;
+  --color-canvas: #0a0a0b;
+  --color-surface: #0e0e11;
+  --color-surface-2: #16161a;
+  --color-surface-3: #202025;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a6a6ad;
+  --color-text-muted: #6e6e77;
+  --color-text-disabled: #45454d;
+  --color-accent: #fafafa;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgba(255, 255, 255, 0.08);
+  --color-accent-muted: rgba(255, 255, 255, 0.22);
+  --color-on-accent: #0a0a0b;
+  --color-success: #4ade80;
+  --color-success-soft: rgba(74, 222, 128, 0.12);
+  --color-warn: #e0b341;
+  --color-warn-soft: rgba(224, 179, 65, 0.12);
+  --color-danger: #f26d6d;
+  --color-danger-soft: rgba(242, 109, 102, 0.12);
+  --color-info: #d4d4d8;
+  --color-info-soft: rgba(212, 212, 216, 0.1);
+  --color-overlay: rgba(4, 4, 6, 0.66);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 24px rgba(255, 255, 255, 0.1);
+  --app-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.006) 46%, rgba(255, 255, 255, 0) 100%), var(--color-surface);
+  --app-card-border: 1px solid rgba(255, 255, 255, 0.07);
+  --app-card-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset, 0 1px 2px rgba(0, 0, 0, 0.42), 0 14px 36px -14px rgba(0, 0, 0, 0.6);
+  --app-tile-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--color-surface-2);
+  --app-modal-shadow: 0 24px 72px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  color: var(--color-text-primary);
+}
+:root[data-theme='light'] .s-surface,
+:root.light .s-surface,
+.s-surface[data-appearance='light'] {
+  color-scheme: light;
+  --color-canvas: #f6f6f7;
+  --color-surface: #ffffff;
+  --color-surface-2: #f1f1f3;
+  --color-surface-3: #e8e8eb;
+  --color-line: #e4e4e7;
+  --color-line-strong: #d1d1d6;
+  --color-text-primary: #0b0b0c;
+  --color-text-secondary: #52525b;
+  --color-text-muted: #71717a;
+  --color-text-disabled: #a1a1aa;
+  --color-accent: #111113;
+  --color-accent-hover: #000000;
+  --color-accent-soft: rgba(17, 17, 19, 0.06);
+  --color-accent-muted: rgba(17, 17, 19, 0.2);
+  --color-on-accent: #ffffff;
+  --color-success: #16a34a;
+  --color-success-soft: rgba(22, 163, 74, 0.11);
+  --color-warn: #b45309;
+  --color-warn-soft: rgba(180, 83, 9, 0.12);
+  --color-danger: #dc2626;
+  --color-danger-soft: rgba(220, 38, 38, 0.09);
+  --color-info: #52525b;
+  --color-info-soft: rgba(82, 82, 91, 0.1);
+  --color-overlay: rgba(11, 11, 12, 0.4);
+  --shadow-glow: 0 0 0 1px rgba(17, 17, 19, 0.22), 0 8px 24px rgba(17, 17, 19, 0.1);
+  --app-card-bg: #ffffff;
+  --app-card-border: 1px solid #e4e7ec;
+  --app-card-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 10px 24px -12px rgba(16, 24, 40, 0.07);
+  --app-tile-bg: #ffffff;
+  --app-modal-shadow: 0 24px 64px -12px rgba(16, 24, 40, 0.2), 0 0 0 1px #e4e7ec;
+}
+/* Per-app dark pin — beats the platform light theme (same specificity, declared
+   after; values mirror the base dark bundle above). */
+:root .s-surface[data-appearance='dark'] {
+  color-scheme: dark;
+  --color-canvas: #0a0a0b;
+  --color-surface: #0e0e11;
+  --color-surface-2: #16161a;
+  --color-surface-3: #202025;
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-strong: rgba(255, 255, 255, 0.16);
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a6a6ad;
+  --color-text-muted: #6e6e77;
+  --color-text-disabled: #45454d;
+  --color-accent: #fafafa;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgba(255, 255, 255, 0.08);
+  --color-accent-muted: rgba(255, 255, 255, 0.22);
+  --color-on-accent: #0a0a0b;
+  --color-success: #4ade80;
+  --color-success-soft: rgba(74, 222, 128, 0.12);
+  --color-warn: #e0b341;
+  --color-warn-soft: rgba(224, 179, 65, 0.12);
+  --color-danger: #f26d6d;
+  --color-danger-soft: rgba(242, 109, 102, 0.12);
+  --color-info: #d4d4d8;
+  --color-info-soft: rgba(212, 212, 216, 0.1);
+  --color-overlay: rgba(4, 4, 6, 0.66);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 24px rgba(255, 255, 255, 0.1);
+  --app-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.006) 46%, rgba(255, 255, 255, 0) 100%), var(--color-surface);
+  --app-card-border: 1px solid rgba(255, 255, 255, 0.07);
+  --app-card-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset, 0 1px 2px rgba(0, 0, 0, 0.42), 0 14px 36px -14px rgba(0, 0, 0, 0.6);
+  --app-tile-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--color-surface-2);
+  --app-modal-shadow: 0 24px 72px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* ── Reserved color islands ─────────────────────────────────────────
+   The global shell is monochrome. Chroma survives in exactly two scoped
+   contexts, each re-pointing `--color-accent` (+ glow/terminal) locally so
+   every token consumer inside them adopts the island color with ZERO
+   component changes. Wrap the workflow canvas route in `.workflow-scope`
+   and the Brain page root in `.brain-scope`. */
+
+/* Workflow / Canvas — green = execution & flow. The running-node halo and
+   marching edges reference --color-accent, so they light green in-canvas and
+   white everywhere else, automatically. */
+.workflow-scope {
+  --color-accent: #4ade80;
+  --color-accent-hover: #22c55e;
+  --color-accent-soft: rgba(74, 222, 128, 0.12);
+  --color-accent-muted: rgba(74, 222, 128, 0.28);
+  --color-on-accent: #05130b;
+  --shadow-glow: 0 0 0 1px rgba(74, 222, 128, 0.35), 0 0 22px rgba(74, 222, 128, 0.16);
+  --color-canvas-ambient: rgba(74, 222, 128, 0.03);
+  --color-terminal-text: #4ade80;
+}
+:root[data-theme='light'] .workflow-scope,
+:root.light .workflow-scope {
+  --color-accent: #087443;
+  --color-accent-hover: #065f38;
+  --color-accent-soft: rgba(8, 116, 67, 0.1);
+  --color-accent-muted: rgba(8, 116, 67, 0.24);
+  --color-on-accent: #ffffff;
+  --shadow-glow: 0 0 0 1px rgba(8, 116, 67, 0.3), 0 8px 24px rgba(8, 116, 67, 0.13);
+  --color-canvas-ambient: rgba(8, 116, 67, 0.045);
+}
+
+/* Brain — violet = cognition. Deeper and darker than the app base, per brand
+   direction. Surfaces sink into an indigo-black; accent is a luminous violet. */
+.brain-scope {
+  --color-canvas: #08070d;
+  --color-surface: #0d0b15;
+  --color-surface-2: #14101f;
+  --color-surface-3: #1c1830;
+  --color-node-surface: #14101f;
+  --color-control-hover: #1c1830;
+  --color-accent: #8b5cf6;
+  --color-accent-hover: #a78bfa;
+  --color-accent-soft: rgba(139, 92, 246, 0.14);
+  --color-accent-muted: rgba(139, 92, 246, 0.34);
+  --color-on-accent: #ffffff;
+  --shadow-glow: 0 0 0 1px rgba(139, 92, 246, 0.35), 0 0 26px rgba(139, 92, 246, 0.14);
+  --color-canvas-ambient: rgba(139, 92, 246, 0.04);
+  --color-home-glow-idle: rgba(139, 92, 246, 0.07);
+  --color-home-halo-idle: rgba(139, 92, 246, 0.028);
+  --color-home-glow-active: rgba(139, 92, 246, 0.13);
+  --color-home-halo-active: rgba(139, 92, 246, 0.05);
+}
+:root[data-theme='light'] .brain-scope,
+:root.light .brain-scope {
+  --color-canvas: #f4f2fb;
+  --color-surface: #ffffff;
+  --color-surface-2: #f2eefb;
+  --color-surface-3: #e9e2f7;
+  --color-node-surface: #ffffff;
+  --color-control-hover: #e9e2f7;
+  --color-accent: #6d28d9;
+  --color-accent-hover: #5b21b6;
+  --color-accent-soft: rgba(109, 40, 217, 0.1);
+  --color-accent-muted: rgba(109, 40, 217, 0.26);
+  --color-on-accent: #ffffff;
+  --shadow-glow: 0 0 0 1px rgba(109, 40, 217, 0.28), 0 8px 24px rgba(109, 40, 217, 0.12);
+  --color-canvas-ambient: rgba(109, 40, 217, 0.045);
+}
+
+/* ── Kit primitives (read the `--s-*` structure vars + the palette above) ── */
+.s-panel {
+  background: var(--s-card-bg, var(--app-card-bg, var(--color-surface)));
+  border: var(--s-card-border, var(--app-card-border, 1px solid var(--color-line)));
+  border-radius: var(--s-radius, 14px);
+  box-shadow: var(--s-card-shadow, var(--app-card-shadow, var(--shadow-card)));
+}
+.s-panel-hover {
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+.s-panel-hover:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-line-strong);
+}
+.s-tile {
+  background: var(--s-kpi-bg, var(--app-tile-bg, var(--color-surface-2)));
+  border: var(--s-card-border, var(--app-card-border, 1px solid var(--color-line)));
+  border-radius: var(--s-radius, 14px);
+  box-shadow: var(--s-card-shadow, var(--app-card-shadow, none));
+}
+.s-round { border-radius: var(--s-radius, 14px); }
+/* Type roles (frontend-design scale — the scale must JUMP) */
+.s-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.s-title {
+  font-size: var(--s-title-size, 15px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+}
+.s-num {
+  font-size: var(--s-kpi-size, 32px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+/* Buttons — one anatomy, four intents. Shared by every kit block + approvals. */
+.s-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, opacity 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+.s-btn:disabled { opacity: 0.5; pointer-events: none; }
+.s-btn:active { transform: translateY(0.5px); }
+.s-btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
+.s-btn-primary {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.s-btn-primary:hover { background: var(--color-accent-hover); }
+.s-btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-line-strong);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+.s-btn-secondary:hover { background: var(--color-surface-2); }
+.s-btn-ghost { background: transparent; color: var(--color-text-secondary); }
+.s-btn-ghost:hover { background: var(--color-surface-2); color: var(--color-text-primary); }
+.s-btn-danger {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 28%, transparent);
+}
+.s-btn-danger:hover { background: color-mix(in srgb, var(--color-danger) 16%, transparent); }
+.s-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  width: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--color-line);
+  color: var(--color-text-secondary);
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.s-icon-btn:hover { background: var(--color-surface-2); color: var(--color-text-primary); }
+/* Inputs */
+.s-input {
+  height: 34px;
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-surface);
+  padding: 0 12px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.s-input::placeholder { color: var(--color-text-muted); }
+.s-input:focus { outline: none; border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-soft); }
+textarea.s-input { height: auto; padding: 10px 12px; line-height: 1.55; }
+/* Pills / chips */
+.s-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* Breathing live pulse — the surface's signature element. Reduced motion honored. */
+.s-pulse {
+  animation: s-pulse 2.2s ease-in-out infinite;
+}
+@keyframes s-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 35%, transparent); }
+  50% { opacity: 0.75; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .s-pulse { animation: none; }
+  .s-panel-hover, .s-panel-hover:hover { transition: none; transform: none; }
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: 'Inter', 'Aptos', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--color-canvas);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.agentis-brand {
+  display: inline-grid;
+  flex: none;
+  line-height: 0;
+  place-items: center;
+  vertical-align: middle;
+}
+
+.agentis-brand__asset {
+  grid-area: 1 / 1;
+  display: block;
+  height: 100%;
+  max-height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.agentis-brand__asset--dark {
+  display: none;
+}
+
+:root[data-theme='light'] .agentis-brand__asset--light {
+  display: none;
+}
+
+:root[data-theme='light'] .agentis-brand__asset--dark {
+  display: block;
+}
+
+body.agentis-canvas-fullscreen {
+  overflow: hidden;
+}
+
+body.agentis-canvas-fullscreen [data-agentis-shell-header],
+body.agentis-canvas-fullscreen [data-agentis-sidebar],
+body.agentis-canvas-fullscreen [data-agentis-onboarding-strip],
+body.agentis-canvas-fullscreen [data-agentis-live-strip] {
+  display: none !important;
+}
+
+body.agentis-canvas-fullscreen [data-agentis-shell],
+body.agentis-canvas-fullscreen [data-agentis-shell-layout],
+body.agentis-canvas-fullscreen [data-agentis-shell-main] {
+  height: 100vh;
+  min-height: 100vh;
+}
+
+body.agentis-canvas-fullscreen [data-agentis-shell-main] {
+  overflow: hidden !important;
+}
+
+body.agentis-canvas-fullscreen aside[aria-label="Chat panel"] {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  bottom: 6.75rem;
+  z-index: 10020;
+  max-height: calc(100vh - 8rem);
+  overflow: hidden;
+  border: 1px solid var(--color-glass-border);
+  border-radius: 1.25rem;
+  background: var(--color-glass-panel);
+  box-shadow: var(--shadow-floating);
+  backdrop-filter: blur(18px);
+}
+
+body.agentis-canvas-fullscreen aside[aria-label="Chat panel"] > header {
+  height: 2.75rem;
+}
+
+body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  height: 100vh;
+  width: 100vw;
+}
+
+@media (max-width: 720px) {
+  [data-agentis-shell-header] {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    gap: 0.5rem;
+  }
+
+  [data-agentis-shell-header] button[title^="Search"] {
+    width: 2.25rem;
+    padding-left: 0;
+    padding-right: 0;
+    justify-content: center;
+    overflow: hidden;
+    color: transparent;
+  }
+
+  [data-agentis-shell-header] button[title^="Search"] svg {
+    color: var(--color-text-muted);
+  }
+
+  [data-agentis-sidebar],
+  [data-agentis-live-strip] {
+    display: none;
+  }
+
+  [data-agentis-shell-main] {
+    min-width: 0;
+  }
+}
+
+/* React Flow tweaks */
+.react-flow {
+  background: var(--rf-canvas, #08090b);
+}
+.react-flow__background {
+  background-color: var(--color-canvas) !important;
+  background-image: radial-gradient(circle at 50% 0%, var(--color-canvas-ambient), transparent 44%);
+}
+.react-flow__edge-path {
+  stroke: var(--color-line-strong);
+  stroke-width: 1.5;
+}
+.react-flow__handle {
+  background: var(--color-line-strong);
+  border: 1px solid var(--color-text-disabled);
+  width: 10px;
+  height: 10px;
+}
+.react-flow__controls,
+.react-flow__minimap {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: var(--color-surface-2) !important;
+  border-color: var(--color-line) !important;
+  color: var(--color-text-secondary) !important;
+  fill: currentColor;
+}
+.react-flow__controls-button:hover {
+  background: var(--color-control-hover) !important;
+  color: var(--color-text-primary) !important;
+}
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+.agentis-workflow-node {
+  background: var(--color-node-surface);
+}
+
+/* Active (running) node — the signature live moment. A breathing accent halo
+   makes the currently-executing step impossible to miss, plus an indeterminate
+   sweep bar that reads as "working". Motion is confined to the running node so
+   an idle canvas stays perfectly still. */
+@keyframes agentis-node-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px var(--color-accent),
+      0 0 0 4px color-mix(in srgb, var(--color-accent) 20%, transparent),
+      0 10px 30px color-mix(in srgb, var(--color-accent) 24%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--color-accent),
+      0 0 0 9px color-mix(in srgb, var(--color-accent) 5%, transparent),
+      0 14px 40px color-mix(in srgb, var(--color-accent) 46%, transparent);
+  }
+}
+/* Compound selector so this beats Tailwind's `.duration-200` utility on the
+   same card (which also sets animation-duration) — otherwise the pulse runs at
+   the transition's 200ms and looks frantic. */
+.agentis-workflow-node.agentis-node-running {
+  border-color: var(--color-accent) !important;
+  animation: agentis-node-pulse 1.7s ease-in-out infinite;
+}
+@keyframes agentis-node-sweep {
+  0% { transform: translateX(-130%); }
+  100% { transform: translateX(340%); }
+}
+.agentis-node-sweep {
+  animation: agentis-node-sweep 1.1s linear infinite;
+}
+/* Active edge — the connection feeding the running node lights up and its
+   dashes march in the direction of flow. */
+.react-flow__edge.agentis-edge-active .react-flow__edge-path {
+  stroke: var(--color-accent) !important;
+  stroke-width: 2.25 !important;
+  stroke-dasharray: 6 5;
+  animation: agentis-edge-flow 0.5s linear infinite;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--color-accent) 55%, transparent));
+}
+@keyframes agentis-edge-flow {
+  to { stroke-dashoffset: -11; }
+}
+[data-agentis-workspace-canvas] {
+  background:
+    radial-gradient(circle at 50% 16%, var(--color-canvas-ambient), transparent 42%),
+    var(--color-canvas);
+}
+.react-flow__attribution {
+  display: none;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-text-disabled); }
+::-webkit-scrollbar-track { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--color-line-strong) transparent; }
+
+/* Skeleton shimmer */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-2) 0%,
+    var(--color-surface-3) 50%,
+    var(--color-surface-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 8px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Utility: scroll shadow indicators */
+.scroll-shadow-bottom {
+  box-shadow: var(--shadow-soft-inset-bottom);
+}
+.scroll-shadow-top {
+  box-shadow: var(--shadow-soft-inset-top);
+}
+
+/* Section gradient used on Home to fade between hero and content */
+.section-fade-gradient {
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    transparent 50%,
+    var(--color-canvas) 100%
+  );
+}
+
+/* Inter font: ensure proper rendering for our weights */
+@supports (font-variation-settings: normal) {
+  body { font-family: 'Inter', 'Aptos', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; }
+}
+
+@layer base {
+  *, ::before, ::after {
+    border-color: var(--color-line);
+  }
+}
+
+@keyframes unreadBadgeEnter {
+  0% { transform: scale(0.6); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.unread-badge-enter {
+  animation: unreadBadgeEnter 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+/* animate-in / slide-in-from-bottom support (tailwindcss-animate compat) */
+@keyframes enter-from-bottom {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes enter-from-top {
+  0% { opacity: 0; transform: translateY(-8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation-name: fade-in;
+  animation-fill-mode: both;
+}
+
+.slide-in-from-bottom-1 {
+  animation-name: enter-from-bottom;
+}
+
+.slide-in-from-top-2 {
+  animation-name: enter-from-top;
+}
+
+.fade-in {
+  opacity: 1;
+}
+
+.fade-in:not(.slide-in-from-bottom-1):not(.slide-in-from-top-2) {
+  animation-name: fade-in;
+}
+
+.duration-200 { animation-duration: 200ms; }
+.duration-300 { animation-duration: 300ms; }
+
+@keyframes chat-skeleton-sweep {
+  0% { transform: translateX(-120%); opacity: 0.35; }
+  45% { opacity: 0.9; }
+  100% { transform: translateX(220%); opacity: 0.35; }
+}
+
+/* Workspace boot skeleton — gentle breathing for the loading pyramid nodes. */
+@keyframes home-canvas-skeleton {
+  0%, 100% { opacity: 0.45; transform: translateY(0); }
+  50% { opacity: 0.85; transform: translateY(-1px); }
+}
+.home-canvas-skeleton {
+  animation: home-canvas-skeleton 1.6s ease-in-out infinite;
+}
+
+/* Premium highlighted buttons for key features (Abilities & Extensions) */
+.btn-premium-highlight {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 13px;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 8px;
+  
+  /* Follow the active accent (monochrome globally; green/violet inside the
+     workflow/brain islands) via accent tokens — no hardcoded hue. */
+  --glow-color: var(--color-accent-soft);
+  --accent-color: var(--color-accent);
+  --border-glow: var(--color-accent-muted);
+
+  border: 1px solid var(--border-glow);
+  background: linear-gradient(135deg, var(--glow-color) 0%, var(--color-surface-2) 100%);
+  color: var(--color-text-primary);
+  box-shadow: 
+    0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 0 12px var(--glow-color),
+    0 2px 4px rgba(0, 0, 0, 0.05);
+  
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+  cursor: pointer;
+  outline: none;
+}
+
+.btn-premium-highlight::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  padding: 1px; /* border thickness */
+  background: linear-gradient(to bottom right, var(--accent-color), transparent);
+  opacity: 0.3;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+  transition: all 0.25s ease;
+}
+
+.btn-premium-highlight:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text-primary);
+  box-shadow:
+    0 0 20px var(--glow-color),
+    0 4px 12px var(--color-accent-soft),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: translateY(-1.5px);
+}
+
+.btn-premium-highlight:hover::before {
+  opacity: 0.8;
+  background: linear-gradient(to bottom right, var(--accent-color), var(--color-accent-soft));
+}
+
+.btn-premium-highlight:active {
+  transform: translateY(0) scale(0.97);
+}
+
+/* Icon styling and animations */
+.btn-premium-highlight .btn-icon-zap,
+.btn-premium-highlight .btn-icon-puzzle {
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  color: var(--accent-color);
+  filter: drop-shadow(0 0 3px var(--glow-color));
+}
+
+.btn-premium-highlight:hover .btn-icon-zap {
+  transform: scale(1.22) rotate(12deg);
+  filter: drop-shadow(0 0 6px var(--accent-color));
+}
+
+.btn-premium-highlight:hover .btn-icon-puzzle {
+  transform: scale(1.18) rotate(-10deg);
+  filter: drop-shadow(0 0 6px var(--accent-color));
+}
+
+/* Activity sweep shimmers */
+@keyframes activity-sweep {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Composer glow pulse — follows the active accent (white globally). */
+@keyframes composer-glow-pulse {
+  0% { box-shadow: 0 0 0 1px var(--color-accent-soft), 0 4px 16px rgba(0, 0, 0, 0.4); }
+  50% { box-shadow: 0 0 0 2px var(--color-accent-muted), 0 0 12px var(--color-accent-soft), 0 4px 16px rgba(0, 0, 0, 0.4); }
+  100% { box-shadow: 0 0 0 1px var(--color-accent-soft), 0 4px 16px rgba(0, 0, 0, 0.4); }
+}
+
+.composer-focused {
+  animation: composer-glow-pulse 2s infinite ease-in-out;
+}
+
+/* ── Self-healing console — a distinct, minimal "the agent is repairing" motif ── */
+@keyframes sh-rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.sh-rise { animation: sh-rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Breathing aura behind the healing glyph while the agent is working. */
+@keyframes sh-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.45; }
+  50% { transform: scale(1.55); opacity: 0; }
+}
+.sh-aura { animation: sh-breathe 2.4s ease-in-out infinite; }
+
+/* A thin scan line sweeping across the diagnosis — the "thinking" signal. */
+@keyframes sh-scan {
+  0% { transform: translateX(-100%); opacity: 0; }
+  40% { opacity: 1; }
+  100% { transform: translateX(220%); opacity: 0; }
+}
+.sh-scan { animation: sh-scan 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+
+/* Blinking caret for the live thought typewriter. */
+@keyframes sh-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.sh-caret { animation: sh-caret 1s steps(1) infinite; }
+
+/* Success pop when a fix lands. */
+@keyframes sh-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.sh-pop { animation: sh-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+
+/* Phase-dot pulse for the active step. */
+@keyframes sh-dot {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  50% { box-shadow: 0 0 0 3px transparent; opacity: 0.5; }
+}
+.sh-dot-active { animation: sh-dot 1.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-rise, .sh-aura, .sh-scan, .sh-caret, .sh-pop, .sh-dot-active { animation: none; }
+}
+
+/* Radix ScrollArea styles */
+.ScrollAreaRoot {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.ScrollAreaViewport {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.ScrollAreaScrollbar {
+  display: flex;
+  user-select: none;
+  touch-action: none;
+  padding: 2px;
+  background: transparent;
+  transition: background 160ms ease-out;
+}
+.ScrollAreaScrollbar:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+.ScrollAreaScrollbar[data-orientation="vertical"] {
+  width: 8px;
+}
+.ScrollAreaScrollbar[data-orientation="horizontal"] {
+  flex-direction: column;
+  height: 8px;
+}
+
+.ScrollAreaThumb {
+  flex: 1;
+  background: var(--color-line-strong);
+  border-radius: 10px;
+  position: relative;
+  transition: background 160ms ease;
+}
+.ScrollAreaThumb::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  height: 100%;
+  min-width: 44px;
+  min-height: 44px;
+}
+.ScrollAreaThumb:hover {
+  background: var(--color-text-disabled);
+}
+
+.ScrollAreaCorner {
+  background: transparent;
+}

@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Local Agentis runtime data (embedded mode)
+.agentis/
+.claude/
+
+# Agent/app-generated media & runtime output — NEVER commit (personal/business
+# data, and it bloats the repo). Generated assets belong in the data root
+# ({AGENTIS_DATA_DIR}) or an external store dir, never in the source tree.
+brand-assets/
+**/brand-assets/
+apps/api/tmp/
+stores/
+**/generated-assets/
+
+# Smoke-test working dirs (generated DB + per-run secrets — never commit)
+.agentis-smoke/
+.agentis-cli-smoke/
+**/.agentis-smoke/
+**/.agentis-cli-smoke/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+.agentis-e2e/
+apps/api/.agentis-e2e/
+
+# Editor backups / stray compiler dumps
+*.bak
+*.orig
+tsc.out
+
+# Local scratch / dev artifacts (never commit — keeps the repo clean for inspection)
+scratch_*
+tmp-*
+/tmp/
+.playwright-mcp/
+.codex-*
