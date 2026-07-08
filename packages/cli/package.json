@@ -49,7 +49,7 @@
   "dependencies": {
     "@agentis/sdk": "workspace:*",
     "@hono/node-server": "^1.13.1",
-    "@hono/zod-openapi": "^0.16.0",
+    "@hono/zod-openapi": "^1.4.0",
     "@scalar/hono-api-reference": "^0.5.150",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.4.1",
