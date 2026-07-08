@@ -58,7 +58,7 @@
     "jose": "^5.9.3",
     "postgres": "^3.4.4",
     "socket.io": "^4.8.0",
-    "zod": "^3.23.8"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@agentis/api": "workspace:*",
