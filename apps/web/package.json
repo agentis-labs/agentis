@@ -31,7 +31,7 @@
     "react-router-dom": "^6.26.0",
     "socket.io-client": "^4.8.0",
     "zod": "^3.23.8",
-    "zustand": "^4.5.5"
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/container-queries": "^0.1.1",
