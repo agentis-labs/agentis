@@ -1,4 +1,4 @@
-name: Publish @agentis-ai/cli
+name: Publish @agentis-labs/cli
 
 on:
   push:
@@ -24,6 +24,6 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Publish
-        run: pnpm publish --filter @agentis-ai/cli --no-git-checks --access public
+        run: pnpm --filter @agentis-labs/cli publish --no-git-checks --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

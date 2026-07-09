@@ -64,5 +64,6 @@ tsc.out
 scratch_*
 tmp-*
 /tmp/
+/demos/
 .playwright-mcp/
 .codex-*
