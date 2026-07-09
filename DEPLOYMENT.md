@@ -11,7 +11,13 @@ Agentis V1 deploys as a single Node process that serves the API, WebSocket bridg
 ## Local CLI
 
 ```bash
-npm install -g @agentis-ai/cli
+npx @agentis-labs/cli@latest up
+```
+
+Or install it globally if you prefer a persistent binary:
+
+```bash
+npm install -g @agentis-labs/cli
 agentis up
 ```
 

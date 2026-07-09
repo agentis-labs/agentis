@@ -43,8 +43,8 @@ if (!existsSync(join(webDist, 'index.html'))) {
 console.log('[prepack] Bundling CLI with tsup…');
 run('pnpm', ['exec', 'tsup'], { cwd: pkgRoot });
 
-if (!existsSync(join(cliDist, 'index.js'))) {
-  throw new Error(`[prepack] expected tsup output at ${join(cliDist, 'index.js')}`);
+if (!existsSync(join(cliDist, 'index.cjs'))) {
+  throw new Error(`[prepack] expected tsup output at ${join(cliDist, 'index.cjs')}`);
 }
 
 console.log(`[prepack] Copying web SPA → ${cliWebDist}`);
@@ -56,5 +56,5 @@ if (!existsSync(indexHtml)) {
   throw new Error(`[prepack] copy failed; missing ${indexHtml}`);
 }
 
-const bundleStat = statSync(join(cliDist, 'index.js'));
+const bundleStat = statSync(join(cliDist, 'index.cjs'));
 console.log(`[prepack] Done. CLI bundle: ${(bundleStat.size / 1024).toFixed(1)} KB`);

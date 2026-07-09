@@ -282,42 +282,12 @@ importers:
 
   packages/cli:
     dependencies:
-      '@agentis/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-      '@hono/node-server':
-        specifier: ^1.13.1
-        version: 1.19.14(hono@4.12.28)
-      '@hono/zod-openapi':
-        specifier: ^0.16.0
-        version: 0.16.4(hono@4.12.28)(zod@3.25.76)
-      '@scalar/hono-api-reference':
-        specifier: ^0.5.150
-        version: 0.5.184(hono@4.12.28)
-      bcryptjs:
-        specifier: ^2.4.3
-        version: 2.4.3
       better-sqlite3:
         specifier: ^12.4.1
         version: 12.9.0
-      drizzle-orm:
-        specifier: ^0.45.2
-        version: 0.45.2(@types/better-sqlite3@7.6.13)(better-sqlite3@12.9.0)(postgres@3.4.9)
-      hono:
-        specifier: ^4.12.28
-        version: 4.12.28
-      jose:
-        specifier: ^5.9.3
-        version: 5.10.0
-      postgres:
-        specifier: ^3.4.4
-        version: 3.4.9
-      socket.io:
-        specifier: ^4.8.0
-        version: 4.8.3
-      zod:
-        specifier: ^3.23.8
-        version: 3.25.76
+      playwright:
+        specifier: ^1.60.0
+        version: 1.60.0
     devDependencies:
       '@agentis/api':
         specifier: workspace:*
@@ -328,6 +298,9 @@ importers:
       '@agentis/db':
         specifier: workspace:*
         version: link:../db
+      '@agentis/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@agentis/web':
         specifier: workspace:*
         version: link:../../apps/web

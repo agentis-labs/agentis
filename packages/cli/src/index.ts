@@ -23,19 +23,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { bootstrap } from '@agentis/api/bootstrap';
-import { createBackup, restoreBackup } from '@agentis/api/backup';
-import { resolveDefaultDataDir } from '@agentis/api/defaultDataDir';
-import { canonicalizeManifest } from '@agentis/core';
-import {
-  buildAgentisApp,
-  createStarterApp,
-  createAgentisClient,
-  validateAgentisApp,
-  validateAppManifest,
-  type AppTestOptions,
-  type AppManifestEnvelope,
-} from '@agentis/sdk';
+import type { AppTestOptions, AppManifestEnvelope } from '@agentis/sdk';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
 
 // When the CLI is published to npm and run via `npx`, the bundled web SPA
@@ -92,8 +80,10 @@ Environment:
 Run \`agentis up\` and open http://127.0.0.1:3737 in your browser.
 `;
 
-function dataDir(): string {
-  return process.env.AGENTIS_DATA_DIR ?? resolveDefaultDataDir();
+async function dataDir(): Promise<string> {
+  if (process.env.AGENTIS_DATA_DIR) return process.env.AGENTIS_DATA_DIR;
+  const { resolveDefaultDataDir } = await import('@agentis/api/defaultDataDir');
+  return resolveDefaultDataDir();
 }
 
 function timestampSlug(): string {
@@ -124,6 +114,7 @@ function parseFlags(argv: string[]): { positionals: string[]; flags: Record<stri
 
 async function runUp(): Promise<void> {
   maybeBindBundledWebDist();
+  const { bootstrap } = await import('@agentis/api/bootstrap');
   const handle = await bootstrap();
   const { url } = await handle.start();
 
@@ -154,7 +145,10 @@ async function runUp(): Promise<void> {
 
 async function runBackupCmd(argv: string[]): Promise<number> {
   const { flags } = parseFlags(argv);
-  const src = dataDir();
+  const [{ createBackup }, src] = await Promise.all([
+    import('@agentis/api/backup'),
+    dataDir(),
+  ]);
   const out =
     typeof flags.out === 'string'
       ? flags.out
@@ -179,10 +173,11 @@ async function runRestoreCmd(argv: string[]): Promise<number> {
     process.stderr.write(`agentis restore requires a backup directory.\nUsage: agentis restore <dir> [--force] [--data-dir <dir>]\n`);
     return 2;
   }
-  const targetDataDir = typeof flags['data-dir'] === 'string' ? (flags['data-dir'] as string) : dataDir();
+  const targetDataDir = typeof flags['data-dir'] === 'string' ? (flags['data-dir'] as string) : await dataDir();
   const force = flags.force === true;
 
   try {
+    const { restoreBackup } = await import('@agentis/api/backup');
     const result = await restoreBackup({ backupDir, dataDir: targetDataDir, force });
     process.stdout.write(
       `Restored ${result.files.length} file(s) into ${result.dataDir}\n  files: ${result.files.join(', ')}\n`,
@@ -203,6 +198,7 @@ async function runCreateCmd(argv: string[]): Promise<number> {
   }
 
   try {
+    const { buildAgentisApp, createStarterApp } = await import('@agentis/sdk');
     const dir = resolve(destination);
     if (existsSync(dir) && (await readdir(dir)).length > 0) {
       throw new Error(`target directory is not empty: ${dir}`);
@@ -231,7 +227,7 @@ async function runCreateCmd(argv: string[]): Promise<number> {
     process.stdout.write(`Created ${manifest.identity.name} in ${dir}\n`);
 
     if (flags.install === true) {
-      const client = appClient(flags);
+      const client = await appClient(flags);
       const preview = await client.previewAppImport(envelope);
       const installed = await client.importApp(envelope, { permissionsAcknowledged: preview.data.permissions });
       process.stdout.write(`Installed app ${installed.data.appId}\n`);
@@ -289,20 +285,22 @@ async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-function verifyEnvelopeChecksum(envelope: AppManifestEnvelope): void {
+async function verifyEnvelopeChecksum(envelope: AppManifestEnvelope): Promise<void> {
+  const { canonicalizeManifest } = await import('@agentis/core');
   const checksum = createHash('sha256').update(canonicalizeManifest(envelope.manifest)).digest('hex');
   if (checksum !== envelope.checksum) {
     throw new Error('checksum mismatch: package is corrupt or tampered');
   }
 }
 
-function appClient(flags: Record<string, string | true>) {
+async function appClient(flags: Record<string, string | true>) {
   const url = typeof flags.url === 'string' ? flags.url : undefined;
   const key = typeof flags['api-key'] === 'string' ? flags['api-key'] : undefined;
   const workspaceId = typeof flags['workspace-id'] === 'string' ? flags['workspace-id'] : undefined;
   if (!url || !key || !workspaceId) {
     throw new Error('requires --url <url> --api-key <key> --workspace-id <id>');
   }
+  const { createAgentisClient } = await import('@agentis/sdk');
   return createAgentisClient({ baseUrl: url, token: key, workspaceId });
 }
 
@@ -314,13 +312,18 @@ async function runAppCmd(argv: string[]): Promise<number> {
       process.stdout.write('Usage: agentis app <validate|pack|test|install|export> ...\n');
       return 0;
     }
+    const {
+      buildAgentisApp,
+      validateAgentisApp,
+      validateAppManifest,
+    } = await import('@agentis/sdk');
     if (sub === 'validate') {
       const file = positionals[0];
       if (!file) throw new Error('agentis app validate requires a file');
       const value = await readJsonFile(file);
       if (value && typeof value === 'object' && (value as { format?: unknown }).format === '.agentisapp') {
         const envelope = validateAgentisApp(value);
-        verifyEnvelopeChecksum(envelope);
+        await verifyEnvelopeChecksum(envelope);
         process.stdout.write(`Valid .agentisapp: ${envelope.manifest.identity.name} v${envelope.manifest.identity.version}\n`);
       } else {
         const manifest = validateAppManifest(value);
@@ -344,9 +347,9 @@ async function runAppCmd(argv: string[]): Promise<number> {
       if (!file) throw new Error('agentis app test requires a .agentisapp file');
       if (!specFile) throw new Error('agentis app test requires --spec <file>');
       const envelope = validateAgentisApp(await readJsonFile(file));
-      verifyEnvelopeChecksum(envelope);
+      await verifyEnvelopeChecksum(envelope);
       const spec = await readJsonFile(specFile) as AppTestOptions;
-      const result = await appClient(flags).testApp(envelope, spec);
+      const result = await (await appClient(flags)).testApp(envelope, spec);
       process.stdout.write(`Passed ${result.data.assertions.length} assertion(s) across ${result.data.surfaces.length} surface(s)\n`);
       return 0;
     }
@@ -354,8 +357,8 @@ async function runAppCmd(argv: string[]): Promise<number> {
       const file = positionals[0];
       if (!file) throw new Error('agentis app install requires a .agentisapp file');
       const envelope = validateAgentisApp(await readJsonFile(file));
-      verifyEnvelopeChecksum(envelope);
-      const client = appClient(flags);
+      await verifyEnvelopeChecksum(envelope);
+      const client = await appClient(flags);
       const preview = await client.previewAppImport(envelope);
       process.stdout.write(
         `Installing ${preview.data.identity.name} v${preview.data.identity.version} ` +
@@ -370,9 +373,9 @@ async function runAppCmd(argv: string[]): Promise<number> {
     if (sub === 'export') {
       const appId = positionals[0];
       if (!appId) throw new Error('agentis app export requires an app id');
-      const client = appClient(flags);
+      const client = await appClient(flags);
       const exported = await client.exportApp(appId);
-      verifyEnvelopeChecksum(exported.data);
+      await verifyEnvelopeChecksum(exported.data);
       const out = typeof flags.out === 'string' ? flags.out : `${exported.data.manifest.identity.slug}.agentisapp`;
       await writeJsonFile(out, exported.data);
       process.stdout.write(`Exported ${exported.data.manifest.identity.name} to ${out}\n`);

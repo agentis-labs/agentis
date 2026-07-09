@@ -6,7 +6,7 @@
 #
 # What it does:
 #   1. Verifies Node ≥ 20.10 is on PATH (offers a hint if not).
-#   2. Runs `npx agentis@latest up`, which generates secrets, initialises
+#   2. Runs `npx @agentis-labs/cli@latest up`, which generates secrets, initialises
 #      SQLite, seeds the operator user, and starts the server on :3737.
 
 set -eu
@@ -39,4 +39,4 @@ if ! command -v npx >/dev/null 2>&1; then
 fi
 
 info "Node ${NODE_VERSION} detected. Starting Agentis…"
-exec npx --yes agentis@latest up "$@"
+exec npx --yes @agentis-labs/cli@latest up "$@"

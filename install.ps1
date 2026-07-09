@@ -5,7 +5,7 @@
 #
 # What it does:
 #   1. Verifies Node >= 20.10 is on PATH (offers a hint if not).
-#   2. Runs `npx agentis@latest up`, which generates secrets, initialises
+#   2. Runs `npx @agentis-labs/cli@latest up`, which generates secrets, initialises
 #      SQLite, seeds the operator user, and starts the server on :3737.
 
 $ErrorActionPreference = 'Stop'
@@ -37,5 +37,5 @@ if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
 }
 
 Write-Info "Node $nodeVersion detected. Starting Agentis..."
-& npx --yes agentis@latest up @args
+& npx --yes @agentis-labs/cli@latest up @args
 exit $LASTEXITCODE
