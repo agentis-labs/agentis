@@ -1,4 +1,4 @@
-﻿/**
+/**
  * AppEditorPage — the single editor for an Agentic App (route `/apps/:id`).
  *
  * One primitive, one page. The familiar workflow-canvas chrome with facet tabs:
@@ -17,6 +17,8 @@ import {
   ArrowLeft,
   BrainCircuit,
   Boxes,
+  ChevronLeft,
+  ChevronRight,
   Code2,
   Copy,
   Database,
@@ -48,7 +50,6 @@ import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
 import { AppTeamStrip } from '../components/apps/AppTeamStrip';
-import { AppLearningsPanel } from '../components/apps/AppLearningsPanel';
 import { AppDataGrid } from '../components/apps/AppDataGrid';
 import { AppEngineModal, type AppEngineDomain, type AppEngineAgent } from '../components/apps/AppEngineModal';
 import { SurfaceCanvas } from '../components/apps/SurfaceCanvas';
@@ -825,14 +826,6 @@ function WorkflowFacet({
             ) : null}
           </div>
         ))}
-        <button
-          type="button"
-          onClick={onAdd}
-          disabled={busy}
-          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
-        >
-          {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
-        </button>
         <input
           ref={importInputRef}
           type="file"
@@ -844,16 +837,36 @@ function WorkflowFacet({
             if (file) onImport(file);
           }}
         />
-        <button
-          type="button"
-          onClick={() => importInputRef.current?.click()}
-          disabled={busy}
-          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
-          title="Import workflow YAML"
-        >
-          {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-          Import
-        </button>
+        {/* One add affordance: start from scratch or import (no separate button). */}
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              type="button"
+              disabled={busy}
+              aria-label="Add workflow"
+              title="Add workflow"
+              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content align="end" className="z-50 min-w-[180px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
+              <DropdownMenu.Item
+                onClick={onAdd}
+                className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+              >
+                <Plus size={12} /> Start from scratch
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                onClick={() => importInputRef.current?.click()}
+                className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+              >
+                <Download size={12} /> Import YAML
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
       <div className="min-h-0 flex-1">
         {selectedId ? <WorkflowCanvasPage key={`${selectedId}:${reloadKey}`} embedded workflowId={selectedId} /> : null}
@@ -913,6 +926,7 @@ function InterfaceFacet({
 }) {
   const confirm = useConfirm();
   const [mode, setMode] = useState<BuilderMode>('live');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [renamingSurface, setRenamingSurface] = useState<string | null>(null);
   const [surfaceNameDraft, setSurfaceNameDraft] = useState('');
   const [menuOpenSurface, setMenuOpenSurface] = useState<string | null>(null);
@@ -998,124 +1012,154 @@ function InterfaceFacet({
 
   return (
     <div className="flex h-full min-h-0">
-      {/* Inner sidebar: the interface's pages live here (not in a top header), so
-          the surface itself gets the full width. Add + mode also live here. */}
-      <aside className="flex w-48 shrink-0 flex-col border-r border-line bg-surface">
-        <div className="flex items-center justify-between px-3 py-2">
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Pages</span>
-          <button
-            type="button"
-            onClick={onCreate}
-            disabled={creating}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
-            aria-label="Add surface"
-            title="Add page"
-          >
-            {creating ? <Loader2 size={12} className="animate-spin" /> : <Plus size={13} />}
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
-          {surfaces.map((surface) => (
-            <div
-              key={surface.id}
-              className={clsx(
-                'group flex items-center rounded-btn text-[12px]',
-                selected === surface.name ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-canvas hover:text-text-primary',
-              )}
-            >
-              {renamingSurface === surface.name ? (
-                <input
-                  autoFocus
-                  value={surfaceNameDraft}
-                  onChange={(event) => setSurfaceNameDraft(event.target.value)}
-                  onBlur={() => void commitSurfaceRename(surface.name)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') void commitSurfaceRename(surface.name);
-                    if (event.key === 'Escape') setRenamingSurface(null);
-                  }}
-                  className="h-7 w-full rounded-md border border-line bg-canvas px-2 text-[12px] text-text-primary outline-none focus:border-accent"
-                  aria-label="Surface name"
-                />
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => { onSelect(surface.name); setSelectedPath([]); }}
-                  onContextMenu={(e) => { e.preventDefault(); setMenuOpenSurface(surface.name); }}
-                  className="h-7 min-w-0 flex-1 truncate px-2 text-left"
-                >
-                  {surface.name}
-                </button>
-              )}
-              {renamingSurface !== surface.name ? (
-                <DropdownMenu.Root open={menuOpenSurface === surface.name} onOpenChange={(open) => setMenuOpenSurface(open ? surface.name : null)}>
-                  <DropdownMenu.Trigger asChild>
-                    <button
-                      type="button"
-                      className={clsx("mr-1 rounded-btn p-1 hover:bg-canvas", menuOpenSurface === surface.name ? "opacity-100 text-text-primary" : "opacity-0 group-hover:opacity-100 text-text-muted")}
-                      title="More actions"
-                    >
-                      <MoreVertical size={11} />
-                    </button>
-                  </DropdownMenu.Trigger>
-                  <DropdownMenu.Portal>
-                    <DropdownMenu.Content align="start" className="z-50 min-w-[140px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
-                      <DropdownMenu.Item
-                        onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
-                        className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
-                      >
-                        <Pencil size={12} /> Rename
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Item
-                        onClick={() => {
-                          if (selected !== surface.name) {
-                            onSelect(surface.name);
-                            setSelectedPath([]);
-                          }
-                          setTimeout(() => onDuplicateSurface(), 0);
-                        }}
-                        className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
-                      >
-                        <Copy size={12} /> Duplicate
-                      </DropdownMenu.Item>
-                      <DropdownMenu.Separator className="my-1 h-px bg-line" />
-                      <DropdownMenu.Item
-                        onClick={async () => {
-                          const ok = await confirm({
-                            title: `Delete surface "${surface.name}"?`,
-                            body: 'This action cannot be undone.',
-                            tone: 'danger',
-                            confirmLabel: 'Delete',
-                          });
-                          if (ok) onDeleteSurface(surface.name);
-                        }}
-                        className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-red-500 outline-none hover:bg-red-500/10 focus:bg-red-500/10"
-                      >
-                        <Trash2 size={12} /> Delete
-                      </DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Portal>
-                </DropdownMenu.Root>
-              ) : null}
-            </div>
-          ))}
-        </div>
-        {/* Mode: view Live, Edit visually, or hand-edit the Code. */}
-        <div className="grid grid-cols-3 gap-0.5 border-t border-line p-1.5">
-          {([
-            { id: 'live', label: 'Live', icon: <Eye size={13} /> },
-            { id: 'edit', label: 'Edit', icon: <SquareStack size={13} /> },
-            { id: 'code', label: 'Code', icon: <Code2 size={13} /> },
-          ] as Array<{ id: BuilderMode; label: string; icon: ReactNode }>).map((segment) => (
+      {/* Inner sidebar: the interface's pages live here (single, collapsible). The
+          live runtime's own page nav is suppressed in-editor so there's just one.
+          Live is the default; Edit / Edit code are in each page's ⋯ menu. */}
+      <aside className={clsx('relative flex shrink-0 flex-col border-r border-line bg-surface transition-all duration-300 ease-in-out', sidebarCollapsed ? 'w-11' : 'w-52')}>
+        <div className={clsx('flex items-center justify-between gap-1 px-2 py-2', sidebarCollapsed ? 'justify-center' : '')}>
+          {!sidebarCollapsed && <span className="pl-1 text-[11px] font-semibold uppercase tracking-wide text-text-muted">Pages</span>}
+          {!sidebarCollapsed && (
             <button
-              key={segment.id}
               type="button"
-              onClick={() => setMode(segment.id)}
-              className={clsx('inline-flex h-7 items-center justify-center gap-1 rounded-md text-[11px]', mode === segment.id ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-primary')}
+              onClick={onCreate}
+              disabled={creating}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+              aria-label="Add surface"
+              title="Add page"
             >
-              {segment.icon} {segment.label}
+              {creating ? <Loader2 size={12} className="animate-spin" /> : <Plus size={13} />}
             </button>
-          ))}
+          )}
         </div>
+        <button
+          type="button"
+          onClick={() => setSidebarCollapsed((v) => !v)}
+          title={sidebarCollapsed ? 'Expand pages' : 'Collapse pages'}
+          className={clsx(
+            'absolute top-6 z-50 flex h-6 w-6 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-full border border-line bg-surface text-text-muted shadow-sm transition-all duration-300 ease-in-out hover:bg-surface-2 hover:text-text-primary right-0'
+          )}
+        >
+          {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+        </button>
+
+        {sidebarCollapsed ? (
+          <div className="flex flex-col items-center gap-1 px-1.5 pb-1.5">
+            {surfaces.map((surface) => (
+              <button
+                key={surface.id}
+                type="button"
+                onClick={() => { onSelect(surface.name); setSelectedPath([]); }}
+                title={surface.name}
+                aria-label={surface.name}
+                className={clsx(
+                  'flex h-8 w-8 items-center justify-center rounded-btn text-[12px] font-medium uppercase',
+                  selected === surface.name ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-canvas hover:text-text-primary',
+                )}
+              >
+                {surface.name.slice(0, 1)}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
+            {surfaces.map((surface) => (
+              <div
+                key={surface.id}
+                className={clsx(
+                  'group flex items-center rounded-btn text-[12px]',
+                  selected === surface.name ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-canvas hover:text-text-primary',
+                )}
+              >
+                {renamingSurface === surface.name ? (
+                  <input
+                    autoFocus
+                    value={surfaceNameDraft}
+                    onChange={(event) => setSurfaceNameDraft(event.target.value)}
+                    onBlur={() => void commitSurfaceRename(surface.name)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void commitSurfaceRename(surface.name);
+                      if (event.key === 'Escape') setRenamingSurface(null);
+                    }}
+                    className="h-7 w-full rounded-md border border-line bg-canvas px-2 text-[12px] text-text-primary outline-none focus:border-accent"
+                    aria-label="Surface name"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { onSelect(surface.name); setSelectedPath([]); setMode('live'); }}
+                    onContextMenu={(e) => { e.preventDefault(); setMenuOpenSurface(surface.name); }}
+                    className="h-7 min-w-0 flex-1 truncate px-2 text-left"
+                  >
+                    {surface.name}
+                  </button>
+                )}
+                {renamingSurface !== surface.name ? (
+                  <DropdownMenu.Root open={menuOpenSurface === surface.name} onOpenChange={(open) => setMenuOpenSurface(open ? surface.name : null)}>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className={clsx("mr-1 rounded-btn p-1 hover:bg-canvas", menuOpenSurface === surface.name ? "opacity-100 text-text-primary" : "opacity-0 group-hover:opacity-100 text-text-muted")}
+                        title="More actions"
+                      >
+                        <MoreVertical size={11} />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content align="start" className="z-50 min-w-[150px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
+                        <DropdownMenu.Item
+                          onClick={() => { onSelect(surface.name); setSelectedPath([]); setTimeout(() => setMode('edit'), 0); }}
+                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                        >
+                          <SquareStack size={12} /> Edit
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item
+                          onClick={() => { onSelect(surface.name); setSelectedPath([]); setTimeout(() => setMode('code'), 0); }}
+                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                        >
+                          <Code2 size={12} /> Edit code
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator className="my-1 h-px bg-line" />
+                        <DropdownMenu.Item
+                          onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
+                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                        >
+                          <Pencil size={12} /> Rename
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item
+                          onClick={() => {
+                            if (selected !== surface.name) {
+                              onSelect(surface.name);
+                              setSelectedPath([]);
+                            }
+                            setTimeout(() => onDuplicateSurface(), 0);
+                          }}
+                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
+                        >
+                          <Copy size={12} /> Duplicate
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator className="my-1 h-px bg-line" />
+                        <DropdownMenu.Item
+                          onClick={async () => {
+                            const ok = await confirm({
+                              title: `Delete surface "${surface.name}"?`,
+                              body: 'This action cannot be undone.',
+                              tone: 'danger',
+                              confirmLabel: 'Delete',
+                            });
+                            if (ok) onDeleteSurface(surface.name);
+                          }}
+                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-red-500 outline-none hover:bg-red-500/10 focus:bg-red-500/10"
+                        >
+                          <Trash2 size={12} /> Delete
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
       </aside>
 
       {/* Main column: contextual edit toolbar (only when editing) + body. */}
@@ -1205,7 +1249,7 @@ function InterfaceFacet({
         ) : mode === 'live' ? (
           <div className="h-full overflow-auto bg-canvas">
             {current ? (
-              <AppRuntime key={`${current.name}:${previewKey}`} appId={appId} surfaceName={current.name} />
+              <AppRuntime key={`${current.name}:${previewKey}`} appId={appId} surfaceName={current.name} hideShellNav />
             ) : (
               <div className="flex h-full items-center justify-center text-text-muted">No surface selected</div>
             )}
@@ -1560,15 +1604,12 @@ function AppAssets({ appId }: { appId: string }) {
 // ── Brain facet — the App's intelligence (memory bound to this App) ──────────
 
 function BrainFacet({ app }: { app: AppRecord }) {
-  // forms and the records promoted via data_promote_memory (AGENTIC-APPS-10X §5.4).
-  // The learnings panel above surfaces "what this agent learned" (Phase M2) so the
-  // improvement loop is visible, not just recorded.
+  // Everything the App has learned — promoted records, memory, and lessons — is
+  // shown as nodes in the scoped Brain map (with an Insights list behind the nav).
+  // No separate "what this agent learned" panel; the map IS the surface.
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <AppLearningsPanel appId={app.id} />
-      <div className="min-h-0 flex-1">
-        <WorkflowBrainTab workflow={{ id: app.id, title: app.name }} kind="app" />
-      </div>
+      <WorkflowBrainTab workflow={{ id: app.id, title: app.name }} kind="app" />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FileCode, Plus, Trash2, Sparkles, Lightbulb, Upload } from 'lucide-react';
-import { apiErrorMessage } from '../../lib/api';
+import { api, apiErrorMessage } from '../../lib/api';
 import { skillsApi, type SkillListItem, type SkillDetail, type LinkedAtom } from '../../lib/skills';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
@@ -17,29 +17,56 @@ interface Draft {
 const EMPTY_DRAFT: Draft = { id: null, name: '', description: '', body: '' };
 
 
-export function SkillsTab() {
+export function SkillsTab({
+  scopeId = null,
+  scopeName,
+}: {
+  scopeId?: string | null;
+  scopeName?: string;
+}) {
   const [skills, setSkills] = useState<SkillListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [linked, setLinked] = useState<{ examples: LinkedAtom[]; lessons: LinkedAtom[] }>({ examples: [], lessons: [] });
   const [saving, setSaving] = useState(false);
+  const [names, setNames] = useState<Record<string, string>>({});
+  const dropInputRef = useRef<HTMLInputElement | null>(null);
   const toast = useToast();
   const confirm = useConfirm();
+
+  useEffect(() => {
+    void api<{ agents: Array<{ id: string; name: string }> }>('/v1/agents')
+      .then((res) => setNames(Object.fromEntries((res.agents ?? []).map((a) => [a.id, a.name]))))
+      .catch(() => undefined);
+  }, []);
 
   const load = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true);
     try {
-      setSkills((await skillsApi.list()).skills);
+      setSkills((await skillsApi.list(scopeId ? { scopeId, includeWorkspace: false } : undefined)).skills);
     } catch (error) {
       toast.error('Failed to load skills', apiErrorMessage(error));
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [scopeId, toast]);
 
   useEffect(() => { void load(true); }, [load]);
 
   const openNew = () => { setDraft({ ...EMPTY_DRAFT }); setLinked({ examples: [], lessons: [] }); };
+
+  // Drop or pick a SKILL.md → open the editor pre-filled so the operator can
+  // review it before saving into the current Brain scope.
+  const openFromFile = async (file: File) => {
+    try {
+      const parsed = parseSkillMarkdown(await file.text(), file.name);
+      setLinked({ examples: [], lessons: [] });
+      setDraft({ id: null, name: parsed.name, description: parsed.description, body: parsed.body });
+    } catch (error) {
+      toast.error('Could not read skill file', apiErrorMessage(error));
+    }
+  };
+  const scopeLabel = (scopeId: string | null) => (scopeId ? (names[scopeId] ?? 'scoped agent') : 'all agents');
 
   const openEdit = async (id: string) => {
     try {
@@ -60,7 +87,7 @@ export function SkillsTab() {
         await skillsApi.update(draft.id, { name: draft.name, description: draft.description, body: draft.body });
         toast.success('Skill updated', draft.name);
       } else {
-        await skillsApi.create({ name: draft.name, description: draft.description, body: draft.body, scopeId: null });
+        await skillsApi.create({ name: draft.name, description: draft.description, body: draft.body, scopeId });
         toast.success('Skill created', draft.name);
       }
       setDraft(null);
@@ -94,11 +121,31 @@ export function SkillsTab() {
         <div>
           <h2 className="text-subheading text-text-primary">Skills</h2>
           <p className="mt-0.5 text-[12px] leading-5 text-text-muted">
-            Reusable procedures your agents load on demand. Each is a real <span className="font-mono">SKILL.md</span> on disk plus a Brain atom whose confidence moves with real run outcomes.
+            {scopeId
+              ? `Reusable procedures owned by ${scopeName?.trim() || 'this agent'}. Each is a real SKILL.md plus a Brain atom whose confidence moves with outcomes.`
+              : <>Reusable procedures your agents load on demand. Each is a real <span className="font-mono">SKILL.md</span> on disk plus a Brain atom whose confidence moves with real run outcomes.</>}
           </p>
         </div>
         <Button variant="primary" size="sm" iconLeft={<Plus size={13} />} onClick={openNew}>New skill</Button>
       </div>
+
+      {/* Always-present: drop a SKILL.md (or click to pick) to add a skill. */}
+      <input
+        ref={dropInputRef}
+        type="file"
+        accept=".md,text/markdown,text/plain"
+        className="hidden"
+        onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void openFromFile(f); e.currentTarget.value = ''; }}
+      />
+      <button
+        type="button"
+        onClick={() => dropInputRef.current?.click()}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) void openFromFile(f); }}
+        className="mb-4 flex w-full items-center justify-center gap-2 rounded-card border border-dashed border-line px-4 py-3 text-[12px] text-text-muted transition-colors hover:border-accent/50 hover:bg-accent-soft/30 hover:text-text-secondary"
+      >
+        <Upload size={14} /> Drop a <span className="font-mono">SKILL.md</span> here, or click to pick one from your machine
+      </button>
 
       {loading ? (
         <div className="flex flex-col gap-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-20 w-full rounded-card" />)}</div>
@@ -119,7 +166,7 @@ export function SkillsTab() {
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-card border border-accent/20 bg-accent-soft text-accent"><FileCode size={15} /></span>
                 <button type="button" onClick={() => void openEdit(skill.id)} className="min-w-0 flex-1 text-left">
                   <div className="truncate text-[13px] font-medium text-text-primary">{skill.name}</div>
-                  <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{skill.slug}{skill.scopeId ? ` · scoped` : ''}</div>
+                  <div className="mt-0.5 truncate font-mono text-[11px] text-text-muted">{skill.slug} · {scopeLabel(skill.scopeId)}</div>
                   {skill.description && <div className="mt-1 line-clamp-1 text-[12px] leading-5 text-text-secondary">{skill.description}</div>}
                 </button>
                 <ConfidencePill value={skill.confidence} />

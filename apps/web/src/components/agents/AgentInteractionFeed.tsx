@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { MessageSquare, GitBranch, RefreshCw, ChevronRight } from 'lucide-react';
 import { listInteractions, type InteractionEvent } from '../../lib/connections';
-import { apiErrorMessage } from '../../lib/api';
+import { api, apiErrorMessage } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
 import { Skeleton } from '../shared/Skeleton';
 
@@ -22,6 +22,19 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Resolve actor/room ids → friendly names (agents show their name; unknown ids
+  // are shortened instead of dumping a raw UUID).
+  const [names, setNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    void api<{ agents: Array<{ id: string; name: string }> }>('/v1/agents')
+      .then((res) => setNames(Object.fromEntries((res.agents ?? []).map((a) => [a.id, a.name]))))
+      .catch(() => undefined);
+  }, []);
+  const nameFor = useCallback((id: string | null | undefined): string => {
+    if (!id) return '—';
+    if (names[id]) return names[id]!;
+    return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+  }, [names]);
 
   const load = useCallback(async () => {
     try {
@@ -71,7 +84,7 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 text-[11px] text-text-muted">
-                      <span className="font-mono">{e.actor.id ?? e.actor.type}</span>
+                      <span className="font-medium text-text-secondary">{e.actor.id ? nameFor(e.actor.id) : e.actor.type}</span>
                       <span className="rounded bg-bg px-1.5 py-0.5">{e.eventType}</span>
                       <span className="ml-auto">{formatTime(e.at)}</span>
                     </div>
@@ -83,9 +96,9 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
                   <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line/70 px-2.5 py-2 text-[11px]">
                     <dt className="text-text-muted">Kind</dt><dd className="text-text-secondary">{e.kind}</dd>
                     <dt className="text-text-muted">Event</dt><dd className="font-mono text-text-secondary">{e.eventType}</dd>
-                    <dt className="text-text-muted">Actor</dt><dd className="font-mono text-text-secondary">{e.actor.type}{e.actor.id ? ` · ${e.actor.id}` : ''}</dd>
-                    {e.entity ? (<><dt className="text-text-muted">Entity</dt><dd className="font-mono text-text-secondary">{e.entity.type} · {e.entity.id}</dd></>) : null}
-                    {e.roomId ? (<><dt className="text-text-muted">Room</dt><dd className="font-mono text-text-secondary">{e.roomId}</dd></>) : null}
+                    <dt className="text-text-muted">Actor</dt><dd className="text-text-secondary">{e.actor.type}{e.actor.id ? <> · {nameFor(e.actor.id)} <span className="font-mono text-text-muted">({e.actor.id.slice(0, 8)})</span></> : ''}</dd>
+                    {e.entity ? (<><dt className="text-text-muted">Entity</dt><dd className="text-text-secondary">{e.entity.type} · {nameFor(e.entity.id)}</dd></>) : null}
+                    {e.roomId ? (<><dt className="text-text-muted">Room</dt><dd className="text-text-secondary">{nameFor(e.roomId)}</dd></>) : null}
                     <dt className="text-text-muted">When</dt><dd className="text-text-secondary">{new Date(e.at).toLocaleString()}</dd>
                   </dl>
                 )}

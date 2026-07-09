@@ -18,9 +18,13 @@ vi.mock('socket.io-client', () => ({
   io: () => ({ on: () => {}, off: () => {}, emit: () => {}, disconnect: () => {}, io: { on: () => {} } }),
 }));
 
+function matchesFilter(row: Record<string, unknown>, filter: Record<string, unknown> = {}): boolean {
+  return Object.entries(filter).every(([key, expected]) => row[key] === expected);
+}
+
 function stubClient(rows: Array<Record<string, unknown>> = []): AgentisAppClient {
   return {
-    data: { query: vi.fn(async () => rows) },
+    data: { query: vi.fn(async (_collection, query) => rows.filter((row) => matchesFilter(row, query?.filter))) },
     state: { get: async () => undefined, set: async () => {}, subscribe: () => () => {} },
     actions: { invoke: vi.fn(async () => ({})) },
     navigation: { go: async () => {} },
@@ -155,6 +159,27 @@ describe('binding markers + design-var spacing (E1)', () => {
     const stack = container.querySelector('.flex-col') as HTMLElement;
     expect(stack.style.gap).toContain('--s-gap');
   });
+
+  it('renders legacy count templates as human KPI numbers, never raw moustache text', async () => {
+    const { container } = renderNode(
+      {
+        type: 'KPIStrip',
+        items: [
+          { label: 'Qualified leads', value: '{{count:fashion leads}}' },
+          { label: 'Positive replies', value: '{{count:fashion leads.stage:positive}}' },
+        ],
+      },
+      [
+        { id: '1', stage: 'positive' },
+        { id: '2', stage: 'greeted' },
+        { id: '3', stage: 'positive' },
+      ],
+    );
+
+    await waitFor(() => expect(screen.getByText('3')).toBeTruthy());
+    expect(screen.getByText('2')).toBeTruthy();
+    expect(container.textContent).not.toContain('{{count:');
+  });
 });
 
 /**
@@ -201,6 +226,7 @@ describe('WorkflowControl block (E3)', () => {
     const runSpy = vi.spyOn(appsApi, 'runAppWorkflow').mockResolvedValue({ runId: 'run-1' });
     renderNode({ type: 'WorkflowControl' } as ViewNode);
 
+    await userEvent.click(await screen.findByRole('button', { name: /expand/i }));
     expect(await screen.findByText('Lead Qualifier')).toBeTruthy();
     expect(screen.getByText('Scores inbound leads')).toBeTruthy();
     expect(screen.getByText('webhook')).toBeTruthy();

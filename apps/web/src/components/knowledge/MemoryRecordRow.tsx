@@ -1,105 +1,122 @@
-﻿import { useEffect, useState } from 'react';
-import { Pencil, Save, Trash2, X } from 'lucide-react';
-import { Button } from '../shared/Button';
+import { useEffect, useState } from 'react';
+import { Pencil, Save, Trash2, X, ChevronRight, Check } from 'lucide-react';
+import { api } from '../../lib/api';
+import { useToast } from '../shared/Toast';
 import type { MemoryRecordRowData } from './types';
 
 export function MemoryRecordRow({
   entry,
-  onArchive,
-  onSave,
+  selected,
+  onToggleSelect,
+  onUpdated,
+  onDeleted,
 }: {
   entry: MemoryRecordRowData;
-  onArchive?: (id: string) => void;
-  onSave?: (id: string, patch: { title?: string; content?: string }) => Promise<void> | void;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
+  onUpdated?: (next: MemoryRecordRowData) => void;
+  onDeleted?: (id: string) => void;
 }) {
   const kind = entry.kind ?? entry.type ?? 'memory';
   const trust = entry.trust ?? entry.confidence ?? 1;
-  const [editing, setEditing] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(entry.title ?? '');
   const [draftContent, setDraftContent] = useState(entry.content);
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setDraftTitle(entry.title ?? '');
-    setDraftContent(entry.content);
-    setEditing(false);
-  }, [entry.id, entry.title, entry.content]);
+  const toast = useToast();
 
   async function saveEdit() {
-    if (!onSave || !draftContent.trim()) return;
+    const content = draftContent.trim();
+    if (!content) return;
     setSaving(true);
     try {
-      await onSave(entry.id, {
-        title: draftTitle.trim() || undefined,
-        content: draftContent.trim(),
+      await api(`/v1/memory/${entry.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          title: draftTitle.trim() || undefined,
+          content,
+        }),
       });
+      onUpdated?.({ ...entry, title: draftTitle.trim() || entry.title, content });
       setEditing(false);
+      toast.success('Memory updated');
+    } catch (err) {
+      toast.error('Failed to update memory', String(err));
     } finally {
       setSaving(false);
     }
   }
 
+  async function remove() {
+    try {
+      await api(`/v1/memory/${entry.id}`, { method: 'DELETE' });
+      onDeleted?.(entry.id);
+    } catch (err) {
+      toast.error('Failed to archive memory', String(err));
+    }
+  }
+
   return (
-    <article className="rounded-card border border-line bg-surface p-4">
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
+    <article className={`rounded-card border bg-surface ${selected ? 'border-accent/50 ring-1 ring-accent/30' : 'border-line'}`}>
+      <div className="flex items-start gap-2.5 p-3">
+        {onToggleSelect && (
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={() => onToggleSelect(entry.id)}
+            className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-line bg-surface text-accent"
+            aria-label="Select memory"
+          />
+        )}
+        <button type="button" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded} className="min-w-0 flex-1 text-left">
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
             <KindBadge kind={kind} />
             <SourceBadge source={entry.sourceType ?? entry.source ?? 'operator'} />
             {entry.createdAt && <span className="ml-auto">{relativeTime(entry.createdAt)}</span>}
           </div>
+          <h3 className="mt-1.5 text-[13px] font-semibold text-text-primary">{entry.title ?? entry.content}</h3>
+          {!expanded && <p className="mt-0.5 truncate text-[12px] text-text-secondary">{entry.content}</p>}
+        </button>
+        <ChevronRight size={15} className={`mt-0.5 shrink-0 text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`} />
+      </div>
+
+      {expanded && (
+        <div className="border-t border-line/70 px-3 py-3">
           {editing ? (
-            <div className="mt-3 space-y-2">
+            <div className="space-y-2">
               <input
                 value={draftTitle}
-                onChange={(event) => setDraftTitle(event.target.value)}
-                placeholder="Memory title"
-                className="h-9 w-full rounded-input border border-line bg-canvas px-3 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                onChange={(e) => setDraftTitle(e.target.value)}
+                placeholder="Title"
+                className="w-full rounded-md border border-line bg-canvas px-2.5 py-1.5 text-[13px] font-medium text-text-primary outline-none focus:border-accent"
               />
               <textarea
                 value={draftContent}
-                onChange={(event) => setDraftContent(event.target.value)}
+                onChange={(e) => setDraftContent(e.target.value)}
                 rows={4}
-                className="w-full resize-y rounded-input border border-line bg-canvas px-3 py-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                className="w-full resize-y rounded-md border border-line bg-canvas px-2.5 py-1.5 text-[13px] leading-relaxed text-text-primary outline-none focus:border-accent"
               />
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => void saveEdit()} disabled={saving} className="inline-flex items-center gap-1 rounded-btn bg-accent px-2 py-1 text-[11px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50"><Check size={12} /> Save</button>
+                <button type="button" onClick={() => { setEditing(false); setDraftTitle(entry.title ?? ''); setDraftContent(entry.content); }} className="inline-flex items-center gap-1 rounded-btn px-2 py-1 text-[11px] text-text-muted hover:bg-surface-2"><X size={12} /> Cancel</button>
+              </div>
             </div>
           ) : (
             <>
-              {entry.title && <h3 className="mt-2 text-subheading text-text-primary">{entry.title}</h3>}
-              <p className={`mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary ${!expanded && entry.content.length > 180 ? 'line-clamp-3' : ''}`}>{entry.content}</p>
-              {entry.content.length > 180 && (
-                <button
-                  type="button"
-                  onClick={() => setExpanded(!expanded)}
-                  className="mt-1.5 text-[11px] font-semibold text-accent hover:underline block"
-                >
-                  {expanded ? 'Read less' : 'Read more'}
-                </button>
-              )}
+              <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-text-secondary">{entry.content}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <TrustBar value={trust} />
+                {entry.importance != null && <span className="text-[10px] uppercase tracking-wider text-text-muted">importance {entry.importance}</span>}
+                <div className="ml-auto flex items-center gap-1">
+                  <button type="button" onClick={() => setEditing(true)} className="inline-flex items-center gap-1 rounded-btn px-2 py-1 text-[11px] text-text-muted hover:bg-surface-2 hover:text-text-primary"><Pencil size={12} /> Edit</button>
+                  <button type="button" onClick={() => void remove()} className="inline-flex items-center gap-1 rounded-btn px-2 py-1 text-[11px] text-text-muted hover:bg-danger/10 hover:text-danger"><Trash2 size={12} /> Delete</button>
+                </div>
+              </div>
             </>
           )}
-          <div className="mt-3 flex items-center gap-3">
-            <TrustBar value={trust} />
-            {entry.importance != null && <span className="text-[10px] uppercase tracking-wider text-text-muted">importance {entry.importance}</span>}
-          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {onSave && editing ? (
-            <>
-              <Button variant="ghost" size="sm" iconLeft={<X size={12} />} onClick={() => setEditing(false)}>Cancel</Button>
-              <Button variant="secondary" size="sm" iconLeft={<Save size={12} />} loading={saving} onClick={() => void saveEdit()}>Save</Button>
-            </>
-          ) : onSave ? (
-            <Button variant="ghost" size="sm" iconLeft={<Pencil size={12} />} onClick={() => setEditing(true)}>Edit</Button>
-          ) : null}
-          {onArchive && !editing && (
-            <Button variant="ghost" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => onArchive(entry.id)}>
-              Archive
-            </Button>
-          )}
-        </div>
-      </div>
+      )}
     </article>
   );
 }

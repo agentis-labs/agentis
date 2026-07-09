@@ -1,4 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { schema } from '@agentis/db/sqlite';
 import { buildSkillRoutes } from '../../src/routes/skills.js';
 import { SkillService } from '../../src/services/skillService.js';
 import { MemoryStore } from '../../src/services/memory/memoryStore.js';
@@ -62,6 +64,48 @@ describe('/v1/skills', () => {
     const body = (await res.json()) as { examples: Array<{ content: string }> };
     expect(body.examples).toHaveLength(1);
     expect(body.examples[0]!.content).toContain('flag, migrate, verify');
+  });
+
+  it('creates an example for a skill via POST /:id/examples', async () => {
+    const s = skills.upsertSkill({ workspaceId: ctx.workspace.id, scopeId: null, name: 'Authorable', description: '', body: 'x' });
+    const res = await app().request(`/v1/skills/${s.id}/examples`, {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({ inputText: 'rename a column', outputText: 'add new, backfill, drop old' }),
+    });
+    expect(res.status).toBe(201);
+    const listed = skills.listLinkedExamples(ctx.workspace.id, s.id, 10);
+    expect(listed.some((e) => e.content.includes('backfill'))).toBe(true);
+  });
+
+  it('filters skills and examples to an agent Brain scope', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Research Brain',
+      adapterType: 'http',
+      role: 'worker',
+    }).run();
+
+    const global = skills.upsertSkill({ workspaceId: ctx.workspace.id, scopeId: null, name: 'Global', description: '', body: 'g' });
+    const scoped = skills.upsertSkill({ workspaceId: ctx.workspace.id, scopeId: agentId, name: 'Agent Owned', description: '', body: 'a' });
+    skills.promoteExample({ workspaceId: ctx.workspace.id, skillId: global.id, inputText: 'global input', outputText: 'global output' });
+    skills.promoteExample({ workspaceId: ctx.workspace.id, skillId: scoped.id, inputText: 'agent input', outputText: 'agent output' });
+
+    const scopedSkills = await app().request(`/v1/skills?scopeId=${agentId}&includeWorkspace=false`, { headers: ctx.authHeaders });
+    expect(scopedSkills.status).toBe(200);
+    const scopedSkillsBody = await scopedSkills.json() as { skills: Array<{ name: string; scopeId: string | null }> };
+    expect(scopedSkillsBody.skills.map((skill) => skill.name)).toEqual(['Agent Owned']);
+    expect(scopedSkillsBody.skills[0]!.scopeId).toBe(agentId);
+
+    const scopedExamples = await app().request(`/v1/skills/examples?scopeId=${agentId}&includeWorkspace=false`, { headers: ctx.authHeaders });
+    expect(scopedExamples.status).toBe(200);
+    const scopedExamplesBody = await scopedExamples.json() as { examples: Array<{ content: string; scopeId: string | null }> };
+    expect(scopedExamplesBody.examples).toHaveLength(1);
+    expect(scopedExamplesBody.examples[0]!.content).toContain('agent output');
+    expect(scopedExamplesBody.examples[0]!.scopeId).toBe(agentId);
   });
 
   it('404s an unknown skill', async () => {

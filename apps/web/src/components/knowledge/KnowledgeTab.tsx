@@ -1,7 +1,7 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { BookOpen, ExternalLink, Info, Plus, Save, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
+import { Bot, BookOpen, ExternalLink, Info, Plus, Save, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
@@ -12,18 +12,22 @@ import { WorkspaceDocDropZone } from './WorkspaceDocDropZone';
 import { DocumentList } from './DocumentList';
 import type { KnowledgeBaseRow, KnowledgeDocumentRow } from './types';
 
-type ScopeKind = 'workspace' | 'workflow';
+type ScopeKind = 'workspace' | 'app' | 'agent' | 'workflow';
+type OwnerScope = { id: string; kind: Exclude<ScopeKind, 'workspace'>; title: string };
 type OwnerWorkflow = { id: string; title: string };
 
 type KnowledgeBaseView = KnowledgeBaseRow & {
   scopeId?: string | null;
   scopeKind?: ScopeKind;
+  ownerScope?: OwnerScope | null;
+  /** Legacy API key retained by the backend while clients move to ownerScope. */
   ownerWorkflow?: OwnerWorkflow | null;
   documentCount?: number;
 };
 
 type KnowledgeDocumentView = KnowledgeDocumentRow & {
   knowledgeBaseScopeKind?: ScopeKind;
+  ownerScope?: OwnerScope | null;
   ownerWorkflow?: OwnerWorkflow | null;
 };
 
@@ -36,7 +40,7 @@ interface KnowledgeChunkPreview {
   createdAt?: string;
 }
 
-const GENERIC_WORKFLOW_KNOWLEDGE = 'workflow knowledge';
+const GENERIC_SCOPED_KNOWLEDGE_NAMES = new Set(['workflow knowledge']);
 
 export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeName?: string }) {
   const toast = useToast();
@@ -61,7 +65,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
   const [savingDocument, setSavingDocument] = useState(false);
   const isScoped = Boolean(scopeId);
   const basePath = scopeId ? `/v1/knowledge-bases?scopeId=${encodeURIComponent(scopeId)}` : '/v1/knowledge-bases';
-  const fallbackWorkflowName = scopeName?.trim() || 'Workflow knowledge';
+  const fallbackScopeName = scopeName?.trim() || 'Scoped knowledge';
 
   async function refresh(preferredBaseId?: string | null) {
     setLoading(true);
@@ -75,7 +79,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
           : nextBases[0]?.id ?? null;
       const documentLists = await Promise.all(nextBases.map(async (base) => {
         const data = await api<{ documents: KnowledgeDocumentRow[] }>(`/v1/knowledge-bases/${base.id}/documents`);
-        return (data.documents ?? []).map((document) => decorateDocument(document, base, isScoped, fallbackWorkflowName));
+        return (data.documents ?? []).map((document) => decorateDocument(document, base, isScoped, fallbackScopeName));
       }));
       setBases(nextBases);
       setSelectedBaseId(nextSelected);
@@ -117,9 +121,9 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
     ? documents.filter((document) => document.knowledgeBaseId === selectedBaseId)
     : documents;
   const selectedBase = bases.find((base) => base.id === selectedBaseId);
-  const selectedBaseTitle = selectedBase ? baseTitle(selectedBase, isScoped, fallbackWorkflowName) : 'All documents';
-  const selectedBaseSubtitle = selectedBase ? baseSubtitle(selectedBase, isScoped, fallbackWorkflowName) : 'Every knowledge source in this Brain';
-  const defaultBaseName = isScoped ? fallbackWorkflowName : 'Workspace knowledge';
+  const selectedBaseTitle = selectedBase ? baseTitle(selectedBase, isScoped, fallbackScopeName) : 'All documents';
+  const selectedBaseSubtitle = selectedBase ? baseSubtitle(selectedBase, isScoped, fallbackScopeName) : 'Every knowledge source in this Brain';
+  const defaultBaseName = isScoped ? fallbackScopeName : 'Workspace knowledge';
 
   async function createBase(event: React.FormEvent) {
     event.preventDefault();
@@ -143,7 +147,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
   }
 
   async function deleteBase(base: KnowledgeBaseView) {
-    const title = baseTitle(base, isScoped, fallbackWorkflowName);
+    const title = baseTitle(base, isScoped, fallbackScopeName);
     const ok = await confirm({
       title: `Delete collection "${title}"?`,
       body: 'All documents in this collection will be permanently removed. This action cannot be undone.',
@@ -174,7 +178,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
           description: baseDraftDescription.trim() || null,
         }),
       });
-      toast.success('Collection updated', baseTitle(result.knowledgeBase, isScoped, fallbackWorkflowName));
+      toast.success('Collection updated', baseTitle(result.knowledgeBase, isScoped, fallbackScopeName));
       setInspectedBase(result.knowledgeBase);
       await refresh(result.knowledgeBase.id);
     } catch (error) {
@@ -209,7 +213,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
       );
       const base = baseById.get(document.knowledgeBaseId);
       const decorated = base
-        ? decorateDocument(data.document, base, isScoped, fallbackWorkflowName)
+        ? decorateDocument(data.document, base, isScoped, fallbackScopeName)
         : { ...document, ...data.document };
       setInspectedDocument(decorated);
       setDocumentDraftName(data.document.name);
@@ -243,7 +247,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
       );
       const base = baseById.get(inspectedDocument.knowledgeBaseId);
       const decorated = base
-        ? decorateDocument(data.document, base, isScoped, fallbackWorkflowName)
+        ? decorateDocument(data.document, base, isScoped, fallbackScopeName)
         : { ...inspectedDocument, ...data.document };
       setInspectedDocument(decorated);
       setDocumentDraftName(data.document.name);
@@ -277,17 +281,17 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
           onBaseChange={setSelectedBaseId}
           onUploaded={() => refresh(selectedBaseId)}
           createBasePath={basePath}
-          title={isScoped ? `Drop knowledge for ${fallbackWorkflowName}` : 'Drop knowledge here'}
+          title={isScoped ? `Drop knowledge for ${fallbackScopeName}` : 'Drop knowledge here'}
           description={isScoped
-            ? 'Attached to this workflow Brain, visible from Workspace Brain with workflow provenance.'
-            : 'Workspace knowledge plus workflow-scoped collections, all with visible ownership.'}
+            ? `Attached to ${fallbackScopeName}'s Brain, visible from Workspace Brain with owner provenance when enabled.`
+            : 'Workspace knowledge plus scoped collections, all with visible ownership.'}
           defaultBaseName={defaultBaseName}
           defaultBaseDescription={isScoped
-            ? `Knowledge attached to ${fallbackWorkflowName}.`
+            ? `Knowledge attached to ${fallbackScopeName}.`
             : 'Shared documents available to workflows and agents.'}
-          emptySelectionLabel={isScoped ? `${fallbackWorkflowName} (new)` : 'Workspace knowledge (new)'}
-          newBasePlaceholder={isScoped ? 'Workflow collection name' : 'New collection name'}
-          labelForBase={(base) => pickerLabel(base, isScoped, fallbackWorkflowName)}
+          emptySelectionLabel={isScoped ? `${fallbackScopeName} (new)` : 'Workspace knowledge (new)'}
+          newBasePlaceholder={isScoped ? 'Collection name' : 'New collection name'}
+          labelForBase={(base) => pickerLabel(base, isScoped, fallbackScopeName)}
           accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt,.csv,.json,.xlsx,.xls,text/*,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
           showDescribeImages={false}
           compact
@@ -302,7 +306,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
             </div>
             {creating && (
               <form className="mb-2 space-y-2 rounded-btn border border-line bg-surface-2 p-2" onSubmit={(event) => void createBase(event)}>
-                <input autoFocus value={newName} onChange={(event) => setNewName(event.target.value)} placeholder={isScoped ? `${fallbackWorkflowName} notes` : 'New collection name'} className="h-8 w-full rounded-input border border-line bg-canvas px-2 text-[12px] text-text-primary focus:border-accent focus:outline-none" />
+                <input autoFocus value={newName} onChange={(event) => setNewName(event.target.value)} placeholder={isScoped ? `${fallbackScopeName} notes` : 'New collection name'} className="h-8 w-full rounded-input border border-line bg-canvas px-2 text-[12px] text-text-primary focus:border-accent focus:outline-none" />
                 <div className="flex gap-1.5">
                   <Button type="submit" size="sm" variant="primary" loading={saving}>Create</Button>
                   <Button size="sm" variant="ghost" onClick={() => { setCreating(false); setNewName(''); }}>Cancel</Button>
@@ -311,11 +315,12 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
             )}
             {bases.length === 0 ? (
               <p className="px-2 py-5 text-[12px] leading-relaxed text-text-muted">
-                Your first upload will create {isScoped ? 'workflow' : 'workspace'} knowledge automatically.
+                Your first upload will create {isScoped ? 'scoped' : 'workspace'} knowledge automatically.
               </p>
             ) : bases.map((base) => {
               const active = selectedBaseId === base.id;
-              const workflowScoped = base.scopeKind === 'workflow' || Boolean(base.scopeId);
+              const scoped = isScopedBase(base);
+              const kind = baseScopeKind(base);
               return (
                 <div key={base.id} className="group relative">
                   <button
@@ -329,17 +334,17 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
                     <BookOpen size={13} className={clsx('mt-0.5 shrink-0', active ? 'text-accent' : 'text-text-muted')} />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-1.5">
-                        <span className="truncate text-[12px] font-medium">{baseTitle(base, isScoped, fallbackWorkflowName)}</span>
-                        {workflowScoped && <ScopeBadge compact />}
+                        <span className="truncate text-[12px] font-medium">{baseTitle(base, isScoped, fallbackScopeName)}</span>
+                        {scoped && <ScopeBadge kind={kind} compact />}
                       </span>
-                      <span className="mt-0.5 block truncate text-[10.5px] text-text-muted">{baseSubtitle(base, isScoped, fallbackWorkflowName)}</span>
+                      <span className="mt-0.5 block truncate text-[10.5px] text-text-muted">{baseSubtitle(base, isScoped, fallbackScopeName)}</span>
                     </span>
                     <span className="text-[11px] text-text-muted">{documentCounts.get(base.id) ?? 0}</span>
                   </button>
                   <button
                     type="button"
-                    title={`Inspect ${baseTitle(base, isScoped, fallbackWorkflowName)}`}
-                    aria-label={`Inspect ${baseTitle(base, isScoped, fallbackWorkflowName)}`}
+                    title={`Inspect ${baseTitle(base, isScoped, fallbackScopeName)}`}
+                    aria-label={`Inspect ${baseTitle(base, isScoped, fallbackScopeName)}`}
                     onClick={() => openBaseInspector(base)}
                     className="absolute right-7 top-2 rounded p-1 text-text-muted opacity-0 transition-opacity hover:bg-surface-3 hover:text-text-primary group-hover:opacity-100"
                   >
@@ -347,8 +352,8 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
                   </button>
                   <button
                     type="button"
-                    title={`Delete ${baseTitle(base, isScoped, fallbackWorkflowName)}`}
-                    aria-label={`Delete ${baseTitle(base, isScoped, fallbackWorkflowName)}`}
+                    title={`Delete ${baseTitle(base, isScoped, fallbackScopeName)}`}
+                    aria-label={`Delete ${baseTitle(base, isScoped, fallbackScopeName)}`}
                     onClick={() => void deleteBase(base)}
                     className="absolute right-1.5 top-2 rounded p-1 text-text-muted opacity-0 transition-opacity hover:bg-danger-soft hover:text-danger group-hover:opacity-100"
                   >
@@ -367,7 +372,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
                 <div className="flex items-center gap-2">
                   <h2 className="truncate text-heading text-text-primary">{selectedBaseTitle}</h2>
                   <span className="rounded-pill bg-surface-2 px-2 py-0.5 text-[11px] text-text-muted">{visibleDocuments.length} documents</span>
-                  {selectedBase?.scopeKind === 'workflow' && <ScopeBadge />}
+                  {selectedBase && isScopedBase(selectedBase) && <ScopeBadge kind={baseScopeKind(selectedBase)} />}
                 </div>
                 <p className="mt-1 text-[12px] text-text-muted">{selectedBaseSubtitle}</p>
               </div>
@@ -381,7 +386,7 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
               documents={visibleDocuments}
               onInspect={(document) => void inspectDocument(document)}
               onDelete={(document) => void deleteDocument(document)}
-              emptyBody={isScoped ? 'Drop files above to add knowledge to this workflow.' : 'Drop files above to begin building this collection.'}
+              emptyBody={isScoped ? 'Drop files above to add knowledge to this Brain.' : 'Drop files above to begin building this collection.'}
             />
           </section>
         </div>
@@ -391,13 +396,13 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
         open={Boolean(inspectedBase)}
         onClose={() => setInspectedBase(null)}
         width="md"
-        title={inspectedBase ? baseTitle(inspectedBase, isScoped, fallbackWorkflowName) : 'Collection'}
-        subtitle={inspectedBase ? baseSubtitle(inspectedBase, isScoped, fallbackWorkflowName) : undefined}
+        title={inspectedBase ? baseTitle(inspectedBase, isScoped, fallbackScopeName) : 'Collection'}
+        subtitle={inspectedBase ? baseSubtitle(inspectedBase, isScoped, fallbackScopeName) : undefined}
         footer={(
           <>
-            {inspectedBase?.ownerWorkflow?.id && !isScoped && (
-              <Button variant="ghost" size="md" iconLeft={<ExternalLink size={13} />} onClick={() => nav(`/apps/workflows/${inspectedBase.ownerWorkflow!.id}?tab=brain`)}>
-                Open logic Brain
+            {inspectedBase && ownerScopeForBase(inspectedBase) && !isScoped && (
+              <Button variant="ghost" size="md" iconLeft={<ExternalLink size={13} />} onClick={() => nav(ownerBrainPath(ownerScopeForBase(inspectedBase)!))}>
+                Open owner Brain
               </Button>
             )}
             <Button variant="primary" size="md" iconLeft={<Save size={13} />} loading={savingBaseDetails} disabled={!baseDraftName.trim()} onClick={() => void saveBaseDetails()}>
@@ -413,11 +418,11 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Scope</div>
                   <div className="mt-1 flex items-center gap-2 text-[13px] text-text-primary">
-                    {inspectedBase.scopeKind === 'workflow' ? <WorkflowIcon size={13} className="text-text-muted" /> : <BookOpen size={13} className="text-text-muted" />}
-                    {inspectedBase.scopeKind === 'workflow' ? inspectedBase.ownerWorkflow?.title ?? 'Workflow' : 'Workspace shared knowledge'}
+                    <ScopeIcon kind={baseScopeKind(inspectedBase)} size={13} />
+                    {ownerScopeForBase(inspectedBase)?.title ?? 'Workspace shared knowledge'}
                   </div>
                 </div>
-                {inspectedBase.scopeKind === 'workflow' && <ScopeBadge />}
+                {isScopedBase(inspectedBase) && <ScopeBadge kind={baseScopeKind(inspectedBase)} />}
               </div>
             </div>
             <label className="block">
@@ -427,9 +432,9 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
                 onChange={(event) => setBaseDraftName(event.target.value)}
                 className="mt-1 h-10 w-full rounded-input border border-line bg-canvas px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
               />
-              {isGenericWorkflowBaseName(inspectedBase.name) && inspectedBase.ownerWorkflow?.title && (
+              {isGenericScopedBaseName(inspectedBase.name) && ownerScopeForBase(inspectedBase)?.title && (
                 <span className="mt-1 block text-[11px] text-text-muted">
-                  Displayed as “{inspectedBase.ownerWorkflow.title}? in Workspace Brain until renamed.
+                  Displayed as "{ownerScopeForBase(inspectedBase)!.title}" in Workspace Brain until renamed.
                 </span>
               )}
             </label>
@@ -476,10 +481,12 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
           <div className="space-y-5">
             <div className="rounded-card border border-line bg-surface-2 p-3">
               <div className="flex flex-wrap items-center gap-2">
-                {inspectedDocument.knowledgeBaseScopeKind === 'workflow' ? <ScopeBadge /> : <span className="rounded-pill border border-line px-2 py-0.5 text-[10px] font-semibold text-text-muted">Workspace</span>}
+                {inspectedDocument.knowledgeBaseScopeKind && inspectedDocument.knowledgeBaseScopeKind !== 'workspace'
+                  ? <ScopeBadge kind={inspectedDocument.knowledgeBaseScopeKind} />
+                  : <span className="rounded-pill border border-line px-2 py-0.5 text-[10px] font-semibold text-text-muted">Workspace</span>}
                 <span className="text-[12px] text-text-muted">
-                  {inspectedDocument.knowledgeBaseScopeKind === 'workflow'
-                    ? `From ${inspectedDocument.ownerWorkflow?.title ?? 'workflow Brain'}`
+                  {inspectedDocument.knowledgeBaseScopeKind && inspectedDocument.knowledgeBaseScopeKind !== 'workspace'
+                    ? `From ${inspectedDocument.ownerScope?.title ?? inspectedDocument.ownerWorkflow?.title ?? 'scoped Brain'}`
                     : 'Shared workspace knowledge'}
                 </span>
               </div>
@@ -531,15 +538,21 @@ export function KnowledgeTab({ scopeId, scopeName }: { scopeId?: string; scopeNa
   );
 }
 
-function ScopeBadge({ compact = false }: { compact?: boolean }) {
+function ScopeBadge({ kind, compact = false }: { kind: ScopeKind; compact?: boolean }) {
   return (
     <span className={clsx(
       'inline-flex items-center justify-center rounded-full border border-accent/30 bg-accent-soft text-accent',
       compact ? 'h-4 w-4' : 'h-5 w-5',
-    )} title="Workflow-scoped knowledge">
-      <WorkflowIcon size={compact ? 10 : 11} />
+    )} title={`${scopeKindLabel(kind)}-scoped knowledge`}>
+      <ScopeIcon kind={kind} size={compact ? 10 : 11} />
     </span>
   );
+}
+
+function ScopeIcon({ kind, size }: { kind: ScopeKind; size: number }) {
+  if (kind === 'agent') return <Bot size={size} className="text-text-muted" />;
+  if (kind === 'workflow') return <WorkflowIcon size={size} className="text-text-muted" />;
+  return <BookOpen size={size} className="text-text-muted" />;
 }
 
 function Fact({ label, value }: { label: string; value: string }) {
@@ -555,41 +568,44 @@ function decorateDocument(
   document: KnowledgeDocumentRow,
   base: KnowledgeBaseView,
   viewingScoped: boolean,
-  fallbackWorkflowName: string,
+  fallbackScopeName: string,
 ): KnowledgeDocumentView {
   return {
     ...document,
-    knowledgeBaseName: baseTitle(base, viewingScoped, fallbackWorkflowName),
-    knowledgeBaseScopeKind: base.scopeKind ?? (base.scopeId ? 'workflow' : 'workspace'),
+    knowledgeBaseName: baseTitle(base, viewingScoped, fallbackScopeName),
+    knowledgeBaseScopeKind: baseScopeKind(base),
+    ownerScope: ownerScopeForBase(base),
     ownerWorkflow: base.ownerWorkflow ?? null,
   };
 }
 
-function pickerLabel(base: KnowledgeBaseView, viewingScoped: boolean, fallbackWorkflowName: string): string {
-  const primary = baseTitle(base, viewingScoped, fallbackWorkflowName);
-  const secondary = baseSubtitle(base, viewingScoped, fallbackWorkflowName);
+function pickerLabel(base: KnowledgeBaseView, viewingScoped: boolean, fallbackScopeName: string): string {
+  const primary = baseTitle(base, viewingScoped, fallbackScopeName);
+  const secondary = baseSubtitle(base, viewingScoped, fallbackScopeName);
   if (!secondary || secondary === 'Shared workspace knowledge') return primary;
   return `${primary} · ${secondary}`;
 }
 
-function baseTitle(base: KnowledgeBaseView, viewingScoped: boolean, fallbackWorkflowName: string): string {
-  const workflowTitle = base.ownerWorkflow?.title ?? (base.scopeId ? fallbackWorkflowName : null);
-  if (base.scopeKind === 'workflow' || base.scopeId) {
-    if (!viewingScoped) return workflowTitle ?? cleanBaseName(base.name);
-    if (isGenericWorkflowBaseName(base.name)) return workflowTitle ?? fallbackWorkflowName;
+function baseTitle(base: KnowledgeBaseView, viewingScoped: boolean, fallbackScopeName: string): string {
+  const owner = ownerScopeForBase(base);
+  const ownerTitle = owner?.title ?? (base.scopeId ? fallbackScopeName : null);
+  if (isScopedBase(base)) {
+    if (!viewingScoped) return ownerTitle ?? cleanBaseName(base.name);
+    if (isGenericScopedBaseName(base.name)) return ownerTitle ?? fallbackScopeName;
   }
   return cleanBaseName(base.name);
 }
 
-function baseSubtitle(base: KnowledgeBaseView, viewingScoped: boolean, fallbackWorkflowName: string): string {
-  if (base.scopeKind === 'workflow' || base.scopeId) {
-    const workflowTitle = base.ownerWorkflow?.title ?? fallbackWorkflowName;
+function baseSubtitle(base: KnowledgeBaseView, viewingScoped: boolean, fallbackScopeName: string): string {
+  if (isScopedBase(base)) {
+    const owner = ownerScopeForBase(base);
+    const ownerTitle = owner?.title ?? fallbackScopeName;
     const collectionName = cleanBaseName(base.name);
     if (!viewingScoped) {
-      if (!isGenericWorkflowBaseName(base.name) && collectionName !== workflowTitle) return collectionName;
-      return 'Scoped workflow knowledge';
+      if (!isGenericScopedBaseName(base.name) && collectionName !== ownerTitle) return collectionName;
+      return `Scoped ${scopeKindLabel(baseScopeKind(base)).toLowerCase()} knowledge`;
     }
-    return `Scoped to ${workflowTitle}`;
+    return `Scoped to ${ownerTitle}`;
   }
   return 'Shared workspace knowledge';
 }
@@ -598,8 +614,36 @@ function cleanBaseName(name: string): string {
   return name.trim() || 'Collection';
 }
 
-function isGenericWorkflowBaseName(name: string): boolean {
-  return name.trim().toLowerCase() === GENERIC_WORKFLOW_KNOWLEDGE;
+function isGenericScopedBaseName(name: string): boolean {
+  return GENERIC_SCOPED_KNOWLEDGE_NAMES.has(name.trim().toLowerCase());
+}
+
+function isScopedBase(base: KnowledgeBaseView): boolean {
+  return baseScopeKind(base) !== 'workspace' || Boolean(base.scopeId);
+}
+
+function baseScopeKind(base: KnowledgeBaseView): ScopeKind {
+  return base.scopeKind ?? (base.scopeId ? 'workflow' : 'workspace');
+}
+
+function ownerScopeForBase(base: KnowledgeBaseView): OwnerScope | null {
+  if (base.ownerScope) return base.ownerScope;
+  if (!base.scopeId || !base.ownerWorkflow) return null;
+  const kind = baseScopeKind(base);
+  return kind === 'workspace' ? null : { id: base.ownerWorkflow.id, title: base.ownerWorkflow.title, kind };
+}
+
+function scopeKindLabel(kind: ScopeKind): string {
+  if (kind === 'agent') return 'Agent';
+  if (kind === 'app') return 'App';
+  if (kind === 'workflow') return 'Workflow';
+  return 'Workspace';
+}
+
+function ownerBrainPath(owner: OwnerScope): string {
+  if (owner.kind === 'agent') return `/agents?tab=brain&agentId=${encodeURIComponent(owner.id)}`;
+  if (owner.kind === 'app') return `/apps/${encodeURIComponent(owner.id)}?tab=brain`;
+  return `/apps/workflows/${encodeURIComponent(owner.id)}?tab=brain`;
 }
 
 function formatDate(value?: string): string {

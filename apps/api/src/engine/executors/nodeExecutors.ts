@@ -639,7 +639,7 @@ export class NodeExecutorController {
     const { spawn } = await import('node:child_process');
     const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
     // Cap raised to 15min so `code`(python) nodes can shell out to long-running
-    // build/deploy scripts (store-demo seed + Vercel deploy) via subprocess.
+    // project helper scripts via subprocess when a workflow truly needs them.
     const timeout = Math.max(1, Math.min(timeoutMs ?? 15_000, 900_000));
     // The user code reads `input` (a dict) and assigns `output`; we print it as JSON.
     const program = [

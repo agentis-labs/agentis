@@ -101,7 +101,7 @@ export function InsightsTab({ onOpenConfig, scopeId, episodeWorkflowId, episodeA
 
         <InsightSection
           eyebrow="Memory"
-          title="Workflow recall"
+          title="Workspace recall"
           description={isScoped
             ? 'Facts, rules, preferences, patterns, and lessons available to this workflow.'
             : 'Facts, rules, preferences, patterns, and lessons available to every agent.'}

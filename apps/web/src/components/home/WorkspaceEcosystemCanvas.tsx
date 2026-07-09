@@ -238,8 +238,8 @@ const LIVE_WORKSPACE_MIN_HEIGHT = 320;
 const LIVE_WORKSPACE_DEFAULT_FRAME: LiveWorkspaceFrame = {
   x: 14,
   y: 14,
-  width: 420,
-  height: 500,
+  width: 372,
+  height: 440,
 };
 
 export function WorkspaceEcosystemCanvas({
@@ -1873,16 +1873,9 @@ function LiveWorkspacePanel({
             <span className={clsx('relative h-2.5 w-2.5 rounded-full', showBeacon ? 'bg-emerald-500' : 'bg-text-muted/60')} />
           </span>
           <div className="min-w-0">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-text-muted">Live Workspace</div>
-            <h2 className="mt-0.5 truncate text-[15px] font-semibold leading-tight text-text-primary">
-              {requestStatus.busy
-                ? 'Work in progress'
-                : waitingCount > 0
-                  ? 'Needs your attention'
-                  : liveCount > 0
-                    ? `${liveCount} active task${liveCount === 1 ? '' : 's'}`
-                    : 'Workspace is quiet'}
-            </h2>
+            {/* Status is carried by the body (empty state / active-work rows), so the
+                header just names the panel — no duplicated status line. */}
+            <h2 className="truncate text-[14px] font-semibold leading-tight text-text-primary">Live Workspace</h2>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">

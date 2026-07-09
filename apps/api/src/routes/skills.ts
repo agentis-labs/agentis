@@ -12,6 +12,8 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { AgentisError } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { schema } from '@agentis/db/sqlite';
+import { and, eq } from 'drizzle-orm';
 import type { AuthService } from '../services/auth.js';
 import type { SkillService } from '../services/skillService.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -51,12 +53,23 @@ export function buildSkillRoutes(deps: SkillRoutesDeps) {
 
   app.get('/', (c) => {
     const { workspaceId } = getWorkspace(c);
-    return c.json({ skills: deps.skills.listSkills(workspaceId).map(toListItem) });
+    const scopeId = skillScope(deps.db, workspaceId, c.req.query('scopeId'));
+    const includeWorkspace = c.req.query('includeWorkspace') !== 'false';
+    const rows = scopeId === undefined
+      ? deps.skills.listSkills(workspaceId)
+      : deps.skills.listForScopes(workspaceId, includeWorkspace ? [scopeId, null] : [scopeId]);
+    return c.json({ skills: rows.map(toListItem) });
   });
 
   app.get('/examples', (c) => {
     const { workspaceId } = getWorkspace(c);
-    return c.json({ examples: deps.skills.listExamples(workspaceId) });
+    const scopeId = skillScope(deps.db, workspaceId, c.req.query('scopeId'));
+    const includeWorkspace = c.req.query('includeWorkspace') !== 'false';
+    const examples = deps.skills.listExamples(workspaceId)
+      .filter((example) => scopeId === undefined
+        || example.scopeId === scopeId
+        || (includeWorkspace && example.scopeId === null));
+    return c.json({ examples });
   });
 
   app.get('/:id', (c) => {
@@ -74,9 +87,10 @@ export function buildSkillRoutes(deps: SkillRoutesDeps) {
   app.post('/', async (c) => {
     const { workspaceId } = getWorkspace(c);
     const body = createSchema.parse(await c.req.json().catch(() => ({})));
+    const scopeId = skillScope(deps.db, workspaceId, body.scopeId ?? undefined);
     const skill = deps.skills.upsertSkill({
       workspaceId,
-      scopeId: body.scopeId ?? null,
+      scopeId: scopeId ?? null,
       name: body.name,
       description: body.description,
       body: body.body,
@@ -102,5 +116,48 @@ export function buildSkillRoutes(deps: SkillRoutesDeps) {
     return c.json({ ok: true });
   });
 
+  // Author a worked input→output example for a skill (operator-created, the same
+  // shape agents promote via agentis.skill.promote_example). Edit/delete of an
+  // existing example go through the generic /v1/brain/atoms/example/:id surface.
+  app.post('/:id/examples', async (c) => {
+    const { workspaceId } = getWorkspace(c);
+    const body = exampleSchema.parse(await c.req.json().catch(() => ({})));
+    const exampleId = deps.skills.promoteExample({
+      workspaceId,
+      skillId: c.req.param('id'),
+      inputText: body.inputText,
+      outputText: body.outputText,
+      source: 'operator',
+    });
+    if (!exampleId) throw new AgentisError('RESOURCE_NOT_FOUND', 'Skill not found');
+    return c.json({ id: exampleId }, 201);
+  });
+
   return app;
+}
+
+const exampleSchema = z.object({
+  inputText: z.string().trim().min(1).max(4000),
+  outputText: z.string().trim().min(1).max(8000),
+});
+
+/** Validate that a requested scoped Skill library owner belongs to this workspace. */
+function skillScope(db: AgentisSqliteDb, workspaceId: string, scopeId: string | undefined | null): string | undefined {
+  if (!scopeId) return undefined;
+  const app = db.select({ id: schema.apps.id })
+    .from(schema.apps)
+    .where(and(eq(schema.apps.id, scopeId), eq(schema.apps.workspaceId, workspaceId)))
+    .get();
+  if (app) return app.id;
+  const agent = db.select({ id: schema.agents.id })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, scopeId), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (agent) return agent.id;
+  const workflow = db.select({ id: schema.workflows.id })
+    .from(schema.workflows)
+    .where(and(eq(schema.workflows.id, scopeId), eq(schema.workflows.workspaceId, workspaceId)))
+    .get();
+  if (workflow) return workflow.id;
+  throw new AgentisError('RESOURCE_NOT_FOUND', 'Skill scope not found');
 }

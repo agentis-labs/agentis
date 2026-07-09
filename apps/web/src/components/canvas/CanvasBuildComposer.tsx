@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Loader2, Sparkles } from 'lucide-react';
+import { Loader2, Sparkles, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 
@@ -26,9 +26,18 @@ export interface CanvasBuildComposerProps {
   nodeId?: string;
   nodeLabel?: string;
   onSent?: () => void;
+  onDismiss?: () => void;
 }
 
-export function CanvasBuildComposer({ workflowId, workflowTitle, variant, nodeId, nodeLabel, onSent }: CanvasBuildComposerProps) {
+export function CanvasBuildComposer({
+  workflowId,
+  workflowTitle,
+  variant,
+  nodeId,
+  nodeLabel,
+  onSent,
+  onDismiss,
+}: CanvasBuildComposerProps) {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,7 +115,18 @@ export function CanvasBuildComposer({ workflowId, workflowTitle, variant, nodeId
   }
 
   return (
-    <div className="pointer-events-auto w-[min(560px,calc(100%-48px))] rounded-2xl border border-line bg-surface/95 p-4 shadow-modal backdrop-blur-xl">
+    <div className="relative pointer-events-auto w-[min(560px,calc(100%-48px))] rounded-2xl border border-line bg-surface/95 p-4 shadow-modal backdrop-blur-xl">
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss and build manually"
+          title="Build manually instead"
+          className="absolute right-3 top-3 inline-flex h-6 w-6 items-center justify-center rounded-full text-text-muted hover:bg-surface-2 hover:text-text-primary transition-colors"
+        >
+          <X size={15} />
+        </button>
+      )}
       <div className="mb-2 flex items-center gap-2 text-text-primary">
         <Sparkles size={16} className="text-accent" />
         <span className="text-sm font-semibold">Describe this workflow</span>

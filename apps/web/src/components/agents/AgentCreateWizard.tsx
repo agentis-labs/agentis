@@ -176,16 +176,6 @@ function labelForSupervisor(agents: ExistingAgent[], id: string): string {
   return agents.find((agent) => agent.id === id)?.name ?? 'Unassigned';
 }
 
-function runtimeLabel(adapterType: AdapterType): string {
-  if (adapterType === 'claude_code') return 'Claude Code';
-  if (adapterType === 'codex') return 'Codex';
-  if (adapterType === 'cursor') return 'Cursor';
-  if (adapterType === 'antigravity') return 'Antigravity CLI';
-  if (adapterType === 'hermes_agent') return 'Hermes Agent';
-  if (adapterType === 'openclaw') return 'OpenClaw';
-  return 'HTTP';
-}
-
 function inboxSummary(channels: Record<ChannelKind, ChannelDraft>): string {
   const active = Object.values(channels)
     .filter((channel) => channel.token.trim())
@@ -236,7 +226,6 @@ export function AgentCreateWizard({
   const [adapterType, setAdapterType] = useState<AdapterType>('claude_code');
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig>(DEFAULT_RUNTIME_CONFIG);
   // opens this to override. Stays collapsed unless they ask, or nothing was detected.
-  const [runtimeAdvanced, setRuntimeAdvanced] = useState(false);
   const [playbook, setPlaybook] = useState('');
   const [capabilityTags, setCapabilityTags] = useState<string[]>([]);
   const [monthlyBudget, setMonthlyBudget] = useState('100');
@@ -290,7 +279,6 @@ export function AgentCreateWizard({
     setPlaybookEntries(EMPTY_PLAYBOOKS);
     setAdapterType('claude_code');
     setRuntimeConfig(DEFAULT_RUNTIME_CONFIG);
-    setRuntimeAdvanced(false);
     setPlaybook('');
     setCapabilityTags([]);
     setMonthlyBudget('100');
@@ -336,8 +324,6 @@ export function AgentCreateWizard({
       const found = ADAPTER_PRIORITY.find((type) => loadedDetections.some((d) => d.adapterType === type && d.status === 'found'));
       if (found) {
         setAdapterType(found);
-      } else {
-        setRuntimeAdvanced(true);
       }
 
       setDetecting(false);
@@ -916,49 +902,28 @@ export function AgentCreateWizard({
             <section className="space-y-3 border-t border-line pt-5">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs font-medium text-text-secondary">Runtime</span>
-                {runtimeAdvanced ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleTestRuntime()}
-                    disabled={testing}
-                    className={secondaryBtnCls}
-                  >
-                    {testing ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                    {testing ? 'Testing runtime…' : 'Test runtime'}
-                  </button>
-                ) : (
-                  <button type="button" onClick={() => setRuntimeAdvanced(true)} className={secondaryBtnCls}>
-                    Configure
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => void handleTestRuntime()}
+                  disabled={testing}
+                  className={secondaryBtnCls}
+                >
+                  {testing ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                  {testing ? 'Testing runtime…' : 'Test runtime'}
+                </button>
               </div>
 
-              {runtimeAdvanced ? (
-                <>
-                  <RuntimePicker
-                    adapterType={adapterType}
-                    runtimeConfig={runtimeConfig}
-                    onAdapterChange={(value) => { setAdapterType(value); setTestResult(null); setTestError(null); }}
-                    onConfigChange={setRuntimeConfig}
-                    detections={detections}
-                    detecting={detecting}
-                    onRefreshDetections={refreshDetections}
-                  />
-                  <RuntimeTestReport testing={testing} result={testResult} error={testError} />
-                </>
-              ) : (
-                <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2.5 text-xs text-text-secondary">
-                  {detecting ? (
-                    <><Loader2 size={13} className="animate-spin" /> Detecting installed runtimes…</>
-                  ) : (
-                    <>
-                      <Check size={13} className="text-accent" />
-                      <span className="text-text-primary">{runtimeLabel(adapterType)}</span>
-                      <span className="text-text-muted">· auto-selected{activeDetection?.status === 'found' ? ' (installed)' : ''}. Commission to go.</span>
-                    </>
-                  )}
-                </div>
-              )}
+              {/* The full runtime choice is always visible — no "Configure" gate. */}
+              <RuntimePicker
+                adapterType={adapterType}
+                runtimeConfig={runtimeConfig}
+                onAdapterChange={(value) => { setAdapterType(value); setTestResult(null); setTestError(null); }}
+                onConfigChange={setRuntimeConfig}
+                detections={detections}
+                detecting={detecting}
+                onRefreshDetections={refreshDetections}
+              />
+              <RuntimeTestReport testing={testing} result={testResult} error={testError} />
             </section>
           </div>
         </main>

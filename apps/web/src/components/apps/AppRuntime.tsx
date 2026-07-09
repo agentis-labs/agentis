@@ -20,7 +20,7 @@ import {
 import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 import { createInProcessAppClient } from '@agentis/app-client';
-import type { AppRecord, AppSurface } from '@agentis/core';
+import type { AppRecord, AppSurface, ViewNode } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { appsApi } from '../../lib/appsApi';
 import { isActiveRunStatus, opsApi } from '../../lib/opsApi';
@@ -34,7 +34,7 @@ import {
 type ShellMode = 'full' | 'minimal' | 'none';
 type DrawerTab = 'runs' | 'activity' | 'approvals' | 'rules';
 
-export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?: string }) {
+export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId: string; surfaceName?: string; hideShellNav?: boolean }) {
   const [app, setApp] = useState<AppRecord | null>(null);
   const [surfaces, setSurfaces] = useState<AppSurface[] | null>(null);
   const [allowCustomCode, setAllowCustomCode] = useState(false);
@@ -187,8 +187,13 @@ export function AppRuntime({ appId, surfaceName }: { appId: string; surfaceName?
         surfaces={surfaces ?? []}
         active={surface}
         onNavigate={gotoSurface}
+        hideShellNav={hideShellNav}
       >
-        {surface.view ? <ViewRenderer node={surface.view} /> : <p className="p-6 text-text-muted">Empty surface.</p>}
+        {surface.view ? (
+          <ViewRenderer node={hideShellNav ? stripEmbeddedDuplicateTitle(surface.view, app.name) : surface.view} />
+        ) : (
+          <p className="p-6 text-text-muted">Empty surface.</p>
+        )}
       </AppShell>
     </RuntimeProvider>
   );
@@ -213,9 +218,10 @@ function useOpsStatus(appId: string): { runningRuns: number; waitingRuns: number
   return { runningRuns, waitingRuns, pendingApprovals };
 }
 
-function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
+function AppShell({ app, appId, surfaces, active, onNavigate, children, hideShellNav = false }: {
   app: AppRecord;
   appId: string;
+  hideShellNav?: boolean;
   surfaces: AppSurface[];
   active: AppSurface;
   onNavigate: (name: string) => void;
@@ -261,6 +267,17 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children }: {
   const appearance = rootStyle?.appearance && rootStyle.appearance !== 'auto' ? rootStyle.appearance : undefined;
   const hasOps = (workflows?.length ?? 0) > 0;
   const mode: ShellMode = rootStyle?.shell ?? (surfaces.length > 1 || hasOps ? 'full' : 'minimal');
+
+  if (hideShellNav) {
+    return (
+      <div
+        className="s-surface h-full min-h-0 w-full overflow-auto bg-canvas text-text-primary"
+        {...(appearance ? { 'data-appearance': appearance } : {})}
+      >
+        <div className="w-full p-3 sm:p-4 lg:p-5">{children}</div>
+      </div>
+    );
+  }
 
   if (mode === 'none') {
     return <div className="s-surface w-full bg-canvas p-4 sm:p-6" {...(appearance ? { 'data-appearance': appearance } : {})}>{children}</div>;
@@ -519,6 +536,72 @@ function setPath(source: Record<string, unknown>, path: string, value: unknown):
     ...source,
     [head]: setPath(child && typeof child === 'object' && !Array.isArray(child) ? child as Record<string, unknown> : {}, rest.join('.'), value),
   };
+}
+
+function stripEmbeddedDuplicateTitle(view: ViewNode, appName: string): ViewNode {
+  if (!hasViewChildren(view)) {
+    return titleLooksLikeApp(view, appName) ? emptyStack(view.style) : view;
+  }
+
+  let changed = false;
+  const children = view.children.flatMap((child, index) => {
+    if (index >= 3 || !titleLooksLikeApp(child, appName)) return [child];
+    changed = true;
+    return child.type === 'Hero' ? heroReplacement(child) : [];
+  });
+  if (!changed) return view;
+
+  return {
+    ...view,
+    children,
+  } as ViewNode;
+}
+
+function hasViewChildren(node: ViewNode): node is ViewNode & { children: ViewNode[] } {
+  return 'children' in node && Array.isArray((node as { children?: unknown }).children);
+}
+
+function titleLooksLikeApp(node: ViewNode, appName: string): boolean {
+  if (node.type === 'Heading') return titleMatchesApp(node.value, appName);
+  if (node.type === 'Hero') return titleMatchesApp(node.title, appName);
+  return false;
+}
+
+function titleMatchesApp(title: string, appName: string): boolean {
+  const normalizedTitle = normalizeTitle(title);
+  const normalizedApp = normalizeTitle(appName);
+  const unbrandedApp = normalizeTitle(appName.replace(/\bagentis\b/gi, ''));
+  if (!normalizedTitle || !normalizedApp) return false;
+  return normalizedTitle.startsWith(normalizedApp)
+    || normalizedApp.startsWith(normalizedTitle)
+    || (unbrandedApp.length > 4 && (normalizedTitle.includes(unbrandedApp) || unbrandedApp.includes(normalizedTitle)));
+}
+
+function normalizeTitle(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+}
+
+function emptyStack(style: ViewNode['style']): ViewNode {
+  return { type: 'Stack', gap: 12, ...(style ? { style } : {}), children: [] } as ViewNode;
+}
+
+function heroReplacement(hero: Extract<ViewNode, { type: 'Hero' }>): ViewNode[] {
+  const nodes: ViewNode[] = [];
+  if (hero.subtitle) {
+    nodes.push({ type: 'Text', value: hero.subtitle, style: { emphasis: 'normal' } } as ViewNode);
+  }
+  if (hero.actions?.length) {
+    nodes.push({
+      type: 'Toolbar',
+      children: hero.actions.map((action) => ({
+        type: 'Button',
+        label: action.action.replace(/[_-]+/g, ' '),
+        action,
+        variant: 'primary',
+      } as ViewNode)),
+    } as ViewNode);
+  }
+  return nodes;
 }
 
 

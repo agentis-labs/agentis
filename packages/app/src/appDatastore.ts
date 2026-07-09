@@ -86,13 +86,22 @@ export class AppDatastore {
 
   listCollections(workspaceId: string, appId: string): CollectionInfo[] {
     this.requireApp(workspaceId, appId);
-    return this.db
+    const rows = this.db
       .select()
       .from(schema.appCollections)
       .where(eq(schema.appCollections.appId, appId))
       .orderBy(asc(schema.appCollections.name))
-      .all()
-      .map((r) => this.toCollectionInfo(r));
+      .all();
+    // One grouped count so the UI can show how many records live in each
+    // collection (not the field count).
+    const counts = this.db
+      .select({ collectionId: schema.appRecords.collectionId, n: sql<number>`COUNT(*)` })
+      .from(schema.appRecords)
+      .where(eq(schema.appRecords.appId, appId))
+      .groupBy(schema.appRecords.collectionId)
+      .all();
+    const countBy = new Map(counts.map((c) => [c.collectionId, Number(c.n)]));
+    return rows.map((r) => ({ ...this.toCollectionInfo(r), recordCount: countBy.get(r.id) ?? 0 }));
   }
 
   // ── Records ─────────────────────────────────────────────────

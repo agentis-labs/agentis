@@ -89,6 +89,8 @@ function nodeTypeForAtom(atomKind: BrainGraphNode['atomKind']): BrainNodeType {
     case 'episode': return 'memory_episode';
     case 'memory':
     case 'pattern': return 'memory_pattern';
+    case 'skill': return 'skill';
+    case 'example': return 'example';
     case 'warning': return 'warning';
     case 'gap': return 'gap';
     // Organizational overlay (Workspace Brain / Grounding engine).
@@ -107,7 +109,9 @@ function layerForAtom(atomKind: BrainGraphNode['atomKind']): BrainLayer {
     case 'knowledge_chunk': return 'knowledge';
     case 'episode':
     case 'memory':
-    case 'pattern': return 'memory';
+    case 'pattern':
+    case 'skill':
+    case 'example': return 'memory';
     case 'warning':
     case 'gap': return 'judgment';
     // Sources + entities sit with knowledge; claims are judged truth.

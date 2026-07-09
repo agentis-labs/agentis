@@ -177,7 +177,7 @@ describe('workSessions', () => {
     const run: WorkspaceActiveRun = {
       id: 'run-failed',
       workflowId: 'workflow-failed',
-      workflowName: 'Fashion Store Factory',
+      workflowName: 'Catalog Launch Workflow',
       status: 'running',
       currentStep: 'Qualify candidate',
       startedAt: baseAt,
@@ -187,7 +187,7 @@ describe('workSessions', () => {
       now: Date.parse(baseAt) + 1000,
       activity: [],
       activeRuns: [run],
-      failedRuns: [{ id: 'run-failed', workflowId: 'workflow-failed', workflowName: 'Fashion Store Factory' }],
+      failedRuns: [{ id: 'run-failed', workflowId: 'workflow-failed', workflowName: 'Catalog Launch Workflow' }],
     });
 
     expect(sessions).toEqual([]);
@@ -223,12 +223,12 @@ describe('workSessions', () => {
           agentName: 'Orchy',
           title: 'Orchy',
           detail: 'Fixed the workflow in place',
-          raw: { workflowName: 'Fashion Store Factory' },
+          raw: { workflowName: 'Catalog Launch Workflow' },
         }),
       ],
     });
 
-    expect(sessions[0].title).toBe('Fashion Store Factory');
+    expect(sessions[0].title).toBe('Catalog Launch Workflow');
     expect(sessions[0].agentId).toBeUndefined();
     expect(sessions[0].participantNames).toEqual(['Orchy']);
   });

@@ -195,6 +195,40 @@ describe('harness agent import (e2e)', () => {
     expect(row?.instructions ?? '').toMatch(/research specialist/i);
   });
 
+  it('imports an existing machine agent with create-like hierarchy overrides', async () => {
+    const now = new Date().toISOString();
+    ctx.db.insert(schema.agents).values({
+      id: 'orchestrator-test',
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'The Brain',
+      adapterType: 'codex',
+      role: 'orchestrator',
+      status: 'offline',
+      colorHex: '#7c83ff',
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const result = await withEnv(() => importAgents(deps, {
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      specs: [{
+        externalId: 'claude_code:primary',
+        overrides: {
+          name: 'Imported Manager',
+          role: 'manager',
+          reportsTo: 'orchestrator-test',
+        },
+      }],
+    }));
+    const row = ctx.db.select().from(schema.agents).where(eq(schema.agents.id, result.imported[0]!.agentId)).get();
+    expect(row?.name).toBe('Imported Manager');
+    expect(row?.role).toBe('manager');
+    expect(row?.reportsTo).toBe('orchestrator-test');
+  });
+
   it('is idempotent: re-import reuses the agent and reinforces memory', async () => {
     const spec = { externalId: 'claude_code:primary' };
     const first = await withEnv(() => importAgents(deps, { workspaceId: ctx.workspace.id, userId: ctx.user.id, specs: [spec] }));

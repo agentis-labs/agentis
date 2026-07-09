@@ -102,7 +102,7 @@ function seedKnowledgeBase() {
   return knowledgeBaseId;
 }
 
-function seedAgent() {
+function seedAgent(input: { name?: string; role?: string | null; reportsTo?: string | null } = {}) {
   const id = randomUUID();
   ctx.db
     .insert(schema.agents)
@@ -111,9 +111,10 @@ function seedAgent() {
       workspaceId: ctx.workspace.id,
       ambientId: ctx.ambient.id,
       userId: ctx.user.id,
-      name: 'Agent Smith',
+      name: input.name ?? 'Agent Smith',
       adapterType: 'claude_code',
-      role: 'worker',
+      role: input.role ?? 'worker',
+      reportsTo: input.reportsTo ?? null,
       status: 'offline',
       colorHex: '#000000',
       createdAt: new Date().toISOString(),
@@ -238,5 +239,44 @@ describe('/v1/packages packages', () => {
     expect(agent).toBeDefined();
     expect(agent?.name).toBe('Agent Smith');
     expect(agent?.role).toBe('worker');
+  });
+
+  it('imports an agent package with create-like hierarchy overrides', async () => {
+    const orchestratorId = seedAgent({ name: 'The Brain', role: 'orchestrator' });
+    const agentId = seedAgent({ name: 'Package Specialist', role: 'worker' });
+    const pack = await app().request(`/v1/packages/pack/agent/${agentId}`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({}),
+    });
+    const packed = (await pack.json()) as { package: { id: string } };
+    const exported = await app().request(`/v1/packages/${packed.package.id}/export`, { headers: ctx.authHeaders });
+    const envelope = await exported.json();
+
+    const imported = await app().request('/v1/packages/import', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        ...envelope,
+        overrides: {
+          agent: {
+            name: 'Imported Manager',
+            role: 'manager',
+            reportsTo: orchestratorId,
+          },
+        },
+      }),
+    });
+    expect(imported.status).toBe(201);
+    const importedBody = (await imported.json()) as { agentId: string };
+
+    const agent = ctx.db
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.id, importedBody.agentId))
+      .get();
+    expect(agent?.name).toBe('Imported Manager');
+    expect(agent?.role).toBe('manager');
+    expect(agent?.reportsTo).toBe(orchestratorId);
   });
 });

@@ -2,19 +2,19 @@ import { cn } from '../../lib/utils';
 
 interface IconProps { className?: string }
 
-/** Google Antigravity mark — an upward "anti-gravity" chevron rising through an
- *  orbital ring, in Antigravity's blue→violet gradient. */
+/** Antigravity runs on Google's Gemini — the Gemini spark, in its blue→violet
+ *  gradient. */
 export function AntigravityIcon({ className }: IconProps) {
   return (
-    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={cn(className)} aria-hidden>
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={cn(className)} aria-hidden>
       <defs>
-        <linearGradient id="antigravity-g" x1="6" y1="28" x2="26" y2="6" gradientUnits="userSpaceOnUse">
+        <linearGradient id="gemini-g" x1="3" y1="21" x2="21" y2="3" gradientUnits="userSpaceOnUse">
           <stop stopColor="#4285F4" />
-          <stop offset="1" stopColor="#9B72CB" />
+          <stop offset="0.5" stopColor="#9B72CB" />
+          <stop offset="1" stopColor="#D96570" />
         </linearGradient>
       </defs>
-      <circle cx="16" cy="16" r="13" stroke="url(#antigravity-g)" strokeWidth="2" fill="none" opacity="0.55" />
-      <path d="M16 7l7 9h-4v8h-6v-8H9l7-9z" fill="url(#antigravity-g)" />
+      <path d="M12 0c0 6.627-5.373 12-12 12 6.627 0 12 5.373 12 12 0-6.627 5.373-12 12-12-6.627 0-12-5.373-12-12z" fill="url(#gemini-g)" />
     </svg>
   );
 }

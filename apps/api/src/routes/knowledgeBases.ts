@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
-import { AgentisError } from '@agentis/core';
+import { AgentisError, type BrainScopeKind } from '@agentis/core';
 import type { AuthService } from '../services/auth.js';
 import type { KnowledgeBaseService } from '../services/knowledge/knowledgeBase.js';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -64,7 +64,7 @@ export function buildKnowledgeBaseRoutes(deps: { db: AgentisSqliteDb; auth: Auth
     const body = createKnowledgeBaseSchema.parse(await c.req.json());
     const queryScopeId = c.req.query('scopeId');
     if (body.scopeId && queryScopeId && body.scopeId !== queryScopeId) {
-      throw new AgentisError('VALIDATION_FAILED', 'Knowledge base scope does not match the requested workflow');
+      throw new AgentisError('VALIDATION_FAILED', 'Knowledge base scope does not match the requested scope');
     }
     const scopeId = workflowScope(deps.db, ws.workspaceId, body.scopeId ?? queryScopeId);
     const knowledgeBase = deps.knowledge.createKnowledgeBase({ workspaceId: ws.workspaceId, ...body, ...(scopeId ? { scopeId } : {}) });
@@ -197,23 +197,7 @@ function presentKnowledgeBase(
   workspaceId: string,
   base: typeof schema.knowledgeBases.$inferSelect,
 ) {
-  const ownerWorkflow = base.scopeId
-    ? (db.select({ id: schema.workflows.id, title: schema.workflows.title })
-        .from(schema.workflows)
-        .where(and(eq(schema.workflows.id, base.scopeId), eq(schema.workflows.workspaceId, workspaceId)))
-        .get()
-      // App-scoped brains own the knowledge via app.id — surface the App's name.
-      ?? db.select({ id: schema.apps.id, title: schema.apps.name })
-        .from(schema.apps)
-        .where(and(eq(schema.apps.id, base.scopeId), eq(schema.apps.workspaceId, workspaceId)))
-        .get()
-      // Agent-scoped brains own knowledge via agent.id — surface the Agent's name.
-      ?? db.select({ id: schema.agents.id, title: schema.agents.name })
-        .from(schema.agents)
-        .where(and(eq(schema.agents.id, base.scopeId), eq(schema.agents.workspaceId, workspaceId)))
-        .get()
-      ?? null)
-    : null;
+  const ownerScope = base.scopeId ? resolveScopeOwner(db, workspaceId, base.scopeId) : null;
   const documentCountRow = db.select({ count: sql<number>`count(*)` })
     .from(schema.kbDocuments)
     .where(and(
@@ -225,10 +209,40 @@ function presentKnowledgeBase(
 
   return {
     ...base,
-    scopeKind: base.scopeId ? 'workflow' as const : 'workspace' as const,
-    ownerWorkflow,
+    scopeKind: ownerScope?.kind ?? (base.scopeId ? 'workflow' as const : 'workspace' as const),
+    ownerScope,
+    // Legacy response key retained while the web client and any external callers
+    // move to ownerScope/scopeKind. For app/agent scopes it still carries the
+    // owning surface's display name, matching the previous App fallback behavior.
+    ownerWorkflow: ownerScope ? { id: ownerScope.id, title: ownerScope.title } : null,
     documentCount: Number(documentCountRow?.count ?? 0),
   };
+}
+
+function resolveScopeOwner(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  scopeId: string,
+): { id: string; kind: BrainScopeKind; title: string } | null {
+  const app = db.select({ id: schema.apps.id, title: schema.apps.name })
+    .from(schema.apps)
+    .where(and(eq(schema.apps.id, scopeId), eq(schema.apps.workspaceId, workspaceId)))
+    .get();
+  if (app) return { ...app, kind: 'app' };
+
+  const agent = db.select({ id: schema.agents.id, title: schema.agents.name })
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, scopeId), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (agent) return { ...agent, kind: 'agent' };
+
+  const workflow = db.select({ id: schema.workflows.id, title: schema.workflows.title })
+    .from(schema.workflows)
+    .where(and(eq(schema.workflows.id, scopeId), eq(schema.workflows.workspaceId, workspaceId)))
+    .get();
+  if (workflow) return { ...workflow, kind: 'workflow' };
+
+  return null;
 }
 
 type DocumentUpload = {

@@ -56,17 +56,16 @@ export function capabilityGapReason(error: string): string | null {
  * environment variable, a working directory, a credential/token), NOT because
  * the graph is wrong. Like a capability gap, no graph edit or agent swap can
  * supply it, so structural self-heal is pointless (it just burns replans and
- * emits "could not derive a grounded repair" — the exact mush the operator saw
- * on the store_factory `AGENTIS_STORES_DIR` failure). The failing extension's own
- * message usually carries the remedy verbatim ("set AGENTIS_STORES_DIR … or pass
- * workingDir/storesDir"), so we surface it as the fix. Returns the trimmed
- * reason+remedy, or null when the failure may genuinely be graph/data-class.
+ * emits "could not derive a grounded repair"). The failing extension's own
+ * message usually carries the remedy verbatim, so we surface it as the fix.
+ * Returns the trimmed reason+remedy, or null when the failure may genuinely be
+ * graph/data-class.
  */
 export function configGapReason(error: string): string | null {
   const e = (error ?? '').replace(/\s+/g, ' ').trim();
   const matched =
     /requires (?:a |an )?(?:working directory|environment variable|configuration|config|credential|directory|api key|token)/i.test(e)
-    || /\bset [A-Z][A-Z0-9_]{3,}\b/.test(e)                                  // "set AGENTIS_STORES_DIR"
+    || /\bset [A-Z][A-Z0-9_]{3,}\b/.test(e)
     || /\bpass (?:workingDir|storesDir|working directory)\b/i.test(e)
     || /environment variable [\w.$-]+ (?:is )?(?:not set|missing|required|undefined|empty)/i.test(e)
     || /(?:credential|api key|token|secret|env(?:ironment)? var(?:iable)?) (?:is )?(?:missing|not set|not configured|required|undefined)/i.test(e);

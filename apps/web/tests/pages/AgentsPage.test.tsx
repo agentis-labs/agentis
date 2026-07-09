@@ -10,6 +10,24 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { AgentsPage } from '../../src/pages/AgentsPage';
 
+vi.mock('../../src/components/brain/AgentBrainPanel', () => ({
+  AgentBrainPanel: ({
+    selectedAgentId,
+    view,
+    onViewChange,
+  }: {
+    selectedAgentId?: string | null;
+    view?: string;
+    onViewChange?: (view: string) => void;
+  }) => (
+    <div data-testid="agent-brain-panel">
+      <span>agent:{selectedAgentId}</span>
+      <span>view:{view}</span>
+      <button type="button" onClick={() => onViewChange?.('knowledge')}>Mock knowledge</button>
+    </div>
+  ),
+}));
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -290,8 +308,39 @@ describe('<AgentsPage />', () => {
     );
     await waitFor(() => expect(screen.getByText(/No agents yet/i)).toBeInTheDocument());
     await userEvent.click(screen.getAllByRole('button', { name: /Add agent/i })[0]!);
+    expect(screen.getByRole('menuitem', { name: /Import existing agent from this machine/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /Import agent package from this machine/i })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('menuitem', { name: /Create new agent/i }));
     expect(screen.getByRole('heading', { name: /Commission agent/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Commission agent/i })).toBeInTheDocument();
     expect(screen.getByText(/Name it, give it a runtime/i)).toBeInTheDocument();
+  });
+
+  it('renders the canonical Agent Brain surface from URL state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({
+        agents: [
+          {
+            id: 'a1',
+            name: 'Hermes',
+            description: 'Research manager',
+            adapterType: 'http',
+            role: 'manager',
+            status: 'online',
+          },
+        ],
+      })),
+    );
+
+    render(
+      <MemoryRouter initialEntries={['/agents?tab=brain&agentId=a1&brainTab=skills']}>
+        <AgentsPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('agent-brain-panel')).toHaveTextContent('agent:a1'));
+    expect(screen.getByTestId('agent-brain-panel')).toHaveTextContent('view:skills');
+    expect(screen.getByText(/Individual agent brains/i)).toBeInTheDocument();
   });
 });

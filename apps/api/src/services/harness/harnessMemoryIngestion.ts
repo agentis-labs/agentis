@@ -250,10 +250,33 @@ export class HarnessMemoryIngestionService {
       candidates.push(...fileCandidates);
     }
 
+    // Perf: annotate EXACT dedup only, with the existing content hashes loaded
+    // ONCE per scope. The old per-candidate path listed 500 episodes AND computed
+    // a semantic embedding for every candidate — minutes on a large brain. The
+    // real semantic dedup runs at commit (`#commitCandidates`), where it matters;
+    // a semantic paraphrase shown as "new" here is simply reinforced on import,
+    // never duplicated.
+    const exact = this.#buildExactHashIndex(agent);
     for (const cand of candidates) {
-      cand.duplicateOf = this.#findDuplicate(agent, cand);
+      const scopeHashes = cand.scopeHint === 'workspace' ? exact.workspace : exact.agent;
+      const episodeId = scopeHashes.get(cand.hash);
+      cand.duplicateOf = episodeId ? { episodeId, kind: 'exact' } : null;
     }
     return { agentId: agent.id, scannedFiles, candidates, minQuality };
+  }
+
+  /** Content-hash → episodeId maps for the workspace and agent scopes, built in a
+   *  single pass each so preview dedup is O(existing + candidates), not O(product). */
+  #buildExactHashIndex(agent: IngestibleAgent): { workspace: Map<string, string>; agent: Map<string, string> } {
+    const build = (scopeId?: string): Map<string, string> => {
+      const map = new Map<string, string>();
+      for (const ep of this.episodes.list({ workspaceId: agent.workspaceId, scopeId, limit: 20000 })) {
+        const hash = harnessContentHash(ep);
+        if (hash) map.set(hash, ep.id);
+      }
+      return map;
+    };
+    return { workspace: build(undefined), agent: build(agent.id) };
   }
 
   /**

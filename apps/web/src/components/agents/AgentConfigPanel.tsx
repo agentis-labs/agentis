@@ -347,6 +347,9 @@ export function AgentConfigPanel({
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <Field label="Monthly budget (USD)">
             <input value={budget} onChange={(e) => setBudget(e.target.value)} inputMode="decimal" placeholder="No limit" className={inputCls} />
+            <p className="mt-1 text-[11px] leading-relaxed text-text-muted">
+              Applies only to <strong>metered</strong> runtimes billed per token (e.g. an API/HTTP model). Subscription CLIs (Claude Code, Codex, Cursor…) aren't metered, so the cap doesn't apply. Leave blank for no limit.
+            </p>
           </Field>
           <Field label="Current spend">
             <input value={`$${((agent.currentMonthSpendCents ?? 0) / 100).toFixed(2)}`} readOnly className={`${inputCls} text-text-muted`} />

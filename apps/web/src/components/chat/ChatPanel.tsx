@@ -6,8 +6,8 @@
  * session history, but they are no longer the default landing view.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Clock, ChevronLeft, Maximize2, Minimize2, Plus, ChevronDown, Check, Globe, Hash } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X, Clock, ChevronLeft, ChevronRight, Maximize2, Minimize2, Plus, ChevronDown, Check, Globe, Hash, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useChatPanelStore } from './ChatPanelStore';
@@ -18,7 +18,7 @@ import {
   formatChatScopePlaceholder,
   ChatScopeGlyph,
 } from './scopeIdentity';
-import { workspace as wsStore } from '../../lib/api';
+import { api, workspace as wsStore } from '../../lib/api';
 import { rtSubscribe } from '../../lib/realtime';
 import { usePrimaryChatScopes } from './usePrimaryChatScopes';
 import { clearDraft } from './Composer';
@@ -27,6 +27,13 @@ import { RoomCreateDialog } from './RoomCreateDialog';
 const MIN_DOCKED_WIDTH = 320;
 const MAX_DOCKED_WIDTH = 720;
 const DOCKED_WIDTH_CSS = (width: number) => `clamp(${MIN_DOCKED_WIDTH}px, ${width}px, min(${MAX_DOCKED_WIDTH}px, calc(100vw - 2rem)))`;
+
+interface RoomMenuRow {
+  id: string;
+  name: string;
+  kind: 'workspace' | 'custom' | 'thread';
+  lastMessagePreview?: string | null;
+}
 
 function pathToContext(path: string): string {
   if (path === '/' || path === '/home') return 'Home';
@@ -59,6 +66,9 @@ export function ChatPanel() {
   } = useChatPanelStore();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [agentMenuView, setAgentMenuView] = useState<'chats' | 'rooms'>('chats');
+  const [roomMenuRows, setRoomMenuRows] = useState<RoomMenuRow[]>([]);
+  const [roomMenuLoading, setRoomMenuLoading] = useState(false);
   const [roomCreateOpen, setRoomCreateOpen] = useState(false);
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
@@ -78,6 +88,26 @@ export function ChatPanel() {
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [agentMenuOpen]);
 
+  const loadRoomMenuRows = useCallback(async () => {
+    setRoomMenuLoading(true);
+    try {
+      const res = await api<{ rooms: RoomMenuRow[] }>('/v1/rooms');
+      setRoomMenuRows(res.rooms ?? []);
+    } catch {
+      setRoomMenuRows([]);
+    } finally {
+      setRoomMenuLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!agentMenuOpen) {
+      setAgentMenuView('chats');
+      return;
+    }
+    if (agentMenuView === 'rooms') void loadRoomMenuRows();
+  }, [agentMenuOpen, agentMenuView, loadRoomMenuRows]);
+
   const primaryScopeIds = useMemo(() => new Set(scopes.map((scope) => scope.id)), [scopes]);
   const currentThread = selectedThread ?? (orchestrator ? { kind: 'agent' as const, id: orchestrator.id, name: orchestrator.name } : null);
   const currentScope = currentThread && currentThread.kind === 'agent'
@@ -93,6 +123,8 @@ export function ChatPanel() {
       cleanup?.();
       cleanup = cur ? rtSubscribe('workspace', { workspaceId: cur }) : undefined;
       setHistoryOpen(false);
+      setAgentMenuView('chats');
+      setRoomMenuRows([]);
       resetForWorkspace();
     }
     window.addEventListener('agentis:workspace-changed', onWorkspaceChanged);
@@ -247,7 +279,7 @@ export function ChatPanel() {
                 <button
                   type="button"
                   onClick={() => setAgentMenuOpen((o) => !o)}
-                  aria-label="Switch agent"
+                  aria-label="Switch chat"
                   className="-ml-1 flex max-w-[20rem] min-w-0 items-center gap-1 rounded-md px-1 py-0.5 hover:bg-surface-2"
                 >
                   <div className="flex min-w-0 flex-col items-start">
@@ -260,58 +292,146 @@ export function ChatPanel() {
                   </div>
                   <ChevronDown size={12} className={clsx('shrink-0 text-text-muted transition-transform', agentMenuOpen && 'rotate-180')} />
                 </button>
-                {agentMenuOpen && scopes.length > 0 && (
-                  <div className="absolute left-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-card border border-line bg-surface shadow-dropdown">
-                    {scopes.map((scope) => (
-                      <button
-                        key={scope.id}
-                        type="button"
-                        onClick={() => {
-                          selectThread({ kind: 'agent', id: scope.id, name: scope.name });
-                          setAgentMenuOpen(false);
-                        }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
-                      >
-                        <span className={clsx(
-                          'grid h-6 w-6 shrink-0 place-items-center rounded border',
-                          scope.id === currentThread?.id
-                            ? 'border-accent/40 bg-accent/10 text-accent'
-                            : 'border-line bg-surface-2 text-text-muted',
-                        )}>
-                          <ChatScopeGlyph role={scope.role} size={11} />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[12px] text-text-primary">{scope.name}</span>
-                          <span className="block text-[10px] text-text-muted">
-                            {scope.role === 'orchestrator' ? 'Orchestrator' : scope.spaceName ?? 'Manager'}
+                {agentMenuOpen && (
+                  <div className="absolute left-0 top-full z-50 mt-1 w-64 overflow-hidden rounded-card border border-line bg-surface shadow-dropdown">
+                    {agentMenuView === 'rooms' ? (
+                      <>
+                        <div className="flex items-center gap-2 border-b border-line/60 px-2 py-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setAgentMenuView('chats')}
+                            aria-label="Back to chats"
+                            className="rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                          >
+                            <ChevronLeft size={13} />
+                          </button>
+                          <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-text-secondary">Rooms</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAgentMenuOpen(false);
+                              setRoomCreateOpen(true);
+                            }}
+                            aria-label="Create room"
+                            title="Create room"
+                            className="rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                          >
+                            <Plus size={13} />
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            selectThread({ kind: 'room', id: '__broadcast__', name: 'Global Chat' });
+                            setAgentMenuOpen(false);
+                          }}
+                          className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
+                        >
+                          <span className={clsx(
+                            'grid h-6 w-6 shrink-0 place-items-center rounded border',
+                            currentThread?.id === '__broadcast__'
+                              ? 'border-accent/40 bg-accent/10 text-accent'
+                              : 'border-line bg-surface-2 text-text-muted',
+                          )}>
+                            <Globe size={11} />
                           </span>
-                        </span>
-                        {scope.id === currentThread?.id && <Check size={12} className="shrink-0 text-accent" />}
-                      </button>
-                    ))}
-                    <div className="mx-2 my-1 h-px bg-line/60" />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        selectThread({ kind: 'room', id: '__broadcast__', name: 'Global Chat' });
-                        setAgentMenuOpen(false);
-                      }}
-                      className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left hover:bg-surface-2"
-                    >
-                      <span className={clsx(
-                        'grid h-5 w-5 shrink-0 place-items-center rounded border',
-                        currentThread?.id === '__broadcast__'
-                          ? 'border-accent/40 bg-accent/10 text-accent'
-                          : 'border-line bg-surface-2 text-text-muted',
-                      )}>
-                        <Globe size={10} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[11px] font-medium text-text-secondary">Global Chat</span>
-                        <span className="block text-[9px] text-text-muted">Workspace-wide interactions</span>
-                      </span>
-                      {currentThread?.id === '__broadcast__' && <Check size={12} className="shrink-0 text-accent" />}
-                    </button>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[12px] font-medium text-text-secondary">Global Chat</span>
+                            <span className="block truncate text-[10px] text-text-muted">Workspace-wide interactions</span>
+                          </span>
+                          {currentThread?.id === '__broadcast__' && <Check size={12} className="shrink-0 text-accent" />}
+                        </button>
+                        {roomMenuLoading ? (
+                          <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-text-muted">
+                            <Loader2 size={12} className="animate-spin" />
+                            Loading rooms...
+                          </div>
+                        ) : (
+                          roomMenuRows
+                            .filter((room) => room.kind !== 'workspace')
+                            .map((room) => (
+                              <button
+                                key={room.id}
+                                type="button"
+                                onClick={() => {
+                                  selectThread({ kind: 'room', id: room.id, name: room.name });
+                                  setAgentMenuOpen(false);
+                                }}
+                                className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
+                              >
+                                <span className={clsx(
+                                  'grid h-6 w-6 shrink-0 place-items-center rounded border',
+                                  currentThread?.id === room.id
+                                    ? 'border-accent/40 bg-accent/10 text-accent'
+                                    : 'border-line bg-surface-2 text-text-muted',
+                                )}>
+                                  <Hash size={11} />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-[12px] text-text-primary">{room.name}</span>
+                                  <span className="block truncate text-[10px] text-text-muted">
+                                    {room.lastMessagePreview?.trim() || (room.kind === 'thread' ? 'Thread room' : 'Room')}
+                                  </span>
+                                </span>
+                                {currentThread?.id === room.id && <Check size={12} className="shrink-0 text-accent" />}
+                              </button>
+                            ))
+                        )}
+                        {!roomMenuLoading && roomMenuRows.filter((room) => room.kind !== 'workspace').length === 0 && (
+                          <div className="px-3 py-2 text-[11px] text-text-muted">No rooms yet.</div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {scopes.map((scope) => (
+                          <button
+                            key={scope.id}
+                            type="button"
+                            onClick={() => {
+                              selectThread({ kind: 'agent', id: scope.id, name: scope.name });
+                              setAgentMenuOpen(false);
+                            }}
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
+                          >
+                            <span className={clsx(
+                              'grid h-6 w-6 shrink-0 place-items-center rounded border',
+                              scope.id === currentThread?.id
+                                ? 'border-accent/40 bg-accent/10 text-accent'
+                                : 'border-line bg-surface-2 text-text-muted',
+                            )}>
+                              <ChatScopeGlyph role={scope.role} size={11} />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[12px] text-text-primary">{scope.name}</span>
+                              <span className="block text-[10px] text-text-muted">
+                                {scope.role === 'orchestrator' ? 'Orchestrator' : scope.spaceName ?? 'Manager'}
+                              </span>
+                            </span>
+                            {scope.id === currentThread?.id && <Check size={12} className="shrink-0 text-accent" />}
+                          </button>
+                        ))}
+                        <div className="mx-2 my-1 h-px bg-line/60" />
+                        <button
+                          type="button"
+                          onClick={() => setAgentMenuView('rooms')}
+                          className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-surface-2"
+                        >
+                          <span className={clsx(
+                            'grid h-6 w-6 shrink-0 place-items-center rounded border',
+                            selectedThread?.kind === 'room'
+                              ? 'border-accent/40 bg-accent/10 text-accent'
+                              : 'border-line bg-surface-2 text-text-muted',
+                          )}>
+                            <Hash size={11} />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[12px] font-medium text-text-secondary">Rooms</span>
+                            <span className="block truncate text-[10px] text-text-muted">Workspace channels and agent handoffs</span>
+                          </span>
+                          <ChevronRight size={13} className="shrink-0 text-text-muted" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -324,15 +444,6 @@ export function ChatPanel() {
                   className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
                 >
                   <Plus size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRoomCreateOpen(true)}
-                  aria-label="Create room"
-                  title="Create room"
-                  className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-                >
-                  <Hash size={14} />
                 </button>
                 <button
                   type="button"
@@ -383,7 +494,7 @@ export function ChatPanel() {
               }}
               onOpenBroadcast={() => {
                 setHistoryOpen(false);
-                selectThread({ kind: 'room', id: '__broadcast__', name: 'Fleet broadcast' });
+                selectThread({ kind: 'room', id: '__broadcast__', name: 'Global Chat' });
               }}
             />
           ) : currentThread ? (
@@ -429,6 +540,9 @@ export function ChatPanel() {
         onCreated={(room) => {
           setRoomCreateOpen(false);
           setHistoryOpen(false);
+          setRoomMenuRows((prev) => prev.some((entry) => entry.id === room.id)
+            ? prev
+            : [...prev, { id: room.id, name: room.name, kind: 'custom', lastMessagePreview: null }]);
           selectThread({ kind: 'room', id: room.id, name: room.name });
         }}
       />

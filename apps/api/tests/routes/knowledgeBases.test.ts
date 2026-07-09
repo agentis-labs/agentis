@@ -76,7 +76,7 @@ describe('/v1/knowledge-bases document uploads', () => {
         workspaceId: ctx.workspace.id,
         ambientId: ctx.ambient.id,
         userId: ctx.user.id,
-        title: 'Fashion Store Factory',
+        title: 'Catalog Launch Workflow',
         graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
         settings: {},
       })
@@ -93,16 +93,23 @@ describe('/v1/knowledge-bases document uploads', () => {
     const workspaceRes = await app().request('/v1/knowledge-bases', { headers: ctx.authHeaders });
     expect(workspaceRes.status).toBe(200);
     const workspaceJson = await workspaceRes.json() as {
-      knowledgeBases: Array<{ id: string; scopeKind: string; ownerWorkflow?: { id: string; title: string } | null; documentCount: number }>;
+      knowledgeBases: Array<{
+        id: string;
+        scopeKind: string;
+        ownerScope?: { id: string; kind: string; title: string } | null;
+        ownerWorkflow?: { id: string; title: string } | null;
+        documentCount: number;
+      }>;
     };
     const scoped = workspaceJson.knowledgeBases.find((base) => base.id === workflowBase.id);
     const shared = workspaceJson.knowledgeBases.find((base) => base.id === workspaceBase.id);
     expect(scoped).toMatchObject({
       scopeKind: 'workflow',
-      ownerWorkflow: { id: workflowId, title: 'Fashion Store Factory' },
+      ownerScope: { id: workflowId, kind: 'workflow', title: 'Catalog Launch Workflow' },
+      ownerWorkflow: { id: workflowId, title: 'Catalog Launch Workflow' },
       documentCount: 1,
     });
-    expect(shared).toMatchObject({ scopeKind: 'workspace', ownerWorkflow: null, documentCount: 0 });
+    expect(shared).toMatchObject({ scopeKind: 'workspace', ownerScope: null, ownerWorkflow: null, documentCount: 0 });
 
     const scopedRes = await app().request(`/v1/knowledge-bases?scopeId=${workflowId}`, { headers: ctx.authHeaders });
     const scopedJson = await scopedRes.json() as { knowledgeBases: Array<{ id: string }> };
@@ -113,7 +120,7 @@ describe('/v1/knowledge-bases document uploads', () => {
     // The App Brain → Knowledge facet binds the scope to app.id, NOT a workflow
     // id. The scope validation used to check only the workflows table and threw
     // "Workflow not found"; an App is now a valid Knowledge scope.
-    const appRecord = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Agentis Fashion Store Factory' });
+    const appRecord = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Agentis Catalog Launch Workflow' });
 
     const listRes = await app().request(`/v1/knowledge-bases?scopeId=${appRecord.id}`, { headers: ctx.authHeaders });
     expect(listRes.status).toBe(200);
@@ -125,10 +132,18 @@ describe('/v1/knowledge-bases document uploads', () => {
     });
     expect(createRes.status).toBe(201);
     const created = await createRes.json() as {
-      knowledgeBase: { id: string; scopeId: string; ownerWorkflow?: { id: string; title: string } | null };
+      knowledgeBase: {
+        id: string;
+        scopeId: string;
+        scopeKind: string;
+        ownerScope?: { id: string; kind: string; title: string } | null;
+        ownerWorkflow?: { id: string; title: string } | null;
+      };
     };
     expect(created.knowledgeBase.scopeId).toBe(appRecord.id);
-    expect(created.knowledgeBase.ownerWorkflow).toMatchObject({ id: appRecord.id, title: 'Agentis Fashion Store Factory' });
+    expect(created.knowledgeBase.scopeKind).toBe('app');
+    expect(created.knowledgeBase.ownerScope).toMatchObject({ id: appRecord.id, kind: 'app', title: 'Agentis Catalog Launch Workflow' });
+    expect(created.knowledgeBase.ownerWorkflow).toMatchObject({ id: appRecord.id, title: 'Agentis Catalog Launch Workflow' });
 
     const scopedList = await app().request(`/v1/knowledge-bases?scopeId=${appRecord.id}`, { headers: ctx.authHeaders });
     const scopedJson = await scopedList.json() as { knowledgeBases: Array<{ id: string }> };
@@ -137,6 +152,55 @@ describe('/v1/knowledge-bases document uploads', () => {
     // A bogus scope still 404s — the validation didn't simply go permissive.
     const bogusRes = await app().request(`/v1/knowledge-bases?scopeId=${randomUUID()}`, { headers: ctx.authHeaders });
     expect(bogusRes.status).toBe(404);
+  });
+
+  it('resolves Agent-scoped knowledge as agent-owned Brain content', async () => {
+    const { intelligence } = wireAutoLinker();
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Research Brain',
+      adapterType: 'http',
+      role: 'worker',
+    }).run();
+
+    const createRes = await app().request(`/v1/knowledge-bases?scopeId=${agentId}`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ name: 'Research playbook' }),
+    });
+
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json() as {
+      knowledgeBase: {
+        id: string;
+        scopeId: string;
+        scopeKind: string;
+        ownerScope?: { id: string; kind: string; title: string } | null;
+      };
+    };
+    expect(created.knowledgeBase).toMatchObject({
+      scopeId: agentId,
+      scopeKind: 'agent',
+      ownerScope: { id: agentId, kind: 'agent', title: 'Research Brain' },
+    });
+
+    const scopedList = await app().request(`/v1/knowledge-bases?scopeId=${agentId}`, { headers: ctx.authHeaders });
+    const scopedJson = await scopedList.json() as { knowledgeBases: Array<{ id: string; scopeKind: string }> };
+    expect(scopedJson.knowledgeBases.map((base) => ({ id: base.id, scopeKind: base.scopeKind })))
+      .toEqual([{ id: created.knowledgeBase.id, scopeKind: 'agent' }]);
+
+    await knowledge.addDocument({
+      workspaceId: ctx.workspace.id,
+      knowledgeBaseId: created.knowledgeBase.id,
+      name: 'agent.md',
+      content: 'Agent-owned knowledge must render inside this agent Brain.',
+    });
+    const graph = intelligence.getGraph(ctx.workspace.id, { scope: 'scoped', scopeId: agentId, includeWorkspace: false });
+    expect(graph.nodes.some((node) => node.scopeId === agentId && node.summary?.includes('Agent-owned knowledge'))).toBe(true);
   });
 
   it('loads document chunk previews and safely renames document metadata', async () => {

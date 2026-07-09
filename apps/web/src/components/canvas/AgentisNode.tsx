@@ -166,8 +166,10 @@ export function AgentisNode({ data, selected }: { data: AgentisNodeData; selecte
         isTrigger ? 'rounded-r-node rounded-l-[28px]' : 'rounded-node',
         stateRing,
         isRunning && 'agentis-node-running',
-        // A running node always reads at full strength, even inside a dimmed phase.
-        data.phaseDimmed && !isRunning && 'opacity-25',
+        // Nodes needing setup stand out with a warn ring so they're not missed.
+        data.pendingConfig && !isRunning && !selected && 'border-warn/60 ring-1 ring-warn/40',
+        // A running or needs-setup node always reads at full strength, even inside a dimmed phase.
+        data.phaseDimmed && !isRunning && !data.pendingConfig && 'opacity-25',
         selected && 'ring-2 ring-accent/45',
       )}
       title={hoverDetail}

@@ -52,6 +52,30 @@ describe('SharedIntelligenceService — dispatch retrieval marks access', () => 
     expect(lastAccessedAt(atom.id)).not.toBeNull();
   });
 
+  it('recalls a stored memory with a missing embedding via lexical fallback (hybrid recall)', async () => {
+    const atom = await brain.addAtom({
+      workspaceId: ctx.workspace.id,
+      content: 'My name is Robson Prado.',
+      confidence: 1,
+      source: 'operator_write',
+    });
+    // Simulate an operator-inserted / un-embedded / mixed-provider memory: strip the
+    // vector so semantic scoring yields 0. Before the hybrid fix this atom was
+    // invisible to agent recall even though the UI's lexical search found it.
+    ctx.db.update(schema.memoryEpisodes)
+      .set({ embedding: null, embeddingModel: null, embeddingDims: null })
+      .where(eq(schema.memoryEpisodes.id, atom.id))
+      .run();
+
+    const hits = await brain.searchAtoms({
+      workspaceId: ctx.workspace.id,
+      query: "what's my name",
+      scope: 'workspace',
+      limit: 5,
+    });
+    expect(hits.some((h) => h.content.includes('Robson Prado'))).toBe(true);
+  });
+
   it('does not touch episodes that are not surfaced', async () => {
     const surfaced = await brain.addAtom({
       workspaceId: ctx.workspace.id,

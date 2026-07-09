@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { isSensitiveEnvKey, redactSensitiveEnv, withExpandedPath } from '../src/services/pathExpander.js';
 
 describe('redactSensitiveEnv', () => {
-  it('strips Agentis-internal secrets, OAuth client creds, and deploy tokens', () => {
+  it('strips Agentis-internal secrets and OAuth client creds', () => {
     const env = {
       PATH: '/usr/bin',
       AGENTIS_CREDENTIAL_KEY: 'vault-master-key',
@@ -17,8 +17,6 @@ describe('redactSensitiveEnv', () => {
       AGENTIS_SEED_PASSWORD: 'hunter2',
       AGENTIS_DATABASE_URL: 'postgres://u:p@h/db',
       WORKFLOW_SYNTHESIS_API_KEY: 'sk-synth',
-      VERCEL_TOKEN: 'vc-token',
-      VERCEL_TEAM_ID: 'team_1',
       OAUTH_GOOGLE_CLIENT_SECRET: 'g-secret',
       OAUTH_GITHUB_CLIENT_ID: 'gh-id',
     };
@@ -50,7 +48,6 @@ describe('redactSensitiveEnv', () => {
   it('classifies keys by shape', () => {
     expect(isSensitiveEnvKey('AGENTIS_ORCHESTRATOR_API_KEY')).toBe(true);
     expect(isSensitiveEnvKey('AGENTIS_CREDENTIAL_KEY')).toBe(true);
-    expect(isSensitiveEnvKey('VERCEL_TOKEN')).toBe(true);
     expect(isSensitiveEnvKey('OAUTH_SLACK_CLIENT_SECRET')).toBe(true);
     expect(isSensitiveEnvKey('ANTHROPIC_API_KEY')).toBe(false);
     expect(isSensitiveEnvKey('PATH')).toBe(false);

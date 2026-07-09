@@ -190,6 +190,7 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
   const { workflows, error, reload } = useAppWorkflows(appId);
   const [busy, setBusy] = useState<string | null>(null);
   const [openRules, setOpenRules] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const run = useCallback(async (wfId: string) => {
@@ -216,21 +217,31 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
 
   const icon = <Workflow size={14} />;
   const heading = title ?? 'Orchestration';
+  const loadedWorkflows = workflows ?? [];
+  const titleById = new Map(loadedWorkflows.map((w) => [w.id, w.title]));
+  const activeWfs = loadedWorkflows.filter((w) => w.activeRun && isActiveRunStatus(w.activeRun.status));
+  const running = activeWfs.filter((w) => (w.activeRun?.status ?? '').toUpperCase() === 'RUNNING').length;
+  const waiting = activeWfs.length - running;
+
+  useEffect(() => {
+    if (activeWfs.length > 0 || actionError || openRules) setExpanded(true);
+  }, [actionError, activeWfs.length, openRules]);
+
   if (error) return <PanelShell title={heading} icon={icon}><EmptyState label="Couldn't load workflows" hint={error} /></PanelShell>;
   if (workflows === null) return <PanelShell title={heading} icon={icon}><SkeletonRows /></PanelShell>;
   if (workflows.length === 0) return <PanelShell title={heading} icon={icon}><EmptyState label="No workflows yet" hint="Adopt or build a workflow to give this app logic." /></PanelShell>;
-
-  const titleById = new Map(workflows.map((w) => [w.id, w.title]));
-  const activeWfs = workflows.filter((w) => w.activeRun && isActiveRunStatus(w.activeRun.status));
-  const running = activeWfs.filter((w) => (w.activeRun?.status ?? '').toUpperCase() === 'RUNNING').length;
-  const waiting = activeWfs.length - running;
 
   return (
     <PanelShell
       title={heading}
       icon={icon}
+      collapsed={!expanded}
+      onToggle={() => setExpanded((value) => !value)}
       action={controls ? (
         <div className="flex items-center gap-2">
+          <span className="hidden rounded-full bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-text-muted sm:inline-flex">
+            {workflows.length} {workflows.length === 1 ? 'workflow' : 'workflows'}
+          </span>
           {running > 0 ? (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-success-soft px-2.5 py-1 text-[11px] font-medium text-success">
               <span className="s-pulse h-1.5 w-1.5 rounded-full bg-success text-success" /> {running} running

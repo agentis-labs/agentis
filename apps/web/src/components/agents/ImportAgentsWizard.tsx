@@ -22,20 +22,32 @@ import {
 } from '../../lib/agentImport';
 import { Drawer } from '../shared/Drawer';
 import { Button } from '../shared/Button';
+import { useConfirm } from '../shared/ConfirmDialog';
 import { harnessOf, type HarnessIcon } from './harnessMeta';
+import {
+  AgentImportSetupPanel,
+  agentImportSetupToOverrides,
+  createDefaultAgentImportSetup,
+  type AgentImportOverrides,
+  type AgentImportSetupValue,
+  type AgentSetupAgent,
+} from './AgentImportSetupPanel';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onImported?: () => void;
+  existingAgents?: AgentSetupAgent[];
 }
 
 interface PerAgent {
   acceptedHashes?: string[];   // undefined = all
   acceptedSkillPaths?: string[];
+  overrides?: AgentImportOverrides;
 }
 
-export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
+export function ImportAgentsWizard({ open, onClose, onImported, existingAgents = [] }: Props) {
+  const confirm = useConfirm();
   const [agents, setAgents] = useState<DiscoveredAgentRow[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [focused, setFocused] = useState<string | null>(null);
@@ -83,13 +95,25 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
     });
   }
 
-  async function runImport(only?: string) {
+  async function runImport(only?: string, confirmResync = false) {
     if (!agents) return;
+    if (confirmResync && only) {
+      const agent = agents.find((candidate) => candidate.externalId === only);
+      const pending = updates.get(only) ?? 0;
+      const ok = await confirm({
+        title: `Re-sync ${agent?.name ?? 'agent'}?`,
+        body: `This will scan the provider again and push new memories plus skills into this agent's Brain.${pending > 0 ? ` ${pending} new item${pending === 1 ? '' : 's'} are available.` : ''}`,
+        confirmLabel: 'Re-sync',
+        tone: 'neutral',
+      });
+      if (!ok) return;
+    }
     setImporting(true); setError(null);
     try {
       const ids = only ? [only] : [...selected];
       const specs: ImportAgentSpec[] = ids.map((id) => ({
         externalId: id,
+        overrides: overrides.get(id)?.overrides,
         acceptedHashes: overrides.get(id)?.acceptedHashes,
         acceptedSkillPaths: overrides.get(id)?.acceptedSkillPaths,
       }));
@@ -110,6 +134,20 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
   const imported = visible.filter((a) => a.alreadyImported);
   const groups = useMemo(() => groupByHarness(fresh), [fresh]);
   const totals = useMemo(() => sumTotals(agents ?? []), [agents]);
+  // Real distilled memory count accumulates from per-agent previews (now fast).
+  // It refines the scan's raw file estimate toward the true number as agents load.
+  const distilled = useMemo(() => {
+    let memories = 0;
+    let previewed = 0;
+    for (const a of agents ?? []) {
+      const p = previewCache.get(a.externalId);
+      if (p) { memories += p.candidates.length; previewed += 1; }
+    }
+    return { memories, previewed, total: (agents ?? []).length };
+  }, [agents, previewCache]);
+  const memoryLabel = distilled.previewed > 0
+    ? `${distilled.memories}${distilled.previewed < distilled.total ? '+' : ''} memories`
+    : `${totals.memories} memory files`;
   const focusedAgent = (agents ?? []).find((a) => a.externalId === focused) ?? null;
 
   return (
@@ -130,7 +168,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
         </span>
       )}
       subtitle={agents && agents.length > 0
-        ? `Found ${totals.count} agent${totals.count === 1 ? '' : 's'} · ${totals.memories} memories · ${totals.skills} skills`
+        ? `Found ${totals.count} agent${totals.count === 1 ? '' : 's'} · ${memoryLabel} · ${totals.skills} skills`
         : 'Import agents you already run outside Agentis — identity, memory and skills.'}
       footer={done ? (
         <div className="flex items-center justify-between">
@@ -211,7 +249,7 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
                         <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface"><Icon className="h-3.5 w-3.5" /></span>
                         <span className="min-w-0 flex-1 truncate text-[12.5px]">{a.name}</span>
                         {pending > 0
-                          ? <button type="button" onClick={() => void runImport(a.externalId)} disabled={importing}
+                          ? <button type="button" onClick={() => void runImport(a.externalId, true)} disabled={importing}
                               className="flex items-center gap-1 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">{pending} new · pull</button>
                           : <Check size={13} className="text-success" />}
                       </div>
@@ -226,16 +264,19 @@ export function ImportAgentsWizard({ open, onClose, onImported }: Props) {
           <div className="min-h-0 overflow-y-auto p-4">
             {focusedAgent
               ? <ManifestPane key={focusedAgent.externalId} agent={focusedAgent}
+                  existingAgents={existingAgents}
                   cachedPreview={previewCache.get(focusedAgent.externalId) ?? null}
                   acceptedHashes={overrides.get(focusedAgent.externalId)?.acceptedHashes}
                   acceptedSkillPaths={overrides.get(focusedAgent.externalId)?.acceptedSkillPaths}
+                  setupOverride={overrides.get(focusedAgent.externalId)?.overrides}
                   onPreviewLoaded={(preview) => setPreviewCache((prev) => {
                     const next = new Map(prev);
                     next.set(focusedAgent.externalId, preview);
                     return next;
                   })}
                   onAccepted={(hashes) => { overrides.set(focusedAgent.externalId, { ...overrides.get(focusedAgent.externalId), acceptedHashes: hashes }); }}
-                  onSkillsAccepted={(paths) => { overrides.set(focusedAgent.externalId, { ...overrides.get(focusedAgent.externalId), acceptedSkillPaths: paths }); }} />
+                  onSkillsAccepted={(paths) => { overrides.set(focusedAgent.externalId, { ...overrides.get(focusedAgent.externalId), acceptedSkillPaths: paths }); }}
+                  onSetupAccepted={(setup) => { overrides.set(focusedAgent.externalId, { ...overrides.get(focusedAgent.externalId), overrides: agentImportSetupToOverrides(setup) }); }} />
               : <p className="text-[13px] text-text-muted">Select an agent to see what will transition.</p>}
           </div>
         </div>
@@ -263,20 +304,31 @@ function RosterRow({ agent, Icon, checked, active, onToggle, onFocus }: {
   );
 }
 
-function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths, onPreviewLoaded, onAccepted, onSkillsAccepted }: {
+function ManifestPane({ agent, existingAgents, cachedPreview, acceptedHashes, acceptedSkillPaths, setupOverride, onPreviewLoaded, onAccepted, onSkillsAccepted, onSetupAccepted }: {
   agent: DiscoveredAgentRow;
+  existingAgents: AgentSetupAgent[];
   cachedPreview: AgentImportPreview | null;
   acceptedHashes?: string[];
   acceptedSkillPaths?: string[];
+  setupOverride?: AgentImportOverrides;
   onPreviewLoaded: (preview: AgentImportPreview) => void;
   onAccepted: (hashes: string[]) => void;
   onSkillsAccepted: (paths: string[]) => void;
+  onSetupAccepted: (setup: AgentImportSetupValue) => void;
 }) {
   const [preview, setPreview] = useState<AgentImportPreview | null>(cachedPreview);
   const [loading, setLoading] = useState(!cachedPreview);
   const [acceptedMem, setAcceptedMem] = useState<Set<string>>(new Set());
   const [acceptedSkills, setAcceptedSkills] = useState<Set<string>>(new Set());
+  const [setup, setSetup] = useState<AgentImportSetupValue>(() => setupFromAgent(agent, existingAgents, setupOverride));
   const { label, Icon } = harnessOf(agent.adapterType);
+
+  useEffect(() => {
+    const next = setupFromAgent(agent, existingAgents, setupOverride);
+    setSetup(next);
+    onSetupAccepted(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.externalId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -342,6 +394,20 @@ function ManifestPane({ agent, cachedPreview, acceptedHashes, acceptedSkillPaths
           <span className="ml-auto text-[11px] text-accent">swappable</span>
         </div>
       </Section>
+
+      {!agent.alreadyImported && (
+        <Section label="Agent setup">
+          <AgentImportSetupPanel
+            value={setup}
+            existingAgents={existingAgents}
+            compact
+            onChange={(next) => {
+              setSetup(next);
+              onSetupAccepted(next);
+            }}
+          />
+        </Section>
+      )}
 
       {loading && <p className="mt-3 flex items-center gap-1.5 text-[12px] text-text-muted"><Loader2 size={12} className="animate-spin" /> Distilling memory + skills…</p>}
 
@@ -416,6 +482,20 @@ function sumTotals(agents: DiscoveredAgentRow[]) {
     memories: acc.memories + a.summary.memoryFiles + a.summary.workspaceFiles + a.summary.agentFiles,
     skills: acc.skills + a.summary.skills,
   }), { count: 0, memories: 0, skills: 0 });
+}
+
+function setupFromAgent(agent: DiscoveredAgentRow, existingAgents: AgentSetupAgent[], override?: AgentImportOverrides): AgentImportSetupValue {
+  return {
+    ...createDefaultAgentImportSetup({
+      name: agent.name,
+      role: agent.role,
+      existingAgents,
+      preferOrchestratorWhenEmpty: false,
+    }),
+    ...(override?.name ? { name: override.name } : {}),
+    ...(override?.role ? { role: override.role === 'orchestrator' || override.role === 'manager' ? override.role : 'worker' } : {}),
+    ...(override?.reportsTo ? { reportsTo: override.reportsTo } : {}),
+  };
 }
 
 

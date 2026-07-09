@@ -10,7 +10,7 @@ import { Bell, Check, Eye, RotateCcw, AlertTriangle, XCircle, Clock } from 'luci
 import clsx from 'clsx';
 import { ManagerGlyph, OrchestratorGlyph } from '../agents/AgentRoleGlyphs';
 import { api, apiErrorMessage } from '../../lib/api';
-import { refreshWorkspaceSnapshot, useWorkspaceData } from '../../lib/workspaceData';
+import { refreshWorkspaceChromeSnapshot, useWorkspaceChromeData } from '../../lib/workspaceChromeData';
 import { useToast } from './Toast';
 import { openRunModal } from '../../lib/runModal';
 import { openApprovalModal } from '../../lib/approvalModal';
@@ -50,7 +50,7 @@ function relativeTime(iso: string): string {
 
 export function NotificationPanel() {
   const [open, setOpen] = useState(false);
-  const { workspaceId, notifications: items, loading } = useWorkspaceData();
+  const { workspaceId, notifications: items, loading } = useWorkspaceChromeData();
   const ref = useRef<HTMLDivElement>(null);
   const toast = useToast();
   const [acknowledgedIds, setAcknowledgedIds] = useState<Set<string>>(new Set());
@@ -154,7 +154,7 @@ export function NotificationPanel() {
       await api(`/v1/runs/${n.runId}/retry`, { method: 'POST' });
       acknowledgeNotifications([n.id]);
       toast.success('Retry started');
-      void refreshWorkspaceSnapshot();
+      void refreshWorkspaceChromeSnapshot();
     } catch (e) {
       toast.error('Retry failed', apiErrorMessage(e));
     }

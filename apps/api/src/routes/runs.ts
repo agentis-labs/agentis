@@ -491,8 +491,8 @@ function presentSelfHealIncident(
 // `node.completed` audit entries (`tokens_in/out`), written by every agent
 // execution path regardless of runtime. The `agent_sessions` table this used to
 // sum is never populated for non-agent_task runtimes (extension/CLI/deterministic
-// nodes), so a workflow like the Fashion Store Factory — mostly extension_task +
-// data_mutate nodes — always read 0 while its real usage sat in the audit trail.
+// nodes), so mixed-runtime workflows used to read 0 while their real usage sat
+// in the audit trail.
 function loadRunTokenUsage(db: AgentisSqliteDb, workspaceId: string, runId: string): { tokensIn: number; tokensOut: number } {
   const row = db.select({
     tokensIn: sql<number>`coalesce(sum(${schema.auditEntries.tokensIn}), 0)`,

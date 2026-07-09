@@ -31,7 +31,7 @@ import { appsApi, type AppConversation, type AppConversationMessage } from '../.
 import { pathsEqual, pathKey } from './viewTree';
 import { CHART_PALETTE, ThemeProvider, accentColor, resolveTheme, useTheme, type ResolvedTheme } from './theme';
 import { containerClasses, textClasses, toneFillClass, toneFromStatus, toneSoftClass } from './styleIntent';
-import { StatusPill, classifyValue, formatDisplay, isWordyMetric, numeralScale } from './format';
+import { StatusPill, classifyValue, formatDisplay, formatNumber, isWordyMetric, numeralScale } from './format';
 import { DataChart, Sparkline as SparkSvg, type ChartSeries } from './charts';
 import { CODE_SURFACE_KIT, CODE_SURFACE_TOKENS } from './codeSurfaceKit';
 import { registerBlock, getBlock, type BlockContext, type ResolveScope } from './blocks/registry';
@@ -125,9 +125,90 @@ function bindablePath(value: unknown): string {
 }
 
 function displayString(value: unknown): string {
+  if (parseCountToken(value)) return '-';
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+interface CountTokenSpec {
+  key: string;
+  collections: string[];
+  filter: Record<string, unknown>;
+}
+
+const COUNT_TOKEN_RE = /^\s*\{\{\s*count\s*:\s*([^{}]+?)\s*\}\}\s*$/i;
+const COUNT_FILTER_RE = /^(.+)\.([a-zA-Z_][a-zA-Z0-9_]*):(.+)$/;
+
+function parseCountToken(value: unknown): CountTokenSpec | null {
+  if (typeof value !== 'string') return null;
+  const match = value.match(COUNT_TOKEN_RE);
+  if (!match) return null;
+  const expr = match[1]?.trim();
+  if (!expr) return null;
+
+  const filterMatch = expr.match(COUNT_FILTER_RE);
+  const collection = (filterMatch?.[1] ?? expr).trim();
+  if (!collection) return null;
+  const field = filterMatch?.[2]?.trim();
+  const rawFilterValue = filterMatch?.[3]?.trim();
+  const filter = field && rawFilterValue ? { [field]: parseCountFilterValue(rawFilterValue) } : {};
+  const collections = collectionCandidates(collection);
+  return { key: JSON.stringify({ collections, filter }), collections, filter };
+}
+
+function parseCountFilterValue(value: string): unknown {
+  const unquoted = value.replace(/^['"]|['"]$/g, '').trim();
+  if (/^(true|false)$/i.test(unquoted)) return unquoted.toLowerCase() === 'true';
+  if (/^-?\d+(\.\d+)?$/.test(unquoted)) return Number(unquoted);
+  return unquoted;
+}
+
+function collectionCandidates(name: string): string[] {
+  const raw = name.trim();
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return [...new Set([raw, normalized].filter(Boolean))];
+}
+
+function useCountToken(spec: CountTokenSpec | null): { loading: boolean; value: number | null } {
+  const { client, dataRevision } = useRuntime();
+  const [state, setState] = useState<{ key: string; loading: boolean; value: number | null }>({ key: '', loading: false, value: null });
+
+  useEffect(() => {
+    if (!spec) {
+      setState((prev) => (prev.key === '' && !prev.loading && prev.value === null ? prev : { key: '', loading: false, value: null }));
+      return undefined;
+    }
+    let cancelled = false;
+    const key = `${spec.key}:${dataRevision}`;
+    setState({ key, loading: true, value: null });
+    (async () => {
+      for (const collection of spec.collections) {
+        try {
+          const rows = await client.data.query(collection, { filter: spec.filter, limit: 500 });
+          if (!cancelled) setState({ key, loading: false, value: rows.length });
+          return;
+        } catch {
+          // Try normalized fallbacks before giving up; agents sometimes emit display labels here.
+        }
+      }
+      if (!cancelled) setState({ key, loading: false, value: null });
+    })();
+    return () => { cancelled = true; };
+  }, [client, dataRevision, spec?.key]);
+
+  if (!spec) return { loading: false, value: null };
+  const key = `${spec.key}:${dataRevision}`;
+  return state.key === key ? { loading: state.loading, value: state.value } : { loading: true, value: null };
+}
+
+function CountSkeleton({ compact = false }: { compact?: boolean }) {
+  return <span className={clsx('inline-block animate-pulse rounded bg-surface-2', compact ? 'h-6 w-12' : 'h-8 w-16')} />;
 }
 
 /**
@@ -495,17 +576,45 @@ function InlineTextEditor({
   );
 }
 
-export function PanelShell({ title, icon, children, action }: { title?: string; icon: ReactNode; children: ReactNode; action?: ReactNode }) {
+export function PanelShell({
+  title,
+  icon,
+  children,
+  action,
+  collapsed = false,
+  onToggle,
+}: {
+  title?: string;
+  icon: ReactNode;
+  children: ReactNode;
+  action?: ReactNode;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
+  const collapsible = Boolean(onToggle);
   return (
     <div className="s-panel overflow-hidden">
       {(title || action) ? (
         <div className="flex items-center gap-2.5 border-b border-line/70 px-5 py-3.5">
+          {collapsible ? (
+            <button
+              type="button"
+              onClick={onToggle}
+              className="-ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-btn text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary"
+              aria-label={collapsed ? `Expand ${title ?? 'panel'}` : `Collapse ${title ?? 'panel'}`}
+              aria-expanded={!collapsed}
+            >
+              {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+            </button>
+          ) : null}
           <span className="text-text-muted">{icon}</span>
           <span className="s-title min-w-0 flex-1 truncate">{title}</span>
           {action}
         </div>
       ) : null}
-      <div style={{ padding: 'calc(var(--s-pad, 20px) - 4px) var(--s-pad, 20px) var(--s-pad, 20px)' }}>{children}</div>
+      {!collapsed ? (
+        <div style={{ padding: 'calc(var(--s-pad, 20px) - 4px) var(--s-pad, 20px) var(--s-pad, 20px)' }}>{children}</div>
+      ) : null}
     </div>
   );
 }
@@ -1405,18 +1514,24 @@ function prettifyAction(name: string): string {
 
 function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' }>; scope: ResolveScope }) {
   const { density } = useTheme();
-  const value = resolveDisplay(node.value, scope);
+  const countSpec = useMemo(() => parseCountToken(node.value), [node.value]);
+  const count = useCountToken(countSpec);
+  const value = countSpec
+    ? { text: count.value == null ? '' : formatNumber(count.value), unbound: null }
+    : resolveDisplay(node.value, scope);
   // Overflow defense: a WORD value ("ACCOMPLISHED", "world verified") never renders
   // as a 32px numeral — it becomes a humanized tone pill. Numerals auto-fit their
   // type step to the value length so they can't wrap mid-word or clip.
-  const wordy = !value.unbound && isWordyMetric(value.text);
+  const wordy = !countSpec && !value.unbound && isWordyMetric(value.text);
   const deltaRaw = node.delta != null ? String(resolveBindable(node.delta, scope) ?? '') : '';
   const deltaTone = deltaRaw.startsWith('-') ? 'text-danger bg-danger-soft' : deltaRaw.startsWith('+') ? 'text-success bg-success-soft' : 'text-text-secondary bg-surface-2';
   return (
     <div className={containerClasses(node.style, density, { defaultElevation: 'inset', defaultPad: 'sm' })}>
       <div className="s-label">{node.label}</div>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
-        {value.unbound ? (
+        {countSpec && count.loading ? (
+          <CountSkeleton />
+        ) : value.unbound ? (
           <UnboundMarker path={value.unbound} />
         ) : wordy ? (
           <StatusPill value={value.text} className="!px-3 !py-1 !text-[13px] font-semibold" />
@@ -1426,7 +1541,7 @@ function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' 
             style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(value.text || '—')})` }}
             title={value.text.length > 12 ? value.text : undefined}
           >
-            {value.text || '—'}
+            {value.text || '-'}
           </span>
         )}
         {deltaRaw ? <span className={clsx('rounded-full px-2 py-0.5 text-[11.5px] font-medium tabular-nums', deltaTone)}>{deltaRaw}</span> : null}
@@ -1568,48 +1683,72 @@ function SparklineView({ node }: { node: Extract<ViewNode, { type: 'Sparkline' }
 
 function KpiStripView({ node, scope }: { node: Extract<ViewNode, { type: 'KPIStrip' }>; scope: ResolveScope }) {
   const { design } = useTheme();
-  // Auto-fit so wide screens pack more KPIs per row (denser dashboards).
   return (
-    <div className="grid" style={{ gap: 'var(--s-gap, 16px)', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
+    <div
+      className="grid"
+      style={{
+        gap: 'var(--s-gap, 16px)',
+        gridAutoRows: '1fr',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))',
+      }}
+    >
       {node.items.map((item, i) => {
         // In multi-palette languages each tile gets a rotating accent edge + spark hue.
         const paletteAccent = design.policy.multiPalette ? CHART_PALETTE[i % CHART_PALETTE.length] : undefined;
-        const sparkAccent = item.tone && item.tone !== 'neutral'
-          ? item.tone
-          : (paletteAccent as AccentName | undefined);
-        return (
-          <div key={i} className="s-tile relative overflow-hidden px-5 py-4">
-            {paletteAccent ? (
-              <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: accentColor(paletteAccent) }} />
-            ) : null}
-            <div className="s-label break-words">{item.label}</div>
-            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-              {(() => {
-                const v = resolveDisplay(item.value, scope);
-                if (v.unbound) return <UnboundMarker path={v.unbound} />;
-                // Word values (verdicts/statuses) become tone pills; numerals
-                // auto-fit their type step so they never wrap mid-word or clip.
-                if (isWordyMetric(v.text)) return <StatusPill value={v.text} className="!px-3 !py-1 !text-[12.5px] font-semibold" />;
-                return (
-                  <span
-                    className="min-w-0 font-semibold leading-tight text-text-primary"
-                    style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(v.text || '—')})`, letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums' }}
-                    title={v.text.length > 12 ? v.text : undefined}
-                  >
-                    {v.text || '—'}
-                  </span>
-                );
-              })()}
-              {item.delta != null ? (
-                <span className={clsx('min-w-0 break-words rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium tabular-nums', item.tone ? textClasses({ tone: item.tone }) : 'text-success')}>
-                  {String(resolveBindable(item.delta, scope) ?? '')}
-                </span>
-              ) : null}
-            </div>
-            {item.spark && item.spark.length > 1 ? <div className="mt-2"><SparkSvg points={item.spark} accent={sparkAccent} height={28} /></div> : null}
-          </div>
-        );
+        return <KpiTile key={i} item={item} scope={scope} paletteAccent={paletteAccent as AccentName | undefined} />;
       })}
+    </div>
+  );
+}
+
+function KpiTile({
+  item,
+  scope,
+  paletteAccent,
+}: {
+  item: Extract<ViewNode, { type: 'KPIStrip' }>['items'][number];
+  scope: ResolveScope;
+  paletteAccent?: AccentName;
+}) {
+  const countSpec = useMemo(() => parseCountToken(item.value), [item.value]);
+  const count = useCountToken(countSpec);
+  const sparkAccent = item.tone && item.tone !== 'neutral'
+    ? item.tone
+    : paletteAccent;
+  const value = countSpec
+    ? { text: count.value == null ? '' : formatNumber(count.value), unbound: null }
+    : resolveDisplay(item.value, scope);
+  const text = value.text || '-';
+
+  return (
+    <div className="s-tile relative flex h-full min-h-[86px] flex-col justify-between overflow-hidden px-5 py-4">
+      {paletteAccent ? (
+        <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: accentColor(paletteAccent) }} />
+      ) : null}
+      <div className="s-label min-w-0 truncate" title={item.label.length > 28 ? item.label : undefined}>{item.label}</div>
+      <div className="mt-1.5 flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        {countSpec && count.loading ? (
+          <CountSkeleton compact />
+        ) : value.unbound ? (
+          <UnboundMarker path={value.unbound} />
+        ) : !countSpec && isWordyMetric(value.text) ? (
+          <StatusPill value={value.text} className="!px-3 !py-1 !text-[12.5px] font-semibold" />
+        ) : (
+          <span
+            className="min-w-0 max-w-full truncate font-semibold leading-tight text-text-primary"
+            style={{ fontSize: `calc(var(--s-kpi-size, 32px) * ${numeralScale(text)})`, fontVariantNumeric: 'tabular-nums' }}
+            title={text.length > 12 ? text : undefined}
+          >
+            {text}
+          </span>
+        )}
+        {item.delta != null ? (
+          <span className={clsx('min-w-0 max-w-full truncate rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-medium tabular-nums', item.tone ? textClasses({ tone: item.tone }) : 'text-success')}>
+            {String(resolveBindable(item.delta, scope) ?? '')}
+          </span>
+        ) : null}
+      </div>
+      {item.spark && item.spark.length > 1 ? <div className="mt-2"><SparkSvg points={item.spark} accent={sparkAccent} height={28} /></div> : null}
     </div>
   );
 }
@@ -2365,13 +2504,21 @@ function UnknownBlock({ node }: { node: ViewNode }) {
   );
 }
 
-/** Layout gap from the design language's `--s-gap`, with the numeric baseline used
- *  only for the Grid min-cell math. Mirrors the former inline computation exactly. */
+/** Layout gap from the design language's rhythm. Agent-authored explicit gaps are
+ * snapped to a compact scale so generated surfaces cannot create random holes. */
 function gapsFor(theme: ResolvedTheme, node: ViewNode): { layout: string | number; child: string; base: number } {
-  const base = theme.density === 'compact' ? 8 : 12;
+  const base = theme.density === 'compact' ? 10 : 14;
   const explicit = 'gap' in node && (node as { gap?: number | null }).gap != null ? (node as { gap?: number }).gap! : null;
   const v = `var(--s-gap, ${base}px)`;
-  return { base, layout: explicit ?? v, child: v };
+  return { base, layout: explicit == null ? v : snapLayoutGap(explicit, theme), child: v };
+}
+
+function snapLayoutGap(value: number, theme: ResolvedTheme): number {
+  const scale = theme.density === 'compact' ? [6, 8, 10, 12, 14, 16] : [8, 12, 14, 16, 20, 24];
+  const n = Number.isFinite(value) ? Math.max(0, value) : theme.density === 'compact' ? 10 : 14;
+  return scale.reduce((nearest, candidate) => (
+    Math.abs(candidate - n) < Math.abs(nearest - n) ? candidate : nearest
+  ), scale[0]!);
 }
 
 // Layout primitives — recurse through ctx.renderChild.
@@ -2391,7 +2538,7 @@ registerBlock('Row', (node, ctx) => {
   return (
     <div className={clsx('flex flex-wrap', !node.style?.align && 'items-stretch', containerClasses(node.style, ctx.theme.density))} style={{ gap: layout }}>
       {node.children.map((c, i) => (
-        <div key={i} className="min-w-[160px]" style={{ flex: `${node.widths?.[i] ?? 1} 1 0` }}>
+        <div key={i} className="min-w-[220px]" style={{ flex: `${node.widths?.[i] ?? 1} 1 0` }}>
           {ctx.renderChild(c, [...ctx.path, i], ctx.scope)}
         </div>
       ))}

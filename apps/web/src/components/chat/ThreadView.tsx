@@ -338,7 +338,7 @@ export function ThreadView({
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
   const [agentTyping, setAgentTyping] = useState(false);
-  // Global Chat loading state: which @mentioned agents we're still waiting on for
+  // Room loading state: which @mentioned agents we're still waiting on for
   // reply (posted after the mention) shows up. A safety timer caps the wait.
   const [pendingResponders, setPendingResponders] = useState<string[]>([]);
   const broadcastPostAtRef = useRef<string | null>(null);
@@ -710,7 +710,7 @@ export function ThreadView({
     setLoadedConversationId(conversationId ?? null);
   }, [kind, id, conversationId]);
 
-  // Reset the Global Chat "responding…" indicator when switching threads, and
+  // Reset the room "responding…" indicator when switching threads, and
   // clear its safety timer on unmount.
   useEffect(() => {
     setPendingResponders([]);
@@ -816,7 +816,12 @@ export function ThreadView({
       return;
     }
     if (payload.message) {
-      setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(payload.message as RoomMsg)));
+      const roomMessage = payload.message as RoomMsg;
+      setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(roomMessage)));
+      const postAt = broadcastPostAtRef.current;
+      if (postAt && roomMessage.authorType === 'agent' && roomMessage.authorId && roomMessage.createdAt >= postAt) {
+        setPendingResponders((prev) => prev.filter((agentId) => agentId !== roomMessage.authorId));
+      }
     }
   });
 
@@ -1097,22 +1102,20 @@ export function ThreadView({
     }
     if (kind === 'room') {
       try {
+        const responders = resolveMentionedAgentIds(value, agentMap);
         const res = await api<{ message?: RoomMsg }>(sendEndpoint, {
           method: 'POST',
-          body: JSON.stringify({ contentType: 'text', content: { text: value } }),
+          body: JSON.stringify({ contentType: 'text', content: { text: value }, mentions: responders }),
         });
         const message = res.message;
         if (message) setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(message)));
-        // Global Chat: show a "responding…" indicator for each @mentioned agent
-        // until its reply lands (the dispatch is async and can take a while).
-        if (id === '__broadcast__') {
-          const responders = resolveMentionedAgentIds(value, agentMap);
-          if (responders.length > 0) {
-            broadcastPostAtRef.current = new Date().toISOString();
-            setPendingResponders(responders);
-            if (broadcastPendingTimerRef.current) window.clearTimeout(broadcastPendingTimerRef.current);
-            broadcastPendingTimerRef.current = window.setTimeout(() => setPendingResponders([]), 180_000);
-          }
+        // Rooms: show a "responding…" indicator for each @mentioned agent until
+        // its reply lands (the dispatch is async and can take a while).
+        if (responders.length > 0) {
+          broadcastPostAtRef.current = new Date().toISOString();
+          setPendingResponders(responders);
+          if (broadcastPendingTimerRef.current) window.clearTimeout(broadcastPendingTimerRef.current);
+          broadcastPendingTimerRef.current = window.setTimeout(() => setPendingResponders([]), 180_000);
         }
       } catch (error) {
         toast.error('Failed to send', apiErrorMessage(error));

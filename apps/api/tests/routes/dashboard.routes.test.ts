@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { buildDashboardRoutes } from '../../src/routes/dashboard.js';
+import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -16,6 +17,12 @@ beforeEach(async () => {
 function app() {
   return ctx.buildApp([
     { path: '/v1/dashboard', app: buildDashboardRoutes({ db: ctx.db, auth: ctx.auth }) },
+  ]);
+}
+
+function appWithApprovals(approvals: ApprovalInboxService) {
+  return ctx.buildApp([
+    { path: '/v1/dashboard', app: buildDashboardRoutes({ db: ctx.db, auth: ctx.auth, approvals }) },
   ]);
 }
 
@@ -138,5 +145,85 @@ describe('/v1/dashboard/fleet-overview', () => {
     const body = JSON.stringify(await res.json());
     expect(body.includes('mine-only')).toBe(false);
     ctx2.close();
+  });
+});
+
+describe('/v1/dashboard/chrome', () => {
+  it('returns compact always-on shell data without the full workspace snapshot payload', async () => {
+    const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
+    ctx.db.insert(schema.agents).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Live specialist',
+      adapterType: 'http',
+      config: {},
+      capabilityTags: [],
+      status: 'online',
+      role: 'specialist',
+      colorHex: '#0ea5e9',
+    }).run();
+    ctx.db.insert(schema.activityEvents).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      eventType: 'test.event',
+      actorType: 'system',
+      actorId: null,
+      entityType: 'test',
+      entityId: 'chrome',
+      summary: 'Chrome updated',
+      metadata: {},
+    }).run();
+    await approvals.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      runId: null,
+      taskId: null,
+      gatewayId: null,
+      source: 'checkpoint',
+      title: 'Review output',
+      summary: 'Approve the generated output',
+      confidence: null,
+    });
+
+    const res = await appWithApprovals(approvals).request('/v1/dashboard/chrome', { headers: ctx.authHeaders });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      workspaceId: string;
+      counts: { liveAgents: number };
+      fleet: {
+        approvals: { pending: number };
+        gateways: { total: number; connected: number };
+        runs: { recent?: unknown };
+        agents?: unknown;
+        workflows?: unknown;
+      };
+      approvals: Array<{ id: string; title: string }>;
+      latestActivity: { summary: string } | null;
+      notifications: Array<{ id: string; type: string; approvalId?: string }>;
+      artifacts?: unknown;
+      issues?: unknown;
+      activeRuns?: unknown;
+      failedRuns?: unknown;
+    };
+
+    expect(body.workspaceId).toBe(ctx.workspace.id);
+    expect(body.counts.liveAgents).toBe(1);
+    expect(body.fleet.approvals.pending).toBe(1);
+    expect(body.fleet.runs.recent).toBeUndefined();
+    expect(body.fleet.agents).toBeUndefined();
+    expect(body.fleet.workflows).toBeUndefined();
+    expect(body.latestActivity?.summary).toBe('Chrome updated');
+    expect(body.approvals).toHaveLength(1);
+    expect(body.notifications.some((item) => item.id === 'setup-orchestrator')).toBe(true);
+    expect(body.notifications.some((item) => item.approvalId === body.approvals[0]?.id)).toBe(true);
+    expect(body.artifacts).toBeUndefined();
+    expect(body.issues).toBeUndefined();
+    expect(body.activeRuns).toBeUndefined();
+    expect(body.failedRuns).toBeUndefined();
   });
 });

@@ -125,10 +125,21 @@ function repair(node: ViewNode, ctx: Ctx, depth: number): ViewNode | null {
       ctx.fixes.push('dropped empty container');
       return null;
     }
-    return { ...node, children: kids } as ViewNode;
+    return { ...node, ...normalizedGap(node, ctx.fixes), children: kids } as ViewNode;
   }
 
   return node;
+}
+
+function normalizedGap(node: ViewNode, fixes: string[]): { gap?: number } {
+  if (!('gap' in node) || typeof node.gap !== 'number') return {};
+  const scale = [8, 12, 16, 20, 24];
+  const original = Number.isFinite(node.gap) ? Math.max(0, node.gap) : 16;
+  const snapped = scale.reduce((nearest, candidate) => (
+    Math.abs(candidate - original) < Math.abs(nearest - original) ? candidate : nearest
+  ), scale[0]!);
+  if (snapped !== node.gap) fixes.push('normalized layout gap');
+  return { gap: snapped };
 }
 
 function inferTheme(view: ViewNode): SurfaceTheme {

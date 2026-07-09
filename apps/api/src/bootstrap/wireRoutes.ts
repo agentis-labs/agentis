@@ -299,7 +299,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     logger,
     bus,
   }));
-  app.route('/v1/dashboard', buildDashboardRoutes({ db: sqlite, auth }));
+  app.route('/v1/dashboard', buildDashboardRoutes({ db: sqlite, auth, approvals }));
   app.route('/v1/activity', buildActivityRoutes({ db: sqlite, auth, activity }));
   app.route('/v1/observability', buildObservabilityRoutes({ db: sqlite, auth, bus, observability }));
   app.route('/v1/approvals', buildApprovalRoutes({ db: sqlite, auth, approvals }));

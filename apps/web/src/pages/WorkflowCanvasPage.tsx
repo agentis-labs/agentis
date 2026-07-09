@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WorkflowCanvasPage — visual workflow editor.
  *
  * Phase-first workflow editor:
@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   REALTIME_EVENTS,
@@ -29,6 +30,8 @@ import {
   ArrowLeft,
   Play,
   Upload,
+  Save,
+  Plus,
   Puzzle,
   MapPinOff,
   ChevronDown,
@@ -198,7 +201,7 @@ interface SpaceSummary {
 }
 
 type SaveState = 'saved' | 'saving' | 'dirty' | 'error';
-type EnginePage = 'overview' | 'inputs' | 'settings' | 'contracts' | 'chains' | 'activation';
+type EnginePage = 'overview' | 'inputs' | 'contracts' | 'chains';
 
 /** Canvas tabs. UI surfaces moved to the Agentic App (AGENTIC-APPS-10X §4/§6). */
 type WorkflowTab = 'canvas' | 'brain';
@@ -249,6 +252,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   const [activeRunFallbackStatus, setActiveRunFallbackStatus] = useState<WorkflowRunSummary['status'] | null>(null);
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const [runControlOpen, setRunControlOpen] = useState(false);
+  // The empty-canvas "describe this workflow" composer can be dismissed to build
+  // by hand; it returns for the next empty workflow.
+  const [describeDismissed, setDescribeDismissed] = useState(false);
   const [runActionBusy, setRunActionBusy] = useState<'pause' | 'cancel' | 'resume' | null>(null);
   const [activateOpen, setActivateOpen] = useState(false);
   const [deployment, setDeployment] = useState<WorkflowDeployment | null>(null);
@@ -1098,10 +1104,10 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     const inst = flowInstanceRef.current;
     if (!inst) return;
     if (inst.getNodes().length === 0) return;
-    // Readable-first framing: never open below the legibility floor. A big
-    // workflow opens on its first phases at a zoom where cards can be read,
-    // framing everything as illegible confetti.
-    inst.fitView({ padding: 0.1, duration: animate ? 460 : 0, maxZoom: 1, minZoom: 0.55 });
+    // True fit-view: show the whole graph on entry. maxZoom:1 keeps a small
+    // workflow readable; minZoom is low enough that a large one still fits fully
+    // instead of opening clipped.
+    inst.fitView({ padding: 0.14, duration: animate ? 460 : 0, maxZoom: 1, minZoom: 0.2 });
   }, []);
 
   // Run the entry framing once per workflow — but only after the canvas is
@@ -1640,21 +1646,8 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     && ['pending', 'running', 'waiting', 'paused'].includes(activeRunStatus);
 
   return (
-    <div className="workflow-scope relative flex h-full flex-col">
-      {/* Embedded (App Workflow facet) hides the header below, which is where Run
-          lives — so surface a first-class Run control on the canvas itself. It
-          opens the same inputs-aware run dialog and live run inspector. */}
-      {embedded && wf ? (
-        <button
-          type="button"
-          onClick={() => setRunDialogOpen(true)}
-          disabled={running}
-          className="absolute bottom-4 right-4 z-30 inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[12px] font-semibold text-on-accent shadow-lg transition-colors hover:bg-accent/90 disabled:opacity-60"
-          title="Run this workflow"
-        >
-          <Play size={14} /> {running ? 'Running…' : 'Run workflow'}
-        </button>
-      ) : null}
+    <div className="relative flex h-full flex-col">
+
       {/* Header — one slim command strip above the canvas. Hidden when embedded
           in the App editor, which provides its own header + facet tabs. */}
       <div className={clsx('flex shrink-0 items-center gap-2 border-b border-line bg-surface px-4 py-2', embedded && 'hidden')}>
@@ -1895,6 +1888,31 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           onAskAgentForPhases={askAgentForPhases}
         />
         <div ref={overlayHostRef} className="relative min-h-0 flex-1">
+          {/* Embedded (App Workflow facet) hides the header below, so surface a compact
+              operations cluster: the engine (inputs & settings) + Run. Run enables only
+              once there's something to run. */}
+          {embedded && wf ? (
+            <div className="absolute bottom-4 left-4 z-30 flex items-center gap-1 rounded-full border border-line bg-surface/95 p-1 shadow-lg backdrop-blur">
+              <button
+                type="button"
+                onClick={() => setOverflowOpen(true)}
+                title="Workflow engine — inputs, settings & contracts"
+                aria-label="Workflow engine"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary"
+              >
+                <Settings size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setRunDialogOpen(true)}
+                disabled={running || (wf.graph.nodes?.length ?? 0) === 0}
+                title={(wf.graph.nodes?.length ?? 0) === 0 ? 'Add a step before running' : 'Run this workflow'}
+                className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-1.5 text-[12px] font-semibold text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-45"
+              >
+                <Play size={14} /> {running ? 'Running…' : 'Run'}
+              </button>
+            </div>
+          ) : null}
           <CanvasEngine
             nodes={flowNodes}
             edges={flowEdges}
@@ -2038,9 +2056,14 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
               onDelete={deleteSelection}
             />
           </CanvasEngine>
-          {flowNodes.length === 0 && wf && (
+          {flowNodes.length === 0 && wf && !describeDismissed && (
             <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
-              <CanvasBuildComposer workflowId={wf.id} workflowTitle={wf.title} variant="empty" />
+              <CanvasBuildComposer
+                workflowId={wf.id}
+                workflowTitle={wf.title}
+                variant="empty"
+                onDismiss={() => setDescribeDismissed(true)}
+              />
             </div>
           )}
           <div className="pointer-events-none absolute right-4 top-4 z-40 flex flex-col items-end gap-3">
@@ -2198,24 +2221,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         onClose={() => setOverflowOpen(false)}
         workflow={wf}
         spaces={spaces}
-        trigger={workflowTriggerConfig(wf)}
-        deployment={deployment}
-        deploymentLoading={deploymentLoading}
-        deploymentBusy={deploymentBusy}
-        deploymentError={deploymentError}
-        onOpenInputs={() => setVariablesOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onManualRun={() => {
-          if (openFirstIncompleteNode()) return;
-          setRunDialogOpen(true);
-        }}
-        onActivate={() => void handleActivate()}
-        onRefreshDeployment={() => void refreshDeployment()}
-        onPauseDeployment={() => void setDeploymentStatus('paused')}
-        onResumeDeployment={() => void setDeploymentStatus('active')}
-        onCopyDeployment={(value, label) => {
-          void navigator.clipboard.writeText(value).then(() => toast.success(`${label} copied`));
-        }}
+        onSaveSettings={handleSaveWorkflow}
         onContractsChange={({ inputContract, outputContract }) => {
           const nextGraph = { ...wf.graph, inputContract, outputContract };
           setWf({ ...wf, graph: nextGraph });
@@ -2282,36 +2288,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         running={running}
       />
 
-      <WorkflowSettingsDialog
-        open={settingsOpen}
-        wf={wf}
-        spaces={spaces}
-        onClose={() => setSettingsOpen(false)}
-        onSave={async (fields) => {
-          await handleSaveWorkflow(fields);
-          setSettingsOpen(false);
-        }}
-      />
 
-      <VariablesDialog
-        open={variablesOpen}
-        onClose={() => setVariablesOpen(false)}
-        wf={wf}
-        onSave={async (vars) => {
-          if (!wf) return;
-          try {
-            await api(`/v1/workflows/${wf.id}`, {
-              method: 'PATCH',
-              body: JSON.stringify({ variables: vars }),
-            });
-            setWf({ ...wf, variables: vars });
-            toast.success('Inputs saved');
-            setVariablesOpen(false);
-          } catch (e) {
-            toast.error('Failed to save inputs', apiErrorMessage(e));
-          }
-        }}
-      />
+
+
 
       {extManagerOpen && <ExtensionsModal onClose={() => setExtManagerOpen(false)} />}
     </div>
@@ -2564,19 +2543,7 @@ function EngineModal({
   onClose,
   workflow,
   spaces,
-  trigger,
-  deployment,
-  deploymentLoading,
-  deploymentBusy,
-  deploymentError,
-  onOpenInputs,
-  onOpenSettings,
-  onManualRun,
-  onActivate,
-  onRefreshDeployment,
-  onPauseDeployment,
-  onResumeDeployment,
-  onCopyDeployment,
+  onSaveSettings,
   onContractsChange,
 }: {
   open: boolean;
@@ -2585,19 +2552,7 @@ function EngineModal({
   onClose: () => void;
   workflow: WorkflowDetail;
   spaces: SpaceSummary[];
-  trigger: Record<string, unknown> | null;
-  deployment: WorkflowDeployment | null;
-  deploymentLoading: boolean;
-  deploymentBusy: boolean;
-  deploymentError: string | null;
-  onOpenInputs: () => void;
-  onOpenSettings: () => void;
-  onManualRun: () => void;
-  onActivate: () => void;
-  onRefreshDeployment: () => void;
-  onPauseDeployment: () => void;
-  onResumeDeployment: () => void;
-  onCopyDeployment: (value: string, label: string) => void;
+  onSaveSettings: (fields: any) => Promise<void>;
   onContractsChange: (contracts: {
     inputContract?: WorkflowContractValue;
     outputContract?: WorkflowContractValue;
@@ -2606,145 +2561,346 @@ function EngineModal({
   if (!open) return null;
   const phaseCount = workflow.graph.phases?.length ?? 0;
   const inputCount = workflow.variables?.length ?? 0;
-  const spaceName = spaces.find((space) => space.id === workflow.spaceId)?.name ?? 'Unassigned';
+
   const pages: Array<{ id: EnginePage; label: string; icon: ReactNode }> = [
-    { id: 'overview', label: 'Overview', icon: <Settings size={13} /> },
-    { id: 'inputs', label: 'Inputs', icon: <Variable size={13} /> },
-    { id: 'settings', label: 'Settings', icon: <Settings size={13} /> },
-    { id: 'contracts', label: 'I/O contracts', icon: <FileSignature size={13} /> },
-    { id: 'chains', label: 'Event chains', icon: <GitBranch size={13} /> },
-    { id: 'activation', label: 'Activation', icon: <Upload size={13} /> },
+    { id: 'overview', label: 'Overview & Settings', icon: <Settings size={16} /> },
+    { id: 'inputs', label: 'Inputs', icon: <Variable size={16} /> },
+    { id: 'contracts', label: 'I/O contracts', icon: <FileSignature size={16} /> },
+    { id: 'chains', label: 'Event chains', icon: <GitBranch size={16} /> },
   ];
 
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-canvas/60 p-4 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Workflow engine"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[min(720px,86vh)] w-[min(920px,94vw)] overflow-hidden rounded-2xl border border-line bg-surface shadow-modal"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <aside className="w-48 shrink-0 border-r border-line bg-canvas/55 p-2">
-          <div className="px-2 py-2">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-accent">Engine</div>
-            <div className="mt-1 truncate text-[13px] font-semibold text-text-primary">{workflow.title}</div>
-          </div>
-          <nav className="mt-2 space-y-1">
-            {pages.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onPageChange(item.id)}
-                className={clsx(
-                  'flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] font-medium transition-colors',
-                  page === item.id
-                    ? 'bg-surface-2 text-text-primary'
-                    : 'text-text-muted hover:bg-surface hover:text-text-secondary',
-                )}
-              >
-                {item.icon}
-                {item.label}
-              </button>
-            ))}
-          </nav>
-        </aside>
-        <section className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-text-muted">Workflow engine</div>
-              <div className="text-[13px] font-semibold text-text-primary">{pages.find((item) => item.id === page)?.label}</div>
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm animate-fade-in">
+      <div className="flex h-full max-h-[800px] w-full max-w-[1000px] flex-col overflow-hidden rounded-[16px] border border-line bg-surface shadow-2xl animate-slide-up">
+        <div className="flex flex-1 overflow-hidden">
+          {/* Sidebar */}
+          <div className="w-64 shrink-0 border-r border-line bg-surface-2 flex flex-col">
+            <div className="px-6 py-6 pb-4">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-accent mb-1">Engine</div>
+              <h2 className="truncate text-[16px] font-semibold text-text-primary">{workflow.title}</h2>
             </div>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close engine"
-              className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-            >
-              <X size={16} />
-            </button>
-          </header>
-          <div className="min-h-0 flex-1 overflow-auto p-4">
-            {page === 'overview' && (
-              <div className="grid gap-3 md:grid-cols-2">
-                <EngineStat label="Nodes" value={String(workflow.graph.nodes.length)} />
-                <EngineStat label="Phases" value={String(phaseCount)} />
-                <EngineStat label="Inputs" value={String(inputCount)} />
-                <EngineStat label="Domain" value={spaceName} />
-                <div className="md:col-span-2 rounded-xl border border-line bg-canvas/45 p-3">
-                  <div className="text-[12px] font-semibold text-text-primary">Description</div>
-                  <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
-                    {workflow.description || 'No description yet. Add one in Settings so operators understand what this workflow does.'}
-                  </p>
-                </div>
-              </div>
-            )}
-            {page === 'inputs' && (
-              <div className="space-y-3">
-                <div className="rounded-xl border border-line bg-canvas/45 p-3">
-                  <div className="text-[12px] font-semibold text-text-primary">Run inputs</div>
-                  <p className="mt-1 text-[12px] text-text-secondary">
-                    {inputCount === 0 ? 'This workflow does not request inputs yet.' : `${inputCount} input${inputCount === 1 ? '' : 's'} configured.`}
-                  </p>
-                </div>
-                <Button variant="secondary" size="sm" iconLeft={<Variable size={13} />} onClick={onOpenInputs}>
-                  Edit inputs
-                </Button>
-              </div>
-            )}
-            {page === 'settings' && (
-              <div className="space-y-3">
-                <EngineStat label="Title" value={workflow.title} />
-                <EngineStat label="Domain" value={spaceName} />
-                <Button variant="secondary" size="sm" iconLeft={<Settings size={13} />} onClick={onOpenSettings}>
-                  Edit workflow settings
-                </Button>
-              </div>
-            )}
-            {page === 'contracts' && (
-              <WorkflowContractsPanel
-                inputContract={(workflow.graph as { inputContract?: WorkflowContractValue }).inputContract}
-                outputContract={(workflow.graph as { outputContract?: WorkflowContractValue }).outputContract}
-                onChange={onContractsChange}
-              />
-            )}
-            {page === 'chains' && <EventChainsPanel workflowId={workflow.id} />}
-            {page === 'activation' && (
-              <div className="space-y-3">
-                <Button variant="secondary" size="sm" iconLeft={<Play size={13} />} onClick={onManualRun}>
-                  Run manually
-                </Button>
-                <div className="overflow-hidden rounded-xl border border-line">
-                  <DeploymentPanel
-                    trigger={trigger}
-                    deployment={deployment}
-                    loading={deploymentLoading}
-                    busy={deploymentBusy}
-                    error={deploymentError}
-                    onActivate={onActivate}
-                    onRefresh={onRefreshDeployment}
-                    onPause={onPauseDeployment}
-                    onResume={onResumeDeployment}
-                    onCopy={onCopyDeployment}
-                  />
-                </div>
-              </div>
-            )}
+            <nav className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
+              {pages.map((item) => {
+                const isActive = page === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onPageChange(item.id)}
+                    className={clsx(
+                      'flex w-full items-center gap-3 rounded-btn px-3 py-2 text-[14px] transition-colors',
+                      isActive ? 'bg-surface-3 text-text-primary font-medium shadow-sm border border-line/50' : 'text-text-secondary hover:bg-surface-3/50 hover:text-text-primary border border-transparent'
+                    )}
+                  >
+                    <span className={isActive ? 'text-text-primary' : 'text-text-muted'}>{item.icon}</span>
+                    {item.label}
+                  </button>
+                );
+              })}
+            </nav>
           </div>
-        </section>
+
+          {/* Content Area */}
+          <div className="relative flex flex-1 flex-col bg-surface overflow-hidden">
+            <div className="absolute right-6 top-6 z-10">
+              <button
+                onClick={onClose}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-text-muted hover:bg-surface-3 hover:text-text-primary transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-10 py-8">
+              <h1 className="mb-6 text-[24px] font-semibold tracking-tight text-text-primary">
+                {pages.find((item) => item.id === page)?.label}
+              </h1>
+              {page === 'overview' && (
+                <WorkflowOverviewTab
+                  workflow={workflow}
+                  spaces={spaces}
+                  phaseCount={phaseCount}
+                  inputCount={inputCount}
+                  onSave={onSaveSettings}
+                />
+              )}
+              {page === 'inputs' && (
+                <WorkflowInputsTab
+                  workflow={workflow}
+                  onSave={onSaveSettings}
+                />
+              )}
+              {page === 'contracts' && (
+                <WorkflowContractsPanel
+                  inputContract={(workflow.graph as { inputContract?: WorkflowContractValue }).inputContract}
+                  outputContract={(workflow.graph as { outputContract?: WorkflowContractValue }).outputContract}
+                  onChange={onContractsChange}
+                />
+              )}
+              {page === 'chains' && <EventChainsPanel workflowId={workflow.id} />}
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
 function EngineStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-line bg-canvas/45 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-text-muted">{label}</div>
-      <div className="mt-1 truncate text-[13px] font-semibold text-text-primary">{value}</div>
+    <div className="rounded-xl border border-line bg-surface-2 p-3 flex-1">
+      <div className="text-[11px] uppercase tracking-wider text-text-muted">{label}</div>
+      <div className="mt-1 truncate text-[16px] font-semibold text-text-primary">{value}</div>
+    </div>
+  );
+}
+
+function WorkflowOverviewTab({
+  workflow,
+  spaces,
+  phaseCount,
+  inputCount,
+  onSave,
+}: {
+  workflow: WorkflowDetail;
+  spaces: SpaceSummary[];
+  phaseCount: number;
+  inputCount: number;
+  onSave: (fields: { title: string; description: string | null; spaceId: string | null }) => Promise<void>;
+}) {
+  const [title, setTitle] = useState(workflow.title);
+  const [description, setDescription] = useState(workflow.description ?? '');
+  const [spaceId, setSpaceId] = useState(workflow.spaceId ?? '');
+  const [saving, setSaving] = useState(false);
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [isPinned, setIsPinned] = useState(false);
+  const toast = useToast();
+
+  async function submit() {
+    const nextTitle = title.trim() || workflow.title;
+    setSaving(true);
+    try {
+      await onSave({
+        title: nextTitle,
+        description: description.trim() || null,
+        spaceId: spaceId || null,
+      });
+      toast.success('Overview & settings saved');
+    } catch (e) {
+      toast.error('Failed to save settings', apiErrorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="max-w-xl space-y-6">
+      <div className="flex gap-3">
+        <EngineStat label="Nodes" value={String(workflow.graph.nodes.length)} />
+        <EngineStat label="Phases" value={String(phaseCount)} />
+        <EngineStat label="Inputs" value={String(inputCount)} />
+      </div>
+      <div>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Workflow Information</h2>
+        <div className="space-y-4 rounded-card border border-line bg-surface p-5">
+          <div className="space-y-1.5">
+            <label className="text-[12px] font-medium text-text-secondary">Title</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-[12px] font-medium text-text-secondary">Domain</label>
+            <select
+              value={spaceId}
+              onChange={(event) => setSpaceId(event.target.value)}
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
+            >
+              <option value="">Unassigned</option>
+              {nestedDomainOptions(spaces).map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <label className="text-[12px] font-medium text-text-secondary">Description</label>
+              <div className="relative inline-flex items-center">
+                <button
+                  type="button"
+                  onMouseEnter={() => setShowTooltip(true)}
+                  onMouseLeave={() => {
+                    if (!isPinned) setShowTooltip(false);
+                  }}
+                  onClick={() => {
+                    if (isPinned) {
+                      setIsPinned(false);
+                      setShowTooltip(false);
+                    } else {
+                      setIsPinned(true);
+                      setShowTooltip(true);
+                    }
+                  }}
+                  className={clsx(
+                    "rounded-full transition-colors focus:outline-none",
+                    isPinned ? "text-accent" : "text-text-muted hover:text-accent"
+                  )}
+                  aria-label="Description info"
+                >
+                  <AlertCircle size={14} />
+                </button>
+                {showTooltip && (
+                  <div className="absolute bottom-full left-0 z-50 mb-2 w-72 rounded-lg border border-line bg-surface p-3 shadow-modal animate-fade-in text-[12px] leading-relaxed text-text-secondary normal-case font-normal">
+                    <div className="font-semibold text-text-primary mb-1">Workflow Description</div>
+                    Explain what this workflow accomplishes, the inputs it expects, and the results it produces. This is used for operator reference, package documentation, and cataloging when exposed as an MCP tool.
+                    <div className="absolute left-[6px] top-full h-2 w-2 -translate-y-1 bg-surface border-r border-b border-line rotate-45" />
+                  </div>
+                )}
+              </div>
+            </div>
+            <textarea
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              rows={5}
+              className="w-full resize-y rounded-input border border-line bg-surface-2 px-3 py-2.5 text-[14px] leading-relaxed text-text-primary focus:border-accent focus:outline-none"
+            />
+          </div>
+          <div className="pt-2">
+            <Button variant="primary" size="md" iconLeft={<Save size={14} />} disabled={saving} onClick={() => void submit()}>
+              {saving ? 'Saving...' : 'Save changes'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowInputsTab({
+  workflow,
+  onSave,
+}: {
+  workflow: WorkflowDetail;
+  onSave: (fields: any) => Promise<void>;
+}) {
+  const [vars, setVars] = useState<Array<{ name: string; type: string; default?: string; label?: string }>>(
+    workflow.variables?.map((v) => ({ ...v, default: v.default == null ? '' : String(v.default) })) ?? []
+  );
+  const [saving, setSaving] = useState(false);
+  const toast = useToast();
+
+  async function submit() {
+    setSaving(true);
+    try {
+      await onSave({ variables: vars });
+      toast.success('Inputs saved');
+    } catch (e) {
+      toast.error('Failed to save inputs', apiErrorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="max-w-3xl space-y-6">
+      <div className="mb-4 rounded-xl border border-accent/20 bg-accent-soft p-4">
+        <h3 className="mb-1 text-[13px] font-semibold text-accent">Run Inputs</h3>
+        <p className="text-[12px] leading-relaxed text-text-secondary">
+          Things this workflow asks for when it runs. Give each one a clear label so the run prompt makes sense.
+        </p>
+      </div>
+
+      <div className="space-y-4 rounded-card border border-line bg-surface p-5">
+        {vars.length === 0 ? (
+          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-line bg-canvas/50 py-8 text-center">
+            <div className="mb-3 rounded-full border border-line bg-surface-2 p-2.5 text-text-muted shadow-sm">
+              <Variable size={18} />
+            </div>
+            <div className="text-[13px] font-medium text-text-primary">No inputs yet</div>
+            <p className="mt-1 text-[12px] text-text-muted max-w-[250px]">
+              Add one if your workflow needs information when it runs (like a company name or a URL).
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-[1fr_1fr_110px_1fr_32px] items-center gap-3 px-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+              <span>Label</span>
+              <span>Key</span>
+              <span>Type</span>
+              <span>Default</span>
+              <span></span>
+            </div>
+            {vars.map((v, i) => (
+              <div key={i} className="grid grid-cols-[1fr_1fr_110px_1fr_32px] items-center gap-3">
+                <input
+                  type="text"
+                  value={v.label ?? ''}
+                  onChange={(e) =>
+                    setVars((arr) => arr.map((x, idx) => (idx === i ? { ...x, label: e.target.value } : x)))
+                  }
+                  placeholder="e.g. Company name"
+                  className="h-10 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+                />
+                <input
+                  type="text"
+                  value={v.name}
+                  onChange={(e) =>
+                    setVars((arr) => arr.map((x, idx) => (idx === i ? { ...x, name: e.target.value } : x)))
+                  }
+                  placeholder="variable_name"
+                  className="h-10 rounded-input border border-line bg-surface-2 px-3 font-mono text-[12px] text-text-secondary focus:border-accent focus:outline-none"
+                />
+                <select
+                  value={v.type}
+                  onChange={(e) =>
+                    setVars((arr) => arr.map((x, idx) => (idx === i ? { ...x, type: e.target.value } : x)))
+                  }
+                  className="h-10 rounded-input border border-line bg-surface-2 px-2 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+                >
+                  <option value="string">Text</option>
+                  <option value="number">Number</option>
+                  <option value="boolean">Yes/No</option>
+                  <option value="json">JSON</option>
+                </select>
+                <input
+                  type="text"
+                  value={v.default ?? ''}
+                  onChange={(e) =>
+                    setVars((arr) => arr.map((x, idx) => (idx === i ? { ...x, default: e.target.value } : x)))
+                  }
+                  placeholder="(optional)"
+                  className="h-10 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => setVars((arr) => arr.filter((_, idx) => idx !== i))}
+                  aria-label="Remove"
+                  className="flex h-8 w-8 items-center justify-center rounded-md text-text-muted hover:bg-danger/10 hover:text-danger transition-colors"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center justify-between pt-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            iconLeft={<Plus size={14} />}
+            onClick={() => setVars((arr) => [...arr, { name: '', type: 'string', default: '', label: '' }])}
+          >
+            Add input
+          </Button>
+          <Button variant="primary" size="md" iconLeft={<Save size={14} />} disabled={saving} onClick={() => void submit()}>
+            {saving ? 'Saving...' : 'Save inputs'}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3134,11 +3290,7 @@ function RunInputDialog({
           </button>
         </header>
         <div className="space-y-4 px-5 py-5">
-          {variables.length === 0 ? (
-            <p className="text-[13px] text-text-secondary">
-              Ready to run — this workflow doesn't need any inputs.
-            </p>
-          ) : (
+          {variables.length === 0 ? null : (
             <>
               <p className="text-[13px] text-text-secondary">
                 Fill in the inputs below to run this workflow.
@@ -3190,168 +3342,7 @@ function RunInputDialog({
   );
 }
 
-function WorkflowSettingsDialog({
-  open,
-  wf,
-  spaces,
-  onClose,
-  onSave,
-}: {
-  open: boolean;
-  wf: WorkflowDetail;
-  spaces: SpaceSummary[];
-  onClose: () => void;
-  onSave: (fields: {
-    title: string;
-    description: string | null;
-    spaceId: string | null;
-  }) => Promise<void>;
-}) {
-  const [title, setTitle] = useState(wf.title);
-  const [description, setDescription] = useState(wf.description ?? '');
-  const [spaceId, setSpaceId] = useState(wf.spaceId ?? '');
-  const [saving, setSaving] = useState(false);
-  const [showTooltip, setShowTooltip] = useState(false);
-  const [isPinned, setIsPinned] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
-    setTitle(wf.title);
-    setDescription(wf.description ?? '');
-    setSpaceId(wf.spaceId ?? '');
-    setShowTooltip(false);
-    setIsPinned(false);
-  }, [open, wf]);
-
-  async function submit(event: { preventDefault: () => void }) {
-    event.preventDefault();
-    const nextTitle = title.trim() || wf.title;
-    setSaving(true);
-    try {
-      await onSave({
-        title: nextTitle,
-        description: description.trim() || null,
-        spaceId: spaceId || null,
-      });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!open) return null;
-  return (
-    <div
-      className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4"
-      role="dialog"
-      aria-modal="true"
-    >
-      <form
-        onSubmit={(event) => void submit(event)}
-        className="animate-scale-in w-full max-w-xl overflow-hidden rounded-modal border border-line bg-surface shadow-modal"
-      >
-        <header className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div>
-            <h3 className="text-heading text-text-primary">Workflow settings</h3>
-            <p className="mt-1 text-[12px] text-text-muted">Organize this workflow under the right domain.</p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-          >
-            <X size={16} />
-          </button>
-        </header>
-        <div className="space-y-4 px-5 py-5">
-          <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Title</label>
-            <input
-              type="text"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Domain</label>
-            <select
-              value={spaceId}
-              onChange={(event) => setSpaceId(event.target.value)}
-              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
-            >
-              <option value="">Unassigned</option>
-              {nestedDomainOptions(spaces).map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <label className="text-[12px] font-medium text-text-secondary">Description</label>
-              <div className="relative inline-flex items-center">
-                <button
-                  type="button"
-                  onMouseEnter={() => setShowTooltip(true)}
-                  onMouseLeave={() => {
-                    if (!isPinned) setShowTooltip(false);
-                  }}
-                  onClick={() => {
-                    if (isPinned) {
-                      setIsPinned(false);
-                      setShowTooltip(false);
-                    } else {
-                      setIsPinned(true);
-                      setShowTooltip(true);
-                    }
-                  }}
-                  className={clsx(
-                    "rounded-full transition-colors focus:outline-none",
-                    isPinned ? "text-accent" : "text-text-muted hover:text-accent"
-                  )}
-                  aria-label="Description info"
-                >
-                  <AlertCircle size={13} />
-                </button>
-                {showTooltip && (
-                  <div className="absolute bottom-full left-0 z-50 mb-2 w-72 rounded-lg border border-line bg-surface p-3 shadow-modal animate-fade-in text-[11px] leading-relaxed text-text-secondary normal-case font-normal">
-                    <div className="font-semibold text-text-primary mb-1">Workflow Description</div>
-                    Explain what this workflow accomplishes, the inputs it expects, and the results it produces. This is used for operator reference, package documentation, and cataloging when exposed as an MCP tool.
-                    <div className="absolute left-[6px] top-full h-2 w-2 -translate-y-1 bg-surface border-r border-b border-line rotate-45" />
-                  </div>
-                )}
-              </div>
-            </div>
-            <textarea
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              rows={5}
-              className="w-full resize-y rounded-input border border-line bg-surface-2 px-3 py-2.5 text-[13px] leading-relaxed text-text-primary focus:border-accent focus:outline-none"
-            />
-          </div>
-        </div>
-        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-9 items-center justify-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={saving}
-            className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
-          >
-            {saving ? 'Saving...' : 'Save settings'}
-          </button>
-        </footer>
-      </form>
-    </div>
-  );
-}
 
 /** Convert a snake_case or camelCase identifier into a human-readable label. */
 function humanizeInputName(name: string): string {
@@ -3364,165 +3355,7 @@ function humanizeInputName(name: string): string {
   return split.charAt(0).toUpperCase() + split.slice(1);
 }
 
-function VariablesDialog({
-  open,
-  onClose,
-  wf,
-  onSave,
-}: {
-  open: boolean;
-  onClose: () => void;
-  wf: WorkflowDetail;
-  onSave: (
-    vars: Array<{ name: string; type: string; default?: unknown; label?: string }>,
-  ) => Promise<void>;
-}) {
-  const [vars, setVars] = useState<
-    Array<{ name: string; type: string; default?: string; label?: string }>
-  >(
-    wf.variables?.map((v) => ({ ...v, default: v.default == null ? '' : String(v.default) })) ?? [],
-  );
 
-  useEffect(() => {
-    if (open) {
-      setVars(
-        wf.variables?.map((v) => ({ ...v, default: v.default == null ? '' : String(v.default) })) ??
-          [],
-      );
-    }
-  }, [open, wf.variables]);
-
-  if (!open) return null;
-  return (
-    <div
-      className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4"
-      role="dialog"
-      aria-modal="true"
-    >
-      <div className="animate-scale-in w-full max-w-2xl rounded-modal border border-line bg-surface shadow-modal">
-        <header className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div>
-            <h3 className="text-heading text-text-primary">Inputs</h3>
-            <p className="mt-0.5 text-[12px] text-text-muted">
-              Things this workflow asks for when it runs. Give each one a clear label so the run
-              prompt makes sense.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
-          >
-            <X size={16} />
-          </button>
-        </header>
-        <div className="space-y-3 px-5 py-5">
-          {vars.length === 0 ? (
-            <p className="text-[13px] text-text-muted">
-              No inputs yet. Add one if your workflow needs information when it runs (like a company
-              name or a URL).
-            </p>
-          ) : (
-            <div className="space-y-2">
-              <div className="grid grid-cols-[1fr_1fr_110px_1fr_28px] items-center gap-2 px-1 text-[10px] font-medium uppercase tracking-wider text-text-muted">
-                <span>Label</span>
-                <span>Key</span>
-                <span>Type</span>
-                <span>Default</span>
-                <span></span>
-              </div>
-              {vars.map((v, i) => (
-                <div key={i} className="grid grid-cols-[1fr_1fr_110px_1fr_28px] items-center gap-2">
-                  <input
-                    type="text"
-                    value={v.label ?? ''}
-                    onChange={(e) =>
-                      setVars((arr) =>
-                        arr.map((x, idx) => (idx === i ? { ...x, label: e.target.value } : x)),
-                      )
-                    }
-                    placeholder="e.g. Company name"
-                    className="h-9 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
-                  />
-                  <input
-                    type="text"
-                    value={v.name}
-                    onChange={(e) =>
-                      setVars((arr) =>
-                        arr.map((x, idx) => (idx === i ? { ...x, name: e.target.value } : x)),
-                      )
-                    }
-                    placeholder="variable_name"
-                    className="h-9 rounded-input border border-line bg-surface-2 px-3 font-mono text-[12px] text-text-secondary focus:border-accent focus:outline-none"
-                  />
-                  <select
-                    value={v.type}
-                    onChange={(e) =>
-                      setVars((arr) =>
-                        arr.map((x, idx) => (idx === i ? { ...x, type: e.target.value } : x)),
-                      )
-                    }
-                    className="h-9 rounded-input border border-line bg-surface-2 px-2 text-[13px] text-text-primary focus:border-accent focus:outline-none"
-                  >
-                    <option value="string">Text</option>
-                    <option value="number">Number</option>
-                    <option value="boolean">Yes/No</option>
-                    <option value="json">JSON</option>
-                  </select>
-                  <input
-                    type="text"
-                    value={v.default ?? ''}
-                    onChange={(e) =>
-                      setVars((arr) =>
-                        arr.map((x, idx) => (idx === i ? { ...x, default: e.target.value } : x)),
-                      )
-                    }
-                    placeholder="(optional)"
-                    className="h-9 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary focus:border-accent focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setVars((arr) => arr.filter((_, idx) => idx !== i))}
-                    aria-label="Remove"
-                    className="-m-1 rounded-md p-1 text-text-muted hover:text-danger"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={() =>
-              setVars((arr) => [...arr, { name: '', type: 'string', default: '', label: '' }])
-            }
-            className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-          >
-            + Add input
-          </button>
-        </div>
-        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void onSave(vars.filter((v) => v.name.trim()))}
-            className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover"
-          >
-            Save
-          </button>
-        </footer>
-      </div>
-    </div>
-  );
-}
 
 function readinessNodeData(
   config: unknown,
@@ -3590,6 +3423,5 @@ function KnowledgeCanvasCallout({ onOpen }: { onOpen: () => void }) {
     </div>
   );
 }
-
 
 

@@ -27,8 +27,8 @@ function fakeAdapters(): any {
   };
 }
 
-async function listMessages(app: any, headers: Record<string, string>) {
-  const res = await app.request('/v1/rooms/__broadcast__/messages', { headers });
+async function listMessages(app: any, headers: Record<string, string>, roomId = '__broadcast__') {
+  const res = await app.request(`/v1/rooms/${roomId}/messages`, { headers });
   const body = (await res.json()) as { messages: Array<{ authorType: string; authorId: string | null; content: { text?: string } }> };
   return body.messages;
 }
@@ -107,6 +107,141 @@ describe('Global Chat (broadcast room)', () => {
         agentReply = messages.find((m) => m.authorType === 'agent');
       }
       expect(agentReply?.content.text).toBe('👋 Hey, joining in!');
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it('dispatches a mentioned agent and posts its reply back into a custom room', async () => {
+    const ctx = await createTestContext();
+    seedAgent(ctx, 'Orchy');
+    const runTurn = (async function* (): AsyncIterable<ChatDelta> {
+      yield { type: 'text', delta: 'I am here in the room.' };
+      yield { type: 'done', finishReason: 'stop' };
+    }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn;
+
+    const dispatcher = new BroadcastDispatcher({
+      db: ctx.db, adapters: fakeAdapters(), conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
+      bus: ctx.bus, logger: ctx.logger, runTurn,
+    });
+    const app = ctx.buildApp([
+      { path: '/v1/rooms', app: buildRoomRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, broadcast: dispatcher }) },
+    ]);
+    try {
+      const created = await app.request('/v1/rooms', {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({ name: 'Ops', kind: 'custom', visibility: 'workspace', agentIds: [] }),
+      });
+      const { room } = (await created.json()) as { room: { id: string } };
+
+      const sent = await app.request(`/v1/rooms/${room.id}/messages`, {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({ contentType: 'text', content: { text: 'hi @Orchy' } }),
+      });
+      expect(sent.status).toBe(201);
+
+      let agentReply: { authorType: string; content: { text?: string } } | undefined;
+      for (let i = 0; i < 40 && !agentReply; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        agentReply = (await listMessages(app, ctx.authHeaders, room.id)).find((m) => m.authorType === 'agent');
+      }
+      expect(agentReply?.content.text).toBe('I am here in the room.');
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it('lets an agent-authored room message wake a mentioned peer', async () => {
+    const ctx = await createTestContext();
+    const hermesId = seedAgent(ctx, 'Hermes');
+    seedAgent(ctx, 'Orchy');
+    const runTurn = (async function* (): AsyncIterable<ChatDelta> {
+      yield { type: 'text', delta: 'Orchy received the handoff.' };
+      yield { type: 'done', finishReason: 'stop' };
+    }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn;
+
+    const dispatcher = new BroadcastDispatcher({
+      db: ctx.db, adapters: fakeAdapters(), conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
+      bus: ctx.bus, logger: ctx.logger, runTurn,
+    });
+    const app = ctx.buildApp([
+      { path: '/v1/rooms', app: buildRoomRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, broadcast: dispatcher }) },
+    ]);
+    try {
+      const created = await app.request('/v1/rooms', {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({ name: 'Pairing', kind: 'custom', visibility: 'workspace', agentIds: [] }),
+      });
+      const { room } = (await created.json()) as { room: { id: string } };
+
+      const sent = await app.request(`/v1/rooms/${room.id}/messages`, {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({
+          authorType: 'agent',
+          authorId: hermesId,
+          contentType: 'text',
+          content: { text: '@Orchy can you take this?' },
+        }),
+      });
+      expect(sent.status).toBe(201);
+
+      let agentReply: { authorType: string; authorId: string | null; content: { text?: string } } | undefined;
+      for (let i = 0; i < 40 && !agentReply; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        agentReply = (await listMessages(app, ctx.authHeaders, room.id))
+          .find((m) => m.authorType === 'agent' && m.authorId !== hermesId);
+      }
+      expect(agentReply?.content.text).toBe('Orchy received the handoff.');
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it('relays a dispatched agent reply to a peer it mentions', async () => {
+    const ctx = await createTestContext();
+    const hermesId = seedAgent(ctx, 'Hermes');
+    const orchyId = seedAgent(ctx, 'Orchy');
+    const runTurn = (async function* (_adapter: unknown, _history: unknown, _message: string, turnContext: { agentId: string }): AsyncIterable<ChatDelta> {
+      if (turnContext.agentId === hermesId) {
+        yield { type: 'text', delta: '@Orchy can you continue this?' };
+      } else {
+        yield { type: 'text', delta: 'Orchy joined from the relay.' };
+      }
+      yield { type: 'done', finishReason: 'stop' };
+    }) as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn;
+
+    const dispatcher = new BroadcastDispatcher({
+      db: ctx.db, adapters: fakeAdapters(), conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
+      bus: ctx.bus, logger: ctx.logger, runTurn,
+    });
+    const app = ctx.buildApp([
+      { path: '/v1/rooms', app: buildRoomRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, broadcast: dispatcher }) },
+    ]);
+    try {
+      const created = await app.request('/v1/rooms', {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({ name: 'Relay', kind: 'custom', visibility: 'workspace', agentIds: [] }),
+      });
+      const { room } = (await created.json()) as { room: { id: string } };
+
+      await app.request(`/v1/rooms/${room.id}/messages`, {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({ contentType: 'text', content: { text: '@Hermes start a handoff' } }),
+      });
+
+      let orchyReply: { authorType: string; authorId: string | null; content: { text?: string } } | undefined;
+      for (let i = 0; i < 40 && !orchyReply; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        orchyReply = (await listMessages(app, ctx.authHeaders, room.id))
+          .find((m) => m.authorType === 'agent' && m.authorId === orchyId);
+      }
+      expect(orchyReply?.content.text).toBe('Orchy joined from the relay.');
     } finally {
       ctx.close();
     }

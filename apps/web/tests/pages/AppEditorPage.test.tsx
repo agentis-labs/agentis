@@ -171,8 +171,9 @@ describe('<AppEditorPage />', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Main dashboard' })).toBeInTheDocument());
 
-    // Interface opens Live; editing is opt-in.
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    // Interface opens Live; editing is opt-in via the page's ⋯ menu.
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
 
     // Add a Heading element from the palette — it renders live on the canvas.
     await userEvent.click(screen.getByRole('button', { name: 'Heading' }));
@@ -218,8 +219,8 @@ describe('<AppEditorPage />', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderEditor('interface');
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
     await userEvent.click(screen.getByRole('button', { name: 'Form' }));
 
     // The create form renders the collection field, and its insert action is declared.
@@ -249,7 +250,8 @@ describe('<AppEditorPage />', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderEditor('interface');
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
     for (const name of ['Hero', 'KPI strip', 'Chart', 'Table', 'Board', 'Tabs', 'Split', 'Callout', 'Code surface']) {
       expect(screen.getByRole('button', { name })).toBeInTheDocument();
     }
@@ -281,8 +283,8 @@ describe('<AppEditorPage />', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderEditor('interface');
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
     await userEvent.type(screen.getByLabelText('Describe a surface'), 'a dashboard');
     await userEvent.click(screen.getByRole('button', { name: 'Generate' }));
 
@@ -308,8 +310,8 @@ describe('<AppEditorPage />', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderEditor('interface');
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
 
     expect(await screen.findByText('Live activity')).toBeInTheDocument();
     expect(screen.queryByLabelText('Direct the operator')).not.toBeInTheDocument();

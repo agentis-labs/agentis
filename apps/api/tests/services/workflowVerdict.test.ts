@@ -165,14 +165,14 @@ describe('evaluateRunVerdict — probes', () => {
   });
 
   it('file_probe: the FILESYSTEM catches a fabricated harvest — dir empty ⇒ failed, real files ⇒ accomplished', async () => {
-    // The Monelly failure: agent_task "harvested 15 products" but assets/ was empty.
+    // Regression case: agent_task "harvested 15 products" but assets/ was empty.
     const empty = await evaluateRunVerdict({
       ...BASE,
       spec: spec({
         acceptance: [{ id: 'harvested', claim: '15 products written to disk', verify: 'file_probe', path: '{output.assetsDir}', minFiles: 15 }],
         sufficiency: [],
       }),
-      output: { assetsDir: '/brand/monelly/curated' },
+      output: { assetsDir: '/brand/sample-brand/curated' },
       deps: { statPath: async () => null }, // disk says: does not exist
     });
     expect(empty.outcome).toBe('failed_checks');
@@ -184,7 +184,7 @@ describe('evaluateRunVerdict — probes', () => {
         acceptance: [{ id: 'harvested', claim: '15 products written to disk', verify: 'file_probe', path: '{output.assetsDir}', minFiles: 15 }],
         sufficiency: [],
       }),
-      output: { assetsDir: '/brand/monelly/curated' },
+      output: { assetsDir: '/brand/sample-brand/curated' },
       deps: { statPath: async () => ({ isDir: true, fileCount: 3, totalBytes: 900 }) },
     });
     expect(tooFew.outcome).toBe('failed_checks');
@@ -196,7 +196,7 @@ describe('evaluateRunVerdict — probes', () => {
         acceptance: [{ id: 'harvested', claim: '15 products written to disk', verify: 'file_probe', path: '{output.assetsDir}', minFiles: 15, minBytes: 1000 }],
         sufficiency: [],
       }),
-      output: { assetsDir: '/brand/monelly/curated' },
+      output: { assetsDir: '/brand/sample-brand/curated' },
       deps: { statPath: async () => ({ isDir: true, fileCount: 15, totalBytes: 42000 }) },
     });
     expect(real.outcome).toBe('accomplished');

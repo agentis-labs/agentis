@@ -11,11 +11,10 @@ import { KnowledgeTab } from '../components/knowledge/KnowledgeTab';
 import { SkillsTab } from '../components/brain/SkillsTab';
 import { ExamplesTab } from '../components/brain/ExamplesTab';
 import { PersonalBrainPanel } from '../components/brain/PersonalBrainPanel';
-import { AgentBrainPanel } from '../components/brain/AgentBrainPanel';
 import { BrainSectionNav } from '../components/brain/BrainSectionNav';
 
 type BrainTab = 'map' | 'knowledge' | 'skills' | 'examples' | 'insights';
-type BrainScope = 'workspace' | 'agent' | 'personal';
+type BrainScope = 'workspace' | 'personal';
 
 interface IntelligenceStatus {
   degraded: boolean;
@@ -81,7 +80,7 @@ export function UnifiedBrainPage() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-display text-text-primary">
-                {scope === 'workspace' ? 'Workspace Brain' : scope === 'agent' ? 'Agent Brain' : 'Personal Brain'}
+                {scope === 'workspace' ? 'Workspace Brain' : 'Personal Brain'}
               </h1>
               <button
                 type="button"
@@ -99,7 +98,7 @@ export function UnifiedBrainPage() {
           </div>
           <div className="flex items-center gap-2">
             <div className="flex rounded-pill border border-line bg-surface-2 p-1 text-[12px]">
-              {(['workspace', 'agent', 'personal'] as const).map((next) => (
+              {(['workspace', 'personal'] as const).map((next) => (
               <button
                 key={next}
                 type="button"
@@ -121,7 +120,6 @@ export function UnifiedBrainPage() {
       )}
       <div className="min-h-0 flex-1 overflow-hidden">
         {scope === 'personal' && <PersonalBrainPanel />}
-        {scope === 'agent' && <AgentBrainPanel />}
         {scope === 'workspace' && tab === 'map' && <BrainView onManage={() => changeTab('knowledge')} onOpenConfig={() => setConfigDrawerOpen(true)} />}
         {scope === 'workspace' && tab === 'knowledge' && <KnowledgeTab />}
         {scope === 'workspace' && tab === 'skills' && <SkillsTab />}

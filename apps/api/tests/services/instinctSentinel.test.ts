@@ -70,7 +70,7 @@ beforeEach(async () => {
   workflowId = randomUUID();
   ctx.db.insert(schema.workflows).values({
     id: workflowId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
-    title: 'Fashion Store Factory', description: 'discovers stores', graph, settings: {},
+    title: 'Catalog Launch Workflow', description: 'discovers catalog candidates', graph, settings: {},
   }).run();
 });
 
@@ -84,7 +84,7 @@ describe('the Sentinel', () => {
     const list = issues.list(ctx.workspace.id);
     expect(list).toHaveLength(1);
     const issue = list[0]!;
-    expect(issue.title).toContain('Fashion Store Factory');
+    expect(issue.title).toContain('Catalog Launch Workflow');
     expect(issue.title).toContain('Instagram Scout');
     expect(issue.linkedWorkflowId).toBe(workflowId);
     expect(issue.priority).toBe('high');

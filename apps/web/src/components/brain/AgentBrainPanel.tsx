@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, ChevronDown, Crown, Download, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, Users, X } from 'lucide-react';
+import { BookOpen, ChevronDown, Crown, Download, FileCode, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, Users, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { harnessOf } from '../agents/harnessMeta';
@@ -10,6 +10,8 @@ import { useConfirm } from '../shared/ConfirmDialog';
 import { ScopedBrainMap } from './ScopedBrainMap';
 import { KnowledgeTab } from '../knowledge/KnowledgeTab';
 import { ScopeVisibilityToggle } from './ScopeVisibilityToggle';
+import { SkillsTab } from './SkillsTab';
+import { ExamplesTab } from './ExamplesTab';
 
 interface ImportOrigin { adapterType: string; externalId: string }
 interface AgentRow { id: string; name: string; role?: string | null; description?: string | null; capabilityTags?: string[] | null; importOrigin?: ImportOrigin | null }
@@ -46,26 +48,50 @@ function subjectTier(role?: string | null): SubjectTier {
 }
 interface MemoryRecord { id: string; section: string; content: string; createdAt: string }
 
-export function AgentBrainPanel() {
+export type AgentBrainView = 'map' | 'memory' | 'knowledge' | 'skills' | 'examples';
+
+export function AgentBrainPanel({
+  agents: providedAgents,
+  selectedAgentId,
+  onSelectedAgentIdChange,
+  view,
+  onViewChange,
+}: {
+  agents?: AgentRow[];
+  selectedAgentId?: string | null;
+  onSelectedAgentIdChange?: (id: string) => void;
+  view?: AgentBrainView;
+  onViewChange?: (view: AgentBrainView) => void;
+} = {}) {
   const toast = useToast();
   const confirm = useConfirm();
-  const [agents, setAgents] = useState<AgentRow[]>([]);
-  const [agentId, setAgentId] = useState('');
+  const [loadedAgents, setLoadedAgents] = useState<AgentRow[]>([]);
+  const [internalAgentId, setInternalAgentId] = useState('');
   const [entries, setEntries] = useState<MemoryRecord[]>([]);
   const [episodes, setEpisodes] = useState<EpisodeRow[]>([]);
+  const [skillCount, setSkillCount] = useState(0);
   const [imports, setImports] = useState<ImportUpdate[]>([]);
   const [pulling, setPulling] = useState(false);
   const [content, setContent] = useState('');
-  const [view, setView] = useState<'map' | 'memory' | 'knowledge'>('map');
+  const [internalView, setInternalView] = useState<AgentBrainView>('map');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const agents = providedAgents ?? loadedAgents;
+  const agentId = selectedAgentId ?? internalAgentId;
+  const activeView = view ?? internalView;
+
+  const selectAgent = useCallback((id: string) => {
+    setInternalAgentId(id);
+    onSelectedAgentIdChange?.(id);
+  }, [onSelectedAgentIdChange]);
+
+  const selectView = useCallback((next: AgentBrainView) => {
+    setInternalView(next);
+    onViewChange?.(next);
+  }, [onViewChange]);
 
   const loadAgents = useCallback(async () => {
     const data = await api<{ agents: AgentRow[] }>('/v1/agents');
-    setAgents(data.agents);
-    // Default to the orchestrator — the always-on workspace brain owner.
-    setAgentId((current) =>
-      current || data.agents.find((a) => subjectTier(a.role) === 'orchestrator')?.id || data.agents[0]?.id || '',
-    );
+    setLoadedAgents(data.agents);
   }, []);
 
   const loadMemory = useCallback(async (id: string) => {
@@ -87,21 +113,60 @@ export function AgentBrainPanel() {
     try { setImports((await checkImportUpdates()).updates); } catch { setImports([]); }
   }, []);
 
-  useEffect(() => { void loadAgents().catch(() => {}); }, [loadAgents]);
-  useEffect(() => { void loadMemory(agentId).catch(() => {}); void loadImports(); }, [agentId, loadMemory, loadImports]);
+  const loadSkillCount = useCallback(async (id: string) => {
+    if (!id) { setSkillCount(0); return; }
+    try {
+      const res = await api<{ skills: unknown[] }>(`/v1/skills?scopeId=${encodeURIComponent(id)}&includeWorkspace=false`);
+      setSkillCount(res.skills.length);
+    } catch {
+      setSkillCount(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (providedAgents) return;
+    void loadAgents().catch(() => {});
+  }, [loadAgents, providedAgents]);
+
+  useEffect(() => {
+    if (agents.length === 0) return;
+    if (agentId && agents.some((agent) => agent.id === agentId)) return;
+    selectAgent(agents.find((agent) => subjectTier(agent.role) === 'orchestrator')?.id || agents[0]?.id || '');
+  }, [agentId, agents, selectAgent]);
+
+  useEffect(() => { void loadMemory(agentId).catch(() => {}); void loadSkillCount(agentId); void loadImports(); }, [agentId, loadMemory, loadSkillCount, loadImports]);
 
   const current = useMemo(() => agents.find((a) => a.id === agentId) ?? null, [agents, agentId]);
   const pending = useMemo(() => imports.find((u) => u.agentId === agentId) ?? null, [imports, agentId]);
 
   async function pullUpdates() {
     if (!current?.importOrigin || pulling) return;
+    const pendingMemory = pending?.pendingMemory ?? pending?.pendingNew ?? 0;
+    const pendingSkills = pending?.pendingSkills ?? 0;
+    const ok = await confirm({
+      title: `Re-sync ${current.name}?`,
+      body: (
+        <div className="space-y-2">
+          <p>This will scan the provider again and push accepted memories plus SKILL.md files into this agent&apos;s Brain.</p>
+          <p className="font-medium text-text-primary">
+            {pendingMemory} new {pendingMemory === 1 ? 'memory' : 'memories'} · {pendingSkills} new {pendingSkills === 1 ? 'skill' : 'skills'}
+          </p>
+        </div>
+      ),
+      confirmLabel: 'Re-sync',
+      tone: 'neutral',
+    });
+    if (!ok) return;
     setPulling(true);
     try {
-      await importAgents([{ externalId: current.importOrigin.externalId }]);
-      await Promise.all([loadMemory(agentId), loadImports()]);
-      toast.success('Pulled new memory', 'The provider memory was merged into this agent’s Brain.');
+      const result = await importAgents([{ externalId: current.importOrigin.externalId }]);
+      await Promise.all([loadMemory(agentId), loadSkillCount(agentId), loadImports()]);
+      toast.success(
+        'Agent Brain re-synced',
+        `${result.totalAtoms} ${result.totalAtoms === 1 ? 'memory' : 'memories'} · ${result.totalAbilities} ${result.totalAbilities === 1 ? 'skill' : 'skills'}.`,
+      );
     } catch (error) {
-      toast.error('Could not pull memory', apiErrorMessage(error));
+      toast.error('Could not re-sync agent Brain', apiErrorMessage(error));
     } finally {
       setPulling(false);
     }
@@ -148,29 +213,30 @@ export function AgentBrainPanel() {
         </button>
         <div className="flex items-center gap-2">
           {agentId && <ScopeVisibilityToggle scopeId={agentId} />}
-          <ScopeToggle view={view} onChange={setView} />
+          <ScopeToggle view={activeView} onChange={selectView} />
         </div>
       </div>
       {current?.importOrigin && (
         <ProviderBrainStrip
           origin={current.importOrigin}
           memoryCount={episodes.length}
+          skillCount={skillCount}
           pending={pending}
           pulling={pulling}
           onPull={() => void pullUpdates()}
         />
       )}
       <div className="min-h-0 flex-1">
-        {view === 'map' ? (
+        {activeView === 'map' ? (
           <ScopedBrainMap
-            endpoint={agentId ? `/v1/brain/agents/${agentId}/graph` : null}
-            detailEndpoint={agentId ? `/v1/brain/agents/${agentId}/graph/node` : null}
+            endpoint={agentId ? `/v1/brain/graph?scope=scoped&scopeId=${encodeURIComponent(agentId)}&includeWorkspace=false` : null}
+            detailEndpoint={agentId ? `/v1/brain/graph/node/:id?scope=scoped&scopeId=${encodeURIComponent(agentId)}&includeWorkspace=false` : null}
             layoutKey={`agent:${agentId}`}
             scopeName={current?.name}
             scopeId={agentId || undefined}
             emptyMessage="Add memories or let this agent accumulate lessons to reveal its map."
           />
-        ) : view === 'memory' ? (
+        ) : activeView === 'memory' ? (
           <div className="h-full overflow-y-auto px-6 py-5">
             <div className="mx-auto max-w-4xl space-y-4">
               <section className="rounded-card border border-line bg-surface p-5">
@@ -219,15 +285,19 @@ export function AgentBrainPanel() {
               </section>
             </div>
           </div>
-        ) : (
+        ) : activeView === 'knowledge' ? (
           agentId ? <KnowledgeTab scopeId={agentId} scopeName={current?.name} /> : null
+        ) : activeView === 'skills' ? (
+          agentId ? <SkillsTab scopeId={agentId} scopeName={current?.name} /> : null
+        ) : (
+          agentId ? <ExamplesTab scopeId={agentId} scopeName={current?.name} /> : null
         )}
       </div>
       {pickerOpen && (
         <BrainSubjectPicker
           agents={agents}
           selectedId={agentId}
-          onSelect={(id) => { setAgentId(id); setPickerOpen(false); }}
+          onSelect={(id) => { selectAgent(id); setPickerOpen(false); }}
           onClose={() => setPickerOpen(false)}
         />
       )}
@@ -243,12 +313,14 @@ export function AgentBrainPanel() {
 function ProviderBrainStrip({
   origin,
   memoryCount,
+  skillCount,
   pending,
   pulling,
   onPull,
 }: {
   origin: ImportOrigin;
   memoryCount: number;
+  skillCount: number;
   pending: ImportUpdate | null;
   pulling: boolean;
   onPull: () => void;
@@ -263,6 +335,7 @@ function ProviderBrainStrip({
         <span className="text-text-muted">→ Agent Brain</span>
       </div>
       <span className="text-[12px] text-text-muted">{memoryCount} {memoryCount === 1 ? 'memory' : 'memories'} pulled</span>
+      <span className="text-[12px] text-text-muted">{skillCount} {skillCount === 1 ? 'skill' : 'skills'} pushed</span>
       {pendingCount > 0 ? (
         <span className="inline-flex items-center rounded-pill bg-accent-soft px-2 py-0.5 text-[11px] text-accent">{pendingCount} new available</span>
       ) : (
@@ -444,14 +517,16 @@ function ScopeToggle({
   view,
   onChange,
 }: {
-  view: 'map' | 'memory' | 'knowledge';
-  onChange: (value: 'map' | 'memory' | 'knowledge') => void;
+  view: AgentBrainView;
+  onChange: (value: AgentBrainView) => void;
 }) {
   return (
     <div className="flex items-center gap-1.5 text-[12px]">
       <button type="button" onClick={() => onChange('map')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'map' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Network size={12} /> Map</button>
       <button type="button" onClick={() => onChange('memory')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'memory' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><NotebookPen size={12} /> Memory</button>
       <button type="button" onClick={() => onChange('knowledge')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'knowledge' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><BookOpen size={12} /> Knowledge</button>
+      <button type="button" onClick={() => onChange('skills')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'skills' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><FileCode size={12} /> Skills</button>
+      <button type="button" onClick={() => onChange('examples')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'examples' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Sparkles size={12} /> Examples</button>
     </div>
   );
 }

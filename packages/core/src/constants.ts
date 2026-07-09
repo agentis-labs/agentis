@@ -70,11 +70,9 @@ export const CONSTANTS = {
   // ────────────────────────────────────────────────────────────
 
   EXTENSION_EXECUTION_TIMEOUT_MS: 30_000,
-  // Ceiling for a single extension execution. Raised to 15 min so the trusted
-  // `store_factory_*` builtins that shell out to real host work (two sequential
-  // Next.js production builds + live validation in `store_factory_deploy`) are
-  // not clamped mid-build. Sandbox (node_worker/docker) extensions remain bounded
-  // by their own per-manifest timeout, which callers rarely raise this high.
+  // Ceiling for a single extension execution. Some trusted builtins may need a
+  // larger budget than the default 30s, while sandboxed extensions remain
+  // bounded by their own per-manifest timeout.
   EXTENSION_EXECUTION_MAX_TIMEOUT_MS: 900_000,
 
   EXTENSION_ISOLATE_HEAP_MB: 128,

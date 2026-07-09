@@ -1,7 +1,7 @@
 /**
  * BUILD-LOOP ACCEPTANCE (WORKFLOW-BUILD-LOOP).
  *
- * A faithful reproduction of the operator's "Fashion Store Factory" failure
+ * A faithful reproduction of the operator's "Catalog Launch Workflow" failure
  * shape, driven through the REAL production engine + dry-run — not mocks of them.
  * Candidates flow trigger -> normalize -> scorer, then a gate routes on
  * nodes["score"].scoredCount (the exact condition that used to silently evaluate
@@ -50,7 +50,7 @@ const CANDIDATES = [
 ];
 
 /** trigger -> normalize -> score -> (accept | reject), gated on nodes["score"].scoredCount. */
-function fashionStoreGraph(): WorkflowGraph {
+function catalogLaunchGraph(): WorkflowGraph {
   return {
     version: 1,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -80,9 +80,9 @@ let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });
 afterEach(() => { vi.restoreAllMocks(); ctx.close(); });
 
-describe('Build-loop acceptance — Fashion Store Factory shape', () => {
+describe('Build-loop acceptance — Catalog Launch Workflow shape', () => {
   it('runs E2E green: candidates reach the scorer and the gate routes on nodes["score"].scoredCount (the exact bug, fixed)', async () => {
-    const graph = fashionStoreGraph();
+    const graph = catalogLaunchGraph();
     const { runId, workflowId, initialState } = persistWorkflow(graph, { candidates: CANDIDATES });
     const terminal = waitForTerminal(runId);
     await makeEngine().startRun({
@@ -103,7 +103,7 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
   });
 
   it('routes to reject — honestly — on an empty batch (no silent "success")', async () => {
-    const graph = fashionStoreGraph();
+    const graph = catalogLaunchGraph();
     const { runId, workflowId, initialState } = persistWorkflow(graph, { candidates: [] });
     const terminal = waitForTerminal(runId);
     await makeEngine().startRun({
@@ -121,7 +121,7 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
   });
 
   it('dry-run traces the I/O: the scorer receives the candidates and emits scoredCount, no external call', () => {
-    const graph = fashionStoreGraph();
+    const graph = catalogLaunchGraph();
     const report = preflightWorkflow({
       db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'dry-run-accept', graph,
       inputs: { candidates: CANDIDATES }, mode: 'canvas',
@@ -137,7 +137,7 @@ describe('Build-loop acceptance — Fashion Store Factory shape', () => {
   it('reachability lint catches the input strip that caused the original failure', () => {
     // Reproduce the operator's inputMapping/inputKeys mistake: the scorer narrows
     // its input and drops `candidates`, but still references it.
-    const graph = fashionStoreGraph();
+    const graph = catalogLaunchGraph();
     const score = graph.nodes.find((n) => n.id === 'score')!;
     (score.config as Record<string, unknown>).inputKeys = ['rawScoutCount'];
     const issues = analyzeInputReachability(graph);
@@ -402,7 +402,7 @@ function persistWorkflow(graph: WorkflowGraph, inputs: Record<string, unknown>):
   const initialState = buildInitialRunState({ runId, workflowId, graph, inputs });
   ctx.db.insert(schema.workflows).values({
     id: workflowId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
-    title: 'Fashion Store Factory (acceptance)', graph, settings: {},
+    title: 'Catalog Launch Workflow (acceptance)', graph, settings: {},
   }).run();
   ctx.db.insert(schema.workflowRuns).values({
     id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id,

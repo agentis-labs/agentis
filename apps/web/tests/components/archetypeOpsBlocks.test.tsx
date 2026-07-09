@@ -6,10 +6,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { AgentisAppClient } from '@agentis/app-client';
 import type { ViewNode } from '@agentis/core';
 import { RuntimeProvider, ViewRenderer } from '../../src/components/apps/ViewRenderer';
 import { hasBlock } from '../../src/components/apps/blocks/registry';
+import { appsApi } from '../../src/lib/appsApi';
 
 vi.mock('socket.io-client', () => ({
   io: () => ({ on: () => {}, off: () => {}, emit: () => {}, disconnect: () => {}, io: { on: () => {} } }),
@@ -66,6 +68,32 @@ describe('block registrations (open seam)', () => {
     for (const kind of ['Kanban', 'RecordMaster', 'Roadmap', 'PipelineFlow', 'OrchestrationPanel', 'RunMonitor', 'AgentFeed', 'ApprovalsInbox', 'WorkflowControl']) {
       expect(hasBlock(kind), `missing block: ${kind}`).toBe(true);
     }
+  });
+});
+
+describe('OrchestrationPanel', () => {
+  it('starts as a compact card and expands to the workflow list', async () => {
+    vi.mocked(appsApi.listWorkflows).mockResolvedValueOnce([
+      {
+        id: 'wf-1',
+        title: 'Fashion ICP Finder',
+        purpose: 'Qualifies the next store leads.',
+        order: 0,
+        enabled: true,
+        dependsOn: [],
+        triggerKind: 'manual',
+        lastRun: null,
+      } as Awaited<ReturnType<typeof appsApi.listWorkflows>>[number],
+    ]);
+
+    renderNode({ type: 'OrchestrationPanel' } as ViewNode);
+
+    const expand = await screen.findByRole('button', { name: /expand orchestration/i });
+    expect(screen.getByText('1 workflow')).toBeTruthy();
+    expect(screen.queryByText('Fashion ICP Finder')).toBeNull();
+
+    await userEvent.click(expand);
+    expect(await screen.findByText('Fashion ICP Finder')).toBeTruthy();
   });
 });
 

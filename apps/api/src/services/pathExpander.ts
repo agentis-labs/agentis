@@ -22,10 +22,7 @@ export interface SpawnTarget {
  * a secret to a child sets it explicitly in `opts.env`/`abilityEnv`, which
  * layers on top of the redacted base and is preserved.
  */
-const SENSITIVE_ENV_EXACT: ReadonlySet<string> = new Set([
-  'VERCEL_TOKEN',
-  'VERCEL_TEAM_ID',
-]);
+const SENSITIVE_ENV_EXACT: ReadonlySet<string> = new Set([]);
 
 const SENSITIVE_ENV_PATTERNS: ReadonlyArray<RegExp> = [
   // Any Agentis-namespaced secret-shaped var.

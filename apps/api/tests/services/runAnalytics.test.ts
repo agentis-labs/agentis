@@ -75,14 +75,14 @@ describe('aggregateRunAnalytics', () => {
   afterEach(() => { ctx.close(); });
 
   it('sums token consumption from the audit sink and stays non-metered without cost', () => {
-    const wf = seedWorkflow(ctx, 'Fashion Store Factory', 'n1');
+    const wf = seedWorkflow(ctx, 'Catalog Launch Workflow', 'n1');
     const r1 = seedRun(ctx, wf, 'COMPLETED');
     const r2 = seedRun(ctx, wf, 'COMPLETED_WITH_ERRORS');
     seedNodeAudit(ctx, r1, { tokensIn: 1000, tokensOut: 400 });
     seedNodeAudit(ctx, r2, { tokensIn: 600, tokensOut: 200 });
 
     const a = aggregateRunAnalytics(ctx.db, ctx.workspace.id, [
-      { id: wf, title: 'Fashion Store Factory', graph: { nodes: [], edges: [] } },
+      { id: wf, title: 'Catalog Launch Workflow', graph: { nodes: [], edges: [] } },
     ]);
 
     expect(a.runs).toBe(2);

@@ -31,7 +31,7 @@ describe('auditWorkflowRobustness', () => {
     const g = graphOf(
       [
         node('t', 'trigger'),
-        node('harvest', 'agent_task', { prompt: 'Run python scripts/fetch-instagram-public-profile.py for the handle and save 15 products to assets/.' }),
+        node('harvest', 'agent_task', { prompt: 'Run scripts/harvest-catalog-assets.py for the handle and save 15 curated items to assets/.' }),
         node('o', 'return_output'),
       ],
       [edge('t', 'harvest'), edge('harvest', 'o')],

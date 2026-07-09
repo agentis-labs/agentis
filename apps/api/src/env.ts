@@ -12,9 +12,6 @@ const envSchema = z.object({
   // an external drive, OneDrive, a NAS — so large media never bloats the system
   // disk or (critically) the source tree. Never inside the repo.
   AGENTIS_ASSETS_DIR: z.string().optional(),
-  // Working root for the store-factory (Instagram fetch / curation scratch).
-  // Defaults under the assets dir; overridable. Must never be a repo path.
-  AGENTIS_STORES_DIR: z.string().optional(),
   AGENTIS_HTTP_PORT: z.coerce.number().int().positive().default(CONSTANTS.DEFAULT_HTTP_PORT),
   AGENTIS_HTTP_HOST: z.string().default('127.0.0.1'),
   // Comma-separated web UI origins permitted to connect to the realtime socket.
@@ -155,12 +152,11 @@ const envSchema = z.object({
   OAUTH_TWITTER_X_CLIENT_SECRET: z.string().optional(),
 });
 
-// `loadEnv` always resolves AGENTIS_DATA_DIR / AGENTIS_ASSETS_DIR / AGENTIS_STORES_DIR
-// to concrete paths (defaults when unset), so consumers can treat them as required.
+// `loadEnv` always resolves AGENTIS_DATA_DIR / AGENTIS_ASSETS_DIR to concrete
+// paths (defaults when unset), so consumers can treat them as required.
 export type AgentisEnv = z.infer<typeof envSchema> & {
   AGENTIS_DATA_DIR: string;
   AGENTIS_ASSETS_DIR: string;
-  AGENTIS_STORES_DIR: string;
 };
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AgentisEnv {
@@ -171,7 +167,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AgentisEnv {
     ...parsed,
     AGENTIS_DATA_DIR: dataDir,
     AGENTIS_ASSETS_DIR: assetsDir,
-    AGENTIS_STORES_DIR: parsed.AGENTIS_STORES_DIR ?? join(assetsDir, 'stores'),
     AGENTIS_OAUTH_PROXY_URL: parsed.AGENTIS_OAUTH_PROXY_URL === undefined
       ? 'https://connect.agentis.dev'
       : parsed.AGENTIS_OAUTH_PROXY_URL,

@@ -35,6 +35,7 @@ import {
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { refreshWorkspaceSnapshot, type WorkspaceApproval } from '../../lib/workspaceData';
+import { refreshWorkspaceChromeSnapshot } from '../../lib/workspaceChromeData';
 import { formatDisplay, humanizeToken } from '../apps/format';
 import { HumanInputApprovalForm, humanInputFormOf } from './HumanInputApprovalForm';
 import { openRunModal } from '../../lib/runModal';
@@ -217,7 +218,10 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
           ...(opts?.feedback ? { feedback: opts.feedback } : {}),
         }),
       });
-      await refreshWorkspaceSnapshot();
+      await Promise.all([
+        refreshWorkspaceSnapshot(),
+        refreshWorkspaceChromeSnapshot(),
+      ]);
       await onResolved?.(approval, decision);
       onClose();
     } catch (err) {

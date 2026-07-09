@@ -24,6 +24,8 @@ export type BrainNodeType =
   | 'knowledge_cluster'
   | 'memory_episode'
   | 'memory_pattern'
+  | 'skill'
+  | 'example'
   | 'evaluator'
   | 'baseline'
   | 'artifact'
@@ -233,6 +235,8 @@ export const BRAIN_NODE_TYPES: ReadonlyArray<BrainNodeType> = [
   'knowledge_cluster',
   'memory_episode',
   'memory_pattern',
+  'skill',
+  'example',
   'evaluator',
   'baseline',
   'artifact',

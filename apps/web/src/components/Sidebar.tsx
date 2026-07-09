@@ -22,7 +22,7 @@ import {
   ChevronsRight,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { useWorkspaceData } from '../lib/workspaceData';
+import { useWorkspaceChromeData } from '../lib/workspaceChromeData';
 import { useChatPanelStore } from './chat/ChatPanelStore';
 import { BrandMark } from './shared/BrandMark';
 
@@ -47,7 +47,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem(STORAGE_KEY) === '1'; } catch { return false; }
   });
-  const { counts } = useWorkspaceData();
+  const { counts } = useWorkspaceChromeData();
   const chatState = useChatPanelStore((s) => s.state);
 
   useEffect(() => {
@@ -103,7 +103,7 @@ function SidebarLink({
 }: {
   item: NavItem;
   collapsed: boolean;
-  counts: ReturnType<typeof useWorkspaceData>['counts'];
+  counts: ReturnType<typeof useWorkspaceChromeData>['counts'];
 }) {
   const Icon = item.icon;
   const badge = item.badge ? counts[item.badge] : 0;

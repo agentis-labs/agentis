@@ -51,6 +51,12 @@ describe('repairSurface — auto-fixes the garbage', () => {
     expect((view as Extract<ViewNode, { type: 'Stack' }>).children.length).toBe(0);
   });
 
+  it('snaps arbitrary container gaps to the spacing rhythm', () => {
+    const { view, fixes } = repairSurface({ type: 'Stack', gap: 31, children: [{ type: 'Heading', value: 'Keep me' }] });
+    expect((view as Extract<ViewNode, { type: 'Stack' }>).gap).toBe(24);
+    expect(fixes).toContain('normalized layout gap');
+  });
+
   it('guarantees a root theme', () => {
     const { view, fixes } = repairSurface({ type: 'Stack', children: [{ type: 'Chart', bind: { collection: 'm', live: true }, chartType: 'area', x: 'd', y: 'v' }] }, { collections: ['m'] });
     expect(view.style?.theme).toBe('analytics'); // inferred from the Chart
@@ -93,7 +99,7 @@ describe('operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X)', 
       {
         type: 'Stack',
         children: [
-          { type: 'Hero', title: 'Fashion Store Factory' },
+          { type: 'Hero', title: 'Catalog Launch Workflow' },
           { type: 'Table', bind: { collection: 'factory_leads', live: true }, columns: [{ key: 'lead' }] },
         ],
       },

@@ -236,13 +236,16 @@ export function buildRoomRoutes(deps: {
     deps.bus.publish(REALTIME_ROOMS.room(room.id), REALTIME_EVENTS.ROOM_MESSAGE_SENT, { message });
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ROOM_MESSAGE_RECEIVED, { roomId: room.id, message });
 
-    // Global Chat: an operator @mentioning agents wakes them for a real turn whose
-    // reply lands back in this room. Fire-and-forget so the post returns fast.
-    if (deps.broadcast && c.req.param('id') === BROADCAST_ALIAS && message.authorType === 'operator') {
+    // Rooms: @mentioning agents wakes them for a real turn whose reply lands
+    // back in this room. Fire-and-forget so the post returns fast.
+    if (deps.broadcast && (message.authorType === 'operator' || message.authorType === 'agent')) {
       const text = typeof message.content?.text === 'string' ? message.content.text : '';
-      const agentIds = body.mentions.length > 0
+      const rawAgentIds = body.mentions.length > 0
         ? body.mentions
         : deps.broadcast.resolveMentionedAgentIds(ws.workspaceId, text);
+      const agentIds = message.authorType === 'agent' && message.authorId
+        ? rawAgentIds.filter((agentId) => agentId !== message.authorId)
+        : rawAgentIds;
       if (agentIds.length > 0 && text.trim()) {
         deps.broadcast.dispatchMentions({
           workspaceId: ws.workspaceId,

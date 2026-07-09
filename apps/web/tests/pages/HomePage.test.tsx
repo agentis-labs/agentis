@@ -272,7 +272,7 @@ describe('<WorkspaceEcosystemCanvas />', () => {
         { id: 'wf-direct', title: 'Send Hi Alex Email', status: 'idle' },
         { id: 'wf-direct2', title: 'AI News Email Digest', status: 'idle' },
         { id: 'wf-direct3', title: '24/7 Site Monitor', status: 'idle' },
-        { id: 'wf-direct4', title: 'Fashion Store Factory', status: 'idle' },
+        { id: 'wf-direct4', title: 'Catalog Launch Workflow', status: 'idle' },
       ],
     };
     const agents: Parameters<typeof buildCanvasModel>[1] = [

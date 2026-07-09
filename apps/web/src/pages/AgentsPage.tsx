@@ -6,16 +6,17 @@
  * space when spaces are configured.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Bot, Plus, Network, List as ListIcon, Search, SearchX, X, Zap, Sparkles, Download } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Bot, Plus, Network, List as ListIcon, Search, SearchX, X, Zap, Sparkles, Download, ChevronDown, FolderInput, PackagePlus, UserPlus, Brain as BrainIcon } from 'lucide-react';
 import { ImportAgentsWizard } from '../components/agents/ImportAgentsWizard';
 import { harnessOf } from '../components/agents/harnessMeta';
 import { checkImportUpdates, type ImportUpdate } from '../lib/agentImport';
 import clsx from 'clsx';
-import { api, apiCached, peekCached, workspace as wsStore } from '../lib/api';
+import { api, apiCached, apiErrorMessage, peekCached, workspace as wsStore } from '../lib/api';
 import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { Button } from '../components/shared/Button';
+import { useToast } from '../components/shared/Toast';
 import { DomainToolbar } from '../components/shared/DomainToolbar';
 import { StatusBadge } from '../components/shared/StatusBadge';
 import { Skeleton, SkeletonCard } from '../components/shared/Skeleton';
@@ -23,8 +24,15 @@ import { EmptyState } from '../components/shared/EmptyState';
 import { AgentCreateWizard } from '../components/agents/AgentCreateWizard';
 import { AgentHierarchyCanvas } from '../components/agents/AgentHierarchyCanvas';
 import type { AgentHierarchyCreatePreset } from '../components/agents/AgentHierarchyCanvas';
+import {
+  AgentImportSetupPanel,
+  agentImportSetupToOverrides,
+  createDefaultAgentImportSetup,
+  type AgentImportSetupValue,
+} from '../components/agents/AgentImportSetupPanel';
 import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
 import { REALTIME_EVENTS, isSpecialistRole } from '@agentis/core';
+import { AgentBrainPanel, type AgentBrainView } from '../components/brain/AgentBrainPanel';
 
 interface AgentRow {
   id: string;
@@ -63,7 +71,17 @@ interface AgentRow {
 interface Space extends DomainOption {}
 
 type View = 'fleet' | 'table';
+type AgentsSurface = 'agents' | 'brain';
 type FilterValue = 'all' | 'active' | 'idle' | 'setup_needed';
+const AGENT_BRAIN_VIEWS = new Set<AgentBrainView>(['map', 'memory', 'knowledge', 'skills', 'examples']);
+
+interface PendingAgentPackageImport {
+  fileName: string;
+  manifest: unknown;
+  setup: AgentImportSetupValue;
+  packageName: string;
+  packageDescription?: string | null;
+}
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -102,8 +120,161 @@ function passesFilter(a: AgentRow, f: FilterValue): boolean {
   return true;
 }
 
+function AgentViewToggle({ view, onChange }: { view: View; onChange: (view: View) => void }) {
+  return (
+    <div className="flex h-9 shrink-0 items-center gap-0.5 rounded-btn border border-line bg-surface-2 p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange('fleet')}
+        aria-label="Fleet view"
+        className={clsx(
+          'inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors',
+          view === 'fleet' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
+        )}
+      >
+        <Network size={12} /> Fleet
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('table')}
+        aria-label="Table view"
+        className={clsx(
+          'inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors',
+          view === 'table' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
+        )}
+      >
+        <ListIcon size={12} /> Table
+      </button>
+    </div>
+  );
+}
+
+function AgentsSurfaceToggle({ value, onChange }: { value: AgentsSurface; onChange: (value: AgentsSurface) => void }) {
+  return (
+    <div className="flex h-9 shrink-0 items-center gap-0.5 rounded-btn border border-line bg-surface-2 p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange('agents')}
+        className={clsx(
+          'inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] transition-colors',
+          value === 'agents' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
+        )}
+      >
+        <Bot size={12} /> Agents
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('brain')}
+        className={clsx(
+          'inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] transition-colors',
+          value === 'brain' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
+        )}
+      >
+        <BrainIcon size={12} /> Brain
+      </button>
+    </div>
+  );
+}
+
+function AddAgentMenu({
+  open,
+  busy,
+  menuRef,
+  onToggle,
+  onCreate,
+  onImportExisting,
+  onImportPackage,
+}: {
+  open: boolean;
+  busy: boolean;
+  menuRef: RefObject<HTMLDivElement>;
+  onToggle: () => void;
+  onCreate: () => void;
+  onImportExisting: () => void;
+  onImportPackage: () => void;
+}) {
+  return (
+    <div ref={menuRef} className="relative">
+      <Button
+        variant="primary"
+        size="md"
+        iconLeft={<Plus size={14} />}
+        iconRight={<ChevronDown size={13} />}
+        onClick={onToggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        Add agent
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Add agent options"
+          className="absolute right-0 top-[calc(100%+0.5rem)] z-40 w-[21rem] overflow-hidden rounded-card border border-line bg-surface p-1.5 shadow-dropdown"
+        >
+          <AddAgentMenuItem
+            icon={<UserPlus size={15} />}
+            title="Create new agent"
+            body="Commission an orchestrator, manager, or specialist."
+            onClick={onCreate}
+          />
+          <AddAgentMenuItem
+            icon={<FolderInput size={15} />}
+            title="Import existing agent from this machine"
+            body="Bring a local agent into Agentis with its identity, memory, and skills."
+            onClick={onImportExisting}
+          />
+          <AddAgentMenuItem
+            icon={<PackagePlus size={15} />}
+            title={busy ? 'Importing agent package...' : 'Import agent package from this machine'}
+            body="Install a portable .agentisagt package into this workspace."
+            onClick={onImportPackage}
+            disabled={busy}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddAgentMenuItem({
+  icon,
+  title,
+  body,
+  onClick,
+  disabled = false,
+}: {
+  icon: ReactNode;
+  title: string;
+  body: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      className="flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-surface-2 focus:bg-surface-2 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-line bg-surface-2 text-text-secondary">
+        {icon}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[13px] font-medium leading-5 text-text-primary">{title}</span>
+        <span className="mt-0.5 block text-[12px] leading-4 text-text-muted">{body}</span>
+      </span>
+    </button>
+  );
+}
+
 export function AgentsPage() {
   const nav = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const toast = useToast();
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const agentPackageInputRef = useRef<HTMLInputElement>(null);
   const [agents, setAgents] = useState<AgentRow[]>(() => peekCached<{ agents: AgentRow[] }>('/v1/agents')?.agents ?? []);
   const [spaces, setSpaces] = useState<Space[]>(() => peekCached<{ data: Space[] }>('/v1/domains')?.data ?? []);
   // Only block on a spinner when nothing is cached; a revisit paints instantly
@@ -118,6 +289,9 @@ export function AgentsPage() {
   });
   const [creating, setCreating] = useState(false);
   const [importingAgents, setImportingAgents] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [importingAgentPackage, setImportingAgentPackage] = useState(false);
+  const [pendingAgentPackage, setPendingAgentPackage] = useState<PendingAgentPackageImport | null>(null);
   const [creatingPreset, setCreatingPreset] = useState<AgentHierarchyCreatePreset | undefined>(undefined);
   const [selectedDomainId, setSelectedDomainId] = useState<'all' | 'unassigned' | string>('all');
   const [editingDomain, setEditingDomain] = useState<Space | null>(null);
@@ -136,10 +310,57 @@ export function AgentsPage() {
   // memory accrued by already-imported agents, ready to pull (approval-gated).
   const [importUpdates, setImportUpdates] = useState<ImportUpdate[]>([]);
   const [dismissedUpdates, setDismissedUpdates] = useState(false);
+  const surface: AgentsSurface = searchParams.get('tab') === 'brain' ? 'brain' : 'agents';
+  const brainAgentId = searchParams.get('agentId') || null;
+  const rawBrainTab = searchParams.get('brainTab');
+  const brainView: AgentBrainView = rawBrainTab && AGENT_BRAIN_VIEWS.has(rawBrainTab as AgentBrainView)
+    ? rawBrainTab as AgentBrainView
+    : 'map';
+
+  function patchQuery(patch: Record<string, string | null>, replace = true) {
+    const next = new URLSearchParams(searchParams);
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) next.delete(key);
+      else next.set(key, value);
+    }
+    setSearchParams(next, { replace });
+  }
+
+  function setSurface(next: AgentsSurface) {
+    if (next === 'brain') {
+      patchQuery({ tab: 'brain' });
+      return;
+    }
+    patchQuery({ tab: null, agentId: null, brainTab: null });
+  }
+
+  function setBrainAgentId(id: string) {
+    patchQuery({ tab: 'brain', agentId: id });
+  }
+
+  function setBrainView(next: AgentBrainView) {
+    patchQuery({ tab: 'brain', brainTab: next === 'map' ? null : next });
+  }
 
   useEffect(() => {
     try { localStorage.setItem('agentis.agents.view', view); } catch { /* ignore */ }
   }, [view]);
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!addMenuRef.current?.contains(event.target as Node)) setAddMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAddMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [addMenuOpen]);
 
   useEffect(() => {
     if (view !== 'fleet') {
@@ -308,9 +529,80 @@ export function AgentsPage() {
   }
 
   function openCreateAgent() {
+    setAddMenuOpen(false);
     const spaceId = selectedDomainId !== 'all' && selectedDomainId !== 'unassigned' ? selectedDomainId : null;
     setCreatingPreset(spaceId ? { role: 'manager', spaceId } : undefined);
     setCreating(true);
+  }
+
+  function openExistingAgentImport() {
+    setAddMenuOpen(false);
+    setImportingAgents(true);
+  }
+
+  function openAgentPackagePicker() {
+    setAddMenuOpen(false);
+    agentPackageInputRef.current?.click();
+  }
+
+  async function handleImportAgentPackageFile(file?: File | null) {
+    if (!file) return;
+    try {
+      const raw = JSON.parse(await file.text()) as Record<string, unknown>;
+      const manifest = 'manifest' in raw
+        ? raw.manifest
+        : 'packageManifest' in raw
+          ? raw.packageManifest
+          : raw;
+      const manifestObj = manifest && typeof manifest === 'object' ? manifest as Record<string, unknown> : null;
+      const contents = manifestObj?.contents && typeof manifestObj.contents === 'object'
+        ? manifestObj.contents as Record<string, unknown>
+        : null;
+      if (manifestObj?.kind !== 'agent' && contents?.kind !== 'agent') {
+        throw new Error('Choose an Agentis agent package (.agentisagt).');
+      }
+      const agent = contents?.agent && typeof contents.agent === 'object'
+        ? contents.agent as Record<string, unknown>
+        : {};
+      setPendingAgentPackage({
+        fileName: file.name,
+        manifest,
+        packageName: typeof manifestObj?.name === 'string' ? manifestObj.name : file.name,
+        packageDescription: typeof manifestObj?.description === 'string' ? manifestObj.description : null,
+        setup: createDefaultAgentImportSetup({
+          name: typeof agent.name === 'string' ? agent.name : file.name.replace(/\.[^.]+$/, ''),
+          role: typeof agent.role === 'string' ? agent.role : null,
+          existingAgents: agents,
+          preferOrchestratorWhenEmpty: agents.length === 0,
+        }),
+      });
+    } catch (error) {
+      toast.error('Agent package import failed', apiErrorMessage(error));
+    } finally {
+      if (agentPackageInputRef.current) agentPackageInputRef.current.value = '';
+    }
+  }
+
+  async function installPendingAgentPackage() {
+    if (!pendingAgentPackage) return;
+    setImportingAgentPackage(true);
+    try {
+      const imported = await api<{ agentId?: string }>('/v1/packages/import', {
+        method: 'POST',
+        body: JSON.stringify({
+          manifest: pendingAgentPackage.manifest,
+          overrides: { agent: agentImportSetupToOverrides(pendingAgentPackage.setup) },
+        }),
+      });
+      toast.success('Agent package imported', pendingAgentPackage.fileName);
+      setPendingAgentPackage(null);
+      await refresh();
+      if (imported.agentId) nav(`/agents?tab=brain&agentId=${encodeURIComponent(imported.agentId)}`);
+    } catch (error) {
+      toast.error('Agent package import failed', apiErrorMessage(error));
+    } finally {
+      setImportingAgentPackage(false);
+    }
   }
 
   if (loading && total === 0) {
@@ -329,47 +621,36 @@ export function AgentsPage() {
 
   return (
     <div className="flex h-full flex-col">
+      <input
+        ref={agentPackageInputRef}
+        type="file"
+        accept=".agentisagt,.agentis,.json,application/json"
+        className="hidden"
+        onChange={(event) => { void handleImportAgentPackageFile(event.target.files?.[0] ?? null); }}
+      />
       {/* Header */}
       <div className="space-y-4 border-b border-line px-6 py-4">
         <div className="flex flex-wrap items-center gap-3">
         <div>
           <h1 className="text-display text-text-primary">Agents</h1>
-          <div className="mt-0.5 text-[12px] text-text-muted">{total} {total === 1 ? 'agent' : 'agents'}</div>
+          <div className="mt-0.5 text-[12px] text-text-muted">
+            {surface === 'brain' ? 'Individual agent brains, knowledge, skills, and examples' : `${total} ${total === 1 ? 'agent' : 'agents'}`}
+          </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <div className="flex h-9 items-center gap-0.5 rounded-btn border border-line bg-surface-2 p-0.5">
-            <button
-              type="button"
-              onClick={() => setView('fleet')}
-              aria-label="Fleet view"
-              className={clsx(
-                'inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors',
-                view === 'fleet' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
-              )}
-            >
-              <Network size={12} /> Fleet
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('table')}
-              aria-label="Table view"
-              className={clsx(
-                'inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] transition-colors',
-                view === 'table' ? 'bg-surface-3 text-text-primary' : 'text-text-muted hover:text-text-primary',
-              )}
-            >
-              <ListIcon size={12} /> Table
-            </button>
-          </div>
-          <Button variant="secondary" size="md" iconLeft={<Download size={14} />} onClick={() => setImportingAgents(true)}>
-            Import agents
-          </Button>
-          <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={openCreateAgent}>
-            Add agent
-          </Button>
+          {agents.length > 0 && <AgentsSurfaceToggle value={surface} onChange={setSurface} />}
+          <AddAgentMenu
+            open={addMenuOpen}
+            busy={importingAgentPackage}
+            menuRef={addMenuRef}
+            onToggle={() => setAddMenuOpen((open) => !open)}
+            onCreate={openCreateAgent}
+            onImportExisting={openExistingAgentImport}
+            onImportPackage={openAgentPackagePicker}
+          />
         </div>
         </div>
-        {total > 0 && (
+        {total > 0 && surface === 'agents' && (
           <div className="flex flex-wrap items-center gap-2">
             <DomainToolbar
               domains={spaces}
@@ -390,6 +671,9 @@ export function AgentsPage() {
                 onClear={() => { setSearch(''); setFilter('all'); }}
               />
             )}
+            <div className="ml-auto flex items-center">
+              <AgentViewToggle view={view} onChange={setView} />
+            </div>
           </div>
         )}
       </div>
@@ -403,15 +687,23 @@ export function AgentsPage() {
       )}
 
       {/* List body */}
-      <div className={clsx('min-h-0 flex-1', view === 'fleet' ? 'overflow-hidden px-0 py-0' : 'overflow-y-auto px-6 py-5')}>
+      <div className={clsx('min-h-0 flex-1', surface === 'brain' || view === 'fleet' ? 'overflow-hidden px-0 py-0' : 'overflow-y-auto px-6 py-5')}>
         {agents.length === 0 ? (
           <EmptyState
             icon={<Bot size={48} />}
             title="No agents yet"
             body="Create your first agent — or bring in agents you already run outside Agentis, with their memory."
             primaryAction={<Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={openCreateAgent}>Add agent</Button>}
-            secondaryAction={<Button variant="secondary" size="md" iconLeft={<Download size={14} />} onClick={() => setImportingAgents(true)}>Import existing agents</Button>}
+            secondaryAction={<Button variant="secondary" size="md" iconLeft={<FolderInput size={14} />} onClick={openExistingAgentImport}>Import existing agent from this machine</Button>}
             variant="page"
+          />
+        ) : surface === 'brain' ? (
+          <AgentBrainPanel
+            agents={agents}
+            selectedAgentId={brainAgentId}
+            onSelectedAgentIdChange={setBrainAgentId}
+            view={brainView}
+            onViewChange={setBrainView}
           />
         ) : view === 'fleet' ? (
           <AgentHierarchyCanvas
@@ -487,7 +779,7 @@ export function AgentsPage() {
           const isSpecialist = agent.role && agent.role !== 'orchestrator' && agent.role !== 'manager';
           if (isSpecialist) {
             void refresh();
-            nav(`/agents/${agent.id}?tab=knowledge`);
+            nav(`/agents?tab=brain&agentId=${encodeURIComponent(agent.id)}&brainTab=knowledge`);
             return;
           }
           // Orchestrator/manager stay on the fleet canvas so users see the
@@ -538,6 +830,15 @@ export function AgentsPage() {
         open={importingAgents}
         onClose={() => setImportingAgents(false)}
         onImported={() => void refresh()}
+        existingAgents={agents}
+      />
+      <AgentPackageSetupModal
+        pending={pendingAgentPackage}
+        existingAgents={agents}
+        installing={importingAgentPackage}
+        onChange={(setup) => setPendingAgentPackage((current) => current ? { ...current, setup } : current)}
+        onInstall={() => void installPendingAgentPackage()}
+        onClose={() => { if (!importingAgentPackage) setPendingAgentPackage(null); }}
       />
     </div>
   );
@@ -589,6 +890,63 @@ function ImportUpdatesBanner({
         >
           <X size={14} />
         </button>
+      </div>
+    </div>
+  );
+}
+
+function AgentPackageSetupModal({
+  pending,
+  existingAgents,
+  installing,
+  onChange,
+  onInstall,
+  onClose,
+}: {
+  pending: PendingAgentPackageImport | null;
+  existingAgents: AgentRow[];
+  installing: boolean;
+  onChange: (setup: AgentImportSetupValue) => void;
+  onInstall: () => void;
+  onClose: () => void;
+}) {
+  if (!pending) return null;
+  const canInstall = pending.setup.name.trim().length > 0;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true" aria-labelledby="agent-package-setup-title">
+      <div className="w-full max-w-xl overflow-hidden rounded-modal border border-line bg-surface shadow-modal">
+        <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+          <div className="min-w-0">
+            <div id="agent-package-setup-title" className="flex items-center gap-2 text-subheading text-text-primary">
+              <PackagePlus size={16} className="text-accent" /> Import agent package
+            </div>
+            <div className="mt-1 truncate text-[12px] text-text-muted">{pending.fileName}</div>
+          </div>
+          <button
+            type="button"
+            aria-label="Close"
+            disabled={installing}
+            onClick={onClose}
+            className="rounded-btn p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-4 px-5 py-4">
+          <div className="rounded-lg border border-line bg-surface-2 px-3 py-2.5">
+            <div className="text-[13px] font-medium text-text-primary">{pending.packageName}</div>
+            {pending.packageDescription && <div className="mt-1 text-[12px] leading-5 text-text-muted">{pending.packageDescription}</div>}
+          </div>
+          <AgentImportSetupPanel value={pending.setup} existingAgents={existingAgents} onChange={onChange} />
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <Button variant="secondary" onClick={onClose} disabled={installing}>Cancel</Button>
+          <Button variant="primary" loading={installing} disabled={!canInstall} iconLeft={<PackagePlus size={13} />} onClick={onInstall}>
+            Install agent
+          </Button>
+        </div>
       </div>
     </div>
   );

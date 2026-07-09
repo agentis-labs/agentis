@@ -8,12 +8,12 @@ export function CanvasRadialLight({
   isActive: boolean;
 }) {
   if (!orchestratorCanvasPos) return null;
-  const pct = isActive ? 11 : 6;
+  const a = isActive ? 0.16 : 0.09;
   const spread = isActive ? 68 : 52;
-  // Theme-neutral orchestrator glow: derives from --color-accent (white on dark,
-  // black on light) so it never reads as a purple brand tint.
-  const inner = `color-mix(in srgb, var(--color-accent) ${pct}%, transparent)`;
-  const outer = `color-mix(in srgb, var(--color-accent) ${(pct * 0.4).toFixed(1)}%, transparent)`;
+  // A cool slate-grey glow — reads as depth/ambient light around the orchestrator,
+  // never the harsh white that a pure-accent tint produced.
+  const inner = `rgba(130, 136, 152, ${a})`;
+  const outer = `rgba(130, 136, 152, ${(a * 0.4).toFixed(3)})`;
   return (
     <div
       className="absolute inset-0 pointer-events-none"

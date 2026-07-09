@@ -103,6 +103,14 @@ const packMetaSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
+const packageImportOverridesSchema = z.object({
+  agent: z.object({
+    name: z.string().min(1).max(120).optional(),
+    role: z.string().max(120).nullish(),
+    reportsTo: z.string().nullish(),
+  }).optional(),
+}).optional();
+
 export function buildPackageRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
@@ -237,17 +245,20 @@ export function buildPackageRoutes(deps: {
   // via usePackage() so the caller gets a ready-to-navigate workflowId + path.
   app.post('/import', async (c) => {
     const s = scope(c);
-    const body = (await c.req.json()) as { manifest?: PackageManifest; packageManifest?: PackageManifest } | PackageManifest;
+    const rawBody = (await c.req.json()) as unknown;
+    const body = isRecord(rawBody) ? rawBody : {};
     const manifest = 'manifest' in body && body.manifest
       ? body.manifest
       : 'packageManifest' in body && body.packageManifest
         ? body.packageManifest
-        : body;
+        : rawBody;
     if (!manifest || typeof manifest !== 'object' || !('contents' in manifest)) {
       throw new AgentisError('VALIDATION_FAILED', 'manifest is required');
     }
+    const overrides = packageImportOverridesSchema.parse(body.overrides) ?? {};
     const imported = packager.importManifest(s, manifest as PackageManifest);
-    const used = packager.usePackage(s, imported.packageId);
+    const agentOverrides = overrides.agent ? compactAgentOverrides(overrides.agent) : undefined;
+    const used = packager.usePackage(s, imported.packageId, { agent: agentOverrides });
     return c.json({
       packageId: imported.packageId,
       ...(used.kind === 'workflow' ? { workflowId: used.resourceId } : { agentId: used.resourceId }),
@@ -363,4 +374,16 @@ export function buildPackageRoutes(deps: {
   });
 
   return app;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function compactAgentOverrides(input: { name?: string; role?: string | null; reportsTo?: string | null }) {
+  const out: { name?: string; role?: string | null; reportsTo?: string | null } = {};
+  if (input.name !== undefined) out.name = input.name;
+  if (input.role !== undefined) out.role = input.role;
+  if (input.reportsTo !== undefined) out.reportsTo = input.reportsTo;
+  return out;
 }

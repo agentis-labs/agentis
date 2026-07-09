@@ -34,7 +34,7 @@ import {
   type AppWorkflowBinding,
   type AppWorkflowSummary,
 } from '@agentis/core';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowGraph, AgentTool } from '@agentis/core';
@@ -420,6 +420,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       settings: schema.workflows.settings,
     }).from(schema.workflows)
       .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.appId, appId)))
+      // Oldest first so a newly created workflow always lands on the right of the tab row.
+      .orderBy(asc(schema.workflows.createdAt))
       .all();
     const summaries: AppWorkflowSummary[] = rows.map((row) => {
       const binding = readAppWorkflowBinding(row.settings);

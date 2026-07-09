@@ -48,7 +48,7 @@ export function AppDataGrid({ appId, collections }: { appId: string; collections
             >
               <Table2 size={13} className="shrink-0" />
               <span className="flex-1 truncate font-mono text-[12px]">{c.name}</span>
-              <span className="shrink-0 text-[10px] text-text-muted">{c.schema.fields.length}f</span>
+              <span className="shrink-0 rounded-full bg-surface-2 px-1.5 text-[10px] tabular-nums text-text-muted" title={`${c.recordCount ?? 0} record${(c.recordCount ?? 0) === 1 ? '' : 's'}`}>{formatCount(c.recordCount ?? 0)}</span>
             </button>
           ))}
         </div>
@@ -212,6 +212,13 @@ function CellValue({ value, field }: { value: unknown; field: CollectionField })
     return <span className="font-mono text-[11px] text-text-secondary">{clip(JSON.stringify(value))}</span>;
   }
   return <>{formatDisplay(value, field.type === 'date' ? { format: 'date' } : {})}</>;
+}
+
+/** Compact record count for the collection list: 1234 → "1.2k". */
+function formatCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 function clip(s: string, n = 60): string {

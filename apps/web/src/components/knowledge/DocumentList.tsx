@@ -5,7 +5,8 @@ import { DocumentRow } from './DocumentRow';
 import type { KnowledgeDocumentRow } from './types';
 
 type KnowledgeDocumentView = KnowledgeDocumentRow & {
-  knowledgeBaseScopeKind?: 'workspace' | 'workflow';
+  knowledgeBaseScopeKind?: 'workspace' | 'app' | 'agent' | 'workflow';
+  ownerScope?: { id: string; kind: 'app' | 'agent' | 'workflow'; title: string } | null;
   ownerWorkflow?: { id: string; title: string } | null;
 };
 
@@ -24,7 +25,7 @@ export function DocumentList({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return documents;
-    return documents.filter((document) => `${document.name} ${document.knowledgeBaseName ?? ''} ${document.ownerWorkflow?.title ?? ''} ${document.mimeType}`.toLowerCase().includes(q));
+    return documents.filter((document) => `${document.name} ${document.knowledgeBaseName ?? ''} ${document.ownerScope?.title ?? document.ownerWorkflow?.title ?? ''} ${document.mimeType}`.toLowerCase().includes(q));
   }, [documents, query]);
 
   if (documents.length === 0) {

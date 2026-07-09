@@ -2,7 +2,7 @@
  * AssetStore — the single authority for agent/app/workflow-generated media.
  *
  * WHY: agents used to write generated media to whatever their process `cwd`
- * happened to be (the repo → `apps/api/brand-assets/`), and binary artifacts
+ * happened to be, and binary artifacts
  * were stored inline as base64 `data:` URLs in the DB. Both bloat without bound
  * and duplicate freely. This store fixes that with ONE content-addressed root:
  *

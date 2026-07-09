@@ -728,6 +728,8 @@ function badgeLabel(type: BrainNodeType): string {
     case 'knowledge_cluster': return 'Knowledge';
     case 'memory_episode': return 'Memory';
     case 'memory_pattern': return 'Pattern';
+    case 'skill': return 'Skill';
+    case 'example': return 'Example';
     case 'evaluator': return 'Evaluator';
     case 'baseline': return 'Baseline';
     case 'warning': return 'Warning';
@@ -740,6 +742,8 @@ function badgeLabel(type: BrainNodeType): string {
 function badgeTone(type: BrainNodeType): string {
   switch (type) {
     case 'knowledge_cluster': return 'border-cyan-300/30 bg-cyan-400/10 text-cyan-200';
+    case 'skill': return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-200';
+    case 'example': return 'border-pink-300/30 bg-pink-400/10 text-pink-200';
     case 'memory_episode':
     case 'memory_pattern': return 'border-violet-300/30 bg-violet-400/10 text-violet-200';
     case 'evaluator':

@@ -386,7 +386,7 @@ export async function registerAdapter(
  * Working directory for a CLI harness agent. An explicit project cwd wins;
  * otherwise the agent runs in its Agentis-managed home under AGENTIS_DATA_DIR —
  * NEVER `process.cwd()` (the repo), which is how agents used to scatter
- * generated media into the source tree (e.g. `apps/api/brand-assets/`).
+ * generated media into the source tree.
  */
 function managedAgentCwd(agentId: string, config: Record<string, unknown>): string {
   const cwd = stringOf(config.cwd) || harnessAgentHomeDir(agentId);

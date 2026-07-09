@@ -43,6 +43,15 @@ export interface UsePackageResult {
 
 import type { Logger } from '../logger.js';
 import type { SkillService } from './skillService.js';
+import { ensureReportsToTarget, ensureSingleOrchestrator } from './agent/agentCommission.js';
+
+export interface UsePackageOptions {
+  agent?: {
+    name?: string;
+    role?: string | null;
+    reportsTo?: string | null;
+  };
+}
 
 export class PackagerService {
   constructor(
@@ -283,7 +292,7 @@ export class PackagerService {
     };
   }
 
-  usePackage(scope: PackageScope, packageId: string): UsePackageResult {
+  usePackage(scope: PackageScope, packageId: string, options: UsePackageOptions = {}): UsePackageResult {
     const row = this.get(packageId, scope.workspaceId);
     const contents = row.contents as PackageContents;
     const now = new Date().toISOString();
@@ -315,6 +324,10 @@ export class PackagerService {
     if (contents.kind === 'agent') {
       const id = randomUUID();
       const colorHex = CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
+      const role = options.agent && 'role' in options.agent ? options.agent.role ?? null : contents.agent.role ?? 'agent';
+      const reportsTo = options.agent?.reportsTo ?? null;
+      ensureSingleOrchestrator(this.deps.db, scope.workspaceId, role);
+      if (reportsTo) ensureReportsToTarget(this.deps.db, scope.workspaceId, reportsTo);
       this.deps.db
         .insert(schema.agents)
         .values({
@@ -324,7 +337,7 @@ export class PackagerService {
           userId: scope.userId,
           gatewayId: null,
           packageId: null,
-          name: contents.agent.name,
+          name: options.agent?.name?.trim() || contents.agent.name,
           adapterType: contents.agent.adapterType,
           capabilityTags: contents.agent.capabilityTags,
           config: contents.agent.config,
@@ -333,7 +346,8 @@ export class PackagerService {
           instructions: contents.agent.instructions ?? null,
           avatarGlyph: contents.agent.avatarGlyph ?? null,
           runtimeModel: contents.agent.runtimeModel ?? null,
-          role: contents.agent.role ?? 'agent',
+          role,
+          reportsTo,
           createdAt: now,
           updatedAt: now,
         })

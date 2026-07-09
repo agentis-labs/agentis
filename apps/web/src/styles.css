@@ -269,32 +269,8 @@
    The global shell is monochrome. Chroma survives in exactly two scoped
    contexts, each re-pointing `--color-accent` (+ glow/terminal) locally so
    every token consumer inside them adopts the island color with ZERO
-   component changes. Wrap the workflow canvas route in `.workflow-scope`
-   and the Brain page root in `.brain-scope`. */
-
-/* Workflow / Canvas — green = execution & flow. The running-node halo and
-   marching edges reference --color-accent, so they light green in-canvas and
-   white everywhere else, automatically. */
-.workflow-scope {
-  --color-accent: #4ade80;
-  --color-accent-hover: #22c55e;
-  --color-accent-soft: rgba(74, 222, 128, 0.12);
-  --color-accent-muted: rgba(74, 222, 128, 0.28);
-  --color-on-accent: #05130b;
-  --shadow-glow: 0 0 0 1px rgba(74, 222, 128, 0.35), 0 0 22px rgba(74, 222, 128, 0.16);
-  --color-canvas-ambient: rgba(74, 222, 128, 0.03);
-  --color-terminal-text: #4ade80;
-}
-:root[data-theme='light'] .workflow-scope,
-:root.light .workflow-scope {
-  --color-accent: #087443;
-  --color-accent-hover: #065f38;
-  --color-accent-soft: rgba(8, 116, 67, 0.1);
-  --color-accent-muted: rgba(8, 116, 67, 0.24);
-  --color-on-accent: #ffffff;
-  --shadow-glow: 0 0 0 1px rgba(8, 116, 67, 0.3), 0 8px 24px rgba(8, 116, 67, 0.13);
-  --color-canvas-ambient: rgba(8, 116, 67, 0.045);
-}
+   component changes. Wrap the Brain page root in `.brain-scope`. (The workflow
+   canvas is monochrome — it no longer has its own color island.) */
 
 /* Brain — violet = cognition. Deeper and darker than the app base, per brand
    direction. Surfaces sink into an indigo-black; accent is a luminous violet. */

@@ -2,11 +2,11 @@
 
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
-import { useWorkspaceData } from '../lib/workspaceData';
+import { useWorkspaceChromeData } from '../lib/workspaceChromeData';
 import { useAgentisStore } from '../store/agentisStore';
 
 export function LiveStrip() {
-  const { approvals, counts, fleet: snap, latestActivity: latest, loading } = useWorkspaceData();
+  const { approvals, counts, fleet: snap, latestActivity: latest, loading } = useWorkspaceChromeData();
   const { setSettingsOpen } = useAgentisStore();
 
   if (!snap) {
@@ -44,7 +44,7 @@ export function LiveStrip() {
   }
 
   const gwOk = snap.gateways.connected === snap.gateways.total;
-  const gwDot = gwOk ? 'bg-accent' : 'bg-amber-400';
+  const gwDot = gwOk ? 'bg-emerald-500' : 'bg-amber-400';
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-4 border-t border-line bg-surface px-3 text-[11px] text-text-muted">

@@ -162,10 +162,7 @@ export class SelfHealController {
 
     // ── CONFIG-AWARE: a missing env var / working directory / credential is a
     //    configuration gap, not a graph fault — no graph rewrite can set it. The
-    //    old classifier only caught missing binaries, so store_factory's
-    //    "requires a working directory — set AGENTIS_STORES_DIR …" fell through to
-    //    structural repair and died as "could not derive a grounded repair". Now
-    //    we escalate with the exact remedy the extension already named.
+    //    We escalate with the exact remedy the failing step already named.
     const cfgGap = configGapReason(error);
     if (cfgGap) {
       this.host.emitWorkStep(ctx, node, 'fail', `Configuration gap — ${cfgGap}`);

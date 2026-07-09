@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { Navigate, useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine, Pencil, Check, X as XIcon } from 'lucide-react';
 import { api, apiErrorMessage } from '../lib/api';
 import { openRunModal } from '../lib/runModal';
@@ -26,7 +26,7 @@ import { DeleteAgentDialog } from '../components/agents/DeleteAgentDialog';
 import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
 import { useAgentInstallSession } from '../hooks/useBackgroundInstall';
 
-type TabKey = 'identity' | 'instructions' | 'runtime' | 'memory' | 'channels' | 'history';
+type TabKey = 'identity' | 'instructions' | 'runtime' | 'channels' | 'history';
 
 /** Map legacy tab values (overview / connections / interactions) onto the redesigned set. */
 function normalizeTab(raw: string | null): TabKey {
@@ -42,7 +42,6 @@ function normalizeTab(raw: string | null): TabKey {
     case 'history':
       return 'history';
     case 'instructions':
-    case 'memory':
     case 'channels':
       return raw;
     default:
@@ -113,6 +112,7 @@ export function AgentDetailPage() {
   const nav = useNavigate();
   const toast = useToast();
   const [searchParams] = useSearchParams();
+  const rawTab = searchParams.get('tab');
   const tab = normalizeTab(searchParams.get('tab'));
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [allAgents, setAllAgents] = useState<AgentSummary[]>([]);
@@ -198,6 +198,11 @@ export function AgentDetailPage() {
   const displayStatus = agent.status === 'setting_up' && !installActive ? 'error' : agent.status ?? 'offline';
   const displayStatusLabel = agent.status === 'setting_up' && !installActive ? 'runtime missing' : undefined;
 
+  if (rawTab === 'memory' || rawTab === 'knowledge') {
+    const brainTab = rawTab === 'memory' ? 'memory' : 'knowledge';
+    return <Navigate to={`/agents?tab=brain&agentId=${encodeURIComponent(agent.id)}&brainTab=${brainTab}`} replace />;
+  }
+
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
@@ -257,7 +262,6 @@ export function AgentDetailPage() {
           { value: 'identity',     label: 'Identity' },
           { value: 'instructions', label: 'Instructions' },
           { value: 'runtime',      label: 'Runtime' },
-          { value: 'memory',       label: 'Memory' },
           { value: 'channels',     label: 'Channels' },
           { value: 'history',      label: 'History' },
         ]}
@@ -268,7 +272,6 @@ export function AgentDetailPage() {
         {tab === 'identity' && <IdentityTab agent={agent} allAgents={allAgents} allSpaces={allSpaces} onChange={refresh} />}
         {tab === 'instructions' && <RuntimeNativePanel agentId={agent.id} mode="resources" />}
         {tab === 'runtime' && <RuntimeTab agent={agent} allAgents={allAgents} onChange={refresh} />}
-        {tab === 'memory' && <MemoryTab agent={agent} />}
         {tab === 'channels' && <AgentChannelsTab agentId={agent.id} agentName={agent.name} />}
         {tab === 'history' && <HistoryTab agent={agent} />}
       </div>

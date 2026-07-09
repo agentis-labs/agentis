@@ -225,6 +225,9 @@ const EMBED_HIGH_SIMILARITY = 0.88;
 /** Cosine similarity above which two atoms get a `refines`/`related` link. */
 /** Minimum cosine relevance for an atom to enter a dispatch context block. */
 const DISPATCH_MIN_RELEVANCE = 0.32;
+/** Minimum lexical overlap for the hybrid recall fallback to count an atom as a
+ *  match (rescues un-embedded/mixed-provider atoms without flooding weak noise). */
+const LEXICAL_RECALL_FLOOR = 0.06;
 /**
  * Per-provider relevance floor. Cosine distributions differ wildly by model:
  * `local`/e5 sits in a high, compressed band (~0.78–0.92 even for unrelated
@@ -1392,8 +1395,14 @@ export class SharedIntelligenceService {
     // to the query provider: episodes carry model+dims provenance, so a
     // stale-embedded one is detected + flagged for re-embed; chunks (no provenance
     // columns) are written by the single workspace provider, so an equal dimension
-    // is sufficient comparability. We never fall back to lexical scoring — recall
-    // is purely semantic; un-embedded atoms are picked up after the re-embed sweep.
+    // is sufficient comparability.
+    //
+    // HYBRID recall: an atom with no comparable embedding (e.g. an operator-
+    // inserted memory that hasn't been embedded yet, or a mixed-provider vector) is
+    // rescued by lexical overlap instead of being silently invisible — recall must
+    // never drop a stored fact just because its vector is missing. For embedded
+    // atoms we take max(semantic, lexical) so a strong literal match ("what's my
+    // name" ↔ "My name is Robson Prado") is never buried below the relevance floor.
     const staleIds: string[] = [];
     const scored = atoms
       .map((atom) => {
@@ -1410,7 +1419,9 @@ export class SharedIntelligenceService {
           // Episode never embedded (deferred async write) → nudge a re-embed.
           staleIds.push(atom.id);
         }
-        const score = vec ? cosineSimilarity(queryVec!, vec) : 0;
+        const semScore = vec ? cosineSimilarity(queryVec!, vec) : 0;
+        const lexScore = similarity(args.query, atom.text);
+        const score = Math.max(semScore, lexScore >= LEXICAL_RECALL_FLOOR ? lexScore : 0);
         return { atom, score, text: atom.text, vec };
       })
       .filter((r) => r.score > 0)

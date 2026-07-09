@@ -63,6 +63,8 @@ export interface CollectionInfo {
   appId: string;
   name: string;
   schema: CollectionSchema;
+  /** Number of records currently stored in the collection (populated by listCollections). */
+  recordCount?: number;
   createdAt: string;
   updatedAt: string;
 }

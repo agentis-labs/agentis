@@ -1,21 +1,22 @@
 /**
- * BroadcastDispatcher — turns an @mention in the Global Chat (workspace
- * broadcast room) into a real agent turn whose reply lands back in that room.
+ * BroadcastDispatcher — turns an @mention in a room into a real agent turn
+ * whose reply lands back in that room.
  *
  * Before this existed, the Global Chat composer posted to a virtual
  * `__broadcast__` room that did not exist, so sending 404'd ("Room not found").
- * Now `rooms.ts` resolves the broadcast alias to a real workspace room, persists
- * the operator's message, and hands the mentioned agents to this dispatcher:
+ * Now `rooms.ts` resolves the broadcast alias to a real workspace room when
+ * needed, persists the room message, and hands the mentioned agents to this
+ * dispatcher:
  *
  *   operator posts "@hermes say hi to @Orchy"
  *     → resolve @hermes (and any other @mentions) to agents
  *     → for each: run ChatSessionExecutor.turn(...)   // the agent THINKS
- *     → persist the reply as an 'agent' room message  // it appears in Global Chat
+ *     → persist the reply as an 'agent' room message  // it appears in the room
  *
- * Only operator-authored messages dispatch, so an agent's own reply (even when it
- * @mentions another agent) never re-triggers this loop — agent-to-agent chatter
- * stays the job of the agents' own A2A tools, which already surface in the feed.
- * Mentions are capped per message to keep a single post from fanning out.
+ * Operator-authored and agent-authored messages can dispatch, so an agent can
+ * pull a peer into the same room with an explicit @mention. Mentions are capped
+ * per message to keep a single post from fanning out, and automatic peer relays
+ * are depth-limited to avoid runaway loops.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -42,6 +43,8 @@ export interface BroadcastDispatcherDeps {
 
 /** Most agents a single operator post may wake — a guard against runaway fan-out. */
 const MAX_MENTIONS_PER_MESSAGE = 3;
+/** Automatic agent-to-agent relays allowed after an agent reply mentions a peer. */
+const MAX_AGENT_RELAY_DEPTH = 1;
 /** How many prior room lines the agent sees as context. */
 const HISTORY_LIMIT = 12;
 
@@ -84,10 +87,11 @@ export class BroadcastDispatcher {
     roomId: string;
     agentIds: string[];
     userMessage: string;
+    relayDepth?: number;
   }): void {
     const agentIds = Array.from(new Set(args.agentIds)).slice(0, MAX_MENTIONS_PER_MESSAGE);
     for (const agentId of agentIds) {
-      void this.#dispatchOne({ ...args, agentId }).catch((error) => {
+      void this.#dispatchOne({ ...args, agentId, relayDepth: args.relayDepth ?? 0 }).catch((error) => {
         this.deps.logger.error('broadcast.dispatch.failed', {
           agentId,
           roomId: args.roomId,
@@ -104,6 +108,7 @@ export class BroadcastDispatcher {
     roomId: string;
     agentId: string;
     userMessage: string;
+    relayDepth: number;
   }): Promise<void> {
     const name = this.#agentName(args.agentId);
     const reg = this.deps.adapters.get(args.agentId);
@@ -112,7 +117,7 @@ export class BroadcastDispatcher {
       // @mentioned this agent and deserves to know why nothing came back.
       this.deps.logger.info('broadcast.dispatch.skipped_no_chat', { agentId: args.agentId });
       this.#postLine(args.workspaceId, args.roomId, 'system', null,
-        `⚠️ ${name} isn't connected to an interactive runtime, so it can't answer in Global Chat.`);
+        `⚠️ ${name} isn't connected to an interactive runtime, so it can't answer in this room.`);
       return;
     }
 
@@ -159,6 +164,21 @@ export class BroadcastDispatcher {
     const text = reply.trim();
     if (text) {
       this.#postLine(args.workspaceId, args.roomId, 'agent', args.agentId, text);
+      if (args.relayDepth < MAX_AGENT_RELAY_DEPTH) {
+        const peerIds = this.resolveMentionedAgentIds(args.workspaceId, text)
+          .filter((agentId) => agentId !== args.agentId);
+        if (peerIds.length > 0) {
+          this.dispatchMentions({
+            workspaceId: args.workspaceId,
+            ambientId: args.ambientId,
+            userId: args.userId,
+            roomId: args.roomId,
+            agentIds: peerIds,
+            userMessage: text,
+            relayDepth: args.relayDepth + 1,
+          });
+        }
+      }
       return;
     }
 
@@ -167,7 +187,7 @@ export class BroadcastDispatcher {
     // that an @mention does something visible).
     if (sawConfirmation) {
       this.#postLine(args.workspaceId, args.roomId, 'system', null,
-        `🔒 ${name} needs to run a tool that requires your approval — open its direct chat to approve it (Global Chat can't show approval prompts).`);
+        `🔒 ${name} needs to run a tool that requires your approval — open its direct chat to approve it (rooms can't show approval prompts).`);
     } else if (adapterError || finishReason === 'error') {
       this.#postLine(args.workspaceId, args.roomId, 'system', null,
         `⚠️ ${name} couldn't reply: ${trimReason(adapterError) || 'its runtime returned an error.'}`);

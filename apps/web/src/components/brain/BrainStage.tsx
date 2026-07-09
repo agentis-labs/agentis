@@ -256,15 +256,16 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
           .strength((l) => 0.08 + (l.edge.weight ?? 0.4) * 0.32))
         .force('x', forceX<SimNode>(0).strength(0.055))
         .force('y', forceY<SimNode>(0).strength(0.055))
-        .force('collide', forceCollide<SimNode>().radius((n) => n.baseRadius + 7).strength(0.86).iterations(2))
+        .force('collide', forceCollide<SimNode>().radius((n) => n.baseRadius + 7).strength(0.86).iterations(simNodes.length > 4000 ? 1 : 2))
         .velocityDecay(0.42)
-        .alphaDecay(0.021)
+        .alphaDecay(simNodes.length > 4000 ? 0.03 : 0.021)
         .alphaMin(0.0016)
         .stop();
       simRef.current = sim;
-      // Warm fewer ticks on large graphs — they finish settling live, which
-      // also gives a pleasant "bloom" animation instead of a blocking freeze.
-      const warm = simNodes.length > 180 ? 70 : 130;
+      // Warm ticks are synchronous (they block the first paint), so scale them
+      // WAY down as the graph grows — a huge graph settles live (animated) over a
+      // couple of seconds instead of freezing the tab for 10s+.
+      const warm = simNodes.length > 4000 ? 8 : simNodes.length > 180 ? 60 : 130;
       for (let i = 0; i < warm; i += 1) sim.tick();
       needFitRef.current = true;
     } else {
@@ -386,6 +387,8 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       const sy = s.y * t.k + t.y;
       const tx = tg.x * t.k + t.x;
       const ty = tg.y * t.k + t.y;
+      // cull edges whose bounding box is fully off-screen
+      if ((sx < 0 && tx < 0) || (sy < 0 && ty < 0) || (sx > w && tx > w) || (sy > h && ty > h)) continue;
       ctx.beginPath();
       ctx.moveTo(sx, sy);
       ctx.lineTo(tx, ty);
@@ -412,8 +415,11 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
     }
 
     // ---- nodes ----
-    const ordered = [...map.values()].sort((a, b) => rank(a, focus) - rank(b, focus));
-    for (const n of ordered) {
+    // Perf: no per-frame sort (O(n log n) at 20k+ nodes was a hot spot) and no
+    // per-node radial gradients (creating 2 gradients per node per frame melted
+    // large graphs). Flat discs read as a clean knowledge graph and stay cheap;
+    // the focused node is emphasised by its ring, not z-order.
+    for (const n of map.values()) {
       const isFocus = focus === n.id;
       const isNeighbour = Boolean(neighbourhood && neighbourhood.has(n.id));
       const isSelected = selectedRef.current === n.id;
@@ -429,52 +435,33 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
 
       const dim = Boolean(neighbourhood && !isNeighbour && !isFocus);
       const conf = n.node.confidence ?? 0.5;
+
+      // soft glow from a cached sprite (cheap, consistent). Skip the glow entirely
+      // when zoomed out on a big graph — it's imperceptible and costs fill time.
+      if (r > 2.2 || isHover || isSelected) {
+        const glowStrength = (isHover || isSelected ? 0.7 : 0.22 + conf * 0.28);
+        const glowSize = r * (isHover || isSelected ? 6.2 : 4.4);
+        const sprite = glowSprite(n.color);
+        ctx.globalAlpha = (dim ? 0.12 : 1) * glowStrength;
+        ctx.drawImage(sprite, sx - glowSize / 2, sy - glowSize / 2, glowSize, glowSize);
+      }
       ctx.globalAlpha = dim ? 0.12 : 1;
 
-      // soft glow from a cached sprite (cheap, consistent)
-      const glowStrength = (isHover || isSelected ? 0.7 : 0.26 + conf * 0.3);
-      const glowSize = r * (isHover || isSelected ? 6.2 : 4.6);
-      const sprite = glowSprite(n.color);
-      ctx.globalAlpha = (dim ? 0.12 : 1) * glowStrength;
-      ctx.drawImage(sprite, sx - glowSize / 2, sy - glowSize / 2, glowSize, glowSize);
-      ctx.globalAlpha = dim ? 0.12 : 1;
-
-      // spherical body — offset radial gradient gives depth instead of a flat disc
-      const body = ctx.createRadialGradient(
-        sx - r * 0.42, sy - r * 0.46, r * 0.12,
-        sx, sy, r * 1.04,
-      );
-      body.addColorStop(0, lighten(n.color, 0.62));
-      body.addColorStop(0.5, n.color);
-      body.addColorStop(1, darken(n.color, 0.34));
+      // flat body — clean disc with a subtle rim for definition
       ctx.beginPath();
       ctx.arc(sx, sy, r, 0, Math.PI * 2);
-      ctx.fillStyle = body;
+      ctx.fillStyle = n.color;
       ctx.fill();
-
-      // crisp rim
-      ctx.beginPath();
-      ctx.arc(sx, sy, r - 0.5, 0, Math.PI * 2);
-      ctx.strokeStyle = withAlpha(lighten(n.color, 0.5), 0.5);
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      // specular highlight
-      if (r > 3.5) {
-        const spec = ctx.createRadialGradient(
-          sx - r * 0.36, sy - r * 0.4, 0,
-          sx - r * 0.36, sy - r * 0.4, r * 0.66,
-        );
-        spec.addColorStop(0, withAlpha('#ffffff', 0.55));
-        spec.addColorStop(1, withAlpha('#ffffff', 0));
+      if (r > 2.5) {
         ctx.beginPath();
-        ctx.arc(sx - r * 0.34, sy - r * 0.38, r * 0.5, 0, Math.PI * 2);
-        ctx.fillStyle = spec;
-        ctx.fill();
+        ctx.arc(sx, sy, r - 0.5, 0, Math.PI * 2);
+        ctx.strokeStyle = withAlpha(darken(n.color, 0.28), 0.7);
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
 
       // disconnected-node ring
-      if (n.degree === 0 && !n.isCore) {
+      if (n.degree === 0 && !n.isCore && r > 2.5) {
         ctx.beginPath();
         ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
         ctx.setLineDash([2, 3]);
@@ -503,7 +490,16 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
     const duplicateLabels = new Set<string>();
     const neighbourLabelBudget = 8;
     let neighbourLabels = 0;
-    const labelOrder = [...ordered].sort((a, b) => labelImportance(b, focus) - labelImportance(a, focus));
+    // Only rank the on-screen nodes for labels — sorting all 20k every frame was
+    // wasteful; a fraction is visible at any zoom.
+    const labelCandidates: SimNode[] = [];
+    for (const n of map.values()) {
+      const sx = n.x * t.k + t.x;
+      const sy = n.y * t.k + t.y;
+      if (sx < -40 || sy < -40 || sx > w + 40 || sy > h + 40) continue;
+      labelCandidates.push(n);
+    }
+    const labelOrder = labelCandidates.sort((a, b) => labelImportance(b, focus) - labelImportance(a, focus));
     for (const n of labelOrder) {
       const isFocus = focus === n.id;
       const isNeighbour = Boolean(neighbourhood && neighbourhood.has(n.id));
@@ -665,7 +661,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       {graph && (
         <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-md border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-cyan-200 backdrop-blur-sm">
           <span className={['mr-1 inline-block h-1.5 w-1.5 rounded-full bg-cyan-300', livePulse > 0 ? 'animate-pulse' : ''].join(' ')} />
-          {graph.meta.atomCount} atoms · {graph.meta.linkCount} links
+          {atomCountLabel(graph)} · {graph.meta.linkCount} links
         </div>
       )}
 
@@ -694,12 +690,6 @@ function ControlButton({ label, onClick, children }: { label: string; onClick: (
 }
 
 // ---- pure helpers --------------------------------------------------------
-
-function rank(node: SimNode, focus: string | null): number {
-  if (node.id === focus) return 3;
-  if (node.isCore) return 2;
-  return node.degree;
-}
 
 function labelImportance(node: SimNode, focus: string | null): number {
   if (node.id === focus) return 1_000_000;
@@ -739,11 +729,6 @@ function withAlpha(hex: string, alpha: number): string {
   return `rgba(${r},${g},${b},${clamp(alpha, 0, 1)})`;
 }
 
-function lighten(hex: string, amount: number): string {
-  const { r, g, b } = toRgb(hex);
-  const m = clamp(amount, 0, 1);
-  return `rgb(${Math.round(r + (255 - r) * m)},${Math.round(g + (255 - g) * m)},${Math.round(b + (255 - b) * m)})`;
-}
 
 function darken(hex: string, amount: number): string {
   const { r, g, b } = toRgb(hex);
@@ -799,6 +784,8 @@ function hslToHex(h: number, s: number, l: number): string {
 
 function dotColor(node: BrainNode): string {
   if (node.type === 'scope_owner') return '#fbbf24'; // App/Agent/Workflow owner hub
+  if (node.type === 'skill') return '#34d399';
+  if (node.type === 'example') return '#f472b6';
   if (node.type === 'warning') return '#fb7185';
   if (node.type === 'gap') return '#94a3b8';
 
@@ -815,6 +802,18 @@ function dotColor(node: BrainNode): string {
     case 'judgment': return '#f59e0b';
     default: return '#94a3b8';
   }
+}
+
+function atomCountLabel(graph: BrainGraph): string {
+  const skillCount = graph.nodes.filter((node) => node.atomKind === 'skill').length;
+  const exampleCount = graph.nodes.filter((node) => node.atomKind === 'example').length;
+  const atomCount = graph.meta.atomCount;
+  if (atomCount > 0 && skillCount === atomCount) return `${atomCount} ${atomCount === 1 ? 'skill' : 'skills'}`;
+  if (atomCount > 0 && exampleCount === atomCount) return `${atomCount} ${atomCount === 1 ? 'example' : 'examples'}`;
+  const parts: string[] = [];
+  if (skillCount > 0) parts.push(`${skillCount} ${skillCount === 1 ? 'skill' : 'skills'}`);
+  if (exampleCount > 0) parts.push(`${exampleCount} ${exampleCount === 1 ? 'example' : 'examples'}`);
+  return parts.length > 0 ? `${atomCount} atoms (${parts.join(', ')})` : `${atomCount} atoms`;
 }
 
 function shortLabel(label: string): string {

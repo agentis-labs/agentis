@@ -175,6 +175,10 @@ CRAFT RULES (this is what separates a great surface from a dumb one):
   platform); "accent" re-brands the accent hue; "design" picks a structural VARIANT when the domain demands it —
   "aurora" (bigger numerals), "soft" (rounder, friendlier), "editorial" (big flat type), "console" (dense grid).
   Default (no "design") is the flagship: set nothing unless you have a reason.
+- The App Shell already names the App/page. Do NOT start a surface with a Hero or Heading that repeats the App name;
+  if a header is useful, name the job/state ("Outreach queue", "Pipeline review") instead of the product.
+- Spacing follows the design-system rhythm. Omit "gap" unless needed; when needed use 8, 12, 16, 20, or 24 only.
+  Never create visual distance with oversized gaps, blank cards, or ad hoc spacer rows. Use Grid spans/Split rails.
 - Visualize, don't narrate: use Chart (line/area/bar/pie/donut, multi-series via "series"), KPIStrip, Sparkline,
   ProgressBar, Timeline — not paragraphs of Text.
 - MISSION-CONTROL-FIRST for an App overview (the App is an operational unit, not a form): lead with the headline
@@ -213,6 +217,8 @@ NEVER (these produce broken UIs and are auto-stripped by the layout auditor — 
 - NEVER use Image nodes as a header, and never put text-baked generated images at the top. Lead with a Hero (it looks great with NO image — a gradient) + a KPIStrip or Chart.
 - NEVER nest Cards inside Cards inside Cards. ONE level of boxing. Group with Stack/Grid; use Card only for a genuine panel.
 - NEVER cram a Split — ratios stay balanced (1 to 2.5); the rail is ~320px, the main pane is the star.
+- NEVER repeat the App name as page content below the App Shell title. One title is enough.
+- NEVER use arbitrary or oversized layout gaps. The card rhythm is 8/12/16/20/24px.
 - NEVER build 4+ data panels for one sparse collection. If the app has little/empty data, build ONE table or board + the activity rail — not a wall of "No records" panels.
 - NEVER bind a Table/Chart/Board/List/Inbox to a collection or field that isn't listed below. Don't invent data.
 
@@ -242,6 +248,8 @@ KEY NODES:
 - Escape hatch (LAST RESORT, only when the nodes above cannot express it): { "type":"CodeSurface", "code":<plain JS string>, "collections":[<names the code reads>] } — runs in a hardened, zero-egress sandbox with \`ui\` (component+chart kit: ui.card/row/grid/metric/badge/table/heading/text + ui.chart.bar/line/donut) and \`agentis\` (agentis.data.query, agentis.actions.invoke) and \`root\` (mount). Requires the app's custom-code policy. Prefer typed nodes.
 
 Bindable = a literal, or { "$row":"field" } (current row), or { "$state":"key" } (UI state).
+Never put template expressions like "{{count:collection}}" in visible labels, Metric values, KPIs, Text, or Markdown.
+If you need live counts, use bound composites (PipelineFlow/Kanban/Table/Chart) or a literal placeholder number until data exists.
 SurfaceAction = { "name":string, "kind":"data"|"workflow"|"tool", "target":string }. For datastore ops target is "<collection>.insert" | "<collection>.update" | "<collection>.delete".
 
 Rules:

@@ -521,13 +521,13 @@ function QrPanel({ provider, qr, onCancel }: { provider: Provider; qr: QrState; 
 
 function StatusBadge({ status }: { status: ChannelStatus }) {
   const tone =
-    status === 'active' ? 'text-accent' :
+    status === 'active' ? 'text-emerald-500' :
     status === 'needs_action' || status === 'verifying' ? 'text-amber-500' :
     status === 'degraded' ? 'text-cyan-400' :
     status === 'error' ? 'text-danger' :
     'text-text-muted';
   const dot =
-    status === 'active' ? 'bg-accent' :
+    status === 'active' ? 'bg-emerald-500' :
     status === 'needs_action' || status === 'verifying' ? 'bg-amber-500' :
     status === 'degraded' ? 'bg-cyan-400' :
     status === 'error' ? 'bg-danger' :
