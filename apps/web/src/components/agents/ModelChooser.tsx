@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Check, ChevronDown, Search } from 'lucide-react';
+import { Check, ChevronDown, Loader2, Search } from 'lucide-react';
 import { api } from '../../lib/api';
 import type { AdapterType } from './RuntimePicker';
 
@@ -28,6 +28,8 @@ export function ModelChooser({
   onChange,
   onLoadingChange,
   disabled = false,
+  loading = false,
+  loadingLabel = 'Saving model',
   variant = 'full',
   align = 'left',
   openDirection = 'down',
@@ -39,6 +41,8 @@ export function ModelChooser({
   onChange: (value: string) => void;
   onLoadingChange?: (loading: boolean) => void;
   disabled?: boolean;
+  loading?: boolean;
+  loadingLabel?: string;
   variant?: 'full' | 'compact';
   align?: 'left' | 'right';
   openDirection?: 'up' | 'down';
@@ -145,6 +149,7 @@ export function ModelChooser({
     <button
       type="button"
       disabled={disabled}
+      aria-busy={loading}
       onClick={() => setOpen((currentOpen) => !currentOpen)}
       className={clsx(
         'group inline-flex items-center text-left transition disabled:cursor-not-allowed disabled:opacity-50',
@@ -154,10 +159,14 @@ export function ModelChooser({
       )}
     >
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{displayLabel}</span>
+        <span className="block truncate font-medium">{loading ? loadingLabel : displayLabel}</span>
         {variant === 'full' && <span className="block truncate text-[11px] text-text-muted">{displayDetail}</span>}
       </span>
-      <ChevronDown size={13} className={clsx('shrink-0 text-text-muted transition', open && 'rotate-180')} />
+      {loading ? (
+        <Loader2 size={13} className="shrink-0 animate-spin text-accent" />
+      ) : (
+        <ChevronDown size={13} className={clsx('shrink-0 text-text-muted transition', open && 'rotate-180')} />
+      )}
     </button>
   );
 

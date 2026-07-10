@@ -101,6 +101,7 @@ export function SelectedAgentModelControl({
     const nextConfig = { ...storedConfig, ...nextKnownConfig };
     if (!Object.prototype.hasOwnProperty.call(nextKnownConfig, 'model')) delete nextConfig.model;
 
+    setSelectedModel(nextModel);
     setSaving(true);
     try {
       await api(`/v1/agents/${agent.id}`, {
@@ -115,7 +116,6 @@ export function SelectedAgentModelControl({
         config: nextConfig,
         runtimeModel: runtimeModelFor(agentAdapterType, nextRuntimeConfig),
       });
-      setSelectedModel(nextModel);
       toast.success('Model updated');
       onUpdated?.();
     } catch (error) {
@@ -133,6 +133,9 @@ export function SelectedAgentModelControl({
     // per-runtime settings (binary paths, cwd…) live in the Runtime tab.
     const nextConfig = runtimeConfigToAdapterConfig(nextAdapter, DEFAULT_RUNTIME_CONFIG);
     const nextModel = runtimeModelFor(nextAdapter, DEFAULT_RUNTIME_CONFIG);
+    const nextSelectedModel = runtimeModelValue(configToRuntimeConfig(nextAdapter, nextConfig), nextAdapter);
+    setAgent({ ...agent, adapterType: nextAdapter, config: nextConfig, runtimeModel: nextModel });
+    setSelectedModel(nextSelectedModel);
     setSaving(true);
     try {
       // Dedicated rebind endpoint — swaps the runtime binding without touching the
@@ -143,11 +146,13 @@ export function SelectedAgentModelControl({
       });
       const updated = { ...agent, adapterType: nextAdapter, config: nextConfig, runtimeModel: nextModel };
       setAgent(updated);
-      setSelectedModel(runtimeModelValue(configToRuntimeConfig(nextAdapter, nextConfig), nextAdapter));
       toast.success('Runtime updated');
       onUpdated?.();
     } catch (error) {
       setAgent(previous);
+      if (isV1AdapterType(previous.adapterType ?? '')) {
+        setSelectedModel(runtimeModelValue(configToRuntimeConfig(previous.adapterType as AdapterType, (previous.config ?? {}) as Record<string, unknown>), previous.adapterType as AdapterType));
+      }
       toast.error('Runtime update failed', apiErrorMessage(error));
     } finally {
       setSaving(false);
@@ -185,6 +190,8 @@ export function SelectedAgentModelControl({
         value={selectedModel}
         onChange={(next) => void updateModel(next)}
         disabled={disabled}
+        loading={saving}
+        loadingLabel="Saving model"
         onLoadingChange={setCatalogLoading}
         className={variant === 'rail' ? 'mt-0.5' : undefined}
       />

@@ -88,6 +88,7 @@ import type {
 } from '../../lib/workspaceData';
 import { useChatPanelStore, type ChatPanelState } from '../chat/ChatPanelStore';
 import { AgentCreateWizard } from '../agents/AgentCreateWizard';
+import { RoleGlyph } from '../agents/AgentRoleGlyphs';
 import { captureFlip, type FlipSnapshot } from '../shared/flip';
 import { CanvasActivityPopover } from './CanvasActivityPopover';
 import { CanvasApprovalNodeBadge } from './CanvasApprovalNode';
@@ -1377,7 +1378,7 @@ function CanvasNodeCard({
       className={clsx(
         'home-node-enter absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border text-left shadow-card transition duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-muted focus-visible:ring-offset-2 focus-visible:ring-offset-canvas',
         compact ? 'px-2' : 'px-3',
-        node.kind === 'orchestrator' && node.status !== 'offline' && node.status !== 'error' && 'home-orchestrator-aura',
+        node.kind === 'orchestrator' && !isLive && node.status !== 'offline' && node.status !== 'error' && 'home-orchestrator-aura',
         node.ghost && 'home-ghost-breathe',
         node.outOfCredits
           ? 'border-warn bg-warn/5 shadow-[0_0_12px_rgba(245,158,11,0.25)]'
@@ -1386,11 +1387,10 @@ function CanvasNodeCard({
             : node.warn
               ? 'border-warn/40 bg-warn-soft'
               : isLive
-                ? 'border-accent/35 bg-accent-soft'
+                ? 'home-node-live'
                 : node.ghost
                   ? 'border-dashed border-line bg-surface/45 text-text-muted'
                   : 'border-line bg-surface/90 hover:border-line-strong hover:bg-surface',
-        isLive && !node.warn && !node.outOfCredits && 'home-orchestrator-aura',
         selected && 'ring-2 ring-accent/55',
         // Visual hierarchy at scale: idle workflows recede so the ones that are
         // running or failing carry the eye. (Focus-dimming below still wins.)
@@ -1420,7 +1420,7 @@ function CanvasNodeCard({
                 : node.warn
                   ? 'border-warn/35 bg-warn-soft text-warn'
                   : isLive
-                    ? 'border-accent/35 bg-accent-soft text-accent'
+                    ? 'home-node-live-avatar'
                     : node.ghost
                       ? 'border-line bg-canvas/50 text-text-muted'
                       : 'border-line bg-surface-2 text-text-secondary',
@@ -1546,7 +1546,10 @@ function LiveActivityStream({
   activity: RealtimeActivity[];
   onSelectWorkflow: (workflowId: string) => void;
 }) {
-  const items = activity.slice(0, 40);
+  const items = activity
+    .filter((item) => item.kind !== 'message' && item.kind !== 'status')
+    .filter((item) => !(item.conversationId && !item.runId && !item.workflowId))
+    .slice(0, 40);
   return (
     <section className="mb-5">
       <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
@@ -3111,7 +3114,7 @@ function agentNode(
       ? domainAccent ?? undefined
       : stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? 'var(--color-accent)' : undefined),
     imageUrl: imageFromRecord(record, ['avatarUrl', 'avatarDataUrl', 'imageUrl', 'imageDataUrl', 'iconUrl', 'photoUrl', 'pictureUrl']),
-    icon: role === 'orchestrator' ? <BrainCircuit size={20} /> : role === 'manager' ? <ShieldCheck size={18} /> : <Bot size={18} />,
+    icon: <RoleGlyph role={role} size={20} />,
     currentTask: stringField(record, ['currentTask', 'currentTaskId']),
     tooltipLines: compactStrings([
       `Status: ${status}`,
@@ -3147,7 +3150,7 @@ function ghostNode(
     ghost: true,
     role: kind,
     route: '/agents',
-    icon: kind === 'orchestrator' ? <BrainCircuit size={18} /> : kind === 'manager' ? <ShieldCheck size={18} /> : <Bot size={18} />,
+    icon: <RoleGlyph role={kind} size={18} />,
     tooltipLines: kind === 'orchestrator'
       ? ['Your orchestrator goes here - it directs the workspace hierarchy.']
       : kind === 'manager'
@@ -4451,6 +4454,19 @@ const CANVAS_STYLE = `
   50% { box-shadow: 0 0 0 1px rgba(167,139,250,0.46), 0 0 72px rgba(167,139,250,0.18); }
 }
 
+@keyframes homeNodeLivePulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--node-accent) 24%, transparent),
+      0 14px 34px -28px color-mix(in srgb, var(--node-accent) 70%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--node-accent) 48%, transparent),
+      0 18px 44px -24px color-mix(in srgb, var(--node-accent) 86%, transparent);
+  }
+}
+
 @keyframes homeGhostBreathe {
   0%, 100% { opacity: 0.24; }
   50% { opacity: 0.42; }
@@ -4477,6 +4493,24 @@ const CANVAS_STYLE = `
   animation-fill-mode: both, none;
 }
 
+.home-node-live {
+  border-color: color-mix(in srgb, var(--node-accent) 42%, var(--color-line));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--node-accent) 10%, transparent), transparent 70%),
+    color-mix(in srgb, var(--color-surface) 92%, var(--node-accent) 8%);
+  animation-name: homeNodeIn, homeNodeLivePulse;
+  animation-duration: 520ms, 2.6s;
+  animation-timing-function: cubic-bezier(.2,.8,.2,1), ease-in-out;
+  animation-iteration-count: 1, infinite;
+  animation-fill-mode: both, none;
+}
+
+.home-node-live-avatar {
+  border-color: color-mix(in srgb, var(--node-accent) 42%, var(--color-line));
+  background: color-mix(in srgb, var(--node-accent) 14%, var(--color-surface-2));
+  color: var(--node-accent);
+}
+
 .home-ghost-breathe {
   animation-name: homeNodeIn, homeGhostBreathe;
   animation-duration: 520ms, 3.5s;
@@ -4499,7 +4533,8 @@ body.agentis-canvas-fullscreen [data-agentis-live-strip] {
 @media (prefers-reduced-motion: reduce) {
   .home-node-enter,
   .home-edge-enter,
-  .home-orchestrator-aura {
+  .home-orchestrator-aura,
+  .home-node-live {
     animation: none !important;
   }
 }

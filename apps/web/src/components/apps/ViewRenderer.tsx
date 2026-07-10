@@ -1513,7 +1513,6 @@ function prettifyAction(name: string): string {
 }
 
 function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' }>; scope: ResolveScope }) {
-  const { density } = useTheme();
   const countSpec = useMemo(() => parseCountToken(node.value), [node.value]);
   const count = useCountToken(countSpec);
   const value = countSpec
@@ -1526,8 +1525,8 @@ function MetricView({ node, scope }: { node: Extract<ViewNode, { type: 'Metric' 
   const deltaRaw = node.delta != null ? String(resolveBindable(node.delta, scope) ?? '') : '';
   const deltaTone = deltaRaw.startsWith('-') ? 'text-danger bg-danger-soft' : deltaRaw.startsWith('+') ? 'text-success bg-success-soft' : 'text-text-secondary bg-surface-2';
   return (
-    <div className={containerClasses(node.style, density, { defaultElevation: 'inset', defaultPad: 'sm' })}>
-      <div className="s-label">{node.label}</div>
+    <div className="s-tile flex h-full flex-col overflow-hidden px-5 py-4">
+      <div className="s-label min-w-0 truncate">{node.label}</div>
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
         {countSpec && count.loading ? (
           <CountSkeleton />

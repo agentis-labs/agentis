@@ -9,20 +9,20 @@
 import clsx from 'clsx';
 import type { ReactNode } from 'react';
 
-export type StatusTone = 'accent' | 'warn' | 'danger' | 'muted' | 'neutral';
+export type StatusTone = 'accent' | 'success' | 'warn' | 'danger' | 'muted' | 'neutral';
 
 const KNOWN: Record<string, StatusTone> = {
-  online: 'accent',
+  online: 'success',
   ready: 'accent',
-  active: 'accent',
+  active: 'success',
   running: 'accent',
-  live: 'accent',
-  completed: 'accent',
-  connected: 'accent',
-  healthy: 'accent',
-  ok: 'accent',
-  succeeded: 'accent',
-  success: 'accent',
+  live: 'success',
+  completed: 'success',
+  connected: 'success',
+  healthy: 'success',
+  ok: 'success',
+  succeeded: 'success',
+  success: 'success',
 
   degraded: 'warn',
   pending: 'warn',
@@ -70,6 +70,7 @@ export function statusTone(status: string | null | undefined): StatusTone {
 
 const TONE_CLS: Record<StatusTone, string> = {
   accent: 'border-accent/30 bg-accent-soft text-accent',
+  success: 'border-success/30 bg-success-soft text-success',
   warn: 'border-warn/30 bg-warn-soft text-warn',
   danger: 'border-danger/30 bg-danger-soft text-danger',
   muted: 'border-line bg-surface-2 text-text-muted',
@@ -78,6 +79,7 @@ const TONE_CLS: Record<StatusTone, string> = {
 
 const DOT_CLS: Record<StatusTone, string> = {
   accent: 'bg-accent',
+  success: 'bg-success',
   warn: 'bg-warn',
   danger: 'bg-danger',
   muted: 'bg-text-muted/50',
@@ -106,7 +108,7 @@ export function StatusBadge({
             'h-1.5 w-1.5 rounded-full',
             DOT_CLS[t],
             shouldPulse && 'animate-pulse-dot',
-            t === 'accent' && shouldPulse && 'shadow-glow',
+            (t === 'accent' || t === 'success') && shouldPulse && 'shadow-glow',
           )}
         />
       )}

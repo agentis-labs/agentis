@@ -9,7 +9,6 @@ import { BrainStage } from './BrainStage';
 import { BrainDetailRail } from './BrainDetailRail';
 import { OrgDetailRail } from './OrgDetailRail';
 import { EmptyBrainStage } from './EmptyBrainStage';
-import { CanvasSearch } from './CanvasSearch';
 import { LayerFilterChips, type BrainVisibleLayers } from './LayerFilterChips';
 import { graphToBrainEdges, graphToBrainNodes } from './brainGraphAdapter';
 
@@ -22,16 +21,20 @@ interface IntelligenceConfig {
 export function BrainView({
   onManage,
   onOpenConfig,
+  search = '',
+  onSearchChange,
 }: {
   onManage?: () => void;
   onOpenConfig?: () => void;
+  /** Node-search query, driven by the page toolbar so search lives in one bar. */
+  search?: string;
+  onSearchChange?: (value: string) => void;
 }) {
   const [data, setData] = useState<BrainResponse | null>(null);
   const [graph, setGraph] = useState<BrainGraph | null>(null);
   const [orgOverlay, setOrgOverlay] = useState<BrainGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
   const [visibleLayers, setVisibleLayers] = useState<BrainVisibleLayers>({ knowledge: true, memory: true, judgment: true });
   const [showWarnings, setShowWarnings] = useState(true);
   const [showGaps, setShowGaps] = useState(true);
@@ -202,16 +205,26 @@ export function BrainView({
               filters={{ showWarnings, showGaps, visibleLayers }}
               livePulse={livePulse}
               layoutKey="workspace"
+              atomBadgeClassName="bottom-16 left-3"
             />
           )}
           {!isEmptyBrain && (
             <>
-              <CanvasSearch
-                value={search}
-                onChange={setSearch}
-                results={searchMatches}
-                onSelect={(id) => setSelectedId(id)}
-              />
+              {search.trim() && searchMatches.length > 0 && (
+                <div className="absolute left-3 top-14 z-40 w-64 overflow-hidden rounded-card border border-line bg-surface shadow-dropdown">
+                  {searchMatches.map((node) => (
+                    <button
+                      key={node.id}
+                      type="button"
+                      onClick={() => { setSelectedId(node.id); onSearchChange?.(''); }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-surface-2"
+                    >
+                      <span className="shrink-0 text-[10px] uppercase tracking-wider text-text-muted">{node.layer}</span>
+                      <span className="truncate text-text-primary">{node.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <LayerFilterChips
                 visibleLayers={visibleLayers}
                 onToggleLayer={(layer) => setVisibleLayers((current) => ({ ...current, [layer]: !current[layer] }))}

@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+﻿import { useCallback, useEffect, useMemo, useState, useRef, type ReactNode } from 'react';
 import {
   BookHeart, FileText, LockKeyhole, Network, NotebookPen, Plus, Search, Trash2, Save,
   Folder, FolderOpen, ChevronDown, ChevronRight, X, Pin, PinOff, Share2, Bold, Italic,
@@ -6,6 +6,7 @@ import {
   AlertCircle, RefreshCw, UploadCloud, Paperclip, FileArchive, Brain,
   Columns2, Eye, Link2, PenLine
 } from 'lucide-react';
+import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { useToast } from '../shared/Toast';
@@ -155,7 +156,15 @@ function buildFolderTree(
   return root;
 }
 
-export function PersonalBrainPanel() {
+export function PersonalBrainPanel({
+  settingsSlot,
+  scopeSlot,
+}: {
+  /** Brain settings gear, from the page — rendered in the left toolbar. */
+  settingsSlot?: ReactNode;
+  /** Workspace ↔ Personal toggle, from the page — rendered on the right. */
+  scopeSlot?: ReactNode;
+} = {}) {
   const toast = useToast();
   const confirm = useConfirm();
   const [notes, setNotes] = useState<PersonalNote[]>([]);
@@ -223,6 +232,9 @@ export function PersonalBrainPanel() {
   const [saving, setSaving] = useState(false);
   const [view, setView] = useState<'map' | 'notes'>('map');
   const [showAccessModal, setShowAccessModal] = useState(false);
+  // Map node-search lives in the floating toolbar (one connected bar, like the other pages).
+  const [mapSearch, setMapSearch] = useState('');
+  const [mapSearchOpen, setMapSearchOpen] = useState(false);
 
   // Files / Digital Brain State
   const [personalFiles, setPersonalFiles] = useState<KnowledgeDocumentRow[]>([]);
@@ -855,26 +867,124 @@ export function PersonalBrainPanel() {
     );
   };
 
+  const showMapSearch = view === 'map';
+  const controlsCluster = (
+    <div className="flex h-9 items-center gap-1 rounded-lg border border-line bg-surface-2/90 px-1 backdrop-blur-md">
+      {showMapSearch && (
+        <>
+          {mapSearchOpen ? (
+            <div className="flex items-center gap-1.5 pl-1.5">
+              <Search size={14} className="shrink-0 text-text-muted" />
+              <input
+                autoFocus
+                value={mapSearch}
+                onChange={(e) => setMapSearch(e.target.value)}
+                onBlur={() => { if (!mapSearch.trim()) setMapSearchOpen(false); }}
+                onKeyDown={(e) => { if (e.key === 'Escape') { setMapSearch(''); setMapSearchOpen(false); } }}
+                placeholder="Search the map…"
+                aria-label="Search the map"
+                className="w-40 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+              />
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => { setMapSearch(''); setMapSearchOpen(false); }}
+                className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-surface-3 hover:text-text-primary"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              aria-label="Search the map"
+              onClick={() => setMapSearchOpen(true)}
+              className={clsx(
+                'inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-surface-3',
+                mapSearch.trim() ? 'text-accent' : 'text-text-muted hover:text-text-primary',
+              )}
+            >
+              <Search size={15} />
+            </button>
+          )}
+          <span className="h-4 w-px shrink-0 bg-line" />
+        </>
+      )}
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          aria-label="Map"
+          title="Map"
+          onClick={() => setView('map')}
+          className={clsx(
+            'inline-flex h-7 items-center gap-1.5 rounded-md text-[12px] transition-colors',
+            view === 'map' ? 'bg-surface-3 px-2.5 text-text-primary' : 'w-7 justify-center text-text-muted hover:bg-surface-3 hover:text-text-primary',
+          )}
+        >
+          <Network size={14} />{view === 'map' && 'Map'}
+        </button>
+        <button
+          type="button"
+          aria-label="Notes & access"
+          title="Notes & access"
+          onClick={() => setView('notes')}
+          className={clsx(
+            'inline-flex h-7 items-center gap-1.5 rounded-md text-[12px] transition-colors',
+            view === 'notes' ? 'bg-surface-3 px-2.5 text-text-primary' : 'w-7 justify-center text-text-muted hover:bg-surface-3 hover:text-text-primary',
+          )}
+        >
+          <NotebookPen size={14} />{view === 'notes' && 'Notes & access'}
+        </button>
+      </div>
+      <span className="h-4 w-px shrink-0 bg-line" />
+      <button
+        type="button"
+        aria-label="Agent Access"
+        title="Agent Access"
+        onClick={() => setShowAccessModal(true)}
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
+      >
+        <LockKeyhole size={15} />
+      </button>
+      {settingsSlot && (
+        <>
+          <span className="h-4 w-px shrink-0 bg-line" />
+          {settingsSlot}
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex h-full flex-col bg-canvas">
-      <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-6">
-        <span className="text-[12px] font-semibold text-text-muted">Private space explorer</span>
-        <div className="flex items-center gap-1.5 text-[12px]">
-          <button type="button" onClick={() => setView('map')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'map' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Network size={12} /> Map</button>
-          <button type="button" onClick={() => setView('notes')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'notes' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><NotebookPen size={12} /> Notes & access</button>
-          <button type="button" onClick={() => setShowAccessModal(true)} className="inline-flex items-center gap-1.5 rounded-pill px-3 py-1 text-text-muted hover:bg-surface-2 hover:text-text-primary transition-colors"><LockKeyhole size={12} /> Agent Access</button>
-        </div>
-      </div>
       <div className="min-h-0 flex-1">
         {view === 'map' ? (
-          <ScopedBrainMap
-            endpoint="/v1/personal-brain/graph"
-            detailEndpoint="/v1/personal-brain/graph/node"
-            layoutKey="personal"
-            emptyMessage="Capture notes and preferences to begin mapping your Personal Brain."
-          />
+          <div className="relative h-full">
+            <ScopedBrainMap
+              endpoint="/v1/personal-brain/graph"
+              detailEndpoint="/v1/personal-brain/graph/node"
+              layoutKey="personal"
+              emptyMessage="Capture notes and preferences to begin mapping your Personal Brain."
+              searchQuery={mapSearch}
+              onSearchQueryChange={setMapSearch}
+            />
+            <div className="pointer-events-none absolute left-3 top-3 z-30">
+              <div className="pointer-events-auto">{controlsCluster}</div>
+            </div>
+            {scopeSlot && (
+              <div className="pointer-events-none absolute right-3 top-3 z-30">
+                <div className="pointer-events-auto">{scopeSlot}</div>
+              </div>
+            )}
+          </div>
         ) : (
-          <div className="h-full px-6 py-5 overflow-hidden flex flex-col gap-4">
+          <div className="flex h-full flex-col">
+            <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+              <div className="flex min-w-0 items-center gap-2">{controlsCluster}</div>
+              {scopeSlot && <div className="ml-auto flex shrink-0 items-center gap-2">{scopeSlot}</div>}
+            </div>
+            <div className="min-h-0 flex-1">
+              <div className="h-full px-6 py-5 overflow-hidden flex flex-col gap-4">
             {/* Drop Zone — digital brain upload */}
             <WorkspaceDocDropZone
               bases={personalBase ? [personalBase] : []}
@@ -1555,6 +1665,8 @@ export function PersonalBrainPanel() {
                 )}
               </section>
 
+            </div>
+          </div>
             </div>
           </div>
         )}

@@ -159,7 +159,7 @@ export function ComposerStatusBar({ agentId, className }: Props) {
 
   return (
     <div className={clsx('flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-text-secondary', className)}>
-      <RuntimeMenu label={modelLabel} disabled={!canEditModel} ariaLabel="Select model">
+      <RuntimeMenu label={modelLabel} disabled={!canEditModel} busy={saving} ariaLabel="Select model">
         <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">
           Models
         </div>
@@ -262,12 +262,14 @@ export function ComposerStatusBar({ agentId, className }: Props) {
 function RuntimeMenu({
   label,
   disabled,
+  busy,
   ariaLabel,
   widthClass = 'w-52',
   children,
 }: {
   label: string;
   disabled?: boolean;
+  busy?: boolean;
   ariaLabel: string;
   widthClass?: string;
   children: ReactNode;
@@ -278,11 +280,16 @@ function RuntimeMenu({
         <button
           type="button"
           disabled={disabled}
+          aria-busy={busy}
           aria-label={ariaLabel}
           className="inline-flex max-w-32 min-w-0 items-center gap-1 rounded px-1.5 py-0.5 text-text-secondary outline-none hover:bg-surface-3 hover:text-text-primary focus-visible:ring-1 focus-visible:ring-accent/50 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <span className="min-w-0 truncate">{label}</span>
-          <ChevronDown size={10} className="shrink-0 text-text-muted" />
+          <span className="min-w-0 truncate">{busy ? 'Saving...' : label}</span>
+          {busy ? (
+            <Loader2 size={10} className="shrink-0 animate-spin text-accent" />
+          ) : (
+            <ChevronDown size={10} className="shrink-0 text-text-muted" />
+          )}
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

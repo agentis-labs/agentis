@@ -8,11 +8,14 @@ export function CanvasSearch({
   onChange,
   results,
   onSelect,
+  positionClassName = 'right-3 top-3',
 }: {
   value: string;
   onChange: (value: string) => void;
   results: BrainNode[];
   onSelect: (id: string) => void;
+  /** Corner placement — overridden when other controls float in the corner. */
+  positionClassName?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -27,7 +30,7 @@ export function CanvasSearch({
   }
 
   return (
-    <div className="absolute right-3 top-3 z-30">
+    <div className={clsx('absolute z-30', positionClassName)}>
       <div className={clsx('flex h-10 items-center rounded-btn border border-line bg-surface/90 shadow-card backdrop-blur-md transition-all', expanded ? 'w-72 px-2' : 'w-10 justify-center')}>
         {!expanded ? (
           <button type="button" aria-label="Search the brain" onClick={() => setExpanded(true)} className="flex h-full w-full items-center justify-center text-text-secondary hover:text-text-primary">

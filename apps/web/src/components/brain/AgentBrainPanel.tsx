@@ -1,7 +1,8 @@
-﻿import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, ChevronDown, Crown, Download, FileCode, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, Users, X } from 'lucide-react';
+﻿import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { BookOpen, Check, ChevronDown, Download, FileCode, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, type LucideIcon } from 'lucide-react';
+import { RoleGlyph } from '../agents/AgentRoleGlyphs';
 import clsx from 'clsx';
-import { api, apiErrorMessage } from '../../lib/api';
+import { api, apiErrorMessage, workspace as wsStore } from '../../lib/api';
 import { harnessOf } from '../agents/harnessMeta';
 import { importAgents, checkImportUpdates, type ImportUpdate } from '../../lib/agentImport';
 import { Button } from '../shared/Button';
@@ -14,7 +15,7 @@ import { SkillsTab } from './SkillsTab';
 import { ExamplesTab } from './ExamplesTab';
 
 interface ImportOrigin { adapterType: string; externalId: string }
-interface AgentRow { id: string; name: string; role?: string | null; description?: string | null; capabilityTags?: string[] | null; importOrigin?: ImportOrigin | null }
+interface AgentRow { id: string; name: string; role?: string | null; description?: string | null; capabilityTags?: string[] | null; importOrigin?: ImportOrigin | null; domainName?: string | null }
 
 /** One agent-scoped episodic memory atom (the real Brain content). */
 interface EpisodeRow {
@@ -56,12 +57,15 @@ export function AgentBrainPanel({
   onSelectedAgentIdChange,
   view,
   onViewChange,
+  topRightSlot,
 }: {
   agents?: AgentRow[];
   selectedAgentId?: string | null;
   onSelectedAgentIdChange?: (id: string) => void;
   view?: AgentBrainView;
   onViewChange?: (view: AgentBrainView) => void;
+  /** Shared surface controls (Fleet/Brain + Add agent) floated on the map. */
+  topRightSlot?: ReactNode;
 } = {}) {
   const toast = useToast();
   const confirm = useConfirm();
@@ -74,7 +78,9 @@ export function AgentBrainPanel({
   const [pulling, setPulling] = useState(false);
   const [content, setContent] = useState('');
   const [internalView, setInternalView] = useState<AgentBrainView>('map');
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // The orchestrator has no domain, so its subject-picker row shows the
+  // workspace name it presides over instead.
+  const [workspaceName, setWorkspaceName] = useState('');
   const agents = providedAgents ?? loadedAgents;
   const agentId = selectedAgentId ?? internalAgentId;
   const activeView = view ?? internalView;
@@ -127,6 +133,16 @@ export function AgentBrainPanel({
     if (providedAgents) return;
     void loadAgents().catch(() => {});
   }, [loadAgents, providedAgents]);
+
+  useEffect(() => {
+    const wsId = wsStore.get();
+    void api<{ workspaces: Array<{ id: string; name: string }> }>('/v1/workspaces')
+      .then((data) => {
+        const ws = data.workspaces.find((w) => w.id === wsId) ?? data.workspaces[0];
+        if (ws) setWorkspaceName(ws.name);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (agents.length === 0) return;
@@ -198,45 +214,35 @@ export function AgentBrainPanel({
     await loadMemory(agentId);
   }
 
-  return (
-    <div className="flex h-full flex-col bg-canvas">
-      <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-6">
-        <button
-          type="button"
-          onClick={() => setPickerOpen(true)}
-          className="inline-flex h-7 items-center gap-1.5 rounded-pill border border-line bg-surface-2 px-3 text-[12px] text-text-secondary transition-colors hover:border-line-strong hover:text-text-primary"
-        >
-          <span className="text-text-muted">Agent Brain:</span>
-          <TierIcon tier={subjectTier(current?.role)} />
-          <span className="font-semibold text-text-primary">{current?.name ?? 'Select subject'}</span>
-          <ChevronDown size={11} className="text-text-muted" />
-        </button>
-        <div className="flex items-center gap-2">
-          {agentId && <ScopeVisibilityToggle scopeId={agentId} />}
-          <ScopeToggle view={activeView} onChange={selectView} />
-        </div>
-      </div>
-      {current?.importOrigin && (
-        <ProviderBrainStrip
-          origin={current.importOrigin}
-          memoryCount={episodes.length}
-          skillCount={skillCount}
-          pending={pending}
-          pulling={pulling}
-          onPull={() => void pullUpdates()}
-        />
+  const scopeCluster = (
+    <div className="flex h-9 items-center gap-1 rounded-lg border border-line bg-surface-2/90 px-1 backdrop-blur-md">
+      <BrainSubjectDropdown agents={agents} selectedId={agentId} onSelect={selectAgent} workspaceName={workspaceName} />
+      <span className="h-4 w-px shrink-0 bg-line" />
+      <BrainViewTabs view={activeView} onChange={selectView} />
+      {agentId && (
+        <>
+          <span className="h-4 w-px shrink-0 bg-line" />
+          <ScopeVisibilityToggle scopeId={agentId} compact />
+        </>
       )}
-      <div className="min-h-0 flex-1">
-        {activeView === 'map' ? (
-          <ScopedBrainMap
-            endpoint={agentId ? `/v1/brain/graph?scope=scoped&scopeId=${encodeURIComponent(agentId)}&includeWorkspace=false` : null}
-            detailEndpoint={agentId ? `/v1/brain/graph/node/:id?scope=scoped&scopeId=${encodeURIComponent(agentId)}&includeWorkspace=false` : null}
-            layoutKey={`agent:${agentId}`}
-            scopeName={current?.name}
-            scopeId={agentId || undefined}
-            emptyMessage="Add memories or let this agent accumulate lessons to reveal its map."
-          />
-        ) : activeView === 'memory' ? (
+    </div>
+  );
+
+  // Map view floats its controls on the canvas; other views use a slim bar.
+  const mapContent = (
+    <ScopedBrainMap
+      endpoint={agentId ? `/v1/brain/graph?scope=scoped&scopeId=${encodeURIComponent(agentId)}&includeWorkspace=false` : null}
+      detailEndpoint={agentId ? `/v1/brain/graph/node/:id?scope=scoped&scopeId=${encodeURIComponent(agentId)}&includeWorkspace=false` : null}
+      layoutKey={`agent:${agentId}`}
+      scopeName={current?.name}
+      scopeId={agentId || undefined}
+      emptyMessage="Add memories or let this agent accumulate lessons to reveal its map."
+      searchPositionClassName="right-3 top-16"
+    />
+  );
+
+  const otherViewContent =
+    activeView === 'memory' ? (
           <div className="h-full overflow-y-auto px-6 py-5">
             <div className="mx-auto max-w-4xl space-y-4">
               <section className="rounded-card border border-line bg-surface p-5">
@@ -291,16 +297,39 @@ export function AgentBrainPanel({
           agentId ? <SkillsTab scopeId={agentId} scopeName={current?.name} /> : null
         ) : (
           agentId ? <ExamplesTab scopeId={agentId} scopeName={current?.name} /> : null
-        )}
-      </div>
-      {pickerOpen && (
-        <BrainSubjectPicker
-          agents={agents}
-          selectedId={agentId}
-          onSelect={(id) => { selectAgent(id); setPickerOpen(false); }}
-          onClose={() => setPickerOpen(false)}
+        );
+
+  return (
+    <div className="flex h-full flex-col bg-canvas">
+      {current?.importOrigin && (
+        <ProviderBrainStrip
+          origin={current.importOrigin}
+          memoryCount={episodes.length}
+          skillCount={skillCount}
+          pending={pending}
+          pulling={pulling}
+          onPull={() => void pullUpdates()}
         />
       )}
+      <div className="relative min-h-0 flex-1">
+        {activeView === 'map' ? (
+          <>
+            <div className="h-full">{mapContent}</div>
+            <div className="pointer-events-none absolute inset-x-3 top-3 z-30 flex items-start gap-2">
+              <div className="pointer-events-auto flex min-w-0 items-center gap-2">{scopeCluster}</div>
+              {topRightSlot && <div className="pointer-events-auto ml-auto flex shrink-0 items-center gap-2">{topRightSlot}</div>}
+            </div>
+          </>
+        ) : (
+          <div className="flex h-full flex-col">
+            <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+              <div className="flex min-w-0 items-center gap-2">{scopeCluster}</div>
+              {topRightSlot && <div className="ml-auto flex shrink-0 items-center gap-2">{topRightSlot}</div>}
+            </div>
+            <div className="min-h-0 flex-1">{otherViewContent}</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -378,142 +407,134 @@ function relTime(iso: string): string {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
-function TierIcon({ tier }: { tier: SubjectTier }) {
-  if (tier === 'orchestrator') return <Crown size={12} className="text-violet-400" />;
-  if (tier === 'manager') return <Users size={12} className="text-sky-400" />;
-  return <Sparkles size={12} className="text-amber-400" />;
-}
-
-const TIER_TABS: Array<{ key: SubjectTier; label: string }> = [
-  { key: 'orchestrator', label: 'Orchestrator' },
-  { key: 'manager', label: 'Managers' },
-  { key: 'specialist', label: 'Specialists' },
+const SUBJECT_GROUPS: Array<{ tier: SubjectTier; label: string }> = [
+  { tier: 'orchestrator', label: 'Orchestrator' },
+  { tier: 'manager', label: 'Managers' },
+  { tier: 'specialist', label: 'Specialists' },
 ];
 
 /**
- * Modal subject picker for Agent Brain. Keeps the page calm by default and
- * scales past a 50-specialist workspace via tabs + search, instead of a single
- * giant dropdown (SPECIALISTS-10X §UI/UX → Brain Page Subject Picker).
+ * Subject selector for Agent Brain — a compact dropdown (same shape as the
+ * Fleet domain picker) grouped by tier, with a search filter and the shared
+ * monochrome role glyphs.
  */
-function BrainSubjectPicker({
+function BrainSubjectDropdown({
   agents,
   selectedId,
   onSelect,
-  onClose,
+  workspaceName,
 }: {
   agents: AgentRow[];
   selectedId: string;
   onSelect: (id: string) => void;
-  onClose: () => void;
+  workspaceName: string;
 }) {
-  const initialTier = subjectTier(agents.find((a) => a.id === selectedId)?.role);
-  const [tier, setTier] = useState<SubjectTier>(initialTier);
+  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-
-  const counts = useMemo(() => {
-    const c: Record<SubjectTier, number> = { orchestrator: 0, manager: 0, specialist: 0 };
-    for (const a of agents) c[subjectTier(a.role)] += 1;
-    return c;
-  }, [agents]);
-
-  const rows = useMemo(() => {
+  const current = agents.find((a) => a.id === selectedId) ?? null;
+  const grouped = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return agents
-      .filter((a) => subjectTier(a.role) === tier)
-      .filter((a) => {
-        if (!q) return true;
-        return (
-          a.name.toLowerCase().includes(q) ||
-          (a.role ?? '').toLowerCase().includes(q) ||
-          (a.description ?? '').toLowerCase().includes(q) ||
-          (a.capabilityTags ?? []).some((t) => t.toLowerCase().includes(q))
-        );
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [agents, tier, query]);
+    const match = (a: AgentRow) =>
+      !q ||
+      a.name.toLowerCase().includes(q) ||
+      (a.role ?? '').toLowerCase().includes(q) ||
+      (a.description ?? '').toLowerCase().includes(q) ||
+      (a.capabilityTags ?? []).some((t) => t.toLowerCase().includes(q));
+    const sorted = [...agents].filter(match).sort((a, b) => a.name.localeCompare(b.name));
+    return SUBJECT_GROUPS.map((group) => ({
+      ...group,
+      items: sorted.filter((a) => subjectTier(a.role) === group.tier),
+    }));
+  }, [agents, query]);
+  const hasResults = grouped.some((group) => group.items.length > 0);
+
+  function close() {
+    setOpen(false);
+    setQuery('');
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-[12vh]" onClick={onClose}>
-      <div
-        className="flex max-h-[70vh] w-full max-w-lg flex-col overflow-hidden rounded-card border border-line bg-surface shadow-modal"
-        onClick={(e) => e.stopPropagation()}
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-text-primary transition-colors hover:bg-surface-3"
       >
-        <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
-          <div>
-            <div className="text-sm font-medium text-text-primary">Brain Subject</div>
-            <div className="text-[12px] text-text-muted">Select whose mind you want to inspect.</div>
-          </div>
-          <button type="button" aria-label="Close" onClick={onClose} className="rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"><X size={16} /></button>
-        </div>
-
-        <div className="flex items-center gap-1 border-b border-line px-5 py-2.5">
-          {TIER_TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => setTier(t.key)}
-              className={clsx(
-                'inline-flex items-center gap-1.5 rounded-pill px-3 py-1 text-[12px] transition-colors',
-                tier === t.key ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary',
-              )}
-            >
-              <TierIcon tier={t.key} /> {t.label}
-              <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[9px] text-text-muted">{counts[t.key]}</span>
-            </button>
-          ))}
-        </div>
-
-        <label className="flex h-9 items-center gap-2 border-b border-line px-5 text-text-muted focus-within:text-text-primary">
-          <Search size={13} />
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search specialists, abilities, tools…"
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
-          />
-        </label>
-
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
-          {rows.length === 0 ? (
-            <p className="px-5 py-10 text-center text-[12px] text-text-muted">
-              {tier === 'orchestrator'
-                ? 'No orchestrator yet — commission one from the Agents page.'
-                : `No ${tier === 'manager' ? 'managers' : 'specialists'} match.`}
-            </p>
-          ) : (
-            rows.map((a) => {
-              const isSel = a.id === selectedId;
-              return (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() => onSelect(a.id)}
-                  className={clsx(
-                    'flex w-full items-center gap-3 px-5 py-2.5 text-left transition-colors',
-                    isSel ? 'bg-surface-2' : 'hover:bg-surface-2',
-                  )}
-                >
-                  <TierIcon tier={subjectTier(a.role)} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] font-medium text-text-primary">{a.name}</div>
-                    <div className="truncate text-[11px] text-text-muted">
-                      {a.role ? <span className="font-mono">{a.role === 'worker' ? 'specialist' : a.role}</span> : 'agent'}
-                      {a.capabilityTags && a.capabilityTags.length > 0 && ` · ${a.capabilityTags.slice(0, 3).join(', ')}`}
+        {current && <RoleGlyph role={current.role} size={12} />}
+        <span className="font-semibold">{current?.name ?? 'Select subject'}</span>
+        <ChevronDown size={11} className={clsx('text-text-muted transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={close} />
+          <div className="absolute left-0 top-full z-50 mt-1.5 w-64 origin-top-left overflow-hidden rounded-card border border-line bg-surface shadow-modal animate-in fade-in slide-in-from-top-1 duration-150">
+            <label className="flex h-9 items-center gap-2 border-b border-line px-3 text-text-muted focus-within:text-text-primary">
+              <Search size={13} className="shrink-0" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search agents…"
+                className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+              />
+            </label>
+            <div className="max-h-[300px] overflow-y-auto py-1">
+              {!hasResults ? (
+                <p className="px-3 py-6 text-center text-[12px] text-text-muted">No agents match.</p>
+              ) : (
+                grouped.map((group) =>
+                  group.items.length === 0 ? null : (
+                    <div key={group.tier}>
+                      <div className="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                        <RoleGlyph role={group.tier} size={11} />
+                        {group.label}
+                        <span className="font-normal normal-case tracking-normal">· {group.items.length}</span>
+                      </div>
+                      {group.items.map((a) => {
+                        const isSel = a.id === selectedId;
+                        // Orchestrator presides over the workspace; managers and
+                        // specialists show their domain (blank when they have none).
+                        const context = group.tier === 'orchestrator' ? workspaceName : a.domainName ?? '';
+                        return (
+                          <button
+                            key={a.id}
+                            type="button"
+                            onClick={() => { onSelect(a.id); close(); }}
+                            className={clsx(
+                              'flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors',
+                              isSel ? 'bg-surface-2 font-medium text-text-primary' : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
+                            )}
+                          >
+                            <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+                              {isSel && <Check size={12} className="text-accent" />}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate">{a.name}</span>
+                            {context && <span className="ml-2 max-w-[45%] shrink-0 truncate text-[11px] text-text-muted">{context}</span>}
+                          </button>
+                        );
+                      })}
                     </div>
-                  </div>
-                  {isSel && <span className="text-[11px] text-accent">current</span>}
-                </button>
-              );
-            })
-          )}
-        </div>
-      </div>
+                  ),
+                )
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function ScopeToggle({
+const BRAIN_VIEWS: Array<{ key: AgentBrainView; label: string; Icon: LucideIcon }> = [
+  { key: 'map', label: 'Map', Icon: Network },
+  { key: 'memory', label: 'Memory', Icon: NotebookPen },
+  { key: 'knowledge', label: 'Knowledge', Icon: BookOpen },
+  { key: 'skills', label: 'Skills', Icon: FileCode },
+  { key: 'examples', label: 'Examples', Icon: Sparkles },
+];
+
+/** The five brain views — active shows its label, the rest are icon-only. */
+function BrainViewTabs({
   view,
   onChange,
 }: {
@@ -521,12 +542,28 @@ function ScopeToggle({
   onChange: (value: AgentBrainView) => void;
 }) {
   return (
-    <div className="flex items-center gap-1.5 text-[12px]">
-      <button type="button" onClick={() => onChange('map')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'map' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Network size={12} /> Map</button>
-      <button type="button" onClick={() => onChange('memory')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'memory' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><NotebookPen size={12} /> Memory</button>
-      <button type="button" onClick={() => onChange('knowledge')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'knowledge' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><BookOpen size={12} /> Knowledge</button>
-      <button type="button" onClick={() => onChange('skills')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'skills' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><FileCode size={12} /> Skills</button>
-      <button type="button" onClick={() => onChange('examples')} className={`inline-flex items-center gap-1.5 rounded-pill px-3 py-1 ${view === 'examples' ? 'bg-accent-soft text-accent' : 'text-text-muted hover:text-text-primary'}`}><Sparkles size={12} /> Examples</button>
+    <div className="flex items-center gap-0.5">
+      {BRAIN_VIEWS.map(({ key, label, Icon }) => {
+        const active = view === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onChange(key)}
+            aria-label={label}
+            title={label}
+            className={clsx(
+              'inline-flex h-7 items-center gap-1.5 rounded-md text-[12px] transition-colors',
+              active
+                ? 'bg-surface-3 px-2.5 text-text-primary'
+                : 'w-7 justify-center text-text-muted hover:bg-surface-3 hover:text-text-primary',
+            )}
+          >
+            <Icon size={14} />
+            {active && label}
+          </button>
+        );
+      })}
     </div>
   );
 }

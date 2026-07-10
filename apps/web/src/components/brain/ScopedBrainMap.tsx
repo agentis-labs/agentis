@@ -15,6 +15,9 @@ export function ScopedBrainMap({
   emptyMessage,
   scopeName,
   scopeId,
+  searchPositionClassName,
+  searchQuery,
+  onSearchQueryChange,
 }: {
   endpoint: string | null;
   detailEndpoint?: string | null;
@@ -22,12 +25,21 @@ export function ScopedBrainMap({
   emptyMessage: string;
   scopeName?: string;
   scopeId?: string;
+  /** Moves the node-search away from a corner other controls occupy. */
+  searchPositionClassName?: string;
+  /** When provided, the search input lives in the page toolbar (one bar); the
+   * map renders only the results dropdown instead of its own CanvasSearch. */
+  searchQuery?: string;
+  onSearchQueryChange?: (value: string) => void;
 }) {
   const toast = useToast();
   const [graph, setGraph] = useState<BrainGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
+  const controlledSearch = searchQuery !== undefined;
+  const [internalSearch, setInternalSearch] = useState('');
+  const search = searchQuery ?? internalSearch;
+  const setSearch = onSearchQueryChange ?? setInternalSearch;
 
   useEffect(() => {
     if (!endpoint) {
@@ -95,7 +107,25 @@ export function ScopedBrainMap({
           filters={{ showWarnings: false, showGaps: false, visibleLayers: { knowledge: true, memory: true, judgment: true } }}
           layoutKey={layoutKey}
         />
-        <CanvasSearch value={search} onChange={setSearch} results={matches} onSelect={setSelectedId} />
+        {controlledSearch ? (
+          search.trim() && matches.length > 0 && (
+            <div className="absolute left-3 top-14 z-40 w-64 overflow-hidden rounded-card border border-line bg-surface shadow-dropdown">
+              {matches.map((node) => (
+                <button
+                  key={node.id}
+                  type="button"
+                  onClick={() => { setSelectedId(node.id); onSearchQueryChange?.(''); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-surface-2"
+                >
+                  <span className="shrink-0 text-[10px] uppercase tracking-wider text-text-muted">{node.layer}</span>
+                  <span className="truncate text-text-primary">{node.label}</span>
+                </button>
+              ))}
+            </div>
+          )
+        ) : (
+          <CanvasSearch value={search} onChange={setSearch} results={matches} onSelect={setSelectedId} positionClassName={searchPositionClassName} />
+        )}
       </div>
       {selectedNode && (
         <BrainDetailRail

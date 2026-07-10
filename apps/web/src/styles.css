@@ -17,9 +17,9 @@
      actionable elements invert (white fill / black text). Chroma survives
      only inside the scoped color islands (.workflow-scope, .brain-scope). */
   --color-canvas: #0a0a0b;
-  --color-surface: #0e0e11;
-  --color-surface-2: #16161a;
-  --color-surface-3: #202025;
+  --color-surface: #151518;
+  --color-surface-2: #1d1d21;
+  --color-surface-3: #27272c;
   --color-line: rgba(255, 255, 255, 0.08);
   --color-line-strong: rgba(255, 255, 255, 0.16);
   --color-text-primary: #f4f4f5;
@@ -163,9 +163,9 @@
 .s-surface {
   color-scheme: dark;
   --color-canvas: #0a0a0b;
-  --color-surface: #0e0e11;
-  --color-surface-2: #16161a;
-  --color-surface-3: #202025;
+  --color-surface: #151518;
+  --color-surface-2: #1d1d21;
+  --color-surface-3: #27272c;
   --color-line: rgba(255, 255, 255, 0.08);
   --color-line-strong: rgba(255, 255, 255, 0.16);
   --color-text-primary: #f4f4f5;
@@ -187,10 +187,10 @@
   --color-info-soft: rgba(212, 212, 216, 0.1);
   --color-overlay: rgba(4, 4, 6, 0.66);
   --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 24px rgba(255, 255, 255, 0.1);
-  --app-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.006) 46%, rgba(255, 255, 255, 0) 100%), var(--color-surface);
-  --app-card-border: 1px solid rgba(255, 255, 255, 0.07);
-  --app-card-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset, 0 1px 2px rgba(0, 0, 0, 0.42), 0 14px 36px -14px rgba(0, 0, 0, 0.6);
-  --app-tile-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--color-surface-2);
+  --app-card-bg: var(--color-surface);
+  --app-card-border: 1px solid rgba(255, 255, 255, 0.06);
+  --app-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -16px rgba(0, 0, 0, 0.55);
+  --app-tile-bg: var(--color-surface-2);
   --app-modal-shadow: 0 24px 72px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.06);
   color: var(--color-text-primary);
 }
@@ -234,9 +234,9 @@
 :root .s-surface[data-appearance='dark'] {
   color-scheme: dark;
   --color-canvas: #0a0a0b;
-  --color-surface: #0e0e11;
-  --color-surface-2: #16161a;
-  --color-surface-3: #202025;
+  --color-surface: #151518;
+  --color-surface-2: #1d1d21;
+  --color-surface-3: #27272c;
   --color-line: rgba(255, 255, 255, 0.08);
   --color-line-strong: rgba(255, 255, 255, 0.16);
   --color-text-primary: #f4f4f5;
@@ -258,10 +258,10 @@
   --color-info-soft: rgba(212, 212, 216, 0.1);
   --color-overlay: rgba(4, 4, 6, 0.66);
   --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 24px rgba(255, 255, 255, 0.1);
-  --app-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.006) 46%, rgba(255, 255, 255, 0) 100%), var(--color-surface);
-  --app-card-border: 1px solid rgba(255, 255, 255, 0.07);
-  --app-card-shadow: 0 1px 0 rgba(255, 255, 255, 0.045) inset, 0 1px 2px rgba(0, 0, 0, 0.42), 0 14px 36px -14px rgba(0, 0, 0, 0.6);
-  --app-tile-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)), var(--color-surface-2);
+  --app-card-bg: var(--color-surface);
+  --app-card-border: 1px solid rgba(255, 255, 255, 0.06);
+  --app-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 28px -16px rgba(0, 0, 0, 0.55);
+  --app-tile-bg: var(--color-surface-2);
   --app-modal-shadow: 0 24px 72px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 

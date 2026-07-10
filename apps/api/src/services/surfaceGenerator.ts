@@ -201,6 +201,13 @@ CRAFT RULES (this is what separates a great surface from a dumb one):
 - Shape hierarchy with bounded style intent on any node: "style": { "elevation":"flat"|"raised"|"inset"|"outline",
   "pad":"none"|"sm"|"md"|"lg"|"xl", "tone":"neutral"|"accent"|"success"|"warning"|"danger"|"info",
   "accent":"blue"|"teal"|"purple"|"orange"|..., "size":"sm"|"md"|"lg"|"xl", "span":1-12 }. (No raw CSS — these enums only.)
+- HIERARCHY COMES FROM ELEVATION AND TYPE, NOT DECORATION. The page is the base layer; "raised" Cards lift off it;
+  "inset" wells recess into a Card (perfect for a KPIStrip's metric tiles). Don't box what a Stack + a label can already
+  separate. Let the type scale do the work — a bold numeral over a quiet uppercase label reads instantly with no chrome.
+- RESTRAINT: at most ONE accent per surface. Color is a signal that belongs to DATA — status pills, +/- deltas, chart
+  series, live pulses. Chrome (cards, headers, labels, borders) stays neutral. A surface where everything is colored says
+  nothing. When a panel is empty, write a calm one-line invitation ("No leads yet — a run will populate this"), never a
+  dark box that reads as broken, and never eight of them.
 
 THE OPERABILITY CONTRACT (hard-gated at persist — RENDERED ≠ OPERABLE):
 - EVERY action you declare must be reachable from a control. Workflow actions go on the Hero's "actions"

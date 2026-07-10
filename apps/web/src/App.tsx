@@ -412,12 +412,11 @@ function Shell({
               const ev = new KeyboardEvent('keydown', { key: 'k', metaKey: true });
               window.dispatchEvent(ev);
             }}
-            className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-btn border border-line bg-surface-2 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
+            aria-label="Search"
             title="Search (⌘K)"
           >
-            <Search size={12} />
-            Search
-            <span className="rounded border border-line px-1 py-0.5 text-[9px]">⌘K</span>
+            <Search size={14} />
           </button>
           <RealtimeStatusIndicator />
           <NotificationPanel />

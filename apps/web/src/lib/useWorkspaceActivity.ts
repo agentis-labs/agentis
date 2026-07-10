@@ -111,7 +111,12 @@ export interface WorkspaceRequestStatus {
 const WORK_KINDS = new Set<RealtimeActivity['kind']>(['run', 'node', 'agent', 'tool', 'task', 'progress']);
 const BUSY_WINDOW_MS = 20_000;
 
+function isConversationOnlyActivity(a: RealtimeActivity): boolean {
+  return Boolean(a.conversationId && !a.runId && !a.workflowId);
+}
+
 function isWork(a: RealtimeActivity): boolean {
+  if (isConversationOnlyActivity(a)) return false;
   if (a.kind === 'agent') return Boolean(a.runId || a.workflowId || a.agentId);
   return WORK_KINDS.has(a.kind);
 }

@@ -95,6 +95,7 @@ export function buildWorkSessions({
   }
 
   for (const event of observabilityEvents) {
+    if (isConversationOnlyObservation(event)) continue;
     if (!isActiveObservationLike(event, now, windowMs)) continue;
     const key = observationSessionKey(event);
     if (!key) continue;
@@ -265,14 +266,23 @@ function observationSessionStatus(event: ObservabilityEvent): WorkSessionStatus 
 }
 
 function isSessionActivity(item: RealtimeActivity): boolean {
+  if (isConversationOnlyActivity(item)) return false;
   if (item.kind === 'status') return false;
-  if (item.kind === 'message') return Boolean(item.agentId || item.runId || item.workflowId);
   return item.kind === 'run'
     || item.kind === 'node'
     || item.kind === 'agent'
     || item.kind === 'tool'
     || item.kind === 'progress'
     || item.kind === 'approval';
+}
+
+function isConversationOnlyActivity(item: RealtimeActivity): boolean {
+  return Boolean(item.conversationId && !item.runId && !item.workflowId);
+}
+
+function isConversationOnlyObservation(event: ObservabilityEvent): boolean {
+  const raw = event.rawPayloadRedacted;
+  return Boolean(stringFromRecord(raw, ['conversationId']) && !event.runId && !event.workflowId);
 }
 
 function isTerminalActivity(item: RealtimeActivity): boolean {

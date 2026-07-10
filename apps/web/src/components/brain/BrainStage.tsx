@@ -39,6 +39,8 @@ interface StageProps {
   livePulse?: number;
   /** Scope key for the simulation. Changing it resets the layout. */
   layoutKey?: string;
+  /** Placement of the atom-count badge; lifted above the legend on maps that have one. */
+  atomBadgeClassName?: string;
 }
 
 interface SimNode extends SimulationNodeDatum {
@@ -76,7 +78,7 @@ interface Tween {
 const MIN_ZOOM = 0.06;
 const MAX_ZOOM = 6;
 
-export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePulse = 0, layoutKey }: StageProps) {
+export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePulse = 0, layoutKey, atomBadgeClassName = 'bottom-3 left-3' }: StageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -659,7 +661,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       />
 
       {graph && (
-        <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-md border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-cyan-200 backdrop-blur-sm">
+        <div className={`pointer-events-none absolute z-20 rounded-md border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-cyan-200 backdrop-blur-sm ${atomBadgeClassName}`}>
           <span className={['mr-1 inline-block h-1.5 w-1.5 rounded-full bg-cyan-300', livePulse > 0 ? 'animate-pulse' : ''].join(' ')} />
           {atomCountLabel(graph)} · {graph.meta.linkCount} links
         </div>

@@ -11,6 +11,7 @@ import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import {
   Boxes,
+  ChevronDown,
   Download,
   LayoutGrid,
   Loader2,
@@ -31,6 +32,7 @@ import { AppEngineModal, type AppEngineAgent, type AppEngineDomain } from '../co
 import { ExtensionsModal } from '../components/extensions/ExtensionsModal';
 import { DomainToolbar, nestedDomainOptions, type DomainToolbarSelection } from '../components/shared/DomainToolbar';
 import { DomainEditorSheet, type DomainOption, type DomainManagerOption } from '../components/agents/DomainEditorSheet';
+import { InfoHint } from '../components/shared/InfoHint';
 
 interface WorkflowRow {
   id: string;
@@ -83,6 +85,11 @@ export function AppsPage() {
   // so they open as a modal from here (the apps/workflows hub) and from each
   // workflow canvas toolbar — never a standalone sidebar page.
   const [extensionsOpen, setExtensionsOpen] = useState(false);
+  // Header controls mirror the Agents page: collapsible search + a "New app"
+  // split button whose dropdown holds Import.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [importOpen, setImportOpen] = useState(false);
   const [importEnvelope, setImportEnvelope] = useState<AppManifestEnvelope | null>(null);
@@ -120,6 +127,20 @@ export function AppsPage() {
   }
 
   useEffect(() => { void refresh(); }, []);
+
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!newMenuRef.current?.contains(event.target as Node)) setNewMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setNewMenuOpen(false); };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [newMenuOpen]);
 
   const resolveDomainId = (itemDomainId: string | null | undefined, ownerAgentId: string | null | undefined) => {
     if (itemDomainId) return itemDomainId;
@@ -270,65 +291,120 @@ export function AppsPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-4">
-        <div className="mr-auto">
-          <h1 className="text-display text-text-primary">Apps</h1>
-          <p className="mt-0.5 text-[12px] text-text-muted">{items.length} {items.length === 1 ? 'app' : 'apps'}</p>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".agentisapp,application/json"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          if (file) void previewImportFile(file);
+        }}
+      />
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex h-9 items-center gap-1 rounded-lg border border-line bg-surface-2/90 px-1 backdrop-blur-md">
+            {searchOpen ? (
+              <div className="flex items-center gap-1.5 pl-1.5">
+                <Search size={14} className="shrink-0 text-text-muted" />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onBlur={() => { if (!query.trim()) setSearchOpen(false); }}
+                  onKeyDown={(e) => { if (e.key === 'Escape') { setQuery(''); setSearchOpen(false); } }}
+                  placeholder="Search apps…"
+                  aria-label="Search apps"
+                  className="w-40 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+                />
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  onClick={() => { setQuery(''); setSearchOpen(false); }}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-surface-3 hover:text-text-primary"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                aria-label="Search apps"
+                onClick={() => setSearchOpen(true)}
+                className={clsx(
+                  'inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-surface-3',
+                  query.trim() ? 'text-accent' : 'text-text-muted hover:text-text-primary',
+                )}
+              >
+                <Search size={15} />
+              </button>
+            )}
+            <span className="h-4 w-px shrink-0 bg-line" />
+            <DomainToolbar
+              embedded
+              domains={domains}
+              selected={domainFilter}
+              onSelect={setDomainFilter}
+              totalCount={searched.length}
+              countForDomain={countForDomain}
+              allLabel="All domains"
+              unassignedLabel="Unassigned"
+            />
+          </div>
         </div>
-        <div className="relative">
-          <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search…"
-            className="h-9 w-56 rounded-input border border-line bg-canvas pl-9 pr-3 text-[13px] text-text-primary outline-none focus:border-accent"
-          />
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setExtensionsOpen(true)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-line bg-surface-2/90 px-3 text-[12px] font-medium text-text-secondary backdrop-blur-md hover:bg-surface-3 hover:text-text-primary"
+            title="Manage the code extensions your workflows can call"
+          >
+            <Puzzle size={13} /> Extensions
+          </button>
+          <div ref={newMenuRef} className="relative flex items-center">
+            <button
+              type="button"
+              onClick={() => setNewMenuOpen((open) => !open)}
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              className="inline-flex h-9 items-center gap-1.5 rounded-l-lg bg-accent pl-3 pr-2.5 text-[12px] font-semibold text-canvas hover:bg-accent-hover"
+            >
+              <Plus size={14} /> New app
+            </button>
+            <button
+              type="button"
+              onClick={() => setNewMenuOpen((open) => !open)}
+              aria-label="More create options"
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              className="inline-flex h-9 items-center rounded-r-lg border-l border-canvas/25 bg-accent px-1.5 text-canvas hover:bg-accent-hover"
+            >
+              <ChevronDown size={14} className={clsx('transition-transform', newMenuOpen && 'rotate-180')} />
+            </button>
+            {newMenuOpen && (
+              <div role="menu" className="absolute right-0 top-[calc(100%+0.4rem)] z-40 w-56 overflow-hidden rounded-card border border-line bg-surface p-1 shadow-dropdown">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setNewMenuOpen(false); setCreateOpen(true); }}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+                >
+                  <Plus size={13} /> New app
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setNewMenuOpen(false); fileInputRef.current?.click(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+                >
+                  {importBusy ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                  <span className="min-w-0 flex-1">Import app</span>
+                  <InfoHint text="Install a portable .agentisapp package into this workspace." />
+                </button>
+              </div>
+            )}
+          </div>
         </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".agentisapp,application/json"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (file) void previewImportFile(file);
-          }}
-        />
-        <button
-          type="button"
-          onClick={() => setExtensionsOpen(true)}
-          className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-canvas px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary"
-          title="Manage the code extensions your workflows can call"
-        >
-          <Puzzle size={13} /> Extensions
-        </button>
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-line bg-canvas px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary"
-        >
-          {importBusy ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Import
-        </button>
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-canvas hover:bg-accent-hover"
-        >
-          <Plus size={13} /> New app
-        </button>
-      </header>
-
-      <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-6 py-3">
-        <DomainToolbar
-          domains={domains}
-          selected={domainFilter}
-          onSelect={setDomainFilter}
-          totalCount={searched.length}
-          countForDomain={countForDomain}
-          allLabel="All domains"
-          unassignedLabel="Unassigned"
-        />
-        <span className="text-[12px] text-text-muted">Organize apps by domain — the manager who owns each is shown on its section.</span>
       </div>
 
       <main className="min-h-0 flex-1 overflow-auto p-6">

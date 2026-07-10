@@ -46,6 +46,8 @@ interface DomainToolbarProps<TDomain extends DomainToolbarDomain> {
   allLabel?: string;
   unassignedLabel?: string;
   newLabel?: string;
+  /** Drops the pill's own border/background so it blends into a parent toolbar. */
+  embedded?: boolean;
 }
 
 type DomainRow =
@@ -64,6 +66,7 @@ export function DomainToolbar<TDomain extends DomainToolbarDomain>({
   allLabel = 'All domains',
   unassignedLabel = 'Unassigned',
   newLabel = 'New domain',
+  embedded = false,
 }: DomainToolbarProps<TDomain>) {
   const [open, setOpen] = useState(false);
   // Nested rows: each top-level Domain followed by its indented Subdomains.
@@ -87,21 +90,23 @@ export function DomainToolbar<TDomain extends DomainToolbarDomain>({
   const isActive = selected !== 'all';
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className={clsx('flex items-center', !embedded && 'gap-1.5')}>
       <div className="relative inline-block">
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
           className={clsx(
-            'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12px] font-medium transition-colors select-none',
-            isActive ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary',
+            'inline-flex items-center gap-1.5 text-[12px] font-medium transition-colors select-none',
+            embedded
+              ? clsx('h-7 rounded-md px-2', isActive ? 'text-accent' : 'text-text-primary hover:bg-surface-3')
+              : clsx('h-8 rounded-full border px-3', isActive ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3 hover:text-text-primary'),
           )}
         >
           {current.colorHex && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: current.colorHex }} />}
-          <span className="text-text-muted">Domain:</span>
+          {!embedded && <span className="text-text-muted">Domain:</span>}
           <span className={clsx('font-semibold', isActive ? 'text-accent' : 'text-text-primary')}>{current.label}</span>
           <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[9px] font-medium text-text-muted">{current.count}</span>
-          <ChevronDown size={11} className={clsx('transition-transform', open && 'rotate-180')} />
+          <ChevronDown size={11} className={clsx('transition-transform text-text-muted', open && 'rotate-180')} />
         </button>
         {open && (
           <>
@@ -166,7 +171,12 @@ export function DomainToolbar<TDomain extends DomainToolbarDomain>({
           onClick={() => onEdit(selectedDomain)}
           aria-label={`Edit ${selectedDomain.name}`}
           title="Edit domain"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-line bg-surface-2 text-text-muted transition-colors hover:border-accent/45 hover:text-text-primary"
+          className={clsx(
+            'inline-flex items-center justify-center text-text-muted transition-colors hover:text-text-primary',
+            embedded
+              ? 'h-7 w-7 rounded-md hover:bg-surface-3'
+              : 'h-8 w-8 rounded-full border border-line bg-surface-2 hover:border-accent/45',
+          )}
         >
           <SettingsIcon size={13} />
         </button>

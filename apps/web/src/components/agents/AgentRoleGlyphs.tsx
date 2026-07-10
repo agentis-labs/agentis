@@ -33,3 +33,15 @@ export function WorkerGlyph({ size = 16 }: { size?: number }) {
     </svg>
   );
 }
+
+/**
+ * The shared monochrome role glyph — hexagon (orchestrator), diamond (manager),
+ * square (specialist/worker). Use this everywhere a role is iconified so the
+ * whole app speaks one visual language. Accepts a role or tier string.
+ */
+export function RoleGlyph({ role, size = 16 }: { role?: string | null; size?: number }) {
+  const kind = (role ?? '').toLowerCase();
+  if (kind === 'orchestrator') return <OrchestratorGlyph size={size} />;
+  if (kind === 'manager') return <ManagerGlyph size={size} />;
+  return <WorkerGlyph size={size} />;
+}

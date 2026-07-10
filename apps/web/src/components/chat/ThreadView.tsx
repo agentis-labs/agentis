@@ -65,6 +65,8 @@ type AgentConversation = {
   executionMode?: 'chat' | 'plan';
 };
 
+type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
+
 type RoomMsg = {
   id: string;
   authorType: string;
@@ -228,6 +230,84 @@ function extractArtifactIdsFromRoomContent(contentType: string | undefined, cont
   return [...ids];
 }
 
+function removeKeys<T>(record: Record<string, T>, keys: Iterable<string>): Record<string, T> {
+  const remove = new Set(keys);
+  const next: Record<string, T> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!remove.has(key)) next[key] = value;
+  }
+  return next;
+}
+
+function firstString(source: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function roomWaitingActivity(agentId: string, name: string, startedAt: string): ChatActivity {
+  return {
+    type: 'activity',
+    id: `room-waiting-${agentId}-${startedAt}`,
+    phase: 'runtime',
+    status: 'running',
+    label: `Starting ${name}`,
+    detail: 'Waiting for the agent runtime to produce a room reply.',
+    startedAt,
+    agentId,
+  };
+}
+
+function roomRealtimeActivity(event: string, payload: Record<string, unknown>): ChatActivity | null {
+  const agentId = firstString(payload, ['agentId']);
+  if (!agentId) return null;
+  const at = firstString(payload, ['at', 'timestamp']) ?? new Date().toISOString();
+  if (event === REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL) {
+    const tool = firstString(payload, ['tool', 'toolName', 'name', 'command']) ?? 'tool';
+    return {
+      type: 'activity',
+      id: `room-tool-${agentId}-${tool}-${at}`,
+      phase: 'tool',
+      status: 'running',
+      label: `Using ${tool}`,
+      detail: tool,
+      startedAt: at,
+      agentId,
+    };
+  }
+  if (event === REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE) {
+    const message = firstString(payload, ['message', 'text', 'line']);
+    if (!message) return null;
+    return {
+      type: 'activity',
+      id: `room-message-${agentId}-${at}`,
+      phase: 'runtime',
+      status: 'running',
+      label: message,
+      startedAt: at,
+      agentId,
+    };
+  }
+  if (event === REALTIME_EVENTS.AGENT_WORK_STEP) {
+    const phase = firstString(payload, ['phase', 'status']);
+    const text = firstString(payload, ['detail', 'description', 'text', 'summary', 'step', 'message']) ?? 'Working';
+    const failed = phase === 'fail' || phase === 'failed' || phase === 'error';
+    const complete = phase === 'complete' || phase === 'completed' || phase === 'success';
+    return {
+      type: 'activity',
+      id: `room-work-${agentId}-${firstString(payload, ['phase', 'status']) ?? 'step'}-${at}`,
+      phase: failed ? 'error' : complete ? 'complete' : 'runtime',
+      status: failed ? 'error' : complete ? 'success' : 'running',
+      label: text,
+      startedAt: at,
+      agentId,
+    };
+  }
+  return null;
+}
+
 function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
   let text = event.summary;
 
@@ -341,6 +421,7 @@ export function ThreadView({
   // Room loading state: which @mentioned agents we're still waiting on for
   // reply (posted after the mention) shows up. A safety timer caps the wait.
   const [pendingResponders, setPendingResponders] = useState<string[]>([]);
+  const [roomResponderActivities, setRoomResponderActivities] = useState<Record<string, ChatActivity[]>>({});
   const broadcastPostAtRef = useRef<string | null>(null);
   const broadcastPendingTimerRef = useRef<number | null>(null);
   const [composerInitialText, setComposerInitialText] = useState(initialDraft ?? '');
@@ -372,7 +453,6 @@ export function ThreadView({
   const autoSentDraftKeyRef = useRef<string | null>(null);
   const consumedLaunchKeyRef = useRef<string | null>(null);
   const pendingViewportOverrideRef = useRef<ViewportContext | null>(initialViewportOverride ?? null);
-  const openedCanvasWorkflowIdsRef = useRef<Set<string>>(new Set());
   // The real workspace room id behind the virtual `__broadcast__` view, so live
   // room events (which carry the real id) can be scoped to Global Chat.
   const broadcastRoomIdRef = useRef<string | null>(null);
@@ -714,6 +794,7 @@ export function ThreadView({
   // clear its safety timer on unmount.
   useEffect(() => {
     setPendingResponders([]);
+    setRoomResponderActivities({});
     broadcastPostAtRef.current = null;
     if (broadcastPendingTimerRef.current) {
       window.clearTimeout(broadcastPendingTimerRef.current);
@@ -821,6 +902,7 @@ export function ThreadView({
       const postAt = broadcastPostAtRef.current;
       if (postAt && roomMessage.authorType === 'agent' && roomMessage.authorId && roomMessage.createdAt >= postAt) {
         setPendingResponders((prev) => prev.filter((agentId) => agentId !== roomMessage.authorId));
+        setRoomResponderActivities((prev) => removeKeys(prev, [roomMessage.authorId!]));
       }
     }
   });
@@ -874,6 +956,7 @@ export function ThreadView({
             .map((m) => m.authorId as string),
         );
         if (replied.size > 0) setPendingResponders((prev) => prev.filter((agentId) => !replied.has(agentId)));
+        if (replied.size > 0) setRoomResponderActivities((prev) => removeKeys(prev, replied));
       }
       setMessages((current) => {
         let updated = [...current];
@@ -901,6 +984,24 @@ export function ThreadView({
     typingTimer.current = window.setTimeout(() => setAgentTyping(false), 4000);
   });
 
+  useRealtime([
+    REALTIME_EVENTS.AGENT_WORK_STEP,
+    REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL,
+    REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE,
+  ], (env) => {
+    if (kind !== 'room') return;
+    const payload = (env.payload && typeof env.payload === 'object' ? env.payload : {}) as Record<string, unknown>;
+    const activity = roomRealtimeActivity(env.event, payload);
+    if (!activity?.agentId || !pendingResponders.includes(activity.agentId)) return;
+    setRoomResponderActivities((prev) => {
+      const current = prev[activity.agentId!] ?? [
+        roomWaitingActivity(activity.agentId!, agentMap[activity.agentId!]?.name ?? 'Agent', activity.startedAt ?? new Date().toISOString()),
+      ];
+      const deduped = current.filter((entry) => entry.id !== activity.id);
+      return { ...prev, [activity.agentId!]: [...deduped, activity].slice(-40) };
+    });
+  });
+
   useRealtime([REALTIME_EVENTS.AGENT_PROACTIVE_PUSH], (env) => {
     if (kind !== 'agent') return;
     const payload = env.payload as { id?: string; agentId?: string | null; card?: ProactiveCardData };
@@ -916,40 +1017,6 @@ export function ThreadView({
       deliveryStatus: 'delivered',
     };
     setMessages((current) => mergeMessage(current, message));
-  });
-
-  // Open the canvas as soon as the FIRST node streams in, not only once the
-  // build finishes — otherwise a bare chat thread never shows the node-by-node
-  // build reveal (it only ever saw the graph after it was already complete).
-  // CANVAS_NODE_PLACED only ever fires once the workflow row is persisted, so
-  // the canvas mount below can always fetch it successfully.
-  useRealtime([REALTIME_EVENTS.CANVAS_NODE_PLACED], (env) => {
-    if (kind !== 'agent') return;
-    const payload = env.payload as { agentId?: string | null; workflowId?: string; appId?: string | null; runId?: string } | undefined;
-    const workflowId = payload?.workflowId;
-    if (!workflowId) return;
-    if (payload?.agentId && payload.agentId !== id) return;
-    if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
-    openedCanvasWorkflowIdsRef.current.add(workflowId);
-    const appId = payload?.appId ?? null;
-    window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, appId, runId: payload?.runId ?? null } }));
-    navigate(appId ? `/apps/${appId}` : `/apps/workflows/${workflowId}`);
-    toast.success(appId ? 'App opened' : 'Logic opened on canvas');
-  });
-
-  useRealtime([REALTIME_EVENTS.CANVAS_BUILD_COMPLETE], (env) => {
-    if (kind !== 'agent') return;
-    const payload = env.payload as { agentId?: string | null; workflowId?: string; appId?: string | null; runId?: string } | undefined;
-    const workflowId = payload?.workflowId;
-    if (!workflowId) return;
-    if (payload?.agentId && payload.agentId !== id) return;
-    if (openedCanvasWorkflowIdsRef.current.has(workflowId)) return;
-    openedCanvasWorkflowIdsRef.current.add(workflowId);
-    // Agentis ships Apps — open the owning App, not the bare workflow canvas.
-    const appId = payload?.appId ?? null;
-    window.dispatchEvent(new CustomEvent('agentis:open-canvas', { detail: { workflowId, appId, runId: payload?.runId ?? null } }));
-    navigate(appId ? `/apps/${appId}` : `/apps/workflows/${workflowId}`);
-    toast.success(appId ? 'App opened' : 'Logic opened on canvas');
   });
 
   useEffect(() => () => {
@@ -1112,10 +1179,20 @@ export function ThreadView({
         // Rooms: show a "responding…" indicator for each @mentioned agent until
         // its reply lands (the dispatch is async and can take a while).
         if (responders.length > 0) {
-          broadcastPostAtRef.current = new Date().toISOString();
+          const postAt = new Date().toISOString();
+          broadcastPostAtRef.current = postAt;
           setPendingResponders(responders);
+          setRoomResponderActivities(Object.fromEntries(
+            responders.map((agentId) => [
+              agentId,
+              [roomWaitingActivity(agentId, agentMap[agentId]?.name ?? 'Agent', postAt)],
+            ]),
+          ));
           if (broadcastPendingTimerRef.current) window.clearTimeout(broadcastPendingTimerRef.current);
-          broadcastPendingTimerRef.current = window.setTimeout(() => setPendingResponders([]), 180_000);
+          broadcastPendingTimerRef.current = window.setTimeout(() => {
+            setPendingResponders([]);
+            setRoomResponderActivities({});
+          }, 180_000);
         }
       } catch (error) {
         toast.error('Failed to send', apiErrorMessage(error));
@@ -1645,12 +1722,22 @@ export function ThreadView({
           </div>
         )}
         {kind === 'room' && pendingResponders.length > 0 && (
-          <div className="mt-2 flex items-center gap-2 px-1 text-[11px] italic text-text-muted">
-            <TypingDots />
-            <span>
-              {pendingResponders.map((agentId) => agentMap[agentId]?.name ?? 'agent').join(', ')}
-              {pendingResponders.length > 1 ? ' are responding…' : ' is responding…'}
-            </span>
+          <div className="mt-2 space-y-2 px-1">
+            {pendingResponders.map((agentId) => {
+              const responderName = agentMap[agentId]?.name ?? 'Agent';
+              const activities = roomResponderActivities[agentId] ?? [
+                roomWaitingActivity(agentId, responderName, broadcastPostAtRef.current ?? new Date().toISOString()),
+              ];
+              return (
+                <div key={agentId} className="rounded-lg border border-line/55 bg-surface-2/45 px-2.5 py-2">
+                  <div className="mb-1.5 flex items-center gap-2 text-[11px] italic text-text-muted">
+                    <TypingDots />
+                    <span>{responderName} is responding…</span>
+                  </div>
+                  <AgentTurnTrace activities={activities} streaming />
+                </div>
+              );
+            })}
           </div>
         )}
         {stepTrack && stepTrack.steps.length > 0 && (streamingAgentActive || agentTyping) && (

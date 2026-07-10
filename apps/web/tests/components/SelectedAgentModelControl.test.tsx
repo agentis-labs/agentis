@@ -143,7 +143,7 @@ describe('<SelectedAgentModelControl />', () => {
     expect(onUpdated).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps the previous model visible and disables the chooser while a failed save is in flight', async () => {
+  it('shows a saving state while a failed save is in flight, then rolls back', async () => {
     const patchRequest = deferred<Response>();
     const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -167,7 +167,7 @@ describe('<SelectedAgentModelControl />', () => {
     await userEvent.click(chooserButton);
     await userEvent.click(await screen.findByRole('button', { name: /gpt-5 fast/i }));
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /gpt-5 main/i })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /saving model/i })).toBeDisabled());
 
     patchRequest.resolve(jsonResponse({ error: { code: 'PATCH_FAILED', message: 'Nope' } }, 500));
 

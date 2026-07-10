@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Background,
   Controls,
@@ -98,6 +98,8 @@ export function AgentHierarchyCanvas({
   filter,
   search,
   onClearFilters,
+  topLeftSlot,
+  topRightSlot,
 }: {
   agents: AgentHierarchyAgent[];
   onChanged: () => void;
@@ -108,6 +110,9 @@ export function AgentHierarchyCanvas({
   filter: AgentFleetFilterValue;
   search: string;
   onClearFilters: () => void;
+  /** Controls floated directly on the canvas instead of a page header. */
+  topLeftSlot?: ReactNode;
+  topRightSlot?: ReactNode;
 }) {
   const onGhostCreateRef = useRef(onGhostCreate);
   onGhostCreateRef.current = onGhostCreate;
@@ -237,7 +242,7 @@ export function AgentHierarchyCanvas({
         onNodeClick={(_event, node) => onSelect(node.data.agent)}
         onNodeDragStop={(_event, node) => void persistPosition(node)}
         fitView
-        fitViewOptions={{ padding: 0.1, minZoom: 0.62, maxZoom: 1 }}
+        fitViewOptions={{ padding: { top: 0.3, right: 0.1, bottom: 0.1, left: 0.1 }, minZoom: 0.1, maxZoom: 1 }}
         nodesDraggable
         nodesConnectable
         elementsSelectable
@@ -257,8 +262,14 @@ export function AgentHierarchyCanvas({
           </ControlButton>
         </Controls>
       </ReactFlow>
+      {(topLeftSlot || topRightSlot) && (
+        <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex items-start gap-2">
+          {topLeftSlot && <div className="pointer-events-auto flex min-w-0 items-center gap-2">{topLeftSlot}</div>}
+          {topRightSlot && <div className="pointer-events-auto ml-auto flex shrink-0 items-center gap-2">{topRightSlot}</div>}
+        </div>
+      )}
       {visibleAgents.length === 0 && (
-        <div className="pointer-events-none absolute inset-x-0 top-12 z-10 flex justify-center px-4">
+        <div className="pointer-events-none absolute inset-x-0 top-20 z-10 flex justify-center px-4">
           <div className="pointer-events-auto rounded-2xl border border-line bg-surface/95 px-5 py-4 text-center shadow-2xl backdrop-blur-xl">
             <div className="text-subheading text-text-primary">No agents match this view</div>
             <p className="mt-1 text-[12px] text-text-muted">Clear the canvas filters to bring the fleet back into view.</p>
@@ -838,7 +849,7 @@ function liveActivity(
   }
   if (readiness === 'live') {
     const tags = (agent.capabilityTags ?? []).filter(Boolean).slice(0, 2);
-    return { text: tags.length > 0 ? `ready — ${tags.join(', ')}` : 'ready for work', tone: 'text-accent' };
+    return { text: tags.length > 0 ? `ready — ${tags.join(', ')}` : 'ready for work', tone: 'text-success' };
   }
   const last = agent.lastActiveAt ?? agent.lastHeartbeatAt;
   return { text: last ? `idle — last active ${relativeTime(last)}` : 'idle', tone: 'text-text-muted' };
@@ -922,7 +933,7 @@ function safeCanvasPosition(
 function requestFleetFit(instance: ReactFlowInstance<Node<AgentNodeData>, Edge> | null) {
   if (!instance) return;
   window.requestAnimationFrame(() => {
-    instance.fitView({ padding: 0.1, minZoom: 0.62, maxZoom: 1, duration: 180 });
+    instance.fitView({ padding: { top: 0.3, right: 0.1, bottom: 0.1, left: 0.1 }, minZoom: 0.1, maxZoom: 1, duration: 180 });
   });
 }
 
@@ -946,7 +957,7 @@ function readinessOf(agent: AgentHierarchyAgent) {
 }
 
 function readinessDot(readiness: string) {
-  if (readiness === 'live') return 'bg-emerald-500';
+  if (readiness === 'live') return 'bg-success';
   if (readiness === 'running') return 'bg-warn';
   if (readiness === 'setting_up') return 'bg-cyan-500';
   if (readiness === 'failed') return 'bg-danger';

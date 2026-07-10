@@ -4,9 +4,9 @@
  * ExecutionFeed (tool list) with one cohesive surface:
  *
  *  • While the turn is streaming, the agent's thoughts are written out as small
- *    one-line messages, appearing top-to-bottom. Older lines settle; the latest
- *    is alive. We keep only the last few visible so the stream never grows into
- *    a wall of text.
+ *    messages, appearing top-to-bottom. Older lines settle; the latest is alive.
+ *    The trace grows tall enough to read several steps back and scrolls instead
+ *    of hiding history behind a "+N earlier" summary.
  *  • When the turn finishes, the whole thing collapses to a single minimal pill
  *    — "Used 3 tools · 4.2s ›" — that expands on click into the full timeline
  *    (every thought + each tool's input/result/error).
@@ -17,7 +17,7 @@
  * render nothing.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -41,8 +41,8 @@ interface Thought {
   state: ThoughtState;
 }
 
-/** How many live thought lines stay on screen while streaming. */
-const VISIBLE_WHILE_STREAMING = 4;
+/** Keep the live trace bounded without hiding the useful recent history. */
+const MAX_VISIBLE_THOUGHTS = 48;
 
 /**
  * Framework-setup narration (boot, context load, reply streaming) — real, worth
@@ -124,6 +124,7 @@ export function AgentTurnTrace({
   const turnStopped = turn?.status === 'stopped';
   const toolCount = toolCalls.length;
   const durationMs = resolveDurationMs(turn, activities);
+  const liveScrollRef = useRef<HTMLDivElement>(null);
 
   // Once the turn settles, never leave the timeline pinned open from a previous
   // streaming session.
@@ -131,18 +132,26 @@ export function AgentTurnTrace({
     if (streaming) setOpen(false);
   }, [streaming]);
 
+  useEffect(() => {
+    if (!streaming) return;
+    const el = liveScrollRef.current;
+    if (!el) return;
+    if (typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    else el.scrollTop = el.scrollHeight;
+  }, [streaming, thoughts.length]);
+
   // ── Streaming: write the thoughts out, latest alive, older settling. ──────
   if (streaming) {
     const live = thoughts.length > 0
       ? thoughts
       : [{ id: 'preparing', text: 'Thinking', state: 'active' as const }];
-    const visible = live.slice(-VISIBLE_WHILE_STREAMING);
-    const hidden = live.length - visible.length;
+    const visible = live.slice(-MAX_VISIBLE_THOUGHTS);
     return (
-      <div className="mb-2 flex w-full min-w-0 flex-col gap-1" data-testid="agent-turn-trace">
-        {hidden > 0 && (
-          <div className="pl-3.5 text-[10px] text-text-muted/60">+{hidden} earlier</div>
-        )}
+      <div
+        ref={liveScrollRef}
+        className="mb-2 flex max-h-56 w-full min-w-0 flex-col gap-1 overflow-y-auto border-l border-line/40 pl-3 sm:max-h-72"
+        data-testid="agent-turn-trace"
+      >
         {visible.map((thought, index) => {
           const isLast = index === visible.length - 1;
           return (
@@ -162,8 +171,8 @@ export function AgentTurnTrace({
               )}
               <span
                 className={clsx(
-                  'min-w-0 flex-1 text-[12px] leading-5',
-                  isLast ? 'text-text-secondary break-words' : 'text-text-muted truncate',
+                  'min-w-0 flex-1 break-words text-[12px] leading-5 [overflow-wrap:anywhere]',
+                  isLast ? 'text-text-secondary' : 'text-text-muted',
                   thought.state === 'error' && 'text-danger',
                 )}
               >
@@ -176,7 +185,7 @@ export function AgentTurnTrace({
     );
   }
 
-  // ── Settled: collapse to one pill, unless the turn was trivial. ───────────
+  // ── Settled: keep the visible timeline, unless the turn was trivial. ──────
   const substantiveThoughts = thoughts.filter((thought) => !isSetupThought(thought.text)).length;
   const worthShowing = turnFailed || turnStopped || toolCount > 0 || substantiveThoughts >= 1;
   if (!worthShowing) return null;
@@ -220,9 +229,6 @@ export function AgentTurnTrace({
               <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted/80">{meta}</span>
             </>
           )}
-          <span className="ml-auto shrink-0 text-[10px] text-text-muted/0 transition-colors group-hover:text-text-muted/70">
-            {open ? 'hide' : 'details'}
-          </span>
         </button>
       </Collapsible.Trigger>
 

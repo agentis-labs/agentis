@@ -36,16 +36,16 @@ export interface ResolvedDesign {
  * numerals. Color belongs to DATA (status pills, charts, pulses); chrome quiet.
  */
 const FLAGSHIP_VARS: CSSProperties = {
-  '--s-radius': '14px',
+  '--s-radius': '12px',
   '--s-pad': '20px',
-  '--s-gap': '14px',
+  '--s-gap': '16px',
   '--s-card-bg': 'var(--app-card-bg)',
   '--s-card-border': 'var(--app-card-border)',
   '--s-card-shadow': 'var(--app-card-shadow)',
   '--s-kpi-bg': 'var(--app-tile-bg)',
   '--s-kpi-size': '32px',
   '--s-heading-size': '26px',
-  '--s-title-size': '15px',
+  '--s-title-size': '16px',
   '--s-body-size': '13.5px',
   '--s-accent-glow': 'var(--shadow-glow)',
 } as CSSProperties;

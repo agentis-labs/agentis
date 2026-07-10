@@ -217,7 +217,7 @@ export function AgentQuickDetailPanel({
   const dotClass =
     readiness === 'setting_up' ? 'bg-cyan-500' :
     readiness === 'running' ? 'bg-warn' :
-    readiness === 'live' ? 'bg-accent' :
+    readiness === 'live' ? 'bg-success' :
     readiness === 'failed' ? 'bg-danger' : 'bg-text-muted';
 
   const runsToday = agent.runsToday ?? 0;
@@ -348,11 +348,11 @@ export function AgentQuickDetailPanel({
                       <>
                         <span className={clsx(
                           'flex items-center gap-1 text-[12px]',
-                          healthStatus === 'active' ? 'text-accent' : healthStatus === 'error' ? 'text-danger' : 'text-amber-500',
+                          healthStatus === 'active' ? 'text-success' : healthStatus === 'error' ? 'text-danger' : 'text-amber-500',
                         )}>
                           <span className={clsx(
                             'h-1.5 w-1.5 rounded-full',
-                            healthStatus === 'active' ? 'bg-accent' : healthStatus === 'error' ? 'bg-danger' : 'bg-amber-500',
+                            healthStatus === 'active' ? 'bg-success' : healthStatus === 'error' ? 'bg-danger' : 'bg-amber-500',
                           )} />
                           {healthStatus === 'active' ? 'active' : healthStatus === 'needs_action' ? 'needs action' : healthStatus ?? 'verifying'}
                         </span>

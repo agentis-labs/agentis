@@ -1769,7 +1769,7 @@ const REASONING_NUDGE =
   'Write your final answer now as a normal reply, and call any tools you need. Do not return empty content.';
 /** Bumped output budget for the recovery retry, so a reasoning model has room to
  *  emit the answer after the original pass exhausted its budget thinking. */
-const EMPTY_RETRY_MAX_TOKENS = 16_000;
+const EMPTY_RETRY_MAX_TOKENS = 4_096;
 
 /**
  * Per-block char budgets for injected context that grows with workspace state.
