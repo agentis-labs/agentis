@@ -114,7 +114,7 @@ describe('ChannelBridge', () => {
     const { bridge } = buildBridge(ctx, new StubTelegramAdapter());
     const { connection } = bridge.create({
       workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
-      kind: 'telegram', name: 'Workspace Tg', token: 'tok-ws-123456',
+      kind: 'telegram', name: 'Workspace Tg', token: 'fixture-ws',
     });
     expect(connection.agentId).toBeNull();
     expect(bridge.list(ctx.workspace.id).find((c) => c.id === connection.id)?.agentId).toBeNull();
@@ -123,8 +123,8 @@ describe('ChannelBridge', () => {
   it('setDefault designates one connection per kind (single-default invariant) and defaultConnectionFor resolves it', () => {
     const { bridge } = buildBridge(ctx, new StubTelegramAdapter());
     const agentId = seedAgent(ctx);
-    const a = bridge.create({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId, kind: 'telegram', name: 'Tg A', token: 'tok-a-123456' }).connection;
-    const b = bridge.create({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId, kind: 'telegram', name: 'Tg B', token: 'tok-b-123456' }).connection;
+    const a = bridge.create({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId, kind: 'telegram', name: 'Tg A', token: 'fixture-a' }).connection;
+    const b = bridge.create({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId, kind: 'telegram', name: 'Tg B', token: 'fixture-b' }).connection;
 
     // Two active telegram connections → ambiguous (no default).
     expect(bridge.defaultConnectionFor(ctx.workspace.id, 'telegram')).toBeNull();

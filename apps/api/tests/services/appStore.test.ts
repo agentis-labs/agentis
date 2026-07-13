@@ -36,10 +36,10 @@ function seedWorkflow(title = 'Entry'): string {
 }
 
 describe('AppStore', () => {
-  it('creates an app with a derived unique slug and default draft status', () => {
+  it('creates an app with a derived unique slug and default active status', () => {
     const a = store.create(ctx.workspace.id, ctx.user.id, { name: 'Refund Desk', description: 'demo' });
     expect(a.slug).toBe('refund-desk');
-    expect(a.status).toBe('draft');
+    expect(a.status).toBe('active');
     expect(a.version).toBe('0.1.0');
     expect(a.manifest.name).toBe('Refund Desk');
 
@@ -54,17 +54,17 @@ describe('AppStore', () => {
     const updated = store.update(ctx.workspace.id, created.id, {
       name: 'Tickets Pro',
       version: '1.0.0',
-      status: 'published',
-      policy: { shareable: true },
+      status: 'archived',
+      policy: { customCode: 'allowed' },
     });
     expect(updated.name).toBe('Tickets Pro');
     expect(updated.manifest.name).toBe('Tickets Pro');
     expect(updated.manifest.version).toBe('1.0.0');
-    expect(updated.status).toBe('published');
-    expect(updated.policy.shareable).toBe(true);
+    expect(updated.status).toBe('archived');
+    expect(updated.policy.customCode).toBe('allowed');
 
-    expect(store.list(ctx.workspace.id, { status: 'published' })).toHaveLength(1);
-    expect(store.list(ctx.workspace.id, { status: 'draft' })).toHaveLength(0);
+    expect(store.list(ctx.workspace.id, { status: 'archived' })).toHaveLength(1);
+    expect(store.list(ctx.workspace.id, { status: 'active' })).toHaveLength(0);
   });
 
   it('adopts a workflow at create time and lists it', () => {

@@ -1,0 +1,5 @@
+[allowlist]
+description = "Legacy test fixture placeholders"
+regexes = [
+  '''tok-(ws|a|b)-123456''',
+]
