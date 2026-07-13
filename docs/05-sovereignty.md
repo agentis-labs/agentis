@@ -40,7 +40,8 @@ workspace (`workspace_model_config`) or via `AGENTIS_ORCHESTRATOR_*` env vars.
 - **Docker** — a single container (`Dockerfile`, `docker-compose.yml`) bundles better-sqlite3,
   all packages, and the built SPA in one Node process.
 - **Railway** — one-click template (`railway.toml`) with a stateful volume for SQLite.
-- **CLI** (`@agentis-labs/cli`) — `agentis up` (default), `bootstrap`, `backup`, `restore`,
+- **CLI** (`@agentis-labs/cli`) — one-shot `npx @agentis-labs/cli@latest up`, or persistent
+  `npm install -g @agentis-labs/cli` then `agentis up`; also `bootstrap`, `backup`, `restore`,
   `create`, `app {pack,validate,install,test,export}`.
 - **SDK** (`@agentis/sdk`) — programmatic validate/build/test in an isolated transaction.
 

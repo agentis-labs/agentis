@@ -29,6 +29,8 @@ npx @agentis-labs/cli@latest up
 Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed.
 Agentis boots at `http://127.0.0.1:3737`, creates local secrets, initializes SQLite,
 seeds the first operator user, and serves the dashboard from the same process.
+This one-line command is temporary: it runs Agentis through `npx` and does not install
+the `agentis` command permanently.
 
 Prefer a persistent binary?
 
@@ -36,6 +38,9 @@ Prefer a persistent binary?
 npm install -g @agentis-labs/cli
 agentis up
 ```
+
+On Windows, open a new PowerShell after the global install so npm's global command
+shims are picked up on `PATH`.
 
 ## Why Agentis
 
