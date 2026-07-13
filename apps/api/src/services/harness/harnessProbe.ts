@@ -139,6 +139,11 @@ async function detectHarnessesUncached(env: NodeJS.ProcessEnv = process.env): Pr
     env.OPENCLAW_GATEWAY_URL,
     env.OPENCLAW_GATEWAY,
   ));
+  // The gateway URL is one signal, but OpenClaw also ships a local binary (like
+  // Claude/Codex/Cursor/Hermes) — probe PATH for it too, so a locally running
+  // OpenClaw shows up as "found" even before a gateway URL is configured.
+  const openClawBinary = await probeBinaryCandidates(['openclaw'], envWithPath);
+  const openClawFound = Boolean(gatewayUrl) || openClawBinary.ok;
   const httpBaseUrl = firstNonEmpty(
     env.AGENTIS_HTTP_AGENT_BASE_URL,
     env.AGENTIS_HTTP_BASE_URL,
@@ -153,9 +158,15 @@ async function detectHarnessesUncached(env: NodeJS.ProcessEnv = process.env): Pr
     {
       adapterType: 'openclaw',
       harness: 'OpenClaw',
-      status: gatewayUrl ? 'found' : 'not_found',
-      detail: gatewayUrl ? `Gateway URL configured: ${gatewayUrl}` : undefined,
+      status: openClawFound ? 'found' : 'not_found',
+      detail: gatewayUrl
+        ? `Gateway URL configured: ${gatewayUrl}`
+        : openClawBinary.ok
+          ? firstNonEmpty(openClawBinary.detail, 'openclaw binary found on PATH')
+          : undefined,
+      binaryPath: openClawBinary.ok ? openClawBinary.binaryPath : undefined,
       config: gatewayUrl ? { gatewayUrl } : undefined,
+      installCommand: 'Install OpenClaw, then set its Gateway URL below (or export AGENTIS_OPENCLAW_GATEWAY_URL).',
     },
     {
       adapterType: 'http',

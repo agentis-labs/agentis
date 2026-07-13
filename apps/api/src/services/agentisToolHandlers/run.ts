@@ -396,20 +396,24 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         id: 'agentis.memory.write',
         family: 'run',
         description:
-          'Store a memory entry in the WORKSPACE-wide persistent memory. Write only DURABLE, REUSABLE lessons — a rule, '
+          'Store a memory entry in persistent memory. Write only DURABLE, REUSABLE lessons — a rule, '
           + 'a root cause, a standing preference — never transient work product, run ids, or status notes (those are '
           + 'rejected). Give it a SPECIFIC, searchable title (that is how it is found later — cite memories by TITLE, '
-          + 'never by id). Writing the same title again UPDATES the existing memory instead of duplicating it. For '
+          + 'never by id). Writing the same title again UPDATES the existing memory instead of duplicating it. '
+          + 'SCOPE: omit agentId to write WORKSPACE-wide memory (every agent recalls it). Pass agentId to write into '
+          + "ONE specialist's OWN mind — a durable behavioral rule/lesson that agent (and its future sessions) recalls "
+          + 'automatically. Use agent-scoped writes when you CORRECT or constrain a specialist: persist the correction '
+          + 'as a rule in its Brain (kind:"rule") so it is learned, not just pasted into its instructions. For '
           + 'App-scoped, gated learnings prefer agentis.data.promote_memory instead.',
         inputSchema: {
           type: 'object',
           properties: {
             title: { type: 'string' },
             content: { type: 'string' },
-            kind: { type: 'string' },
+            kind: { type: 'string', description: 'fact | preference | pattern | rule | lesson. Use "rule" for a standing behavioral constraint.' },
             importance: { type: 'string' },
             tags: { type: 'string' },
-            agentId: { type: 'string' },
+            agentId: { type: 'string', description: "Target ONE specialist's own mind (agent-scoped). Omit for workspace-wide memory." },
           },
           required: ['title', 'content'],
         },

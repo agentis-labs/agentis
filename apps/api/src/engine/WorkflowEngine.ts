@@ -3324,6 +3324,7 @@ export class WorkflowEngine {
       role: config.agentRole,
       capabilityTags: config.capabilityTags,
       requires: config.requires,
+      preferredAdapter: stringValue(config.preferredAdapter) ?? undefined,
       label: `agent_task node ${node.id}`,
     });
     const agentId = resolved.agentId;
@@ -3987,6 +3988,12 @@ export class WorkflowEngine {
       role?: AgentRole;
       capabilityTags?: string[];
       requires?: AgentRequirements;
+      /**
+       * Runtime/adapter to seed a brand-new role-cast specialist with (see
+       * {@link AgentTaskNodeConfig.preferredAdapter}). Ignored once the role
+       * already has a materialized specialist — operator runtime choices win.
+       */
+      preferredAdapter?: string;
       label: string;
       /**
        * When true a dedicated executor (the AgentSessionRuntime's shared session
@@ -4014,7 +4021,8 @@ export class WorkflowEngine {
       }
     }
     if (validRole && this.deps.specialists) {
-      const id = this.deps.specialists.ensureRole(ctx.workspaceId, ctx.userId, validRole);
+      const runtimeSeed = args.preferredAdapter ? { adapterType: args.preferredAdapter } : undefined;
+      const id = this.deps.specialists.ensureRole(ctx.workspaceId, ctx.userId, validRole, runtimeSeed);
       if (id && hasRuntime(id) && this.#agentSatisfiesRequirements(id, args.requires)) {
         return { agentId: id, role: validRole };
       }

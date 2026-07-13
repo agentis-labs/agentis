@@ -613,6 +613,50 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     },
     [setFlowNodes, setFlowEdges],
   );
+  // Joining a run room is necessarily asynchronous: RUN_CREATED reaches the
+  // workspace room, React commits activeRunId, and only then can this page join
+  // the run room. Fast nodes may already have started or completed in that
+  // window. Hydrate the current durable run state immediately after joining so
+  // those early phases still appear on the canvas instead of requiring refresh.
+  useEffect(() => {
+    if (!activeRunId) return;
+    let cancelled = false;
+    void api<{
+      run: {
+        nodes: Array<{
+          nodeId: string;
+          status: 'completed' | 'failed' | 'running' | 'skipped' | 'pending' | 'waiting';
+        }>;
+      };
+    }>(`/v1/runs/${activeRunId}`)
+      .then(({ run }) => {
+        if (cancelled) return;
+        const statuses = new Map(run.nodes.map((node) => [node.nodeId, node.status]));
+        setFlowNodes((nodes) => nodes.map((node) => {
+          const durable = statuses.get(node.id);
+          const incoming = durable === 'completed' || durable === 'skipped'
+            ? 'completed'
+            : durable === 'failed'
+              ? 'failed'
+              : durable === 'running'
+                ? 'running'
+                : durable === 'waiting'
+                  ? 'waiting'
+                  : null;
+          if (!incoming) return node;
+          const data = (node.data ?? {}) as Record<string, unknown>;
+          const current = data.liveStatus;
+          // Never let a slightly older HTTP snapshot overwrite a terminal
+          // realtime event that arrived while the request was in flight.
+          if ((current === 'completed' || current === 'failed') && incoming !== current) return node;
+          return current === incoming
+            ? node
+            : { ...node, data: { ...data, liveStatus: incoming } };
+        }));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeRunId, setFlowNodes]);
   const clearLiveNodeStatus = useCallback(() => {
     // Fade after a short delay so users see the final state before it clears.
     window.setTimeout(() => {
@@ -3577,5 +3621,4 @@ function KnowledgeCanvasCallout({ onOpen }: { onOpen: () => void }) {
     </div>
   );
 }
-
 

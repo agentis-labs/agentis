@@ -383,8 +383,9 @@ export class ChannelTurnDispatcher {
       }
       // Channel access (CHANNEL-ACCESS-10x): only the owner (default recipient) and
       // listed recipients are answered — unless "answer anyone" is on. A blocked
-      // sender is declined (one line) or silently ignored; an allowed non-owner
-      // carries the operator's free-text rules into the turn as guidance (below).
+      // sender is silently ignored by default, or gets a one-line decline if the
+      // operator opted into that; an allowed non-owner carries the operator's
+      // free-text rules into the turn as guidance (below).
       const access = this.#resolveAccess(input);
       if (!access.allow) {
         this.#publishWorkStep(input, clientTurnId, {

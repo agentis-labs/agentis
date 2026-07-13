@@ -378,6 +378,13 @@ export interface AgentTaskNodeConfig {
   extensions?: string[];
   /** Per-node model override (does not change the agent's global config). */
   modelOverride?: string;
+  /**
+   * Runtime/adapter this task should execute on (e.g. `claude_code`, `codex`,
+   * `cursor`, `hermes_agent`, `openclaw`, `http`). Only takes effect the first
+   * time `agentRole` casts a brand-new specialist for this workspace — an
+   * already-materialized specialist keeps whatever runtime it's connected to.
+   */
+  preferredAdapter?: string;
   /** One-sentence rationale for the chosen specialist role (shown in the inspector). */
   castingReason?: string;
   /**

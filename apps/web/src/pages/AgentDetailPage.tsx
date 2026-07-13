@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine, Pencil, Check, X as XIcon } from 'lucide-react';
+import { ArrowLeft, MessageCircle, Save, Trash2, FileText, Upload, Sparkles, Pin, PinOff, ArrowUpFromLine, Pencil, Check, X as XIcon, Brain, PauseCircle, PlayCircle } from 'lucide-react';
 import { api, apiErrorMessage } from '../lib/api';
 import { openRunModal } from '../lib/runModal';
 import { useToast } from '../components/shared/Toast';
@@ -119,7 +119,26 @@ export function AgentDetailPage() {
   const [allSpaces, setAllSpaces] = useState<Array<{ id: string; name: string; parentDomainId?: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [pausing, setPausing] = useState(false);
   const installSession = useAgentInstallSession(agent?.id);
+
+  async function togglePause() {
+    if (!agent) return;
+    const next = !(agent.isPaused ?? false);
+    setPausing(true);
+    // Optimistic: reflect immediately so the header button state doesn't lag.
+    setAgent((prev) => (prev ? { ...prev, isPaused: next } : prev));
+    try {
+      await api(`/v1/agents/${agent.id}`, { method: 'PATCH', body: JSON.stringify({ isPaused: next }) });
+      toast.success(next ? `Paused ${agent.name}` : `Resumed ${agent.name}`);
+      void refresh();
+    } catch (err) {
+      setAgent((prev) => (prev ? { ...prev, isPaused: !next } : prev));
+      toast.error(next ? 'Could not pause agent' : 'Could not resume agent', apiErrorMessage(err));
+    } finally {
+      setPausing(false);
+    }
+  }
 
   async function refresh() {
     if (!id) return;
@@ -247,6 +266,25 @@ export function AgentDetailPage() {
               }))}
             >
               Talk
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              iconLeft={<Brain size={12} />}
+              onClick={() => nav(`/agents?tab=brain&agentId=${encodeURIComponent(agent.id)}`)}
+              title={`Open ${agent.name}'s Brain — the memories and skills it carries`}
+            >
+              Brain
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              iconLeft={agent.isPaused ? <PlayCircle size={12} /> : <PauseCircle size={12} />}
+              disabled={pausing}
+              onClick={() => void togglePause()}
+              title={agent.isPaused ? 'Resume this agent' : 'Pause this agent — it stops taking work until resumed'}
+            >
+              {agent.isPaused ? 'Resume' : 'Pause'}
             </Button>
             <Button variant="secondary" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => void handlePackageAgent()}>Package</Button>
             <Button variant="danger" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => void handleDelete()}>Delete</Button>

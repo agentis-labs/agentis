@@ -17,6 +17,14 @@ let socketConnected = false;
 let socketConnecting = true;
 let fallbackOpenCount = 0;
 
+type RealtimeRoomKind = 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room';
+
+interface ActiveSubscription {
+  kind: RealtimeRoomKind;
+  args: Record<string, string>;
+  count: number;
+}
+
 function realtimeUrl(): string | undefined {
   const configured =
     (import.meta.env.VITE_AGENTIS_REALTIME_URL as string | undefined)
@@ -49,6 +57,11 @@ const statusListeners = new Set<(s: RealtimeStatus) => void>();
 const localListeners = new Map<string, Set<(env: RealtimeEnvelope) => void>>();
 const workspaceStreams = new Map<string, WorkspaceStreamRecord>();
 const runStreams = new Map<string, WorkspaceStreamRecord>();
+// Socket.IO rooms belong to one physical socket, not to the logical client.
+// A reconnect therefore drops every room even though the React subscriptions
+// are still mounted. Keep the desired room set client-side and replay it for
+// each new connection.
+const activeSubscriptions = new Map<string, ActiveSubscription>();
 
 interface WorkspaceStreamRecord {
   count: number;
@@ -108,6 +121,7 @@ function getSocket(): Socket {
     reconnection: true,
   });
   socket.on('connect', () => {
+    replayActiveSubscriptions(socket);
     socketConnected = true;
     socketConnecting = false;
     refreshRealtimeStatus();
@@ -134,7 +148,12 @@ function getSocket(): Socket {
       'different origin than the API, set VITE_AGENTIS_REALTIME_URL to the API URL.',
     );
   });
+  // Rebind every mounted useRealtime listener when auth rotation creates a new
+  // socket. Previously those listeners stayed on the disconnected instance
+  // until the entire page was refreshed.
+  for (const event of localListeners.keys()) socket.on(event, forwardSocketEnvelope);
   sharedSocket = socket;
+  restoreFallbackStreams();
   return sharedSocket;
 }
 
@@ -153,7 +172,15 @@ export function disconnectRealtime() {
 }
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('agentis:auth-changed', disconnectRealtime);
+  window.addEventListener('agentis:auth-changed', () => {
+    disconnectRealtime();
+    // Silent access-token refresh happens without remounting the application.
+    // Recreate the transport immediately when live consumers still exist; a
+    // logout has no access token and intentionally remains disconnected.
+    if (tokens.access() && (localListeners.size > 0 || activeSubscriptions.size > 0)) {
+      getSocket();
+    }
+  });
 }
 
 export interface RealtimeEnvelope<TPayload = unknown> {
@@ -167,12 +194,20 @@ function addLocalListener(event: string, handler: (env: RealtimeEnvelope) => voi
   if (!listeners) {
     listeners = new Set();
     localListeners.set(event, listeners);
+    sharedSocket?.on(event, forwardSocketEnvelope);
   }
   listeners.add(handler);
   return () => {
     listeners?.delete(handler);
-    if (listeners?.size === 0) localListeners.delete(event);
+    if (listeners?.size === 0) {
+      localListeners.delete(event);
+      sharedSocket?.off(event, forwardSocketEnvelope);
+    }
   };
+}
+
+function forwardSocketEnvelope(env: RealtimeEnvelope): void {
+  emitLocalRealtime(env);
 }
 
 function emitLocalRealtime(env: RealtimeEnvelope): void {
@@ -185,53 +220,92 @@ export function useRealtime(events: string[], handler: (env: RealtimeEnvelope) =
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
   useEffect(() => {
-    const sock = getSocket();
     const wrapped = (env: RealtimeEnvelope) => handlerRef.current(env);
-    for (const ev of events) sock.on(ev, wrapped);
     const unsubs = events.map((ev) => addLocalListener(ev, wrapped));
+    getSocket();
     return () => {
-      for (const ev of events) sock.off(ev, wrapped);
       unsubs.forEach((unsubscribe) => unsubscribe());
     };
   }, [events.join('|')]);
 }
 
 export function rtSubscribe(
-  kind: 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room',
+  kind: RealtimeRoomKind,
   args: Record<string, string>,
 ): () => void {
-  const sock = getSocket();
   const workspaceId = args.workspaceId ?? workspaceStore.get() ?? '';
   const nextArgs = { ...args, workspaceId };
-  if (kind === 'workspace') sock.emit('subscribe:workspace', workspaceId);
-  else sock.emit(`subscribe:${kind}`, nextArgs);
-  const stopWorkspaceStream = kind === 'workspace' && workspaceId
-    ? acquireWorkspaceStream(workspaceId)
-    : undefined;
-  // Run-scoped SSE fallback: when watching a run, stream its events directly from
-  // the API so node/run status + agent reasoning flow even if the websocket is
-  // down. Dedup against the socket happens inside the stream (socketConnected).
-  const stopRunStream = kind === 'run' && args.runId
-    ? acquireRunStream(args.runId)
-    : undefined;
+  const key = subscriptionKey(kind, nextArgs);
+  const existing = activeSubscriptions.get(key);
+  if (existing) existing.count += 1;
+  else {
+    activeSubscriptions.set(key, { kind, args: nextArgs, count: 1 });
+    if (kind === 'workspace' && workspaceId) acquireWorkspaceStream(workspaceId);
+    // Run-scoped SSE fallback streams events directly from the API so node/run
+    // status and reasoning continue even while the socket is reconnecting.
+    if (kind === 'run' && args.runId) acquireRunStream(args.runId);
+  }
+  const sock = getSocket();
+  // A disconnected Socket.IO client buffers emits, but replay-on-connect is the
+  // canonical path. Only send immediately when this physical socket is joined.
+  if (!existing && sock.connected) emitRoomSubscription(sock, kind, nextArgs, true);
+
+  let stopped = false;
   return () => {
-    stopWorkspaceStream?.();
-    stopRunStream?.();
-    if (kind === 'workspace') sock.emit('unsubscribe:workspace', workspaceId);
-    else sock.emit(`unsubscribe:${kind}`, nextArgs);
+    if (stopped) return;
+    stopped = true;
+    const active = activeSubscriptions.get(key);
+    if (!active) return;
+    active.count -= 1;
+    if (active.count > 0) return;
+    activeSubscriptions.delete(key);
+    if (kind === 'workspace' && workspaceId) releaseWorkspaceStream(workspaceId);
+    if (kind === 'run' && args.runId) releaseRunStream(args.runId);
+    if (sharedSocket?.connected) emitRoomSubscription(sharedSocket, kind, nextArgs, false);
   };
 }
 
-function acquireRunStream(runId: string): () => void {
+function subscriptionKey(kind: RealtimeRoomKind, args: Record<string, string>): string {
+  const fields = Object.entries(args).sort(([left], [right]) => left.localeCompare(right));
+  return `${kind}:${JSON.stringify(fields)}`;
+}
+
+function emitRoomSubscription(
+  socket: Socket,
+  kind: RealtimeRoomKind,
+  args: Record<string, string>,
+  subscribe: boolean,
+): void {
+  const action = subscribe ? 'subscribe' : 'unsubscribe';
+  if (kind === 'workspace') socket.emit(`${action}:workspace`, args.workspaceId);
+  else socket.emit(`${action}:${kind}`, args);
+}
+
+function replayActiveSubscriptions(socket: Socket): void {
+  for (const subscription of activeSubscriptions.values()) {
+    emitRoomSubscription(socket, subscription.kind, subscription.args, true);
+  }
+}
+
+function restoreFallbackStreams(): void {
+  for (const subscription of activeSubscriptions.values()) {
+    if (subscription.kind === 'workspace' && subscription.args.workspaceId) {
+      acquireWorkspaceStream(subscription.args.workspaceId);
+    }
+    if (subscription.kind === 'run' && subscription.args.runId) {
+      acquireRunStream(subscription.args.runId);
+    }
+  }
+}
+
+function acquireRunStream(runId: string): void {
   const existing = runStreams.get(runId);
   if (existing) {
-    existing.count += 1;
-    return () => releaseRunStream(runId);
+    return;
   }
   const record: WorkspaceStreamRecord = { count: 1, controller: new AbortController() };
   runStreams.set(runId, record);
   void runRunStream(runId, record);
-  return () => releaseRunStream(runId);
 }
 
 function releaseRunStream(runId: string): void {
@@ -295,16 +369,14 @@ export function emitRealtime(event: string, payload: unknown) {
   getSocket().emit(event, payload);
 }
 
-function acquireWorkspaceStream(workspaceId: string): () => void {
+function acquireWorkspaceStream(workspaceId: string): void {
   const existing = workspaceStreams.get(workspaceId);
   if (existing) {
-    existing.count += 1;
-    return () => releaseWorkspaceStream(workspaceId);
+    return;
   }
   const record: WorkspaceStreamRecord = { count: 1, controller: new AbortController() };
   workspaceStreams.set(workspaceId, record);
   void runWorkspaceStream(workspaceId, record);
-  return () => releaseWorkspaceStream(workspaceId);
 }
 
 function releaseWorkspaceStream(workspaceId: string): void {

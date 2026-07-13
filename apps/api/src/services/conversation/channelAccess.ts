@@ -29,7 +29,7 @@ export interface ChannelAccess {
   answerAnyone?: boolean;
   /** How the agent should behave with anyone not listed (used when answerAnyone). */
   anyoneRules?: string;
-  /** What to do with an unknown sender when answerAnyone is off. Default: decline. */
+  /** What to do with an unknown sender when answerAnyone is off. Default: ignore (send nothing). */
   unknownReply?: 'ignore' | 'decline';
 }
 
@@ -108,7 +108,7 @@ export function resolveChannelAccess(args: {
       isOwner: false,
     };
   }
-  return { allow: false, deny: access.unknownReply ?? 'decline', who, isOwner: false };
+  return { allow: false, deny: access.unknownReply ?? 'ignore', who, isOwner: false };
 }
 
 /**

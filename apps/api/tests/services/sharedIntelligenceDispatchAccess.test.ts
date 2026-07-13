@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
+import { MemoryStore } from '../../src/services/memory/memoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -74,6 +75,44 @@ describe('SharedIntelligenceService — dispatch retrieval marks access', () => 
       limit: 5,
     });
     expect(hits.some((h) => h.content.includes('Robson Prado'))).toBe(true);
+  });
+
+  it('honors an agent-scoped governing rule as constitutional for that agent only, regardless of query relevance', async () => {
+    const memory = new MemoryStore(ctx.db, ctx.logger);
+    const closerId = 'agent-closer';
+    // A hard guardrail pinned to ONE specialist's mind (scopeId = agentId), the
+    // way the orchestrator should persist a correction (kind:'rule').
+    const ruleId = memory.write({
+      workspaceId: ctx.workspace.id,
+      scopeId: closerId,
+      kind: 'rule',
+      source: 'operator',
+      title: 'Never answer as the store',
+      content: 'The Closer must never draft or send a message as if it were the store. Outreach only, workflow-gated.',
+      importance: 0.7,
+    });
+
+    // Dispatch for the Closer on a task that has NOTHING to do with the rule —
+    // a query-relevance tier would never surface it; the constitutional tier must.
+    const own = await brain.buildDispatchContext({
+      workspaceId: ctx.workspace.id,
+      agentId: closerId,
+      scopeId: closerId,
+      taskDescription: 'Summarize this month sales spreadsheet into three bullets.',
+      limit: 8,
+    });
+    expect(own.atomIds).toContain(ruleId);
+    expect(own.block).toMatch(/never answer as the store/i);
+
+    // A DIFFERENT agent must not inherit another specialist's private guardrail.
+    const other = await brain.buildDispatchContext({
+      workspaceId: ctx.workspace.id,
+      agentId: 'agent-other',
+      scopeId: 'agent-other',
+      taskDescription: 'Summarize this month sales spreadsheet into three bullets.',
+      limit: 8,
+    });
+    expect(other.atomIds).not.toContain(ruleId);
   });
 
   it('does not touch episodes that are not surfaced', async () => {

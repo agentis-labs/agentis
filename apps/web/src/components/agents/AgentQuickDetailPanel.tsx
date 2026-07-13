@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRight, Check, Download, Loader2, MessageCircle, Send, X } from 'lucide-react';
+import { ArrowRight, Brain, Check, Download, Loader2, MessageCircle, PauseCircle, PlayCircle, Send, X } from 'lucide-react';
 import clsx from 'clsx';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api } from '../../lib/api';
@@ -117,6 +117,8 @@ export function AgentQuickDetailPanel({
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const [liveLine, setLiveLine] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [pausedOverride, setPausedOverride] = useState<boolean | null>(null);
   const agentIdRef = useRef<string | null>(null);
 
   // Reset transient live state whenever a different agent is selected.
@@ -126,8 +128,26 @@ export function AgentQuickDetailPanel({
       setLiveStatus(null);
       setLiveLine(null);
       setCancelling(false);
+      setPausedOverride(null);
     }
   }, [agent?.id]);
+
+  const togglePause = useCallback(async () => {
+    if (!agent) return;
+    const next = !(pausedOverride ?? agent.isPaused ?? false);
+    setPausing(true);
+    setPausedOverride(next); // optimistic
+    try {
+      await api(`/v1/agents/${agent.id}`, { method: 'PATCH', body: JSON.stringify({ isPaused: next }) });
+      toast.success(next ? `Paused ${agent.name}` : `Resumed ${agent.name}`);
+      onAgentUpdated?.();
+    } catch (err) {
+      setPausedOverride(!next);
+      toast.error(next ? 'Could not pause agent' : 'Could not resume agent', String(err));
+    } finally {
+      setPausing(false);
+    }
+  }, [agent, pausedOverride, toast, onAgentUpdated]);
 
   useEffect(() => {
     if (!open || !agent) return;
@@ -284,6 +304,31 @@ export function AgentQuickDetailPanel({
             className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-btn border border-line bg-surface-2 px-3 text-[13px] font-medium text-text-secondary transition-colors hover:border-line-strong hover:text-text-primary"
           >
             Open agent <ArrowRight size={13} />
+          </button>
+        </div>
+
+        <div className="flex gap-2 border-b border-line px-5 py-2.5">
+          {(() => {
+            const paused = pausedOverride ?? agent.isPaused ?? false;
+            return (
+              <button
+                type="button"
+                onClick={() => void togglePause()}
+                disabled={pausing}
+                title={paused ? 'Resume this agent' : 'Pause this agent — it stops taking work until resumed'}
+                className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-btn border border-line bg-surface-2 px-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-line-strong hover:text-text-primary disabled:opacity-50"
+              >
+                {paused ? <PlayCircle size={13} /> : <PauseCircle size={13} />} {paused ? 'Resume' : 'Pause'}
+              </button>
+            );
+          })()}
+          <button
+            type="button"
+            onClick={() => nav(`/agents?tab=brain&agentId=${encodeURIComponent(agent.id)}`)}
+            title={`Open ${agent.name}'s Brain — the memories and skills it carries`}
+            className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-btn border border-line bg-surface-2 px-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-line-strong hover:text-text-primary"
+          >
+            <Brain size={13} /> Brain
           </button>
         </div>
 

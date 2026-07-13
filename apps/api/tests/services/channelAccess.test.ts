@@ -60,24 +60,24 @@ describe('resolveChannelAccess', () => {
     expect(buildAccessAddendum(d)).toContain('Take a message');
   });
 
-  it('blocks unknown senders when answerAnyone is off (decline by default)', () => {
+  it('blocks unknown senders when answerAnyone is off (silently ignored by default)', () => {
     const d = resolveChannelAccess({
       access: { recipients: [], answerAnyone: false },
       defaultChatId: owner,
       senderHandle: '999@s.whatsapp.net',
     });
     expect(d.allow).toBe(false);
-    expect(d.deny).toBe('decline');
+    expect(d.deny).toBe('ignore');
   });
 
-  it('honors ignore as the unknown-sender policy', () => {
+  it('honors decline as an explicit opt-in unknown-sender policy', () => {
     const d = resolveChannelAccess({
-      access: { recipients: [], answerAnyone: false, unknownReply: 'ignore' },
+      access: { recipients: [], answerAnyone: false, unknownReply: 'decline' },
       defaultChatId: owner,
       senderHandle: '999@s.whatsapp.net',
     });
     expect(d.allow).toBe(false);
-    expect(d.deny).toBe('ignore');
+    expect(d.deny).toBe('decline');
   });
 
   it('falls back to a conservative default when an allowed stranger has no rules', () => {

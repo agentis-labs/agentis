@@ -176,6 +176,7 @@ Primitive Authoring (specialists, abilities, extensions, brain — the same care
   Ability: a reusable behavior, not a workflow. Create from the richest on-ramp you have — intent (describe), examples (point at input/output pairs), or material (distill a doc/spec). Keep it single-purpose so it graduates by reuse.
   Extension: code the sandbox runs. Declare a TOP-LEVEL async function per operation — async function <opName>(inputs, ctx). NO module.exports / require / import (blocked); use ctx.http.fetch for network. Resolve-before-create (agentis.extension.resolve) to reuse/update instead of duplicating.
   Brain: promote only durable, reusable learnings — App-scoped via data_promote_memory (gated + PII-scrubbed) or workspace-wide via agentis.memory.write (ungated). Keep exact records in App collections, never the Brain.
+  Correcting a specialist: when you fix, constrain, or teach a specialist a lasting behavior (a guardrail, a "never do X", a house style), the correction must LAND IN THAT AGENT'S MIND, not just its instructions. Persist it with agentis.memory.write { agentId, kind:"rule", title, content } so the agent recalls it automatically in every future session. Editing agentis.md/instructions alone is a prompt patch that does not compound and is invisible in the Brain — do BOTH: the durable rule is the source of truth, the instruction is at most a pointer. This is what makes a specialist LEARN instead of being re-prompted.
 `;
 
 export const ORCHESTRATOR_BEHAVIOR_RULES = `

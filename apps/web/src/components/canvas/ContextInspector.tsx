@@ -3,10 +3,10 @@ import { Check, Code2, LayoutTemplate, Search, Settings2 } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { ExtensionCombobox } from './ExtensionCombobox';
-import { SpecialistCombobox } from './SpecialistCombobox';
 import { SchemaDrivenFields } from './genericSchemaForm';
 import { schemas } from '@agentis/core';
 import { ModelChooser } from '../agents/ModelChooser';
+import { SelectedAgentModelControl } from '../agents/SelectedAgentModelControl';
 import type { InstalledExtensionOption } from './ExtensionCombobox';
 import { describeCron, nextFires, CRON_PRESETS } from '../../lib/cronPreview';
 import { NodeTestRunner } from './NodeTestRunner';
@@ -751,43 +751,17 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
   const agentRole = asStr(data.agentRole);
   const boundAgent = agents.find((a) => a.id === agentId);
   const adapterType = boundAgent?.adapterType;
-  const castingReason = asStr((data as { castingReason?: unknown }).castingReason);
   return (
     <>
-      {/* ORCHESTRATOR-CREATION §4: a node configured with a specialist role is valid —
-          show it as a badge so the inspector doesn't look empty/broken. Roles are an
-          OPEN vocabulary (packages/core/src/types/specialist.ts): pick a live/draft
-          specialist or author a brand-new role on the spot. */}
-      <Field label="Specialist" hint={agentRole ? 'Resolved to a workspace specialist at run time. Bind a specific agent below to override.' : 'Optional. Pick a specialist, or bind a specific agent below.'}>
-        <SpecialistCombobox value={agentRole} onChange={(role) => update({ agentRole: role || undefined })} />
-        {agentRole && castingReason && (
-          <p className="mt-1 text-[10px] italic text-text-muted">{castingReason}</p>
-        )}
-      </Field>
-      {agentRole && (
-        <Field label="Tool-use loop" hint="Run this task in-process with the role's tools (file I/O, code, search) instead of an external agent.">
-          <label className="flex items-center gap-2 text-[11px] text-text-secondary">
-            <input
-              type="checkbox"
-              checked={Boolean((data as { useRoleTools?: unknown }).useRoleTools)}
-              onChange={(e) => update({ useRoleTools: e.target.checked || undefined })}
-            />
-            Run with role tools
-          </label>
-          {Boolean((data as { useRoleTools?: unknown }).useRoleTools) && (
-            <input
-              type="number"
-              min={1}
-              max={12}
-              className={`${selectCls} mt-2`}
-              placeholder="Max steps (default 6)"
-              value={asStr((data as { maxToolSteps?: unknown }).maxToolSteps)}
-              onChange={(e) => update({ maxToolSteps: e.target.value ? Number(e.target.value) : undefined })}
-            />
-          )}
+      {/* Legacy role-cast nodes (authored by the orchestrator, no explicit agentId)
+          still show the role so it isn't silently hidden — but binding a specific
+          Agent below is the primary path, so nothing here offers to pick a NEW role. */}
+      {agentRole && !agentId && (
+        <Field label="Specialist role" hint="This task casts to a workspace specialist at run time. Bind a specific agent below to pin it directly.">
+          <div className="rounded-input border border-line bg-surface-2 px-2.5 py-1.5 text-[12px] text-text-secondary">{agentRole}</div>
         </Field>
       )}
-      <Field label="Agent" hint="Bind a specific agent (overrides the role).">
+      <Field label="Agent" hint="Bind the agent that runs this task.">
         <select className={selectCls} value={agentId} onChange={(e) => update({ agentId: e.target.value || undefined })}>
           <option value="">{agentRole ? `— Auto (${agentRole} specialist) —` : '— Pick an agent —'}</option>
           {agents.map((a) => (
@@ -801,7 +775,13 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
         )}
       </Field>
       <CapabilityRequirements data={data} update={update} agents={agents} onAgentsChange={onAgentsChange} />
-      <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
+      {agentId ? (
+        <Accordion title="Runtime & model" defaultOpen>
+          <SelectedAgentModelControl agentId={agentId} adapterType={adapterType} onUpdated={onAgentsChange} variant="rail" />
+        </Accordion>
+      ) : (
+        <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
+      )}
       {session && (
         <Field label="Session behavior" hint="Persistent sessions can pause for input and resume without losing context.">
           <label className="flex items-center gap-2 text-[11px] text-text-secondary">
@@ -984,16 +964,30 @@ function CapabilityRequirements({ data, update, agents, onAgentsChange }: { data
 }
 
 function ModelPolicyField({ data, update, adapterType, agentId }: { data: Record<string, unknown>; update: NodeFormProps['update']; adapterType?: string; agentId?: string }) {
-  const [catalogAdapter, setCatalogAdapter] = useState<AdapterType>((adapterType as AdapterType | undefined) ?? 'http');
+  const preferredAdapter = asStr(data.preferredAdapter);
+  const [catalogAdapter, setCatalogAdapter] = useState<AdapterType>(
+    (adapterType as AdapterType | undefined) ?? (preferredAdapter as AdapterType | undefined) ?? 'http',
+  );
   useEffect(() => {
     if (adapterType) setCatalogAdapter(adapterType as AdapterType);
   }, [adapterType]);
   return (
     <Accordion title="LLM model policy" defaultOpen>
       {!adapterType && (
-        <Field label="Model catalog" hint="Used to browse compatible models before a runtime agent is bound.">
-          <select className={selectCls} value={catalogAdapter} onChange={(event) => setCatalogAdapter(event.target.value as AdapterType)}>
-            <option value="http">Provider catalog</option>
+        <Field
+          label="Runtime"
+          hint="Which runtime this task should run on. Only takes effect the first time this role's specialist is created — an already-connected specialist keeps its runtime."
+        >
+          <select
+            className={selectCls}
+            value={catalogAdapter}
+            onChange={(event) => {
+              const next = event.target.value as AdapterType;
+              setCatalogAdapter(next);
+              update({ preferredAdapter: next === 'http' ? undefined : next });
+            }}
+          >
+            <option value="http">Provider catalog (auto)</option>
             <option value="openclaw">OpenClaw</option>
             <option value="claude_code">Claude Code</option>
             <option value="codex">Codex</option>

@@ -855,7 +855,15 @@ export class SharedIntelligenceService {
     // crowd out the prompt. A "never email before 9am" rule must be present even
     // when the task never mentions email.
     const constitutionalCap = Math.min(limit, CONSTITUTIONAL_MAX);
-    const charter = this.#loadConstitutionalAtoms(args.workspaceId, constitutionalCap);
+    // §C7 — a hard rule the operator (or orchestrator) pinned to ONE specialist's
+    // mind (scopeId = agentId) must be honored on every dispatch of that agent,
+    // exactly like a workspace charter rule — not left to query-relevance. Pass
+    // the dispatched agent's own scopes so scoped governing atoms join the charter.
+    const agentScopes = Array.from(new Set(
+      [args.agentId ?? null, args.scopeId ?? null, ...(args.scopeIds ?? [])]
+        .filter((s): s is string => Boolean(s)),
+    ));
+    const charter = this.#loadConstitutionalAtoms(args.workspaceId, constitutionalCap, agentScopes);
     const charterIds = new Set(charter.map((c) => c.id));
 
     // Tier 2 — relevance: everything else, retrieved semantically, filling the
@@ -1124,17 +1132,24 @@ export class SharedIntelligenceService {
    * (how authored workspace/decisions/workflow context is stored). Ranked by
    * importance × trust × recency and capped, so the most binding survive.
    */
-  #loadConstitutionalAtoms(workspaceId: string, cap: number): BrainSearchResult[] {
+  #loadConstitutionalAtoms(workspaceId: string, cap: number, scopeIds: string[] = []): BrainSearchResult[] {
     if (cap <= 0) return [];
     const now = Date.now();
 
     // §B4 — one substrate. Operator-authored / governing episodes (workspace
     // memory now lives here too) inject as constitutional, so a hard rule is
     // honored on every dispatch regardless of how it was authored.
+    // §C7 — workspace-scoped charter (scopeId NULL) is always included; when a
+    // dispatch names the operating agent's own scope(s), scoped governing rules
+    // (a guardrail pinned to that specialist's mind) join it so they are honored
+    // every turn for that agent, not only when query-relevant.
+    const scopeFilter = scopeIds.length > 0
+      ? or(isNull(schema.memoryEpisodes.scopeId), inArray(schema.memoryEpisodes.scopeId, scopeIds))
+      : isNull(schema.memoryEpisodes.scopeId);
     const epRows = this.db.select().from(schema.memoryEpisodes)
       .where(and(
         eq(schema.memoryEpisodes.workspaceId, workspaceId),
-        isNull(schema.memoryEpisodes.scopeId),
+        scopeFilter,
         isNull(schema.memoryEpisodes.archivedAt),
         inArray(schema.memoryEpisodes.source, ['operator_write', 'seed', 'system_write']),
       ))

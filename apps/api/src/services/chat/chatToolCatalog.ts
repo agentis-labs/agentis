@@ -519,9 +519,13 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.memory.write',
     description:
-      'Store a new memory entry in the workspace persistent memory. Use this when you ' +
+      'Store a new memory entry in persistent memory. Use this when you ' +
       'want to remember something important for the future: decisions made, key facts, ' +
-      'learnings from a task, or instructions to preserve. Memory persists across sessions.',
+      'learnings from a task, or instructions to preserve. Memory persists across sessions. ' +
+      'SCOPE: omit agentId for WORKSPACE-wide memory; pass agentId to write into ONE ' +
+      "specialist's OWN mind. When you CORRECT or constrain a specialist, persist the " +
+      'correction as an agent-scoped rule (kind:"rule", agentId set) so the agent LEARNS it ' +
+      'and recalls it automatically — do not rely only on editing its instructions.',
     parameters: {
       type: 'object',
       properties: {
@@ -547,7 +551,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         },
         agentId: {
           type: 'string',
-          description: 'Associate this memory with a specific agent.',
+          description: "Target ONE specialist's own mind (agent-scoped). Omit for workspace-wide memory.",
         },
       },
       required: ['title', 'content'],
