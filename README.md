@@ -24,24 +24,16 @@ and a live product surface they can operate with you.
 
 ---
 
-## Start in one line
-
-```bash
-npx @agentis-labs/cli@latest up
-```
-
-Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed.
-Agentis boots at `http://127.0.0.1:3737`, creates local secrets, initializes SQLite,
-seeds the first operator user, and serves the dashboard from the same process.
-This one-line command is temporary: it runs Agentis through `npx` and does not install
-the `agentis` command permanently.
-
-Prefer a persistent binary?
+## Install
 
 ```bash
 npm install -g @agentis-labs/cli
 agentis up
 ```
+
+Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed.
+Agentis boots at `http://127.0.0.1:3737`, creates local secrets, initializes SQLite,
+seeds the first operator user, and serves the dashboard from the same process.
 
 On Windows, open a new PowerShell after the global install so npm's global command
 shims are picked up on `PATH`.
@@ -111,8 +103,9 @@ The seeded operator credential is printed once. Everything runtime lives under
 
 ## Platform Map
 
-Agentis is organized around seven core systems. The full technical guide lives in
-[`docs/`](./docs/00-foundation.md):
+Agentis is organized around seven core systems. The public technical guide lives at
+[docs.useagentis.com](https://docs.useagentis.com). The source docs in this repository
+mirror the same architecture:
 
 | System | What it gives you |
 |--------|-------------------|

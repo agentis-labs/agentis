@@ -4,7 +4,7 @@
   "private": true,
   "description": "Agentis — the operating system for agentic software.",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/agentis-labs/agentis#readme",
+  "homepage": "https://useagentis.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/agentis-labs/agentis.git"
