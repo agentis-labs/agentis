@@ -1,13 +1,18 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   AgentisError,
   schemas,
+  type ActiveWorkflowSummary,
+  type AppActivationResult,
+  type AppDeploymentSummary,
+  type AppWorkflowDeploymentRow,
   type ListenerConfig,
   type TriggerNodeConfig,
   type WorkflowGraph,
   type WorkflowNode,
 } from '@agentis/core';
+import { nextCronFire } from '../cronNextFire.js';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { TriggerRuntime } from '../../engine/TriggerRuntime.js';
@@ -231,6 +236,221 @@ export class WorkflowTriggerDeploymentService {
     return this.#present(fresh);
   }
 
+  // ─────────────────────────────────────────────
+  // App-level always-on lifecycle
+  // ─────────────────────────────────────────────
+  //
+  // An App is multi-workflow, so "going live" means arming every workflow that
+  // authors an unattended trigger. These methods COMPOSE the per-workflow
+  // `activate` / `setStatus` above (never a forked activation path) so the App
+  // lifecycle stays consistent with the canvas one, SWIFT arming gate included.
+
+  /** Composite activation state of an App across all its bound workflows. */
+  getForApp(workspaceId: string, appId: string): AppDeploymentSummary {
+    const workflows = this.#appWorkflows(workspaceId, appId);
+    const rows: AppWorkflowDeploymentRow[] = [];
+    const listeners = { connected: 0, events: 0, runs: 0, errors: 0 };
+    let armable = 0;
+    let armed = 0;
+    for (const wf of workflows) {
+      const authored = authoredTriggerType(wf.graph as WorkflowGraph);
+      const effective = authored ? effectiveTriggerType(authored) : null;
+      const dep = this.get(workspaceId, wf.id);
+      if (!effective || effective === 'manual') {
+        rows.push({ workflowId: wf.id, title: wf.title, triggerType: 'manual', status: 'manual', lastFiredAt: dep?.lastFiredAt ?? null });
+        continue;
+      }
+      armable += 1;
+      const status = dep && dep.triggerType !== 'manual' ? dep.status : 'unarmed';
+      if (status === 'active') {
+        armed += 1;
+        const health = dep?.health as { connected?: boolean; eventCount?: number; fireCount?: number; status?: string } | null | undefined;
+        if (health) {
+          if (health.connected) listeners.connected += 1;
+          listeners.events += Number(health.eventCount ?? 0);
+          listeners.runs += Number(health.fireCount ?? 0);
+          if (health.status === 'error') listeners.errors += 1;
+        }
+      }
+      rows.push({
+        workflowId: wf.id,
+        title: wf.title,
+        triggerType: effective,
+        status,
+        lastFiredAt: dep?.lastFiredAt ?? null,
+        ...(effective === 'persistent_listener' ? { health: dep?.health } : {}),
+      });
+    }
+    const status: AppDeploymentSummary['status'] =
+      armable === 0 ? 'none' : armed === 0 ? 'paused' : armed === armable ? 'live' : 'partial';
+    return { appId, status, armable, armed, listeners, workflows: rows };
+  }
+
+  /**
+   * Every "always-on" workflow across the workspace — one whose entry trigger is
+   * currently ARMED (active, non-manual). The workspace-wide source for /home's
+   * Active section and any platform-wide live indicator.
+   */
+  listActive(workspaceId: string): ActiveWorkflowSummary[] {
+    const armed = this.db
+      .select()
+      .from(schema.triggers)
+      .where(and(eq(schema.triggers.workspaceId, workspaceId), eq(schema.triggers.status, 'active')))
+      .all()
+      .filter((t) => t.triggerType !== 'manual');
+
+    const out: ActiveWorkflowSummary[] = [];
+    for (const t of armed) {
+      const wf = this.db
+        .select({ id: schema.workflows.id, title: schema.workflows.title, appId: schema.workflows.appId })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.id, t.workflowId))
+        .get();
+      if (!wf) continue;
+      const app = wf.appId
+        ? this.db.select({ name: schema.apps.name }).from(schema.apps).where(eq(schema.apps.id, wf.appId)).get()
+        : null;
+      // Recent history in one read — the newest doubles as `lastRun`.
+      const recentRows = this.db
+        .select({ id: schema.workflowRuns.id, status: schema.workflowRuns.status, startedAt: schema.workflowRuns.startedAt, completedAt: schema.workflowRuns.completedAt, createdAt: schema.workflowRuns.createdAt })
+        .from(schema.workflowRuns)
+        .where(and(eq(schema.workflowRuns.workspaceId, workspaceId), eq(schema.workflowRuns.workflowId, wf.id)))
+        .orderBy(desc(schema.workflowRuns.createdAt))
+        .limit(8)
+        .all();
+      const recentRuns = recentRows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        at: r.startedAt ?? r.createdAt,
+        durationMs: r.startedAt && r.completedAt ? Math.max(0, Date.parse(r.completedAt) - Date.parse(r.startedAt)) : null,
+      }));
+      const lastRun = recentRuns[0] ?? null;
+      // An active run can be older than the recent window (parked WAITING/PAUSED).
+      const activeRun = this.db
+        .select({ id: schema.workflowRuns.id, status: schema.workflowRuns.status, startedAt: schema.workflowRuns.startedAt, createdAt: schema.workflowRuns.createdAt })
+        .from(schema.workflowRuns)
+        .where(and(
+          eq(schema.workflowRuns.workspaceId, workspaceId),
+          eq(schema.workflowRuns.workflowId, wf.id),
+          inArray(schema.workflowRuns.status, ['RUNNING', 'WAITING', 'PAUSED']),
+        ))
+        .orderBy(desc(schema.workflowRuns.createdAt))
+        .limit(1)
+        .get();
+      const totalRuns = this.db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.workflowRuns)
+        .where(and(eq(schema.workflowRuns.workspaceId, workspaceId), eq(schema.workflowRuns.workflowId, wf.id)))
+        .get()?.n ?? 0;
+
+      const config = objectRecord(t.config);
+      const triggerType = t.triggerType as 'cron' | 'webhook' | 'persistent_listener';
+      const source = objectRecord(config.source);
+      const intervalMs = source.kind === 'interval' && typeof source.intervalMs === 'number' ? source.intervalMs : null;
+      const nextRunAt = triggerType === 'cron' && typeof config.expression === 'string'
+        ? nextCronFire(config.expression)?.toISOString() ?? null
+        : intervalMs && t.lastFiredAt
+          ? new Date(Date.parse(t.lastFiredAt) + intervalMs).toISOString()
+          : null;
+      out.push({
+        workflowId: wf.id,
+        title: wf.title,
+        appId: wf.appId ?? null,
+        appName: app?.name ?? null,
+        triggerType,
+        status: normalizeStatus(t.status),
+        lastFiredAt: t.lastFiredAt,
+        nextRunAt,
+        intervalMs,
+        ...(triggerType === 'persistent_listener' ? { health: this.runtime.listeners?.health(t.id) ?? null } : {}),
+        lastRun: lastRun ? { id: lastRun.id, status: lastRun.status, at: lastRun.at } : null,
+        activeRun: activeRun ? { id: activeRun.id, status: activeRun.status, startedAt: activeRun.startedAt ?? activeRun.createdAt } : null,
+        recentRuns,
+        totalRuns,
+      });
+    }
+    // Live first, then most-recently-fired.
+    return out.sort((a, b) => {
+      if (!!a.activeRun !== !!b.activeRun) return a.activeRun ? -1 : 1;
+      return (b.lastFiredAt ?? '').localeCompare(a.lastFiredAt ?? '');
+    });
+  }
+
+  /** Arm every armable workflow in an App. Per-workflow failures are reported, not fatal. */
+  async activateApp(args: {
+    workspaceId: string;
+    appId: string;
+    userId: string;
+    /** SWIFT arming-gate override — applied per workflow, audited. */
+    override?: { ack: string };
+  }): Promise<{ deployment: AppDeploymentSummary; results: AppActivationResult[] }> {
+    const workflows = this.#appWorkflows(args.workspaceId, args.appId);
+    const results: AppActivationResult[] = [];
+    for (const wf of workflows) {
+      const authored = authoredTriggerType(wf.graph as WorkflowGraph);
+      const effective = authored ? effectiveTriggerType(authored) : null;
+      if (!effective || effective === 'manual') {
+        results.push({ workflowId: wf.id, title: wf.title, outcome: 'skipped', message: 'Manual trigger — run on demand.' });
+        continue;
+      }
+      try {
+        await this.activate({
+          workspaceId: args.workspaceId,
+          workflowId: wf.id,
+          ambientId: wf.ambientId,
+          userId: args.userId,
+          override: args.override,
+        });
+        results.push({ workflowId: wf.id, title: wf.title, outcome: 'armed' });
+      } catch (error) {
+        const err = error as AgentisError & { message: string };
+        const blocked = typeof err.message === 'string' && /BLOCKED_LIFECYCLE_NOT_HARDENED/.test(err.message);
+        results.push({
+          workflowId: wf.id,
+          title: wf.title,
+          outcome: blocked ? 'blocked' : 'error',
+          message: err.message,
+        });
+      }
+    }
+    return { deployment: this.getForApp(args.workspaceId, args.appId), results };
+  }
+
+  /** Disarm (pause) every armed workflow in an App. */
+  async deactivateApp(args: {
+    workspaceId: string;
+    appId: string;
+  }): Promise<{ deployment: AppDeploymentSummary; results: AppActivationResult[] }> {
+    const workflows = this.#appWorkflows(args.workspaceId, args.appId);
+    const results: AppActivationResult[] = [];
+    for (const wf of workflows) {
+      const dep = this.get(args.workspaceId, wf.id);
+      if (!dep || dep.triggerType === 'manual' || dep.status !== 'active') {
+        continue;
+      }
+      try {
+        await this.setStatus(args.workspaceId, wf.id, 'paused');
+        results.push({ workflowId: wf.id, title: wf.title, outcome: 'disarmed' });
+      } catch (error) {
+        results.push({ workflowId: wf.id, title: wf.title, outcome: 'error', message: (error as Error).message });
+      }
+    }
+    return { deployment: this.getForApp(args.workspaceId, args.appId), results };
+  }
+
+  #appWorkflows(workspaceId: string, appId: string) {
+    return this.db
+      .select({
+        id: schema.workflows.id,
+        title: schema.workflows.title,
+        ambientId: schema.workflows.ambientId,
+        graph: schema.workflows.graph,
+      })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
+      .all();
+  }
+
   #loadWorkflow(workspaceId: string, workflowId: string) {
     const workflow = this.db
       .select()
@@ -343,11 +563,18 @@ function findTriggerNode(graph: WorkflowGraph, required: boolean): WorkflowNode 
  * else maps to itself. This keeps the DB trigger taxonomy + ActiveTrigger union
  * unchanged while exposing the new types first-class on the canvas.
  */
-function effectiveTriggerType(
+export function effectiveTriggerType(
   t: TriggerNodeConfig['triggerType'],
 ): 'manual' | 'cron' | 'webhook' | 'persistent_listener' {
   if (t === 'error_trigger' || t === 'rss_feed' || t === 'email_imap') return 'persistent_listener';
   return t;
+}
+
+/** The authored trigger type of a graph's single entry trigger node, or null. */
+function authoredTriggerType(graph: WorkflowGraph | null | undefined): TriggerNodeConfig['triggerType'] | null {
+  const node = graph?.nodes?.find((n) => n.config?.kind === 'trigger');
+  if (!node || node.config.kind !== 'trigger') return null;
+  return (node.config as TriggerNodeConfig).triggerType ?? null;
 }
 
 function runtimeConfigFromNode(config: TriggerNodeConfig): Record<string, unknown> {

@@ -29,6 +29,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -54,10 +55,34 @@ export interface McpHarnessDeps {
 }
 
 const HARNESS_KEY_NAME = 'Harness MCP (auto)';
-const MCP_STDIO_BRIDGE_PATH = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../../../scripts/agentis-mcp-stdio-bridge.mjs',
-);
+
+/**
+ * Absolute path to the stdio↔HTTP bridge Codex spawns to reach Agentis MCP.
+ *
+ * Resolved by WALKING UP from this module's directory until `scripts/…bridge.mjs`
+ * is found, rather than a hardcoded `../` count. A fixed relative path is brittle:
+ * the module sits at different depths under `tsx watch` (source:
+ * `apps/api/src/services/mcp/`) vs a bundled build, so any single count is wrong
+ * for one of them. A previous 4-level count resolved to a NON-EXISTENT
+ * `apps/scripts/…` under the dev runtime — Codex was told to spawn a bridge that
+ * didn't exist, the `agentis` MCP server silently never started, and the harness
+ * saw ZERO Agentis tools ("MCP server not mounted") even in Auto mode. Finding the
+ * file makes the mount survive any layout.
+ */
+function resolveBridgePath(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 10; i += 1) {
+    const candidate = resolve(dir, 'scripts', 'agentis-mcp-stdio-bridge.mjs');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  // Deterministic fallback (repo-root layout) so a genuinely-missing file yields a
+  // stable path for logs instead of throwing at import.
+  return resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../scripts/agentis-mcp-stdio-bridge.mjs');
+}
+const MCP_STDIO_BRIDGE_PATH = resolveBridgePath();
 
 export class McpHarnessSessionService {
   /** workspaceId → freshly-minted plaintext token (process lifetime). */
@@ -137,10 +162,15 @@ export class McpHarnessSessionService {
  * Returns spawn `args` to append (and never mutates any global config file).
  * Pure + deterministic so it is unit-testable without the binaries installed.
  */
-export function harnessMcpArgs(adapterType: AdapterType, servers: McpHarnessServer[]): string[] {
+export function harnessMcpArgs(
+  adapterType: AdapterType,
+  servers: McpHarnessServer[],
+  executionMode: 'chat' | 'plan' | 'ask' = 'chat',
+): string[] {
   if (servers.length === 0) return [];
-  if (adapterType === 'claude_code') return claudeMcpArgs(servers);
-  if (adapterType === 'codex') return codexMcpArgs(servers);
+  const tagged = withExecutionModeHeader(servers, executionMode);
+  if (adapterType === 'claude_code') return claudeMcpArgs(tagged);
+  if (adapterType === 'codex') return codexMcpArgs(tagged);
   // Cursor (`cursor-agent`) and Antigravity (`agy`) have NO spawn-arg MCP
   // emitter on purpose: neither CLI accepts an inline `--mcp-config`/`-c` server
   // override (cursor reads a `.cursor/mcp.json` file; agy uses its own settings),
@@ -148,6 +178,19 @@ export function harnessMcpArgs(adapterType: AdapterType, servers: McpHarnessServ
   // and verified against the real binaries, these harnesses use the marker
   // protocol (see agentCommission.registerAdapter) rather than native MCP tools.
   return [];
+}
+
+/**
+ * Per-turn execution-mode header. Read by `/v1/mcp/rpc` → put into the tool
+ * context so the registry gates mutating tools: `plan` hard-blocks them, `ask`
+ * blocks-and-instructs (operator must approve). Added only for plan/ask so an
+ * Auto turn's descriptor is byte-identical to before (no behavior change).
+ */
+export const EXECUTION_MODE_HEADER = 'x-agentis-execution-mode';
+
+function withExecutionModeHeader(servers: McpHarnessServer[], executionMode: 'chat' | 'plan' | 'ask'): McpHarnessServer[] {
+  if (executionMode === 'chat') return servers;
+  return servers.map((s) => ({ ...s, headers: { ...s.headers, [EXECUTION_MODE_HEADER]: executionMode } }));
 }
 
 /** Claude Code: native streamable-HTTP MCP via an inline `--mcp-config` JSON. */

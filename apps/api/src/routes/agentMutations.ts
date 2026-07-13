@@ -26,7 +26,7 @@ import { defaultInstructionsForRole, isDefaultRoleInstructions } from '../data/p
 import { testHarnessConfig, type V1HarnessAdapterType } from '../services/harness/harnessProbe.js';
 import { repairCliHarnessConfig } from '../services/harness/harnessConfigRepair.js';
 import type { McpHarnessSessionService } from '../services/mcp/mcpHarnessSession.js';
-import { registerAdapter, runtimeModelFromConfig, switchRuntime } from '../services/agent/agentCommission.js';
+import { ORCHESTRATOR_DEFAULT_COLOR, registerAdapter, runtimeModelFromConfig, switchRuntime } from '../services/agent/agentCommission.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
 const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
@@ -119,7 +119,10 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
       reportsTo: body.reportsTo ?? null,
       fallbackSpaceTag: body.spaceTag ?? null,
     });
-    const colorHex = body.colorHex ?? CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
+    const colorHex = body.colorHex
+      ?? (body.role === 'orchestrator'
+        ? ORCHESTRATOR_DEFAULT_COLOR
+        : CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)]);
     const repaired = await repairCliHarnessConfig(body.adapterType, body.config);
     const config = repaired.config;
     const isPaused = body.isPaused ?? false;

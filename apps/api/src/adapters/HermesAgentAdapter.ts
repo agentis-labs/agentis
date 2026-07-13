@@ -39,7 +39,7 @@ const DEFAULT_HERMES_FIRST_EVENT_TIMEOUT_MS = 90_000;
 // quickly is treated as an ACP stall: in `auto` transport we cut over to the
 // stable CLI path fast instead of freezing. Env-overridable for genuinely slow
 // providers.
-const DEFAULT_HERMES_INTERACTIVE_FIRST_EVENT_TIMEOUT_MS = 8_000;
+const DEFAULT_HERMES_INTERACTIVE_FIRST_EVENT_TIMEOUT_MS = 30_000;
 const MIN_HERMES_FIRST_EVENT_TIMEOUT_MS = 2_000;
 const MAX_HERMES_FIRST_EVENT_TIMEOUT_MS = 120_000;
 // Once an `auto`-transport turn has had to abandon a stalled ACP attempt and fall
@@ -47,7 +47,7 @@ const MAX_HERMES_FIRST_EVENT_TIMEOUT_MS = 120_000;
 // ~startup + first-event-probe seconds for nothing. Latch the CLI route for this
 // cooldown so subsequent turns are CLI-fast, then periodically re-try ACP in case
 // the build recovered. Env-overridable; 0 disables the breaker.
-const DEFAULT_HERMES_ACP_STALL_COOLDOWN_MS = 600_000;
+const DEFAULT_HERMES_ACP_STALL_COOLDOWN_MS = 60_000;
 
 export interface HermesAgentAdapterOptions {
   agentId: string;
@@ -255,6 +255,11 @@ export class HermesAgentAdapter implements AgentAdapter {
   }
 
   async dispatchTask(task: NormalizedTask): Promise<void> {
+    if (this.#chatTransport() !== 'cli') {
+      this.#dispatchTaskAcp(task);
+      return;
+    }
+
     const controller = new AbortController();
     const unlinkAbort = linkAbortSignal(task.signal, controller);
     this.#inFlight.set(task.taskId, controller);
@@ -380,6 +385,76 @@ export class HermesAgentAdapter implements AgentAdapter {
     // The prompt is passed as the `-q` argument (hermes chat reads no stdin in
     // quiet mode), so close stdin immediately.
     childProcess.stdin?.end();
+  }
+
+  /**
+   * Run workflow/background work through the same persistent ACP session used by
+   * interactive chat. This is the only Hermes transport that can both stream its
+   * live reasoning/tool activity and reach Agentis through the mounted MCP server.
+   * The explicit `cli` compatibility mode keeps the legacy one-shot dispatcher.
+   */
+  #dispatchTaskAcp(task: NormalizedTask): void {
+    const controller = new AbortController();
+    const unlinkAbort = linkAbortSignal(task.signal, controller);
+    this.#inFlight.set(task.taskId, controller);
+    const timestamp = () => new Date().toISOString();
+    this.#emit({
+      eventType: 'task.started',
+      agentId: this.opts.agentId,
+      taskId: task.taskId,
+      runId: task.runId,
+      workflowId: task.workflowId,
+      timestamp: timestamp(),
+    });
+
+    void (async () => {
+      let transcript = '';
+      let failure = '';
+      try {
+        const messages: ChatMessage[] = [
+          {
+            role: 'system',
+            content: this.opts.instructions?.trim()
+              || 'You are a Hermes agent operating inside Agentis. Complete the task, report useful progress, and return concrete artifacts when available.',
+          },
+          { role: 'user', content: buildPrompt(task) },
+        ];
+        for await (const delta of this.chat(messages, [], {
+          signal: controller.signal,
+          sessionKey: `task:${task.taskId}`,
+          latencyClass: 'deliberate',
+          timeoutMs: task.timeoutMs,
+        })) {
+          if (delta.type === 'text' && delta.delta) {
+            transcript += delta.delta;
+            this.#emitProgress(task, delta.delta, timestamp());
+          } else if (delta.type === 'activity') {
+            this.#emitProgress(task, delta.detail?.trim() || delta.label, timestamp());
+          } else if (delta.type === 'tool_result' && delta.error) {
+            failure = delta.error;
+          } else if (delta.type === 'done') {
+            if (delta.finishReason === 'error') {
+              this.#emitFailure(task, failure || 'Hermes ACP task failed.');
+            } else {
+              this.#emit({
+                eventType: 'task.completed',
+                agentId: this.opts.agentId,
+                runId: task.runId,
+                workflowId: task.workflowId,
+                taskId: task.taskId,
+                output: { text: transcript.trim() },
+                timestamp: timestamp(),
+              });
+            }
+          }
+        }
+      } catch (err) {
+        this.#emitFailure(task, `hermes_agent_acp_failed: ${(err as Error).message}`);
+      } finally {
+        unlinkAbort();
+        this.#inFlight.delete(task.taskId);
+      }
+    })();
   }
 
   async cancelTask(taskId: string): Promise<void> {
@@ -674,12 +749,17 @@ export class HermesAgentAdapter implements AgentAdapter {
         const result = await client.sessionPrompt(
           { sessionId, prompt: [{ type: 'text', text: formatAcpPrompt(messages) }] },
           (update) => {
-            if (!firstEventSeen) {
-              firstEventSeen = true;
-              if (firstEventTimer) clearTimeout(firstEventTimer);
-            }
             const delta = acpUpdateToDelta(update, turnState);
-            if (delta && !settled) queue.push(delta);
+            // Lifecycle metadata (usage/command catalogs) is not model output.
+            // Counting it as the first event left a broken ACP prompt hanging
+            // forever because the first-output watchdog was cleared too early.
+            if (delta) {
+              if (!firstEventSeen) {
+                firstEventSeen = true;
+                if (firstEventTimer) clearTimeout(firstEventTimer);
+              }
+              if (!settled) queue.push(delta);
+            }
           },
         );
         if (firstEventTimer) clearTimeout(firstEventTimer);
@@ -724,7 +804,7 @@ export class HermesAgentAdapter implements AgentAdapter {
       type: 'activity',
       id: `hermes-cli-${options?.sessionKey ?? 'default'}`,
       label: 'Starting Hermes',
-      detail: 'Using the stable Hermes headless CLI transport.',
+      detail: 'Compatibility fallback: Hermes exposes only the final answer in this mode, not live reasoning or tool activity.',
       phase: 'runtime',
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -783,7 +863,7 @@ export class HermesAgentAdapter implements AgentAdapter {
     if (normalized === 'cli') return 'cli';
     if (normalized === 'acp') return 'acp';
     if (normalized === 'auto') return 'auto';
-    return 'cli';
+    return 'auto';
   }
 
   async #acquireTurn(): Promise<() => void> {
@@ -1221,6 +1301,23 @@ function formatHermesExitError(stderr: string, stdoutErr: string): string {
     .join('\n')
     .trim();
   const detail = (stdoutErr || '').trim() || cleanStderr;
+  // Out of credits: OpenRouter/Nous returns 402 "This request requires more
+  // credits, or fewer max_tokens…". A depleted account is the single most common
+  // reason a Hermes turn dies, and the raw JSON blob buries it — name it and point
+  // at the two real fixes (top up, or switch to a model you can afford / a free one).
+  if (/\b402\b/.test(detail) || /requires more credits|add more credits|insufficient(?:\s+\w+)?\s+credit|not enough credits/i.test(detail)) {
+    return `${detail} — your inference provider account is out of credits. Add credits (e.g. https://openrouter.ai/settings/credits) or switch this agent to a model you can afford (chat header model picker / agent settings, or \`hermes model\`).`;
+  }
+  // Auth/quota: a missing or invalid key surfaces as 401/403. Point at credentials
+  // rather than leaving the operator to decode an HTTP status.
+  if (/\b40[13]\b/.test(detail) || /invalid api key|unauthorized|not authenticated|no auth credentials|missing.*api.*key/i.test(detail)) {
+    return `${detail} — the inference provider rejected the request as unauthenticated. Check this agent's provider API key (OpenRouter/Nous credentials in Hermes's .env or config).`;
+  }
+  // Rate limited: 429 / "rate limit". Free models hit this constantly; tell the
+  // operator to retry or move to a less-contended model.
+  if (/\b429\b/.test(detail) || /rate.?limit/i.test(detail)) {
+    return `${detail} — the provider is rate-limiting this model (common on free tiers). Retry in a moment, or switch this agent to a less-contended model.`;
+  }
   // Removed / unavailable model: OpenRouter returns 404 "No endpoints found for
   // <model>" (e.g. a retired stealth model). Make the fix obvious instead of a
   // cryptic HTTP code.

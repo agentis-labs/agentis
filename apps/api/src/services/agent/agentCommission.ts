@@ -23,6 +23,9 @@ import { RuntimeSessionStore } from '../runtime/runtimeSessionStore.js';
 import { harnessAgentHomeDir } from '../harness/harnessAgentHome.js';
 import type { SkillMaterializer } from '../skillMaterializer.js';
 
+/** The orchestrator's identity color — distinct from the random palette used for managers/specialists. */
+export const ORCHESTRATOR_DEFAULT_COLOR = '#3b82f6';
+
 export interface RegisterAdapterOptions {
   skipConfigRepair?: boolean;
   skipCliAvailabilityCheck?: boolean;
@@ -85,7 +88,9 @@ export async function commissionAgent(deps: AgentCommissionDeps, input: Commissi
 
   const id = randomUUID();
   const colorHex = input.colorHex
-    ?? CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)]
+    ?? (input.role === 'orchestrator'
+      ? ORCHESTRATOR_DEFAULT_COLOR
+      : CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)])
     ?? '#6366f1';
   const repaired = await repairCliHarnessConfig(input.adapterType, input.config ?? {});
   const config = repaired.config;
@@ -318,7 +323,7 @@ export async function registerAdapter(
       binaryPath: cliCommandFromConfig(config) ?? undefined,
       cwd: managedAgentCwd(agentId, config),
       model: stringOf(config.model) ?? undefined,
-      chatTransport: hermesChatTransportOf(config.chatTransport),
+      chatTransport: hermesChatTransportOf(config.chatTransport, config.chatTransportVersion),
       maxTurns: nativeTurnCap(),
       extraArgs: stringArrayOf(config.extraArgs),
       env: recordStringOf(config.env),
@@ -583,8 +588,14 @@ function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high
   return effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' ? effort : undefined;
 }
 
-function hermesChatTransportOf(value: unknown): 'cli' | 'acp' | 'auto' | undefined {
+function hermesChatTransportOf(value: unknown, version: unknown): 'cli' | 'acp' | 'auto' | undefined {
   const transport = stringOf(value);
+  // The original runtime form persisted `cli` as its default, so existing agents
+  // cannot be distinguished from an operator who deliberately chose the buffered
+  // compatibility path. Versioned configs solve that without a database rewrite:
+  // old unversioned `cli` values migrate to ACP-first auto, while newly saved
+  // explicit CLI selections carry version 2 and remain honored.
+  if (transport === 'cli' && Number(version) !== 2) return 'auto';
   return transport === 'cli' || transport === 'acp' || transport === 'auto' ? transport : undefined;
 }
 

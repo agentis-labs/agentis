@@ -641,6 +641,10 @@ export function AppEditorPage() {
         agents={agents}
         onClose={() => setEngineOpen(false)}
         onSave={saveAppSettings}
+        onDeleted={() => {
+          setEngineOpen(false);
+          navigate('/apps');
+        }}
       />
     </div>
   );

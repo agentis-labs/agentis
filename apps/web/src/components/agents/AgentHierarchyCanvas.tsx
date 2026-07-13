@@ -679,13 +679,14 @@ function AgentHierarchyNode({ data }: NodeProps<Node<AgentNodeData>>) {
   const domainName = agent.subdomainName ?? agent.spaceName ?? agent.spaceTag ?? null;
   const domainColor = agent.spaceColorHex ?? null;
   // Node color: a manager wears the color of the domain it owns (neutral when the
-  // domain has none); the orchestrator is theme-neutral (white on dark / black on
-  // light); specialists stay neutral. See the /home canvas for the same rule.
+  // domain has none); the orchestrator wears a personal colorHex if set via the
+  // detail panel's color picker, else falls back to its blue identity color;
+  // specialists stay neutral. See the /home canvas for the same rule.
   const neutralColor = 'var(--color-line-strong)';
   const nodeColor = settingUp
     ? '#06b6d4'
     : role === 'orchestrator'
-      ? 'var(--color-accent)'
+      ? agent.colorHex ?? '#3b82f6'
       : role === 'manager'
         ? domainColor ?? neutralColor
         : neutralColor;

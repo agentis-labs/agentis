@@ -57,6 +57,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage, workspace as workspaceStore } from '../lib/api';
+import { nextFires } from '../lib/cronPreview';
 import { useAgentisStore } from '../store/agentisStore';
 import { nestedDomainOptions } from '../components/shared/DomainToolbar';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
@@ -103,10 +104,13 @@ import { Button } from '../components/shared/Button';
 import { SegmentedControl } from '../components/shared/SegmentedControl';
 import { useToast } from '../components/shared/Toast';
 import { useConfirm } from '../components/shared/ConfirmDialog';
+import { InfoHint } from '../components/shared/InfoHint';
 import type { WorkflowRunSummary } from '../components/workflows/runFormat';
 import { FOCUS_WORKFLOW_NODE_EVENT, openRunModal } from '../lib/runModal';
 import { ScopedBrainMap } from '../components/brain/ScopedBrainMap';
 import { InsightsTab } from '../components/brain/InsightsTab';
+import { SkillsTab } from '../components/brain/SkillsTab';
+import { ExamplesTab } from '../components/brain/ExamplesTab';
 import { KnowledgeTab } from '../components/knowledge/KnowledgeTab';
 import { ExtensionsModal } from '../components/extensions/ExtensionsModal';
 import { BrainSectionNav, type BrainSection } from '../components/brain/BrainSectionNav';
@@ -1412,6 +1416,16 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activateOpen, wf?.id]);
 
+  // Embedded App facet: the dock's activation pill reflects the live armed state
+  // (Live vs Activate), so load the deployment up front for a non-manual trigger
+  // rather than waiting for the panel to open.
+  const embeddedTriggerType = wf ? workflowTriggerConfig(wf)?.triggerType : undefined;
+  useEffect(() => {
+    if (!embedded || !wf || !embeddedTriggerType || embeddedTriggerType === 'manual') return;
+    void refreshDeployment();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [embedded, wf?.id, embeddedTriggerType]);
+
   // Manual save with ⌘S / Ctrl+S
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1902,11 +1916,71 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
               >
                 <Settings size={15} />
               </button>
+              {/* Always-on activation. Manual workflows are run on demand; a
+                  workflow whose trigger is a schedule / webhook / listener can be
+                  ARMED here so it runs on its own — the header Activate control is
+                  hidden in the embedded App facet, so surface it on the dock. */}
+              {!headerIsManualRun ? (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setActivateOpen((v) => !v); }}
+                    title={deployment?.status === 'active' ? 'Live — armed and running on its own' : 'Activate this workflow so it runs on its own'}
+                    className={clsx(
+                      'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold transition-colors',
+                      deployment?.status === 'active'
+                        ? 'bg-success-soft text-success hover:opacity-90'
+                        : deployment?.status === 'error'
+                          ? 'bg-danger-soft text-danger hover:opacity-90'
+                          : 'border border-success/40 text-success hover:bg-success-soft',
+                    )}
+                  >
+                    {deployment?.status === 'active'
+                      ? <><span className="s-pulse h-2 w-2 rounded-full bg-success text-success" /> Live</>
+                      : <><Upload size={13} /> Activate</>}
+                    <ChevronDown size={12} />
+                  </button>
+                  {activateOpen ? (
+                    <div
+                      className="absolute bottom-full left-0 z-50 mb-2 w-[340px] overflow-hidden rounded-card border border-line bg-surface shadow-dropdown"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <DeploymentPanel
+                        trigger={headerTrigger}
+                        deployment={deployment}
+                        loading={deploymentLoading}
+                        busy={deploymentBusy}
+                        error={deploymentError}
+                        onActivate={() => void handleActivate()}
+                        onRefresh={() => void refreshDeployment()}
+                        onPause={() => void setDeploymentStatus('paused')}
+                        onResume={() => void setDeploymentStatus('active')}
+                        onCopy={(value, label) => {
+                          void navigator.clipboard.writeText(value).then(() => toast.success(`${label} copied`));
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const triggerNode = wf.graph.nodes.find((n) => n.config.kind === 'trigger');
+                    if (triggerNode) focusMonitorNode(triggerNode.id);
+                    else toast.error('No trigger node', 'Add a trigger node to automate this workflow.');
+                  }}
+                  title="Make this run on its own — pick a schedule, webhook, or 24/7 listener"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-line px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+                >
+                  <RadioTower size={13} /> Automate
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setRunDialogOpen(true)}
                 disabled={running || (wf.graph.nodes?.length ?? 0) === 0}
-                title={(wf.graph.nodes?.length ?? 0) === 0 ? 'Add a step before running' : 'Run this workflow'}
+                title={(wf.graph.nodes?.length ?? 0) === 0 ? 'Add a step before running' : headerIsManualRun ? 'Run this workflow' : 'Run once now (a manual test run)'}
                 className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-1.5 text-[12px] font-semibold text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-45"
               >
                 <Play size={14} /> {running ? 'Running…' : 'Run'}
@@ -2061,7 +2135,6 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
               <CanvasBuildComposer
                 workflowId={wf.id}
                 workflowTitle={wf.title}
-                variant="empty"
                 onDismiss={() => setDescribeDismissed(true)}
               />
             </div>
@@ -2399,7 +2472,24 @@ export function WorkflowBrainTab({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-canvas">
       <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-6">
-        <span className="text-[12px] font-semibold text-text-muted">{kind === 'app' ? 'App intelligence' : 'Workflow intelligence'}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[12px] font-semibold text-text-muted">{kind === 'app' ? 'App intelligence' : 'Workflow intelligence'}</span>
+          {kind === 'app' && (
+            <InfoHint
+              icon="help"
+              side="right"
+              align="start"
+              title="App Brain"
+            >
+              <ul className="list-disc space-y-1 pl-3.5">
+                <li>This App&apos;s own memory and knowledge — scoped to it, separate from the shared Workspace Brain.</li>
+                <li>It grows from what the App learns: lessons the agent promotes to memory, knowledge you add here, and episodes recorded from its runs.</li>
+                <li>Map visualizes every node and link; Knowledge and Insights hold the raw entries behind it.</li>
+                <li>The eye toggle controls whether this App&apos;s memory also surfaces in the Workspace Brain.</li>
+              </ul>
+            </InfoHint>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <ScopeVisibilityToggle scopeId={workflow.id} />
           <BrainSectionNav value={view} onChange={setView} />
@@ -2419,6 +2509,10 @@ export function WorkflowBrainTab({
           />
         ) : view === 'knowledge' ? (
           <KnowledgeTab scopeId={workflow.id} scopeName={workflow.title} />
+        ) : view === 'skills' ? (
+          <SkillsTab scopeId={workflow.id} scopeName={workflow.title} />
+        ) : view === 'examples' ? (
+          <ExamplesTab scopeId={workflow.id} scopeName={workflow.title} />
         ) : (
           // Episodes are written scoped to the owning App's id (kind='app', where
           // workflow.id IS the app id — scopeId already matches). A plain workflow's
@@ -2958,6 +3052,14 @@ function DeploymentPanel({
   const readiness = trigger ? evaluateNodeReadiness(trigger) : { ready: false, message: 'Add a trigger node.' };
   const meta = deploymentMeta(triggerType);
   const changed = Boolean(deployment && deploymentDiffersFromDraft(deployment, trigger));
+  const intervalMs = deploymentIntervalMs(deployment);
+  // Tick once a second so an interval/cron "Next run" countdown stays live.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!deployment || deployment.triggerType === 'manual' || deployment.status !== 'active') return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [deployment?.triggerType, deployment?.status, deployment?.lastFiredAt]);
 
   return (
     <div>
@@ -3084,6 +3186,16 @@ function DeploymentPanel({
                 {deployment.health.lastError}
               </p>
             )}
+            {deployment && deployment.triggerType !== 'manual' && (
+              <div className="grid grid-cols-2 divide-x divide-line rounded-input border border-line bg-surface-2">
+                <MiniMetric label="Last fired" value={deployment.lastFiredAt ? relativeSince(deployment.lastFiredAt) : 'Never'} />
+                {deployment.triggerType === 'cron'
+                  ? <MiniMetric label="Next run" value={cronNextRunLabel(deployment.config.expression)} />
+                  : intervalMs && deployment.status === 'active'
+                    ? <MiniMetric label="Next run" value={intervalNextRunLabel(deployment.lastFiredAt, intervalMs, now)} />
+                    : <MiniMetric label="Armed" value={relativeSince(deployment.updatedAt)} />}
+              </div>
+            )}
 
             <div className="flex items-center gap-2">
               {(!deployment || deployment.status === 'error' || changed) && (
@@ -3172,6 +3284,48 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
       <div className="mt-0.5 text-[9px] uppercase tracking-wider text-text-muted">{label}</div>
     </div>
   );
+}
+
+/** Compact "3h ago" / "just now" relative label for a past ISO timestamp. */
+function relativeSince(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+/** The fixed period (ms) of an interval-source deployment, or null. */
+function deploymentIntervalMs(d: WorkflowDeployment | null): number | null {
+  const source = (d?.config?.source ?? {}) as { kind?: string; intervalMs?: number };
+  return source.kind === 'interval' && typeof source.intervalMs === 'number' ? source.intervalMs : null;
+}
+
+/** Live countdown to the next interval fire; rolls forward so it loops between fires. */
+function intervalNextRunLabel(lastFiredAt: string | null, intervalMs: number, now: number): string {
+  if (!lastFiredAt) return `${Math.max(1, Math.round(intervalMs / 1000))}s`;
+  let target = Date.parse(lastFiredAt) + intervalMs;
+  if (Number.isNaN(target)) return '—';
+  while (target <= now) target += intervalMs;
+  const s = Math.max(0, Math.round((target - now) / 1000));
+  if (s <= 0) return 'now';
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+/** "in 12m" for the next fire of a cron expression, or "—" if unparseable. */
+function cronNextRunLabel(expression: unknown): string {
+  if (typeof expression !== 'string' || !expression.trim()) return '—';
+  const next = nextFires(expression, 1)[0];
+  if (!next) return '—';
+  const s = Math.floor((Date.parse(next) - Date.now()) / 1000);
+  if (Number.isNaN(s)) return '—';
+  if (s <= 0) return 'now';
+  if (s < 3600) return `in ${Math.max(1, Math.floor(s / 60))}m`;
+  if (s < 86400) return `in ${Math.floor(s / 3600)}h`;
+  return `in ${Math.floor(s / 86400)}d`;
 }
 
 function workflowTriggerConfig(workflow: WorkflowDetail): Record<string, unknown> | null {

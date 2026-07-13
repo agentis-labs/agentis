@@ -102,7 +102,7 @@ describe('ActiveWorkflowRegistry', () => {
     expect(list[0]!.config).toEqual({ expression: '*/5 * * * *' });
   });
 
-  it('shutdown deactivates every live trigger', async () => {
+  it('shutdown tears down runtime but KEEPS triggers active in DB (survive restart)', async () => {
     const t1 = seedTrigger();
     const t2 = seedTrigger();
     const c1 = vi.fn().mockResolvedValue(undefined);
@@ -113,5 +113,21 @@ describe('ActiveWorkflowRegistry', () => {
     expect(c1).toHaveBeenCalledOnce();
     expect(c2).toHaveBeenCalledOnce();
     expect(registry.list()).toHaveLength(0);
+    // The durability contract: process shutdown must NOT disarm a 24/7 trigger.
+    // Rows stay `active` so loadActiveFromDb re-hydrates them on the next boot.
+    for (const t of [t1, t2]) {
+      const row = ctx.db.select().from(schema.triggers).where(eq(schema.triggers.id, t.triggerId)).get()!;
+      expect(row.status).toBe('active');
+    }
+    // And a fresh registry (simulating reboot) would re-load them.
+    expect(new ActiveWorkflowRegistry(ctx.db, ctx.logger).loadActiveFromDb()).toHaveLength(2);
+  });
+
+  it('operator deactivate still persists paused (stays disarmed across restarts)', async () => {
+    const t = seedTrigger();
+    registry.activate(t, async () => {});
+    await registry.deactivate(t.triggerId);
+    const row = ctx.db.select().from(schema.triggers).where(eq(schema.triggers.id, t.triggerId)).get()!;
+    expect(row.status).toBe('paused');
   });
 });

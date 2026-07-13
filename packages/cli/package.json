@@ -1,6 +1,6 @@
 {
   "name": "@agentis-labs/cli",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Open-source, self-hosted command center for agents you own. Run `npx @agentis-labs/cli@latest up`.",
   "license": "Apache-2.0",
   "author": "Robson Prado <robsonpradodev>",

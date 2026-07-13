@@ -112,6 +112,7 @@ import type { ChatMemoryCaptureService } from '../services/chat/chatMemoryCaptur
 import type { ChannelBridge } from '../services/conversation/channelBridge.js';
 import type { ChannelConnectionSupervisor } from '../services/conversation/channelConnectionSupervisor.js';
 import type { ChannelIdentityService } from '../services/conversation/channelIdentityService.js';
+import type { ConnectionGrantService } from '../services/connectionGrants.js';
 import type { ConversationParticipantService } from '../services/conversation/conversationParticipants.js';
 import type { ConversationSimulatorService } from '../services/conversation/conversationSimulator.js';
 import type { EmbeddingBackfillService } from '../services/embedding/embeddingBackfill.js';
@@ -154,6 +155,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   channelIdentity: ChannelIdentityService;
   channelSupervisor: ChannelConnectionSupervisor;
   chatMemoryCapture: ChatMemoryCaptureService;
+  connectionGrants: ConnectionGrantService;
   commandAutonomyMaster: boolean;
   conversationParticipants: ConversationParticipantService;
   conversationSimulator: ConversationSimulatorService;
@@ -216,6 +218,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     chatMemoryCapture,
     commandAutonomyMaster,
     commandIndex,
+    connectionGrants,
     conversationParticipants,
     conversationSimulator,
     conversations,
@@ -437,7 +440,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
   const appPresence = new AppPresenceService({ bus, logger });
   appPresence.start();
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator }));
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer }));
   const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer }, bus, logger);
@@ -469,7 +472,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));
-  app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge, supervisor: channelSupervisor, identity: channelIdentity }));
+  app.route('/v1/channels', buildChannelRoutes({ db: sqlite, auth, bridge: channelBridge, supervisor: channelSupervisor, identity: channelIdentity, connectionGrants }));
   app.route('/v1/orchestrator/models', buildOrchestratorModelRoutes({
     db: sqlite,
     auth,

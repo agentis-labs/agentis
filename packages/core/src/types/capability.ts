@@ -45,7 +45,7 @@ export interface InvokeCtx {
   appId?: string;
   runId?: string;
   ambientId?: string | null;
-  executionMode?: 'chat' | 'plan';
+  executionMode?: 'chat' | 'plan' | 'ask';
   signal?: AbortSignal;
 }
 

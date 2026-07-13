@@ -22,7 +22,7 @@
 
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
@@ -92,6 +92,23 @@ export class ChannelConnectionSupervisor {
   }
 
   /** Is a public webhook URL configured? Drives the Telegram polling default. */
+  /** Agent a workspace-owned connection's inbound routes to: orchestrator, else
+   *  the first agent, else null. Mirrors ChannelBridge.#resolveInboundAgentId. */
+  #resolveInboundAgentId(workspaceId: string): string | null {
+    const orchestrator = this.deps.db
+      .select({ id: schema.agents.id })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.role, 'orchestrator')))
+      .get();
+    if (orchestrator) return orchestrator.id;
+    const any = this.deps.db
+      .select({ id: schema.agents.id })
+      .from(schema.agents)
+      .where(eq(schema.agents.workspaceId, workspaceId))
+      .get();
+    return any?.id ?? null;
+  }
+
   #hasPublicWebhookUrl(): boolean {
     return this.deps.hasPublicWebhookUrl ? this.deps.hasPublicWebhookUrl() : Boolean(process.env.AGENTIS_PUBLIC_URL);
   }
@@ -283,11 +300,14 @@ export class ChannelConnectionSupervisor {
         .run();
     }
 
+    // Workspace-owned (null-agent) connection routes inbound to the orchestrator.
+    const inboundAgentId = row.agentId ?? this.#resolveInboundAgentId(row.workspaceId);
+    if (!inboundAgentId) return;
     const conversation = this.deps.conversations.getOrCreateByChannel({
       workspaceId: row.workspaceId,
       ambientId: row.ambientId,
       userId: row.userId,
-      agentId: row.agentId,
+      agentId: inboundAgentId,
       channelConnectionId: row.id,
       channelChatId: msg.chatId,
     });
@@ -329,7 +349,7 @@ export class ChannelConnectionSupervisor {
       workspaceId: row.workspaceId,
       ambientId: row.ambientId,
       userId: row.userId,
-      agentId: row.agentId,
+      agentId: inboundAgentId,
       conversationId: conversation.id,
       connectionId: row.id,
       kind: row.kind,

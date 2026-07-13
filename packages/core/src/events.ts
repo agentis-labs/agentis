@@ -23,6 +23,7 @@ export const REALTIME_EVENTS = {
   // Agents
   AGENT_CREATED: 'agent.created',
   AGENT_UPDATED: 'agent.updated',
+  AGENT_DELETED: 'agent.deleted',
   AGENT_STATUS_CHANGED: 'agent.status.changed',
   AGENT_HEARTBEAT: 'agent.heartbeat',
   AGENT_WORK_STEP: 'agent.work.step',
@@ -141,6 +142,14 @@ export const REALTIME_EVENTS = {
   SURFACE_PATCH: 'app.surface_patch',
   // App Datastore (§5) — a record changed; bound views refetch. { appId, collection, op, id }.
   DATA_CHANGED: 'app.data_changed',
+  // App lifecycle — the App ENTITY or its workflow membership/binding changed
+  // (created, renamed, archived, deleted, workflow adopted/reordered). Bound App
+  // views + the workspace app list refetch. { appId, op }. Distinct from
+  // DATA_CHANGED (which is a datastore RECORD change), so a view can react to
+  // structural changes without conflating them with row edits.
+  APP_CREATED: 'app.created',
+  APP_UPDATED: 'app.updated',
+  APP_DELETED: 'app.deleted',
 
   // Live co-presence (LIVING-APPS-10X §6/G9) — EPHEMERAL, never persisted.
   //   broadcast on heartbeat + on join/leave. Payload: AppPresenceUpdate.

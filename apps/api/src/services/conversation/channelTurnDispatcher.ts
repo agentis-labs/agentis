@@ -246,6 +246,15 @@ export class ChannelTurnDispatcher {
    * fire-and-forget exactly as before. Fire-and-forget safe — never throws.
    */
   async dispatch(input: ChannelTurnInput): Promise<{ replied: boolean; reason?: string }> {
+    // Operator block gate: a blocked sender is fully silent — no subject routing,
+    // no agent turn, no reply. Cheap single-row lookup on the same handle the
+    // identity table shows. (Same handle rule as #recordIdentity below.)
+    if (this.deps.identity) {
+      const handle = (input.kind === 'slack' || input.kind === 'discord') ? (input.from ?? input.chatId) : input.chatId;
+      if (this.deps.identity.isBlocked(input.workspaceId, input.kind, handle)) {
+        return { replied: false, reason: 'blocked' };
+      }
+    }
     // §3.2 — hand the inbound to any Subject awaiting this channel correlation (best-effort).
     try {
       this.deps.onInbound?.({ workspaceId: input.workspaceId, connectionId: input.connectionId, chatId: input.chatId, ...(input.from ? { from: input.from } : {}), ...(input.text ? { text: input.text } : {}) });

@@ -102,6 +102,15 @@ export function buildWorkflowRoutes(deps: {
     return c.json({ collections });
   });
 
+  // Workspace-wide "always-on" workflows: every workflow whose entry trigger is
+  // currently ARMED (schedule / webhook / listener), with next-run / last-fired /
+  // last-run / listener health. Powers /home's Active section.
+  app.get('/active', (c) => {
+    const ws = getWorkspace(c);
+    if (!triggerDeployments) return c.json({ workflows: [] });
+    return c.json({ workflows: triggerDeployments.listActive(ws.workspaceId) });
+  });
+
   app.post('/', async (c) => {
     const ws = getWorkspace(c);
     const body = schemas.createWorkflowSchema.parse({
@@ -282,6 +291,7 @@ export function buildWorkflowRoutes(deps: {
       userId: ws.user.id,
       ...(body.override?.ack?.trim() ? { override: { ack: String(body.override.ack) } } : {}),
     });
+    emitWorkflowDeploymentChanged(deps.bus, ws.workspaceId, c.req.param('id'));
     return c.json({ deployment });
   });
 
@@ -296,6 +306,7 @@ export function buildWorkflowRoutes(deps: {
       c.req.param('id'),
       body.status,
     );
+    emitWorkflowDeploymentChanged(deps.bus, ws.workspaceId, c.req.param('id'));
     return c.json({ deployment });
   });
 
@@ -1061,4 +1072,16 @@ function ensureWorkflowSpace(db: AgentisSqliteDb, workspaceId: string, spaceId: 
     .where(and(eq(schema.spaces.id, spaceId), eq(schema.spaces.workspaceId, workspaceId)))
     .get();
   if (!space) throw new AgentisError('RESOURCE_NOT_FOUND', `space ${spaceId} not found`);
+}
+
+/**
+ * Fan out a workflow arming change to the workspace room so /home's Active
+ * section and any live indicator refresh — arming is not a run, so it rides the
+ * WORKFLOW_UPDATED event rather than the RUN_* stream.
+ */
+function emitWorkflowDeploymentChanged(bus: EventBus, workspaceId: string, workflowId: string) {
+  bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.WORKFLOW_UPDATED, {
+    workflowId,
+    reason: 'deployment',
+  });
 }

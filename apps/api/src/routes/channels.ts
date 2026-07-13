@@ -19,6 +19,7 @@ import type { AuthService } from '../services/auth.js';
 import type { ChannelBridge } from '../services/conversation/channelBridge.js';
 import type { ChannelConnectionSupervisor } from '../services/conversation/channelConnectionSupervisor.js';
 import type { ChannelIdentityService } from '../services/conversation/channelIdentityService.js';
+import type { ConnectionGrantService } from '../services/connectionGrants.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 
@@ -27,7 +28,8 @@ const createSchema = z
     // WhatsApp QR is tokenless; WhatsApp Cloud and the others are token/API based.
     kind: z.enum(['telegram', 'discord', 'slack', 'whatsapp', 'voice']),
     name: z.string().min(1).max(120),
-    agentId: z.string().min(1),
+    /** Owning agent, or omit/null for a workspace-owned (global) connection. */
+    agentId: z.string().min(1).nullish(),
     token: z.string().min(8).max(4096).optional(),
     defaultChatId: z.string().min(1).max(120).optional(),
     defaultRecipient: z.string().min(1).max(120).optional(),
@@ -56,6 +58,20 @@ const linkSchema = z.object({
   handle: z.string().min(1).max(256),
   /** Null unlinks the handle from any workspace user. */
   userId: z.string().min(1).nullish(),
+});
+
+const blockSchema = z.object({
+  channelKind: z.enum(['telegram', 'discord', 'slack', 'whatsapp']),
+  handle: z.string().min(1).max(256),
+  blocked: z.boolean(),
+});
+
+const defaultSchema = z.object({ default: z.boolean().optional() });
+
+const grantSchema = z.object({
+  agentId: z.string().min(1),
+  scope: z.enum(['read', 'send', 'manage']).optional(),
+  expiresAt: z.string().nullish(),
 });
 
 const testSchema = z.object({
@@ -96,6 +112,8 @@ export function buildChannelRoutes(deps: {
   supervisor?: ChannelConnectionSupervisor;
   /** Cross-surface peer identity. Optional — absent in some tests. */
   identity?: ChannelIdentityService;
+  /** §3.3 per-agent connection authority. Optional — absent in some tests. */
+  connectionGrants?: ConnectionGrantService;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -124,6 +142,19 @@ export function buildChannelRoutes(deps: {
     });
     if (!linked) throw new AgentisError('RESOURCE_NOT_FOUND', 'peer identity not found');
     return c.json({ identity: linked });
+  });
+
+  app.post('/identities/block', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.identity) throw new AgentisError('RESOURCE_NOT_FOUND', 'identity service not available');
+    const body = blockSchema.parse(await c.req.json());
+    const identity = deps.identity.setBlocked({
+      workspaceId: ws.workspaceId,
+      channelKind: body.channelKind,
+      handle: body.handle,
+      blocked: body.blocked,
+    });
+    return c.json({ identity });
   });
 
   app.post('/', async (c) => {
@@ -227,6 +258,54 @@ export function buildChannelRoutes(deps: {
     const body = targetSchema.parse(await c.req.json());
     const connection = deps.bridge.updateTargets(ws.workspaceId, c.req.param('id'), body);
     return c.json({ connection, health: connection.health });
+  });
+
+  // Designate (or clear) the workspace DEFAULT connection for its kind — the one
+  // deterministic sends (the `channel` workflow node / agentis.channel.send by
+  // kind) use when several connections of that kind exist.
+  app.post('/:id/default', async (c) => {
+    const ws = getWorkspace(c);
+    const body = defaultSchema.parse(await c.req.json().catch(() => ({})));
+    const connection = deps.bridge.setDefault(ws.workspaceId, c.req.param('id'), body.default ?? true);
+    return c.json({ connection });
+  });
+
+  // ── Per-agent authority over this connection (§3.3) ──────
+  // A connection with zero grant rows is OPEN (any agent may send). Issuing the
+  // first grant flips it to default-deny — only the owner + granted agents may
+  // use it. This is what lets a workspace/global connection be restricted to a
+  // chosen set of agents instead of staying open to the whole workspace.
+  app.get('/:id/grants', (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.connectionGrants) return c.json({ grants: [] });
+    const id = c.req.param('id');
+    deps.bridge.get(ws.workspaceId, id); // 404s if missing
+    return c.json({ grants: deps.connectionGrants.list(ws.workspaceId, id) });
+  });
+
+  app.post('/:id/grants', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.connectionGrants) throw new AgentisError('CONNECTION_GRANTS_UNAVAILABLE', 'connection grant service not configured');
+    const id = c.req.param('id');
+    deps.bridge.get(ws.workspaceId, id); // 404s if missing
+    const body = grantSchema.parse(await c.req.json());
+    const grant = deps.connectionGrants.grant({
+      workspaceId: ws.workspaceId,
+      connectionKind: 'channel',
+      connectionId: id,
+      agentId: body.agentId,
+      scope: body.scope ?? 'send',
+      grantedBy: ws.user.id,
+      expiresAt: body.expiresAt ?? null,
+    });
+    return c.json({ grant }, 201);
+  });
+
+  app.delete('/:id/grants/:grantId', (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.connectionGrants) throw new AgentisError('CONNECTION_GRANTS_UNAVAILABLE', 'connection grant service not configured');
+    deps.connectionGrants.revoke(ws.workspaceId, c.req.param('grantId'));
+    return c.json({ ok: true });
   });
 
   app.get('/:id/health', (c) => {

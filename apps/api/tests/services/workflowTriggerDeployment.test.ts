@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { WorkflowGraph } from '@agentis/core';
+import { AppStore } from '@agentis/app';
 import { schema } from '@agentis/db/sqlite';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 import { WorkflowTriggerDeploymentService } from '../../src/services/workflow/workflowTriggerDeployment.js';
@@ -29,13 +30,14 @@ beforeEach(async () => {
 
 afterEach(() => ctx.close());
 
-function seedWorkflow(graph: WorkflowGraph): string {
+function seedWorkflow(graph: WorkflowGraph, appId: string | null = null): string {
   const id = crypto.randomUUID();
   ctx.db.insert(schema.workflows).values({
     id,
     workspaceId: ctx.workspace.id,
     ambientId: ctx.ambient.id,
     userId: ctx.user.id,
+    appId,
     title: 'Automation',
     graph,
     // These fences target the deployment MECHANICS (runtime linking, webhook
@@ -191,5 +193,102 @@ describe('WorkflowTriggerDeploymentService', () => {
     expect(activate).not.toHaveBeenCalled();
     const row = ctx.db.select().from(schema.triggers).where(eq(schema.triggers.workflowId, workflowId)).get();
     expect(row).toMatchObject({ triggerType: 'manual', status: 'active' });
+  });
+});
+
+describe('WorkflowTriggerDeploymentService — App always-on lifecycle', () => {
+  it('reports armable/armed composite and arms only unattended triggers on Go Live', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Monitor' }).id;
+    const cronWf = seedWorkflow(graphWithTrigger({ kind: 'trigger', triggerType: 'cron', schedule: '*/5 * * * *', timezone: 'UTC' }), appId);
+    const manualWf = seedWorkflow(graphWithTrigger({ kind: 'trigger', triggerType: 'manual' }), appId);
+
+    // Before Go Live: the cron trigger is armable but unarmed; the manual one is not armable.
+    const before = service.getForApp(ctx.workspace.id, appId);
+    expect(before).toMatchObject({ status: 'paused', armable: 1, armed: 0 });
+    expect(before.workflows.find((w) => w.workflowId === cronWf)).toMatchObject({ triggerType: 'cron', status: 'unarmed' });
+    expect(before.workflows.find((w) => w.workflowId === manualWf)).toMatchObject({ status: 'manual' });
+
+    const { deployment, results } = await service.activateApp({ workspaceId: ctx.workspace.id, appId, userId: ctx.user.id });
+    expect(deployment).toMatchObject({ status: 'live', armable: 1, armed: 1 });
+    expect(results.find((r) => r.workflowId === cronWf)).toMatchObject({ outcome: 'armed' });
+    expect(results.find((r) => r.workflowId === manualWf)).toMatchObject({ outcome: 'skipped' });
+    expect(activate).toHaveBeenCalledOnce();
+
+    const { deployment: afterOff } = await service.deactivateApp({ workspaceId: ctx.workspace.id, appId });
+    expect(afterOff).toMatchObject({ status: 'paused', armed: 0 });
+    expect(deactivate).toHaveBeenCalledOnce();
+  });
+
+  it('listActive returns armed workflows workspace-wide with next-run/last-fired', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Monitors' }).id;
+    const cronWf = seedWorkflow(graphWithTrigger({ kind: 'trigger', triggerType: 'cron', schedule: '*/5 * * * *', timezone: 'UTC' }), appId);
+    seedWorkflow(graphWithTrigger({ kind: 'trigger', triggerType: 'manual' }), appId);
+
+    // Nothing armed yet → empty.
+    expect(service.listActive(ctx.workspace.id)).toHaveLength(0);
+
+    await service.activate({ workspaceId: ctx.workspace.id, workflowId: cronWf, ambientId: ctx.ambient.id, userId: ctx.user.id });
+
+    const active = service.listActive(ctx.workspace.id);
+    expect(active).toHaveLength(1);
+    expect(active[0]).toMatchObject({
+      workflowId: cronWf,
+      appId,
+      appName: 'Monitors',
+      triggerType: 'cron',
+      status: 'active',
+    });
+    expect(active[0]!.nextRunAt).toBeTruthy(); // cron next fire is computed
+  });
+
+  it('listActive surfaces interval period + run-history shape for an interval trigger', async () => {
+    const workflowId = seedWorkflow(graphWithTrigger({
+      kind: 'trigger',
+      triggerType: 'persistent_listener',
+      listenerConfig: {
+        source: { kind: 'interval', intervalMs: 10_000, fireOnStart: true },
+        predicate: { kind: 'always' },
+        firePolicy: { mode: 'immediate' },
+      },
+    }));
+    await service.activate({ workspaceId: ctx.workspace.id, workflowId, ambientId: ctx.ambient.id, userId: ctx.user.id });
+
+    const active = service.listActive(ctx.workspace.id);
+    const row = active.find((a) => a.workflowId === workflowId)!;
+    expect(row).toBeTruthy();
+    expect(row.triggerType).toBe('persistent_listener');
+    expect(row.intervalMs).toBe(10_000);
+    expect(Array.isArray(row.recentRuns)).toBe(true);
+    expect(typeof row.totalRuns).toBe('number');
+  });
+
+  it('reports status "none" when an app has no unattended triggers', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Manual-only' }).id;
+    seedWorkflow(graphWithTrigger({ kind: 'trigger', triggerType: 'manual' }), appId);
+    const summary = service.getForApp(ctx.workspace.id, appId);
+    expect(summary).toMatchObject({ status: 'none', armable: 0, armed: 0 });
+  });
+
+  it('surfaces a per-workflow block instead of failing the whole sweep', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Mixed' }).id;
+    // Seed a listener workflow with an invalid (empty) listener config so activate throws.
+    const id = crypto.randomUUID();
+    ctx.db.insert(schema.workflows).values({
+      id,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      appId,
+      title: 'Broken listener',
+      graph: graphWithTrigger({ kind: 'trigger', triggerType: 'persistent_listener' }),
+      settings: {},
+    }).run();
+    const okCron = seedWorkflow(graphWithTrigger({ kind: 'trigger', triggerType: 'cron', schedule: '*/5 * * * *', timezone: 'UTC' }), appId);
+
+    const { results } = await service.activateApp({ workspaceId: ctx.workspace.id, appId, userId: ctx.user.id });
+    expect(results.find((r) => r.workflowId === okCron)).toMatchObject({ outcome: 'armed' });
+    const broken = results.find((r) => r.workflowId === id)!;
+    expect(broken.outcome === 'blocked' || broken.outcome === 'error').toBe(true);
+    expect(broken.message).toBeTruthy();
   });
 });

@@ -35,6 +35,13 @@ export function createRealtimeServer(deps: {
   logger: Logger;
   viewportStore?: ViewportStore;
   allowedOrigins: readonly string[];
+  /**
+   * Non-production single-tenant host. When true the socket CORS reflects any
+   * loopback/LAN origin so the realtime link connects regardless of the web
+   * dev-server port (5173, an autoPort fallback, a LAN IP, …) — no manual
+   * AGENTIS_ALLOWED_ORIGINS needed. Strict allowlist still applies in production.
+   */
+  dev?: boolean;
   options?: Partial<ServerOptions>;
 }): RealtimeServer {
   let io: IOServer | null = null;
@@ -43,7 +50,7 @@ export function createRealtimeServer(deps: {
     attach(server) {
       io = new IOServer(server, {
         ...deps.options,
-        cors: { origin: [...deps.allowedOrigins], credentials: true },
+        cors: { origin: makeCorsOrigin(deps.allowedOrigins, deps.dev ?? false), credentials: true },
       });
 
       io.use(async (socket, next) => {
@@ -152,6 +159,43 @@ export function createRealtimeServer(deps: {
       await io?.close();
     },
   };
+}
+
+type CorsOriginFn = (
+  origin: string | undefined,
+  cb: (err: Error | null, allow?: boolean) => void,
+) => void;
+
+/**
+ * CORS origin decision for the realtime socket. Always allows the configured
+ * origins (and non-browser clients with no Origin). In dev, also reflects any
+ * loopback/private-LAN origin so the socket connects from whatever port the web
+ * dev server landed on — without hand-editing AGENTIS_ALLOWED_ORIGINS.
+ */
+function makeCorsOrigin(allowed: readonly string[], dev: boolean): CorsOriginFn {
+  const allowSet = new Set(allowed);
+  return (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (allowSet.has(origin)) return cb(null, true);
+    if (dev && isLocalOrigin(origin)) return cb(null, true);
+    cb(null, false);
+  };
+}
+
+function isLocalOrigin(origin: string): boolean {
+  try {
+    const { hostname } = new URL(origin);
+    return (
+      hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '::1'
+      || /^10\./.test(hostname)
+      || /^192\.168\./.test(hostname)
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function ownsWorkspace(db: AgentisSqliteDb, userId: string, workspaceId: string): boolean {

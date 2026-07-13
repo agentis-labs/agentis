@@ -17,6 +17,7 @@
 // ── Layer 1: Source ──────────────────────────────────────────────────────────
 
 export type ListenerSourceKind =
+  | 'interval'
   | 'websocket'
   | 'sse'
   | 'http_poll'
@@ -30,6 +31,18 @@ export type ListenerSourceKind =
   | 'email_imap';
 
 export type ListenerSource =
+  | {
+      // Heartbeat: fire the workflow on a fixed timer. The way to say "run every
+      // N seconds" — cron floors at 1 minute and every other source fires on
+      // external events, not a clock.
+      kind: 'interval';
+      /** Fire every this many milliseconds. Min 1000. */
+      intervalMs: number;
+      /** Also fire once immediately on activation (default false — first tick after intervalMs). */
+      fireOnStart?: boolean;
+      /** Static fields merged into every tick event (become workflow inputs). */
+      payload?: Record<string, unknown>;
+    }
   | {
       kind: 'websocket';
       url: string;

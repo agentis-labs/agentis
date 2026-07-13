@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale, Boxes, Database } from 'lucide-react';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, MessageCircle, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale, Boxes, Database, Loader2, CheckCircle2, Users, ChevronDown, ChevronUp } from 'lucide-react';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -154,7 +154,7 @@ const RUNTIME_MATRIX: RuntimeRow[] = [
   { type: 'codex', label: 'Codex CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Slower (re-spawns per tool round). Use the orchestrator fast path for native speed.' },
   { type: 'claude_code', label: 'Claude Code CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Same fast-path recommendation as Codex.' },
   { type: 'openclaw', label: 'OpenClaw', interactiveChat: true, support: 'relay', note: 'Chats through the gateway session: Agentis relays your message and streams the reply. Platform tool calls run on the gateway agent, not the local chat loop.' },
-  { type: 'hermes_agent', label: 'Hermes Agent', interactiveChat: true, support: 'marker', note: 'Marker protocol. Interactive chat and Agentis tool forwarding via the spawn-level JSON stream.' },
+  { type: 'hermes_agent', label: 'Hermes Agent', interactiveChat: true, support: 'native', note: 'ACP-native streaming with live reasoning, tool activity, and Agentis tools over MCP. Quiet CLI remains a final-answer-only fallback.' },
   { type: 'cursor', label: 'Cursor', interactiveChat: true, support: 'marker', note: 'Marker protocol. Chat and tool forwarding via spawn-level JSON stream.' },
 ];
 
@@ -451,10 +451,15 @@ function WorkspaceTab() {
 
 interface Connection {
   id: string;
-  kind: 'gateway' | 'telegram' | 'discord' | 'slack' | 'webhook';
+  kind: 'gateway' | 'whatsapp' | 'telegram' | 'discord' | 'slack' | 'webhook' | 'voice';
   name: string;
   status?: string;
   agentCount?: number;
+  isDefault?: boolean;
+  /** Owner label for channels: agent name, or "Workspace" when agentless. */
+  owner?: string;
+  /** Owning agent id, or null/undefined for a workspace-owned (agentless) connection. */
+  agentId?: string | null;
 }
 
 function ConnectionsTab() {
@@ -463,23 +468,30 @@ function ConnectionsTab() {
   const [items, setItems] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
+  const [permissionsFor, setPermissionsFor] = useState<string | null>(null);
 
   async function refresh() {
     setLoading(true);
     try {
-      const [g, c] = await Promise.allSettled([
+      const [g, c, a] = await Promise.allSettled([
         api<{ gateways: Array<{ id: string; name: string; status: string; agentCount?: number }> }>('/v1/gateways'),
-        api<{ channels: Array<{ id: string; kind: string; name: string; status?: string }> }>('/v1/channels'),
+        // NOTE: /v1/channels returns { connections: [...] }, NOT { channels }.
+        // Reading the wrong key is why the list showed "No connections configured".
+        api<{ connections: Array<{ id: string; kind: string; name: string; status?: string; isDefault?: boolean; agentId?: string | null }> }>('/v1/channels'),
+        api<{ agents: Array<{ id: string; name: string }> }>('/v1/agents'),
       ]);
+      const agentName = new Map((a.status === 'fulfilled' ? a.value.agents ?? [] : []).map((x) => [x.id, x.name]));
       const merged: Connection[] = [];
       if (g.status === 'fulfilled') {
         for (const x of g.value.gateways ?? []) merged.push({ ...x, kind: 'gateway' });
       }
       if (c.status === 'fulfilled') {
-        for (const x of c.value.channels ?? []) {
-          if (x.kind === 'telegram' || x.kind === 'discord' || x.kind === 'slack' || x.kind === 'webhook') {
-            merged.push({ id: x.id, kind: x.kind, name: x.name, status: x.status });
-          }
+        for (const x of c.value.connections ?? []) {
+          merged.push({
+            id: x.id, kind: x.kind as Connection['kind'], name: x.name, status: x.status, isDefault: x.isDefault,
+            owner: x.agentId ? (agentName.get(x.agentId) ?? 'Agent') : 'Workspace',
+            agentId: x.agentId ?? null,
+          });
         }
       }
       setItems(merged);
@@ -503,6 +515,18 @@ function ConnectionsTab() {
       void refresh();
     } catch (e) { toast.error('Failed to disconnect', apiErrorMessage(e)); }
   }
+
+  async function makeDefault(c: Connection) {
+    try {
+      await api(`/v1/channels/${c.id}/default`, { method: 'POST', body: JSON.stringify({ default: true }) });
+      toast.success('Default set', `Deterministic ${c.kind} sends now use "${c.name}".`);
+      void refresh();
+    } catch (e) { toast.error('Could not set default', apiErrorMessage(e)); }
+  }
+
+  // A kind has "competing" connections when >1 of it exists — that's when a
+  // default matters for deterministic sends.
+  const kindCounts = items.reduce<Record<string, number>>((acc, i) => { acc[i.kind] = (acc[i.kind] ?? 0) + 1; return acc; }, {});
 
   return (
     <div className="space-y-4">
@@ -528,30 +552,156 @@ function ConnectionsTab() {
         </div>
       ) : (
         <div className="space-y-1.5">
-          {items.map((c) => (
-            <div key={c.id} className="flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3">
-              <span className={`flex h-8 w-8 items-center justify-center rounded-card ${
-                c.kind === 'gateway' ? 'bg-info-soft text-info'
-                  : c.kind === 'telegram' ? 'bg-info-soft text-info'
-                  : c.kind === 'discord' ? 'bg-accent-soft text-accent'
-                  : c.kind === 'slack' ? 'bg-warn-soft text-warn'
-                  : 'bg-surface-2 text-text-secondary'
-              }`}>
-                {c.kind === 'gateway' ? <Plug size={14} /> : <Hash size={14} />}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-[13px] font-medium text-text-primary">{c.name}</span>
-                  <StatusBadge status={c.status ?? 'unknown'} size="sm" />
+          {items.map((c) => {
+            const canGovern = c.kind !== 'gateway' && c.kind !== 'webhook';
+            // §3.3 agent-grants only make sense on a SHARED (workspace-owned)
+            // connection — "which agents may use it". An individually-owned
+            // connection is already scoped to its one agent; the equivalent
+            // permission question there is "who it may talk to", which lives on
+            // that agent's own Channels tab (People with rules), not here.
+            const canRestrictToAgents = canGovern && !c.agentId;
+            const expanded = permissionsFor === c.id;
+            return (
+              <div key={c.id} className="rounded-card border border-line bg-surface">
+                <div className="flex items-center gap-3 px-4 py-3">
+                  <span className={`flex h-8 w-8 items-center justify-center rounded-card ${
+                    c.kind === 'gateway' ? 'bg-info-soft text-info'
+                      : c.kind === 'whatsapp' ? 'bg-success-soft text-success'
+                      : c.kind === 'telegram' ? 'bg-info-soft text-info'
+                      : c.kind === 'discord' ? 'bg-accent-soft text-accent'
+                      : c.kind === 'slack' ? 'bg-warn-soft text-warn'
+                      : 'bg-surface-2 text-text-secondary'
+                  }`}>
+                    {c.kind === 'gateway' ? <Plug size={14} /> : c.kind === 'whatsapp' ? <MessageCircle size={14} /> : c.kind === 'telegram' ? <MessageSquare size={14} /> : <Hash size={14} />}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-medium text-text-primary">{c.name}</span>
+                      <StatusBadge status={c.status ?? 'unknown'} size="sm" />
+                      {c.isDefault && (
+                        <span className="inline-flex items-center rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">Default</span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[11px] capitalize text-text-muted">
+                      {c.kind}
+                      {c.owner ? ` · ${c.owner}` : ''}
+                      {c.agentCount != null ? ` · ${c.agentCount} agent${c.agentCount === 1 ? '' : 's'}` : ''}
+                    </div>
+                  </div>
+                  {/* Only messaging channels with a sibling of the same kind need a default. */}
+                  {canGovern && !c.isDefault && (kindCounts[c.kind] ?? 0) > 1 && (
+                    <Button variant="ghost" size="sm" onClick={() => void makeDefault(c)} title={`Use this for deterministic ${c.kind} sends`}>
+                      Set default
+                    </Button>
+                  )}
+                  {canRestrictToAgents && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      iconLeft={<Users size={12} />}
+                      onClick={() => setPermissionsFor(expanded ? null : c.id)}
+                      title="Choose which agents may use this shared connection"
+                    >
+                      Permissions {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                    </Button>
+                  )}
+                  {canGovern && c.agentId && (
+                    <Link
+                      to={`/agents/${c.agentId}?tab=channels`}
+                      className="text-[11px] text-text-muted hover:text-accent hover:underline"
+                      title="This connection belongs to one agent — manage who it talks to on that agent's Channels tab"
+                    >
+                      Individual connection · manage on {c.owner} →
+                    </Link>
+                  )}
+                  <Button variant="ghost" size="sm" aria-label="Disconnect" onClick={() => void handleDelete(c)}>
+                    <Trash2 size={12} />
+                  </Button>
                 </div>
-                <div className="mt-0.5 text-[11px] capitalize text-text-muted">
-                  {c.kind}{c.agentCount != null ? ` · ${c.agentCount} agent${c.agentCount === 1 ? '' : 's'}` : ''}
-                </div>
+                {expanded && <ConnectionPermissions connectionId={c.id} owner={c.owner} />}
               </div>
-              <Button variant="ghost" size="sm" aria-label="Disconnect" onClick={() => void handleDelete(c)}>
-                <Trash2 size={12} />
-              </Button>
-            </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface AgentOption { id: string; name: string; }
+interface Grant { id: string; agentId: string; status: string; scope: string; }
+
+/**
+ * Inline permissions panel for one connection (§3.3 grants). A connection with
+ * zero grants is open to every agent — that's the default. Granting the FIRST
+ * agent flips it to default-deny for that connection: only its owner (if any)
+ * plus explicitly checked agents may send on it. Unchecking the last agent
+ * does NOT re-open it — revoke leaves a (revoked) row; add a note below.
+ */
+function ConnectionPermissions({ connectionId, owner }: { connectionId: string; owner?: string }) {
+  const toast = useToast();
+  const [agents, setAgents] = useState<AgentOption[] | null>(null);
+  const [grants, setGrants] = useState<Grant[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh() {
+    const [a, g] = await Promise.allSettled([
+      api<{ agents: AgentOption[] }>('/v1/agents'),
+      api<{ grants: Grant[] }>(`/v1/channels/${connectionId}/grants`),
+    ]);
+    if (a.status === 'fulfilled') setAgents(a.value.agents ?? []);
+    if (g.status === 'fulfilled') setGrants(g.value.grants ?? []);
+  }
+
+  useEffect(() => { void refresh(); }, [connectionId]);
+
+  const activeGrants = grants.filter((g) => g.status === 'active');
+  const restricted = activeGrants.length > 0;
+  const grantedIds = new Set(activeGrants.map((g) => g.agentId));
+
+  async function toggle(agentId: string) {
+    setBusy(agentId);
+    try {
+      const existing = activeGrants.find((g) => g.agentId === agentId);
+      if (existing) {
+        await api(`/v1/channels/${connectionId}/grants/${existing.id}`, { method: 'DELETE' });
+      } else {
+        await api(`/v1/channels/${connectionId}/grants`, { method: 'POST', body: JSON.stringify({ agentId, scope: 'send' }) });
+      }
+      await refresh();
+    } catch (e) { toast.error('Could not update permission', apiErrorMessage(e)); }
+    finally { setBusy(null); }
+  }
+
+  return (
+    <div className="border-t border-line bg-surface-2/60 px-4 py-3">
+      <div className={clsx(
+        'mb-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+        restricted ? 'bg-warn-soft text-warn' : 'bg-success-soft text-success',
+      )}>
+        {restricted ? `Restricted — ${activeGrants.length} agent${activeGrants.length === 1 ? '' : 's'} allowed` : 'Open — every agent may send on this connection'}
+      </div>
+      <p className="mb-2 text-[11px] text-text-secondary">
+        {owner ? `${owner} (the owner) always has access. ` : ''}
+        Check an agent to restrict this connection to only checked agents{owner ? ' plus the owner' : ''}. Leave everything unchecked to keep it open to all.
+      </p>
+      {agents === null ? (
+        <div className="text-[11px] text-text-muted">Loading agents…</div>
+      ) : agents.length === 0 ? (
+        <div className="text-[11px] text-text-muted">No agents in this workspace yet.</div>
+      ) : (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+          {agents.map((a) => (
+            <label key={a.id} className="flex cursor-pointer items-center gap-2 py-0.5 text-[12px] text-text-primary">
+              <input
+                type="checkbox"
+                checked={grantedIds.has(a.id)}
+                disabled={busy === a.id}
+                onChange={() => void toggle(a.id)}
+                className="h-3.5 w-3.5 rounded border-line"
+              />
+              {a.name}
+            </label>
           ))}
         </div>
       )}
@@ -783,13 +933,22 @@ interface AddConnectionDialogProps {
   onCreated: () => void;
 }
 
+// `flow` drives the connect UI: 'qr' = scan a QR to pair (WhatsApp), 'token' =
+// paste a bot token, 'gateway' = provision compute, 'webhook' = inbound HTTP.
 const CONNECTION_KINDS = [
-  { kind: 'gateway',  label: 'OpenClaw Gateway', desc: 'Self-hosted compute', icon: Plug },
-  { kind: 'telegram', label: 'Telegram',         desc: 'Bot adapter',          icon: MessageSquare },
-  { kind: 'discord',  label: 'Discord',          desc: 'Bot adapter',          icon: Hash },
-  { kind: 'slack',    label: 'Slack',            desc: 'Bot adapter',          icon: Hash },
-  { kind: 'webhook',  label: 'Webhook',          desc: 'Inbound HTTP',         icon: WebhookIcon },
+  { kind: 'whatsapp', label: 'WhatsApp',         desc: 'Scan a QR to pair',    icon: MessageCircle, group: 'messaging', flow: 'qr' },
+  { kind: 'telegram', label: 'Telegram',         desc: 'Bot token',            icon: MessageSquare, group: 'messaging', flow: 'token' },
+  { kind: 'discord',  label: 'Discord',          desc: 'Bot token',            icon: Hash,          group: 'messaging', flow: 'token' },
+  { kind: 'slack',    label: 'Slack',            desc: 'Bot token',            icon: Hash,          group: 'messaging', flow: 'token' },
+  { kind: 'gateway',  label: 'OpenClaw Gateway', desc: 'Self-hosted compute',  icon: Plug,          group: 'compute',   flow: 'gateway' },
+  { kind: 'webhook',  label: 'Webhook',          desc: 'Inbound HTTP',         icon: WebhookIcon,   group: 'inbound',   flow: 'webhook' },
 ] as const;
+
+const CONNECTION_GROUPS: Array<{ id: string; label: string }> = [
+  { id: 'messaging', label: 'Messaging channels' },
+  { id: 'compute', label: 'Gateway / compute' },
+  { id: 'inbound', label: 'Inbound' },
+];
 
 function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogProps) {
   const toast = useToast();
@@ -797,35 +956,73 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
   const [name, setName] = useState('');
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
+  // A channel connection is OWNED by an agent (inbound routes to it; outbound
+  // sends as it), so messaging kinds must pick one.
+  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+  const [agentId, setAgentId] = useState('');
+  // WhatsApp QR pairing sub-flow.
+  const [qr, setQr] = useState<{ connectionId: string; qrDataUrl?: string; qr?: string; status: string } | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const picked = pickedKind ? CONNECTION_KINDS.find((c) => c.kind === pickedKind) ?? null : null;
+  const needsAgent = picked?.flow === 'token' || picked?.flow === 'qr';
+
+  const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
   useEffect(() => {
-    if (open) { setPickedKind(null); setName(''); setToken(''); }
+    if (open) {
+      setPickedKind(null); setName(''); setToken(''); setAgentId(''); setQr(null); stopPoll();
+      void api<{ agents: Array<{ id: string; name: string }> }>('/v1/agents')
+        .then((r) => setAgents(r.agents ?? [])).catch(() => setAgents([]));
+    }
+    return stopPoll;
   }, [open]);
 
   if (!open) return null;
 
-  async function submit(e: React.FormEvent) {
+  function beginQrPolling(connectionId: string) {
+    stopPoll();
+    // Poll quickly so the QR appears as soon as baileys emits it (usually 1–2s),
+    // not several seconds later.
+    pollRef.current = setInterval(async () => {
+      try {
+        const state = await api<{ connectionId: string; status: string; qr?: string; qrDataUrl?: string }>(`/v1/channels/${connectionId}/login`);
+        setQr({ connectionId, status: state.status, qr: state.qr, qrDataUrl: state.qrDataUrl });
+        if (state.status === 'open' || state.status === 'active' || state.status === 'connected') {
+          stopPoll();
+          toast.success('WhatsApp connected', name.trim());
+          onCreated();
+        }
+      } catch { /* transient; keep polling */ }
+    }, 1000);
+  }
+
+  async function connect(e: React.FormEvent) {
     e.preventDefault();
-    if (!pickedKind || !name.trim() || busy) return;
+    if (!picked || !name.trim() || busy) return;
     setBusy(true);
     try {
-      if (pickedKind === 'gateway') {
-        await api('/v1/gateways', {
-          method: 'POST',
-          body: JSON.stringify({ name: name.trim() }),
+      if (picked.flow === 'gateway') {
+        await api('/v1/gateways', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
+        toast.success('Connected', name.trim());
+        onCreated();
+      } else if (picked.flow === 'qr') {
+        // WhatsApp: create the connection (QR-local, no token) owned by the chosen
+        // agent, then start the login session and poll for the QR + connected state.
+        const created = await api<{ connection: { id: string } }>('/v1/channels', {
+          method: 'POST', body: JSON.stringify({ kind: 'whatsapp', mode: 'qr_local', name: name.trim(), ...(agentId ? { agentId } : {}) }),
         });
+        const id = created.connection.id;
+        const login = await api<{ connectionId: string; status: string; qr?: string; qrDataUrl?: string }>(`/v1/channels/${id}/login`, { method: 'POST', body: '{}' });
+        setQr({ connectionId: id, status: login.status, qr: login.qr, qrDataUrl: login.qrDataUrl });
+        beginQrPolling(id);
       } else {
         await api('/v1/channels', {
           method: 'POST',
-          body: JSON.stringify({
-            kind: pickedKind,
-            name: name.trim(),
-            credentials: token.trim() ? { token: token.trim() } : {},
-          }),
+          body: JSON.stringify({ kind: pickedKind, name: name.trim(), ...(agentId ? { agentId } : {}), ...(token.trim() ? { token: token.trim() } : {}) }),
         });
+        toast.success('Connected', name.trim());
+        onCreated();
       }
-      toast.success('Connected', name.trim());
-      onCreated();
     } catch (e) {
       toast.error('Failed to connect', apiErrorMessage(e));
     } finally {
@@ -835,72 +1032,100 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
 
   return (
     <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
-      <form onSubmit={submit} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
+      <form onSubmit={connect} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
-          <h3 className="text-heading text-text-primary">Add connection</h3>
+          <h3 className="text-heading text-text-primary">{qr ? 'Connect WhatsApp' : 'Add connection'}</h3>
           <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
             <X size={16} />
           </button>
         </header>
         <div className="space-y-4 px-5 py-5">
-          {!pickedKind ? (
-            <div className="grid grid-cols-2 gap-2">
-              {CONNECTION_KINDS.map((c) => {
-                const Icon = c.icon;
+          {qr ? (
+            // WhatsApp QR pairing screen.
+            <div className="flex flex-col items-center gap-3 text-center">
+              {(qr.status === 'open' || qr.status === 'active' || qr.status === 'connected') ? (
+                <><CheckCircle2 size={40} className="text-success" /><p className="text-[14px] text-text-primary">Connected!</p></>
+              ) : qr.qrDataUrl ? (
+                <>
+                  <img src={qr.qrDataUrl} alt="WhatsApp pairing QR" className="h-52 w-52 rounded-card border border-line bg-white p-2" />
+                  <p className="text-[13px] text-text-secondary">On your phone: <strong>WhatsApp → Settings → Linked Devices → Link a Device</strong>, then scan this code.</p>
+                  <p className="inline-flex items-center gap-1.5 text-[12px] text-text-muted"><Loader2 size={12} className="animate-spin" /> Waiting for scan…</p>
+                </>
+              ) : (
+                <p className="inline-flex items-center gap-1.5 py-8 text-[13px] text-text-muted"><Loader2 size={14} className="animate-spin" /> Generating pairing code…</p>
+              )}
+            </div>
+          ) : !pickedKind ? (
+            <div className="space-y-4">
+              {CONNECTION_GROUPS.map((g) => {
+                const items = CONNECTION_KINDS.filter((c) => c.group === g.id);
+                if (items.length === 0) return null;
                 return (
-                  <button
-                    key={c.kind}
-                    type="button"
-                    onClick={() => setPickedKind(c.kind)}
-                    className="flex flex-col items-start gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-left transition-colors hover:border-line-strong hover:bg-surface-3"
-                  >
-                    <Icon size={16} className="text-text-secondary" />
-                    <span className="text-subheading text-text-primary">{c.label}</span>
-                    <span className="text-[11px] text-text-muted">{c.desc}</span>
-                  </button>
+                  <div key={g.id}>
+                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">{g.label}</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {items.map((c) => {
+                        const Icon = c.icon;
+                        return (
+                          <button key={c.kind} type="button" onClick={() => setPickedKind(c.kind)}
+                            className="flex flex-col items-start gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-left transition-colors hover:border-line-strong hover:bg-surface-3">
+                            <Icon size={16} className="text-text-secondary" />
+                            <span className="text-subheading text-text-primary">{c.label}</span>
+                            <span className="text-[11px] text-text-muted">{c.desc}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
               })}
             </div>
           ) : (
             <>
               <div>
-                <button type="button" onClick={() => setPickedKind(null)} className="text-[12px] text-text-muted hover:text-text-primary">
-                  ← Back
-                </button>
+                <button type="button" onClick={() => setPickedKind(null)} className="text-[12px] text-text-muted hover:text-text-primary">← Back</button>
               </div>
               <label className="block">
                 <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Name</span>
-                <input
-                  autoFocus
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder={`My ${pickedKind}`}
-                  className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-                />
+                <input autoFocus type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder={`My ${picked?.label ?? pickedKind}`}
+                  className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
               </label>
-              {pickedKind !== 'gateway' && pickedKind !== 'webhook' && (
+              {needsAgent && (
+                <label className="block">
+                  <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Owner</span>
+                  <select value={agentId} onChange={(e) => setAgentId(e.target.value)}
+                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none">
+                    <option value="">Workspace — shared by all agents &amp; automation</option>
+                    {agents.map((a) => <option key={a.id} value={a.id}>Agent: {a.name}</option>)}
+                  </select>
+                  <span className="mt-1 block text-[11px] text-text-muted">
+                    {agentId
+                      ? 'This agent receives inbound messages and owns this channel.'
+                      : 'Workspace channel: inbound routes to the orchestrator; workflows and any agent can send on it.'}
+                  </span>
+                </label>
+              )}
+              {picked?.flow === 'token' && (
                 <label className="block">
                   <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Bot token</span>
-                  <input
-                    type="password"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder="Paste token"
-                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-                  />
+                  <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token"
+                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
                 </label>
+              )}
+              {picked?.flow === 'qr' && (
+                <p className="text-[12px] text-text-muted">No token needed — you'll scan a QR code with WhatsApp on the next step.</p>
               )}
             </>
           )}
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
-          <button type="button" onClick={onClose} className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary">Cancel</button>
-          <button
-            type="submit"
-            disabled={!pickedKind || !name.trim() || busy}
-            className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
-          >{busy ? 'Connecting…' : 'Connect'}</button>
+          <button type="button" onClick={onClose} className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary">{qr ? 'Done' : 'Cancel'}</button>
+          {!qr && (
+            <button type="submit" disabled={!pickedKind || !name.trim() || busy}
+              className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60">
+              {busy ? 'Connecting…' : picked?.flow === 'qr' ? 'Get QR code' : 'Connect'}
+            </button>
+          )}
         </footer>
       </form>
     </div>

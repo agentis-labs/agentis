@@ -8,6 +8,13 @@ const cursorSchema = z.object({
   cursorParamName: z.string().min(1).optional(),
 });
 
+const intervalSourceSchema = z.object({
+  kind: z.literal('interval'),
+  intervalMs: z.number().int().min(1_000),
+  fireOnStart: z.boolean().optional(),
+  payload: z.record(z.unknown()).optional(),
+});
+
 const websocketSourceSchema = z.object({
   kind: z.literal('websocket'),
   url: z.string().url(),
@@ -109,6 +116,7 @@ const emailImapSourceSchema = z.object({
 });
 
 export const listenerSourceSchema = z.union([
+  intervalSourceSchema,
   websocketSourceSchema,
   sseSourceSchema,
   httpPollSourceSchema,

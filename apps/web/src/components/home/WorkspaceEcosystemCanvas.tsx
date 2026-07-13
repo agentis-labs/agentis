@@ -14,7 +14,7 @@
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { REALTIME_EVENTS, type WorkStepTrack } from '@agentis/core';
+import { REALTIME_EVENTS, type ActiveWorkflowSummary, type WorkStepTrack } from '@agentis/core';
 import {
   AlertTriangle,
   Bot,
@@ -42,6 +42,9 @@ import {
   Pencil,
   Loader2,
   Zap,
+  Radio,
+  CalendarClock,
+  Webhook,
   RefreshCw,
   Sparkles,
   Activity as ActivityIcon,
@@ -98,6 +101,7 @@ import { CanvasControls } from './CanvasControls';
 import { CanvasLoadingOverlay } from './CanvasLoadingOverlay';
 import { CanvasNodeDetailPanel } from './CanvasNodeDetailPanel';
 import { CanvasRadialLight } from './CanvasRadialLight';
+import { ORCHESTRATOR_DEFAULT_ACCENT } from './homeCanvasTypes';
 import type {
   CanvasEdge,
   CanvasModel,
@@ -122,9 +126,10 @@ interface WorkspaceEcosystemCanvasProps {
   approvals?: WorkspaceApproval[];
   failedRuns?: WorkspaceFailedRun[];
   issues?: WorkspaceIssue[];
+  activeWorkflows?: ActiveWorkflowSummary[];
   me?: WorkspaceUser | null;
   fleet?: WorkspaceFleetOverview | null;
-  counts?: { liveAgents: number; activeRuns: number };
+  counts?: { liveAgents: number; activeRuns: number; armedWorkflows?: number };
 }
 
 interface CanvasViewport {
@@ -181,6 +186,7 @@ const EMPTY_DATA: EcosystemData = {
 const EMPTY_APPROVALS: WorkspaceApproval[] = [];
 const EMPTY_FAILED_RUNS: WorkspaceFailedRun[] = [];
 const EMPTY_ISSUES: WorkspaceIssue[] = [];
+const EMPTY_ACTIVE_WORKFLOWS: ActiveWorkflowSummary[] = [];
 const LIVE_WORKSPACE_KINDS = new Set<string>(['run', 'node', 'agent', 'tool', 'workflow', 'listener']);
 
 const ECOSYSTEM_REFRESH_EVENTS = [
@@ -251,6 +257,7 @@ export function WorkspaceEcosystemCanvas({
   approvals: approvalsProp,
   failedRuns: failedRunsProp,
   issues: issuesProp,
+  activeWorkflows: activeWorkflowsProp,
   me = null,
   fleet = null,
   counts,
@@ -258,6 +265,7 @@ export function WorkspaceEcosystemCanvas({
   const approvals = approvalsProp ?? EMPTY_APPROVALS;
   const failedRuns = failedRunsProp ?? EMPTY_FAILED_RUNS;
   const issues = issuesProp ?? EMPTY_ISSUES;
+  const activeWorkflows = activeWorkflowsProp ?? EMPTY_ACTIVE_WORKFLOWS;
   const nav = useNavigate();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<CanvasViewport>({ pan: { x: 0, y: 0 }, zoom: 1 });
@@ -838,6 +846,10 @@ export function WorkspaceEcosystemCanvas({
   }
 
   function handleCanvasWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    // Scrollable overlays (the node detail panel, popovers, etc.) sit inside the
+    // canvas surface for positioning, but their own scroll must never be hijacked
+    // into a canvas pan/zoom.
+    if ((event.target as HTMLElement).closest('[data-canvas-control]')) return;
     event.preventDefault();
     event.stopPropagation();
     stopAnimation();
@@ -1059,6 +1071,7 @@ export function WorkspaceEcosystemCanvas({
         approvals={approvals}
         failedRuns={failedRuns}
         issues={issues}
+        activeWorkflows={activeWorkflows}
         activity={workspaceActivity}
         workSessions={workSessions}
         observabilityEvents={commandCenter.events}
@@ -1601,6 +1614,7 @@ function LiveWorkspacePanel({
   approvals,
   failedRuns,
   issues,
+  activeWorkflows,
   activity,
   workSessions,
   observabilityEvents,
@@ -1621,6 +1635,7 @@ function LiveWorkspacePanel({
   approvals: WorkspaceApproval[];
   failedRuns: WorkspaceFailedRun[];
   issues: WorkspaceIssue[];
+  activeWorkflows: ActiveWorkflowSummary[];
   activity: RealtimeActivity[];
   workSessions: WorkSession[];
   observabilityEvents: ObservabilityEvent[];
@@ -1930,6 +1945,22 @@ function LiveWorkspacePanel({
               </section>
             )}
 
+            {activeWorkflows.length > 0 && (
+              <LiveWorkspaceSection storageKey="always-on" label="Always-on" icon={<Radio size={12} />} empty="No armed workflows" count={activeWorkflows.length} defaultOpen>
+                {activeWorkflows.map((wf) => (
+                  <AlwaysOnWorkflowRow
+                    key={wf.workflowId}
+                    workflow={wf}
+                    now={panelNow}
+                    onOpen={() => {
+                      if (wf.activeRun) openRunModal({ runId: wf.activeRun.id, workflowId: wf.workflowId, source: 'live-workspace-always-on' });
+                      else onSelectWorkflow(wf.workflowId);
+                    }}
+                  />
+                ))}
+              </LiveWorkspaceSection>
+            )}
+
             {activeSessions.length === 0 && showStream && (
               <LiveActivityStream activity={activity} onSelectWorkflow={onSelectWorkflow} />
             )}
@@ -2210,6 +2241,135 @@ function LiveWorkspaceSection({
       </div>
     </section>
   );
+}
+
+/** A single always-on (armed) workflow: live countdown, run history, counts. */
+function AlwaysOnWorkflowRow({ workflow, now, onOpen }: { workflow: ActiveWorkflowSummary; now: number; onOpen: () => void }) {
+  const live = Boolean(workflow.activeRun);
+  const health = workflow.health as { connected?: boolean; eventCount?: number; fireCount?: number } | null | undefined;
+  const TriggerIcon = workflow.triggerType === 'cron' ? CalendarClock : workflow.triggerType === 'webhook' ? Webhook : Radio;
+  const countdown = nextRunCountdown(workflow, now);
+  const totalRuns = workflow.totalRuns ?? Number(health?.fireCount ?? 0);
+  const events = Number(health?.eventCount ?? 0);
+
+  // Left meta: app + connection/schedule descriptor.
+  const meta: string[] = [];
+  if (workflow.appName) meta.push(workflow.appName);
+  if (workflow.intervalMs) meta.push(`every ${formatDurationShort(workflow.intervalMs)}`);
+  else if (workflow.triggerType === 'webhook') meta.push('webhook');
+  else if (workflow.triggerType === 'persistent_listener') meta.push(health?.connected ? 'listening' : 'connecting…');
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center gap-2.5 rounded-card border border-line/70 bg-canvas/35 px-2 py-1.5 text-left transition hover:bg-surface-2"
+      title={`${workflow.title}${workflow.appName ? ` · ${workflow.appName}` : ''}`}
+    >
+      <span className={clsx('flex h-6 w-6 shrink-0 items-center justify-center rounded-md', live ? 'bg-emerald-500/15 text-emerald-500' : workflow.status === 'error' ? 'bg-red-500/15 text-red-400' : 'bg-surface-2 text-text-muted')}>
+        {live ? <span className="h-2 w-2 rounded-full bg-emerald-500 s-pulse" /> : <TriggerIcon size={12} />}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-[12px] font-medium text-text-primary">{workflow.title}</span>
+          {live ? (
+            <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-500">running</span>
+          ) : workflow.status === 'error' ? (
+            <span className="shrink-0 rounded-full bg-red-500/15 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-red-400">error</span>
+          ) : null}
+          <RunHistoryStrip runs={workflow.recentRuns ?? []} />
+        </div>
+        <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-text-muted">
+          <span className="truncate">{meta.join(' · ')}</span>
+          <span className="text-text-disabled">·</span>
+          <span className="shrink-0 tabular-nums">
+            {workflow.lastFiredAt ? `fired ${relTime(workflow.lastFiredAt, now)}` : 'never fired'}
+          </span>
+          {totalRuns > 0 ? <><span className="text-text-disabled">·</span><span className="shrink-0 tabular-nums">{totalRuns} runs</span></> : null}
+          {events > 0 ? <><span className="text-text-disabled">·</span><span className="shrink-0 tabular-nums">{events} ev</span></> : null}
+        </div>
+      </div>
+      {/* Right: the live countdown — the "in each second" pulse. */}
+      {live ? (
+        <span className="shrink-0 rounded-md bg-emerald-500/10 px-1.5 py-1 text-[10px] font-semibold tabular-nums text-emerald-500">live now</span>
+      ) : countdown ? (
+        <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-1 text-right text-[11px] font-semibold tabular-nums text-text-secondary" title="Next run">
+          {countdown}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+/** The last runs as a left→right timeline of status dots. */
+function RunHistoryStrip({ runs }: { runs: ActiveWorkflowSummary['recentRuns'] }) {
+  if (!runs || runs.length === 0) return null;
+  const chronological = [...runs].reverse(); // oldest → newest
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-[3px]" aria-hidden>
+      {chronological.map((run) => (
+        <span
+          key={run.id}
+          className={clsx('h-2.5 w-1 rounded-full', runDotClass(run.status))}
+          title={`${run.status}${run.durationMs != null ? ` · ${formatDurationShort(run.durationMs)}` : ''} · ${new Date(run.at).toLocaleTimeString()}`}
+        />
+      ))}
+    </span>
+  );
+}
+
+function runDotClass(status: string): string {
+  const s = status.toUpperCase();
+  if (s === 'COMPLETED') return 'bg-emerald-500/70';
+  if (s === 'RUNNING' || s === 'WAITING' || s === 'PAUSED' || s === 'PLANNING' || s === 'CREATED') return 'bg-amber-400/80';
+  if (s === 'CANCELLED') return 'bg-text-disabled';
+  return 'bg-red-500/70';
+}
+
+/**
+ * Live countdown to the next run. For an interval trigger we roll the target
+ * forward by intervalMs so the label loops smoothly (…3s, 2s, 1s, now, 10s…)
+ * between server refetches; cron uses the server-computed nextRunAt.
+ */
+function nextRunCountdown(workflow: ActiveWorkflowSummary, now: number): string | null {
+  if (!workflow.nextRunAt && !workflow.intervalMs) return null;
+  let target = workflow.nextRunAt ? Date.parse(workflow.nextRunAt) : NaN;
+  const interval = workflow.intervalMs ?? 0;
+  if (Number.isNaN(target)) {
+    if (!interval || !workflow.lastFiredAt) return null;
+    target = Date.parse(workflow.lastFiredAt) + interval;
+  }
+  if (interval > 0) {
+    while (target <= now) target += interval;
+  } else if (target <= now) {
+    return 'due';
+  }
+  const s = Math.max(0, Math.round((target - now) / 1000));
+  if (s <= 0) return 'now';
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+function formatDurationShort(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** Compact signed relative time: "in 5m" (future) / "3h ago" (past). */
+function relTime(iso: string, now: number): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const diff = t - now;
+  const future = diff > 0;
+  const s = Math.floor(Math.abs(diff) / 1000);
+  const label = s < 60 ? `${Math.max(1, s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
+  return future ? `in ${label}` : `${label} ago`;
 }
 
 function usePersistentSectionState(key: string, defaultOpen: boolean): [boolean, Dispatch<SetStateAction<boolean>>] {
@@ -3107,12 +3267,15 @@ function agentNode(
     status: agent.status,
     operationalState,
     route: `/agents/${agent.id}`,
-    // Managers take their color from the DOMAIN they own (undefined = neutral when
-    // the domain has no color); the orchestrator is theme-neutral (white on dark,
-    // black on light); specialists stay neutral (undefined).
+    // Managers take their color from the DOMAIN they own (undefined = neutral
+    // when the domain has no color). The orchestrator wears a personal colorHex
+    // if set via the node detail panel's color picker, else falls back to its
+    // blue identity color. Specialists keep their personal colorHex (unchanged).
     accent: role === 'manager'
       ? domainAccent ?? undefined
-      : stringField(record, ['colorHex', 'accentColor']) ?? (role === 'orchestrator' ? 'var(--color-accent)' : undefined),
+      : role === 'orchestrator'
+        ? stringField(record, ['colorHex', 'accentColor']) ?? ORCHESTRATOR_DEFAULT_ACCENT
+        : stringField(record, ['colorHex', 'accentColor']) ?? undefined,
     imageUrl: imageFromRecord(record, ['avatarUrl', 'avatarDataUrl', 'imageUrl', 'imageDataUrl', 'iconUrl', 'photoUrl', 'pictureUrl']),
     icon: <RoleGlyph role={role} size={20} />,
     currentTask: stringField(record, ['currentTask', 'currentTaskId']),
@@ -4450,8 +4613,8 @@ const CANVAS_STYLE = `
 }
 
 @keyframes homeOrchestratorAura {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(167,139,250,0.28), 0 0 44px rgba(167,139,250,0.10); }
-  50% { box-shadow: 0 0 0 1px rgba(167,139,250,0.46), 0 0 72px rgba(167,139,250,0.18); }
+  0%, 100% { box-shadow: 0 0 0 1px rgba(29,78,216,0.32), 0 0 44px rgba(29,78,216,0.14); }
+  50% { box-shadow: 0 0 0 1px rgba(29,78,216,0.5), 0 0 72px rgba(29,78,216,0.22); }
 }
 
 @keyframes homeNodeLivePulse {

@@ -27,6 +27,8 @@ export interface PeerIdentity {
   displayName: string | null;
   userId: string | null;
   peerKey: string | null;
+  /** Operator-blocked: inbound turns from this handle are silently ignored. */
+  blocked: boolean;
   messageCount: number;
   firstSeenAt: string;
   lastSeenAt: string;
@@ -59,6 +61,7 @@ export class ChannelIdentityService {
       displayName: args.displayName ?? null,
       userId: null,
       peerKey: null,
+      blocked: false,
       messageCount: 1,
       firstSeenAt: now,
       lastSeenAt: now,
@@ -77,6 +80,33 @@ export class ChannelIdentityService {
       .from(schema.channelPeerIdentities)
       .where(eq(schema.channelPeerIdentities.workspaceId, workspaceId))
       .all();
+  }
+
+  /** Block/unblock a sender: a blocked handle's inbound turns are silently
+   *  ignored by the dispatcher (never reaches an agent). Creates the identity row
+   *  if the handle hasn't been seen yet, so an operator can pre-block. */
+  setBlocked(args: { workspaceId: string; channelKind: string; handle: string; blocked: boolean }): PeerIdentity {
+    const existing = this.#find(args.workspaceId, args.channelKind, args.handle);
+    if (existing) {
+      this.deps.db
+        .update(schema.channelPeerIdentities)
+        .set({ blocked: args.blocked })
+        .where(eq(schema.channelPeerIdentities.id, existing.id))
+        .run();
+      return { ...existing, blocked: args.blocked };
+    }
+    const now = new Date().toISOString();
+    const row: PeerIdentity = {
+      id: randomUUID(), workspaceId: args.workspaceId, channelKind: args.channelKind, handle: args.handle,
+      displayName: null, userId: null, peerKey: null, blocked: args.blocked, messageCount: 0, firstSeenAt: now, lastSeenAt: now,
+    };
+    this.deps.db.insert(schema.channelPeerIdentities).values(row).run();
+    return row;
+  }
+
+  /** True if this sender is blocked (dispatcher gate). Cheap single-row read. */
+  isBlocked(workspaceId: string, channelKind: string, handle: string): boolean {
+    return Boolean(this.#find(workspaceId, channelKind, handle)?.blocked);
   }
 
   /** Opt-in: link a handle to a workspace user, unifying it across channels. */

@@ -47,6 +47,7 @@ export const SUPPORTED_NODE_KINDS = new Set([
   'filter',
   'integration',
   'mcp',
+  'channel',
   'data_query',
   'data_mutate',
   'aggregate_window',
@@ -290,6 +291,14 @@ export function validateWorkflowGraph(
         }
         if (!node.config.method) {
           fail(`Node ${node.id} (http_request) missing method`);
+        }
+        break;
+      case 'channel':
+        if (!node.config.body && !(Array.isArray(node.config.attachments) && node.config.attachments.length > 0)) {
+          fail(`Node ${node.id} (channel) needs a body or at least one attachment`);
+        }
+        if (!node.config.channelKind && !node.config.connectionId) {
+          fail(`Node ${node.id} (channel) needs channelKind (e.g. "whatsapp") or an explicit connectionId`);
         }
         break;
       case 'transform':

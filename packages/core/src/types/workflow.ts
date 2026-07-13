@@ -238,6 +238,7 @@ export type WorkflowNodeConfig = (
   | FilterNodeConfig
   | IntegrationNodeConfig
   | McpNodeConfig
+  | ChannelSendNodeConfig
   | DataQueryNodeConfig
   | DataMutateNodeConfig
   | AggregateWindowNodeConfig
@@ -694,6 +695,31 @@ export interface McpNodeConfig {
   /** Argument values (may contain `{{variable}}` templates). */
   arguments?: Record<string, unknown>;
   /** Key under which the tool result is stored. Defaults to `content`. */
+  outputKey?: string;
+}
+
+/**
+ * Deterministically send a message on a native channel connection (WhatsApp,
+ * Telegram, Slack, Discord) — the zero-token "actually reach the world" step a
+ * deterministic outreach workflow needs. Resolves the connection by `kind` (the
+ * one active authorized connection of that kind) or an explicit `connectionId`,
+ * delivers via the same path as `agentis.channel.send`, and returns a delivery
+ * receipt SWIFT can verify. A node that can't resolve/authorize/deliver FAILS —
+ * it never reports a hollow success.
+ */
+export interface ChannelSendNodeConfig {
+  kind: 'channel';
+  /** Channel kind to resolve when `connectionId` is omitted, e.g. "whatsapp". */
+  channelKind?: 'telegram' | 'discord' | 'slack' | 'whatsapp';
+  /** Pin an exact connection instead of resolving by kind. */
+  connectionId?: string;
+  /** Destination — a phone/JID/alias, or "default"/"me" for the saved default target. May contain `{{variable}}`. */
+  to?: string;
+  /** Message body / caption. May contain `{{variable}}` templates. */
+  body: string;
+  /** Attachment sources (artifact:<id>, data:, or http(s) URL). May contain templates. */
+  attachments?: Array<{ url?: string; artifactId?: string; filename?: string; mimeType?: string; kind?: 'image' | 'file' }>;
+  /** Key under which the delivery receipt is stored. Defaults to `delivery`. */
   outputKey?: string;
 }
 
@@ -1379,6 +1405,13 @@ export interface WorkflowNodeState {
   completedAt?: string;
   inputData?: Record<string, unknown>;
   outputData?: Record<string, unknown>;
+  /**
+   * Set on the persisted snapshot when a terminal (COMPLETED/SKIPPED) node's
+   * `inputData` was dropped to keep the run_state blob small. The input is
+   * recoverable from the upstream nodes' `outputData` (retained). Never set on
+   * live in-memory state — only in what `toPersistedRunState` writes to the DB.
+   */
+  inputOmitted?: boolean;
   /**
    * Present when an agent-like node completed with useful output, but could not
    * ground every declared output key. The run stays auditable and is downgraded

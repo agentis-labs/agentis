@@ -40,7 +40,26 @@ describe('app lifecycle tools', () => {
     expect((listedAll.output as { apps: Array<{ appId: string }> }).apps.some((a) => a.appId === appId)).toBe(true);
 
     const restored = await r.execute({ id: '', toolId: 'agentis.app.archive', arguments: { appId, restore: true } }, toolCtx());
-    expect((restored.output as { status: string }).status).toBe('draft');
+    // Current lifecycle is active|archived (legacy draft/published coerce to active
+    // via normalizeAppStatus) — restore returns the app to `active`.
+    expect((restored.output as { status: string }).status).toBe('active');
+  });
+
+  it('updates identity: rename + icon (agentis.app.update)', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Old Name' }).id;
+    const r = registry();
+    const res = await r.execute({ id: '', toolId: 'agentis.app.update', arguments: { appId, name: 'New Name', icon: '🚀' } }, toolCtx());
+    expect(res.ok).toBe(true);
+    const app = new AppStore(ctx.db).get(ctx.workspace.id, appId);
+    expect(app.name).toBe('New Name');
+    expect(app.icon).toBe('🚀');
+  });
+
+  it('app.update requires at least one field', async () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Nn' }).id;
+    const res = await registry().execute({ id: '', toolId: 'agentis.app.update', arguments: { appId } }, toolCtx());
+    expect(res.ok).toBe(false);
+    expect(res.errorMessage).toMatch(/at least one field/i);
   });
 
   it('previews before deleting, then deletes on confirm', async () => {

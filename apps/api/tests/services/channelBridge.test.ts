@@ -110,6 +110,41 @@ describe('ChannelBridge', () => {
     expect(ctx.vault.decrypt(row.tokenEncrypted)).toBe('super-secret-bot-token');
   });
 
+  it('creates a WORKSPACE-owned connection (no agentId) — agentId is null in the projection', () => {
+    const { bridge } = buildBridge(ctx, new StubTelegramAdapter());
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      kind: 'telegram', name: 'Workspace Tg', token: 'tok-ws-123456',
+    });
+    expect(connection.agentId).toBeNull();
+    expect(bridge.list(ctx.workspace.id).find((c) => c.id === connection.id)?.agentId).toBeNull();
+  });
+
+  it('setDefault designates one connection per kind (single-default invariant) and defaultConnectionFor resolves it', () => {
+    const { bridge } = buildBridge(ctx, new StubTelegramAdapter());
+    const agentId = seedAgent(ctx);
+    const a = bridge.create({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId, kind: 'telegram', name: 'Tg A', token: 'tok-a-123456' }).connection;
+    const b = bridge.create({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId, kind: 'telegram', name: 'Tg B', token: 'tok-b-123456' }).connection;
+
+    // Two active telegram connections → ambiguous (no default).
+    expect(bridge.defaultConnectionFor(ctx.workspace.id, 'telegram')).toBeNull();
+
+    bridge.setDefault(ctx.workspace.id, a.id, true);
+    expect(bridge.defaultConnectionFor(ctx.workspace.id, 'telegram')).toBe(a.id);
+    expect(bridge.list(ctx.workspace.id).find((c) => c.id === a.id)?.isDefault).toBe(true);
+
+    // Setting B default clears A (only one default per kind).
+    bridge.setDefault(ctx.workspace.id, b.id, true);
+    const list = bridge.list(ctx.workspace.id);
+    expect(list.find((c) => c.id === a.id)?.isDefault).toBe(false);
+    expect(list.find((c) => c.id === b.id)?.isDefault).toBe(true);
+    expect(bridge.defaultConnectionFor(ctx.workspace.id, 'telegram')).toBe(b.id);
+
+    // Clearing it leaves no default → ambiguous again.
+    bridge.setDefault(ctx.workspace.id, b.id, false);
+    expect(bridge.defaultConnectionFor(ctx.workspace.id, 'telegram')).toBeNull();
+  });
+
   it('create() rejects unknown kind with CHANNEL_KIND_UNAVAILABLE', () => {
     const adapter = new StubTelegramAdapter();
     const { bridge } = buildBridge(ctx, adapter);

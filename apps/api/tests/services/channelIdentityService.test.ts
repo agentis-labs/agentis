@@ -33,6 +33,22 @@ describe('ChannelIdentityService', () => {
     expect(repeat.summary).toContain('2 prior messages');
   });
 
+  it('blocks and unblocks a sender (gate reads isBlocked; list surfaces it)', () => {
+    svc.record({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle: 'spammer', displayName: 'X' });
+    expect(svc.isBlocked(ctx.workspace.id, 'whatsapp', 'spammer')).toBe(false);
+    const blocked = svc.setBlocked({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle: 'spammer', blocked: true });
+    expect(blocked.blocked).toBe(true);
+    expect(svc.isBlocked(ctx.workspace.id, 'whatsapp', 'spammer')).toBe(true);
+    expect(svc.list(ctx.workspace.id).find((i) => i.handle === 'spammer')?.blocked).toBe(true);
+    svc.setBlocked({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle: 'spammer', blocked: false });
+    expect(svc.isBlocked(ctx.workspace.id, 'whatsapp', 'spammer')).toBe(false);
+  });
+
+  it('can pre-block a sender never seen before (creates the row)', () => {
+    svc.setBlocked({ workspaceId: ctx.workspace.id, channelKind: 'telegram', handle: 'never-seen', blocked: true });
+    expect(svc.isBlocked(ctx.workspace.id, 'telegram', 'never-seen')).toBe(true);
+  });
+
   it('linking a handle to a user unifies it across channels', () => {
     svc.record({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle: 'wa-1', displayName: 'Sam' });
     svc.record({ workspaceId: ctx.workspace.id, channelKind: 'slack', handle: 'U123', displayName: 'Sam' });

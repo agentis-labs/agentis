@@ -6,12 +6,16 @@ import type { MemoryRecordRowData } from './types';
 
 export function MemoryRecordRow({
   entry,
+  scopeId,
   selected,
   onToggleSelect,
   onUpdated,
   onDeleted,
 }: {
   entry: MemoryRecordRowData;
+  /** The scope this memory was saved under — required so the PATCH/DELETE
+   * scope check on the API matches (a scoped entry 404s without it). */
+  scopeId?: string;
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
   onUpdated?: (next: MemoryRecordRowData) => void;
@@ -25,13 +29,14 @@ export function MemoryRecordRow({
   const [draftContent, setDraftContent] = useState(entry.content);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
+  const query = scopeId ? `?scopeId=${encodeURIComponent(scopeId)}` : '';
 
   async function saveEdit() {
     const content = draftContent.trim();
     if (!content) return;
     setSaving(true);
     try {
-      await api(`/v1/memory/${entry.id}`, {
+      await api(`/v1/memory/${entry.id}${query}`, {
         method: 'PATCH',
         body: JSON.stringify({
           title: draftTitle.trim() || undefined,
@@ -50,7 +55,7 @@ export function MemoryRecordRow({
 
   async function remove() {
     try {
-      await api(`/v1/memory/${entry.id}`, { method: 'DELETE' });
+      await api(`/v1/memory/${entry.id}${query}`, { method: 'DELETE' });
       onDeleted?.(entry.id);
     } catch (err) {
       toast.error('Failed to archive memory', String(err));

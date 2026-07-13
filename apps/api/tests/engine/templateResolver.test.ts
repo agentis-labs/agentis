@@ -136,3 +136,44 @@ describe('readTemplatePath', () => {
     expect(readTemplatePath(ctx(), 'research.summary')).toBe('A short summary.');
   });
 });
+
+describe('node aliasing (readable {{nodes.<slug>}} references)', () => {
+  function aliasedCtx() {
+    return buildTemplateContext({
+      triggerInputs: {},
+      nodeOutputs: { 'trigger-mrj63dwv': { status: 'ok' } },
+      graphNodes: [{ id: 'trigger-mrj63dwv', title: 'Qualified Lead' }],
+      scratchpad: {},
+      store: {},
+    });
+  }
+
+  it('resolves the title-derived slug to the same output as the raw id', () => {
+    expect(resolveTemplate('{{nodes.qualified_lead.status}}', aliasedCtx())).toBe('ok');
+    expect(resolveTemplate('{{nodes.trigger-mrj63dwv.status}}', aliasedCtx())).toBe('ok');
+  });
+
+  it('is a no-op when graphNodes is omitted (back-compat)', () => {
+    const c = buildTemplateContext({
+      triggerInputs: {},
+      nodeOutputs: { 'trigger-mrj63dwv': { status: 'ok' } },
+      scratchpad: {},
+      store: {},
+    });
+    expect(resolveTemplate('{{nodes.qualified_lead.status}}', c)).toBe('');
+    expect(resolveTemplate('{{nodes.trigger-mrj63dwv.status}}', c)).toBe('ok');
+  });
+
+  it('does not alias a title that collides with another node in the graph', () => {
+    const c = buildTemplateContext({
+      triggerInputs: {},
+      nodeOutputs: { a: { v: 1 }, b: { v: 2 } },
+      graphNodes: [{ id: 'a', title: 'Send Message' }, { id: 'b', title: 'Send Message' }],
+      scratchpad: {},
+      store: {},
+    });
+    expect(resolveTemplate('{{nodes.send_message.v}}', c)).toBe('');
+    expect(resolveTemplate('{{nodes.a.v}}', c)).toBe('1');
+    expect(resolveTemplate('{{nodes.b.v}}', c)).toBe('2');
+  });
+});

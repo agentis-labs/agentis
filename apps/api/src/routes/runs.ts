@@ -546,6 +546,9 @@ function buildRunNodes(graph: WorkflowGraph, state: WorkflowRunState) {
       output: nodeState?.outputData,
       outputSummary: summarizeValue(nodeState?.outputData),
       inputs: nodeState?.inputData,
+      // A completed node's input is dropped from the persisted snapshot to keep
+      // run_state small — it equals the upstream nodes' output (shown above).
+      inputOmitted: nodeState?.inputOmitted ?? false,
       error: nodeState?.error,
       ...(nodeState?.blockedReason ? { blockedReason: nodeState.blockedReason } : {}),
     };

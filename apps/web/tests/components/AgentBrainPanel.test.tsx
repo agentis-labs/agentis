@@ -28,14 +28,19 @@ vi.mock('../../src/components/brain/ExamplesTab', () => ({
   ExamplesTab: ({ scopeId }: { scopeId: string }) => <div data-testid="agent-examples-tab">{scopeId}</div>,
 }));
 
+vi.mock('../../src/components/knowledge/WorkspaceMemoryTab', () => ({
+  WorkspaceMemoryTab: ({ scopeId }: { scopeId: string }) => <div data-testid="agent-memory-tab">{scopeId}</div>,
+}));
+
+vi.mock('../../src/components/knowledge/EpisodesTab', () => ({
+  EpisodesTab: ({ agentId }: { agentId: string }) => <div data-testid="agent-episodes-tab">{agentId}</div>,
+}));
+
 describe('<AgentBrainPanel />', () => {
   beforeEach(() => {
-    mocks.api.mockImplementation(async (path: string, init?: RequestInit) => {
+    mocks.api.mockImplementation(async (path: string) => {
       if (path === '/v1/agents') {
         return { agents: [{ id: 'agent-1', name: 'Codex Orch', role: 'orchestrator' }] };
-      }
-      if (path === '/v1/brain/agents/agent-1/memory' && (!init?.method || init.method === 'GET')) {
-        return { entries: [] };
       }
       if (path === '/v1/memory/episodes?agentId=agent-1&limit=200') {
         return { episodes: [] };
@@ -58,7 +63,7 @@ describe('<AgentBrainPanel />', () => {
     );
 
     await waitFor(() => expect(screen.getByRole('button', { name: /Map/i })).toBeInTheDocument());
-    await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/v1/brain/agents/agent-1/memory'));
+    await waitFor(() => expect(mocks.api).toHaveBeenCalledWith('/v1/memory/episodes?agentId=agent-1&limit=200'));
 
     expect(screen.getByRole('button', { name: /Memory/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Knowledge/i })).toBeInTheDocument();
@@ -76,12 +81,12 @@ describe('<AgentBrainPanel />', () => {
     await waitFor(() => expect(screen.getByTestId('agent-examples-tab')).toHaveTextContent('agent-1'));
 
     fireEvent.click(screen.getByRole('button', { name: /Memory/i }));
-    await waitFor(() => expect(screen.getByPlaceholderText('Add a lesson or operating note for this agent...')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('agent-memory-tab')).toHaveTextContent('agent-1'));
+    expect(screen.getByTestId('agent-episodes-tab')).toHaveTextContent('agent-1');
   });
 
   it('shows imported skills in the provider strip separately from pulled memories', async () => {
     mocks.api.mockImplementation(async (path: string) => {
-      if (path === '/v1/brain/agents/agent-1/memory') return { entries: [] };
       if (path === '/v1/memory/episodes?agentId=agent-1&limit=200') return { episodes: [] };
       if (path === '/v1/skills?scopeId=agent-1&includeWorkspace=false') return { skills: Array.from({ length: 16 }, (_, index) => ({ id: `skill-${index}` })) };
       if (path === '/v1/brain/scopes/agent-1/visibility') return { surfacedInWorkspace: true };

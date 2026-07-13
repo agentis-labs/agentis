@@ -71,6 +71,18 @@ export interface ChatInvocationOptions {
    * Adapters must never keep one global resume id for unrelated conversations.
    */
   sessionKey?: string;
+  /**
+   * Permission posture for this turn, enforced on the `mcp_native` path where the
+   * harness runs its own tool loop (no interceptable per-tool dialog). The adapter
+   * tags the per-turn Agentis MCP descriptor with an execution-mode header so the
+   * tool registry gates mutating tools directly instead of relying on the prompt:
+   * - `plan` — read-only; mutations hard-blocked (`PLAN_MODE_MUTATION_BLOCKED`).
+   * - `ask`  — mutations blocked with `ASK_MODE_CONFIRMATION_REQUIRED` so the
+   *            harness summarizes the action and waits for the operator (who can
+   *            switch to Auto to proceed). Reads always pass.
+   * - `chat` (or omitted) — Auto: mutations allowed.
+   */
+  executionMode?: 'chat' | 'plan' | 'ask';
 }
 
 export type RuntimeValueSource =
@@ -343,6 +355,8 @@ export interface HermesAgentAdapterConfig {
    * streaming transport; `auto` tries ACP first and falls back to CLI if it stalls.
    */
   chatTransport?: 'cli' | 'acp' | 'auto';
+  /** Version 2 distinguishes an explicit CLI choice from the old persisted CLI default. */
+  chatTransportVersion?: 2;
   maxTurns?: number;
   extraArgs?: string[];
   env?: Record<string, string>;

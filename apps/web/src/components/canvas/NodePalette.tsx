@@ -60,6 +60,7 @@ const SECTIONS: PaletteSection[] = [
       { type: 'filter',         label: 'Filter',         glyph: '◓', description: 'Gate on a boolean expression', defaults: { condition: 'true' } },
       { type: 'integration',    label: 'Integration',    glyph: '⚙', description: 'Call a built-in connector (Slack, Gmail, …)', defaults: { inputs: {} } },
       { type: 'mcp',            label: 'MCP Tool',       glyph: '⌬', description: 'Call a tool on a mounted MCP server (Supabase, Linear, …)', defaults: { toolId: '', arguments: {} } },
+      { type: 'channel',        label: 'Channel',        glyph: '💬', description: 'Send on WhatsApp/Telegram/Slack/Discord via a connected channel (deterministic, zero-token)', defaults: { channelKind: 'whatsapp', to: '', body: '' } },
       { type: 'http_request',   label: 'HTTP Request',   glyph: '↗', description: 'Raw outbound HTTP call', defaults: { method: 'GET', url: '', headers: {} } },
       { type: 'workflow_store',  label: 'Workflow Store',  glyph: '◧', description: 'Read/write workflow-scoped persistent KV', defaults: { operations: [] } },
       { type: 'workspace_store', label: 'Workspace Store', glyph: '▤', description: 'Read/write workspace-wide KV (shared across all workflows)', defaults: { operations: [] } },

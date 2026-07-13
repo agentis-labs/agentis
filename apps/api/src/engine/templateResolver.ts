@@ -16,6 +16,7 @@
  *     `JSON.stringify`; exact expression fields keep their typed value.
  */
 
+import { buildNodeAliasMap } from '@agentis/core';
 import { evaluateExpression } from './safeExpression.js';
 
 export interface TemplateWarning {
@@ -298,6 +299,13 @@ export function buildTemplateContext(args: {
   triggerInputs: Record<string, unknown>;
   /** Map of nodeId → completed-node outputData. */
   nodeOutputs: Record<string, Record<string, unknown>>;
+  /**
+   * The workflow's nodes (id + title) — when given, `nodes` also exposes each
+   * node's readable title slug (e.g. `nodes.qualified_lead`) aliased to the
+   * same output as its raw id, so `{{nodes.<slug>...}}` and `{{nodes.<id>...}}`
+   * resolve identically. See `buildNodeAliasMap`.
+   */
+  graphNodes?: ReadonlyArray<{ id: string; title?: string | null }>;
   /** Run-scoped scratchpad snapshot. */
   scratchpad: Record<string, unknown>;
   /** Workflow-scoped store snapshot. */
@@ -309,10 +317,11 @@ export function buildTemplateContext(args: {
   /** Loop iteration context, if any. */
   loop?: { item: unknown; index: number };
 }): TemplateContext {
+  const nodes = args.graphNodes ? withNodeAliases(args.nodeOutputs, args.graphNodes) : args.nodeOutputs;
   return {
     input: args.inputData ?? args.triggerInputs,
     trigger: args.triggerInputs,
-    nodes: args.nodeOutputs,
+    nodes,
     scratchpad: args.scratchpad,
     store: args.store,
     workspace: args.workspace,
@@ -320,4 +329,17 @@ export function buildTemplateContext(args: {
     loop: args.loop,
     warnings: [],
   };
+}
+
+/** Adds a `slug -> outputData` entry per aliased node, alongside the raw-id entries. */
+function withNodeAliases(
+  nodeOutputs: Record<string, Record<string, unknown>>,
+  graphNodes: ReadonlyArray<{ id: string; title?: string | null }>,
+): Record<string, Record<string, unknown>> {
+  const alias = buildNodeAliasMap(graphNodes);
+  const aliasEntries = Object.entries(alias).filter(([, id]) => nodeOutputs[id] !== undefined);
+  if (aliasEntries.length === 0) return nodeOutputs;
+  const out = { ...nodeOutputs };
+  for (const [slug, id] of aliasEntries) out[slug] = nodeOutputs[id]!;
+  return out;
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { History, Trash2 } from 'lucide-react';
+import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
@@ -18,7 +19,7 @@ const FILTERS = ['all', 'decision', 'failure', 'recovery', 'correction', 'patter
  * a specific workflow canvas or agent panel find its own episodes even when the
  * write went to a different scope (e.g. an App id).
  */
-export function EpisodesTab({ scopeId, workflowId, agentId }: { scopeId?: string; workflowId?: string; agentId?: string }) {
+export function EpisodesTab({ scopeId, workflowId, agentId, maxHeightClassName = 'max-h-[560px]' }: { scopeId?: string; workflowId?: string; agentId?: string; maxHeightClassName?: string }) {
   const toast = useToast();
   const confirm = useConfirm();
   const [episodes, setEpisodes] = useState<EpisodeRowData[]>([]);
@@ -107,7 +108,7 @@ export function EpisodesTab({ scopeId, workflowId, agentId }: { scopeId?: string
             : 'Episodes appear here as workflows complete and Agentis distills useful decisions, recoveries, and patterns.'}
         />
       ) : (
-        <div className="max-h-[560px] space-y-2 overflow-y-auto pr-1">
+        <div className={clsx('space-y-2 overflow-y-auto pr-1', maxHeightClassName)}>
           {filtered.map((episode) => (
             <EpisodeRow
               key={episode.id}

@@ -14,7 +14,7 @@ import { api } from '../../lib/api';
 import { ExtensionStudioModal } from '../extensions/ExtensionStudioModal';
 
 type SourceKind =
-  | 'websocket' | 'sse' | 'http_poll' | 'message_queue' | 'db_notify'
+  | 'interval' | 'websocket' | 'sse' | 'http_poll' | 'message_queue' | 'db_notify'
   | 'file_watch' | 'extension' | 'agent_event' | 'workflow_event';
 
 interface ListenerConfig {
@@ -37,6 +37,7 @@ interface ListenerSourceOption {
 }
 
 const SOURCE_META: Array<{ kind: SourceKind; label: string; blurb: string; disabled?: boolean }> = [
+  { kind: 'interval', label: 'Interval (timer)', blurb: 'Run the workflow on a fixed clock — e.g. every 10 seconds. The way to say "run every N seconds".' },
   { kind: 'extension', label: 'Extension source', blurb: 'Run a custom sandboxed Extension operation as the source. Any logic.' },
   { kind: 'http_poll', label: 'HTTP Poll', blurb: 'Poll an HTTP endpoint on an interval, with a durable cursor.' },
   { kind: 'websocket', label: 'WebSocket', blurb: 'Stay connected to a WebSocket URL and receive JSON messages.' },
@@ -47,6 +48,11 @@ const SOURCE_META: Array<{ kind: SourceKind; label: string; blurb: string; disab
   { kind: 'message_queue', label: 'Message queue', blurb: 'AMQP / Kafka / Redis / SQS — needs a broker add-on.', disabled: true },
   { kind: 'db_notify', label: 'Database notify', blurb: 'Postgres LISTEN/NOTIFY — needs a pg add-on.', disabled: true },
 ];
+
+/** Seed a valid source shape when a kind is first picked (so it needs no extra edits to activate). */
+const SOURCE_DEFAULTS: Partial<Record<SourceKind, { kind: SourceKind } & Record<string, unknown>>> = {
+  interval: { kind: 'interval', intervalMs: 10_000 },
+};
 
 const PREDICATE_META = [
   { kind: 'always', label: 'Always', blurb: 'Every event fires.' },
@@ -163,7 +169,7 @@ export function ListenerInspector({
                   className="mt-0.5"
                   disabled={s.disabled}
                   checked={sourceKind === s.kind}
-                  onChange={() => setConfig({ ...config, source: { kind: s.kind } })}
+                  onChange={() => setConfig({ ...config, source: SOURCE_DEFAULTS[s.kind] ?? { kind: s.kind } })}
                 />
                 <span>
                   <span className="block text-[12px] font-medium text-text-primary">{s.label}</span>
@@ -229,6 +235,30 @@ export function ListenerInspector({
               <>
                 <label className={labelCls}>URL</label>
                 <input className={inputCls} placeholder={sourceKind === 'websocket' ? 'wss://…' : 'https://…/stream'} value={config.source.url as string ?? ''} onChange={(e) => patchSource({ url: e.target.value })} />
+              </>
+            )}
+
+            {sourceKind === 'interval' && (
+              <>
+                <label className={labelCls}>Run every</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    className={inputCls}
+                    placeholder="10"
+                    value={config.source.intervalMs != null ? Math.max(1, Math.round((config.source.intervalMs as number) / 1000)) : ''}
+                    onChange={(e) => patchSource({ intervalMs: Math.max(1000, (Number(e.target.value) || 10) * 1000) })}
+                  />
+                  <span className="shrink-0 text-[12px] text-text-secondary">seconds</span>
+                </div>
+                <p className="mt-1.5 text-[11px] leading-4 text-text-muted">
+                  Fires the workflow on a fixed timer (minimum 1s). Each run gets <code className="rounded bg-canvas px-1">{'{{ trigger.tick }}'}</code> and <code className="rounded bg-canvas px-1">{'{{ trigger.firedAt }}'}</code>. Use Immediate fire policy.
+                </p>
+                <label className="mt-2 flex items-center gap-2 text-[12px] text-text-secondary">
+                  <input type="checkbox" checked={Boolean(config.source.fireOnStart)} onChange={(e) => patchSource({ fireOnStart: e.target.checked })} />
+                  Also run immediately when activated
+                </label>
               </>
             )}
 

@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Link2, Loader2 } from 'lucide-react';
+import { Ban, Link2, Loader2, ShieldCheck } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
@@ -21,6 +21,7 @@ interface PeerIdentity {
   displayName: string | null;
   userId: string | null;
   peerKey: string | null;
+  blocked?: boolean;
   messageCount: number;
   lastSeenAt: string;
 }
@@ -64,12 +65,29 @@ export function ChannelIdentitiesPanel() {
     }
   }
 
+  async function block(identity: PeerIdentity, blocked: boolean) {
+    setBusy(identity.id);
+    try {
+      await api('/v1/channels/identities/block', {
+        method: 'POST',
+        body: JSON.stringify({ channelKind: identity.channelKind, handle: identity.handle, blocked }),
+      });
+      toast.success(blocked ? 'Sender blocked' : 'Sender unblocked', blocked ? 'Their messages are now ignored.' : undefined);
+      await refresh();
+    } catch (err) {
+      toast.error('Could not update sender', String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <section>
       <h2 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Channel identities</h2>
       <p className="mb-3 text-[13px] text-text-secondary">
-        People reaching your agents over channels. Link a sender to a workspace user so the
-        orchestrator recognizes them across WhatsApp, Telegram, and Slack.
+        People reaching your agents over channels. <strong>Link</strong> a sender to a workspace user so the
+        orchestrator recognizes them across WhatsApp, Telegram, and Slack — or <strong>Block</strong> a
+        sender to silently ignore their messages workspace-wide.
       </p>
 
       {identities === null ? (
@@ -92,7 +110,7 @@ export function ChannelIdentitiesPanel() {
             </thead>
             <tbody>
               {identities.map((identity) => (
-                <tr key={identity.id} className="border-t border-line">
+                <tr key={identity.id} className={`border-t border-line ${identity.blocked ? 'opacity-60' : ''}`}>
                   <td className="px-3 py-2 capitalize text-text-secondary">{identity.channelKind}</td>
                   <td className="px-3 py-2 text-text-primary">
                     {identity.displayName ?? identity.handle}
@@ -102,29 +120,37 @@ export function ChannelIdentitiesPanel() {
                   </td>
                   <td className="px-3 py-2 text-text-secondary">{identity.messageCount}</td>
                   <td className="px-3 py-2">
-                    {identity.peerKey ? (
-                      <span className="inline-flex items-center gap-1 text-[12px] text-accent">
-                        <Link2 size={12} /> linked
-                      </span>
+                    {identity.blocked ? (
+                      <span className="inline-flex items-center gap-1 text-[12px] text-danger"><Ban size={12} /> blocked</span>
+                    ) : identity.peerKey ? (
+                      <span className="inline-flex items-center gap-1 text-[12px] text-accent"><Link2 size={12} /> linked</span>
                     ) : (
                       <span className="text-[12px] text-text-muted">—</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-right">
-                    {identity.peerKey ? (
-                      <Button size="sm" variant="ghost" disabled={busy === identity.id} onClick={() => void link(identity, null)}>
-                        {busy === identity.id ? <Loader2 size={12} className="animate-spin" /> : 'Unlink'}
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busy === identity.id || !me}
-                        onClick={() => me && void link(identity, me.id)}
-                      >
-                        {busy === identity.id ? <Loader2 size={12} className="animate-spin" /> : 'Link to me'}
-                      </Button>
-                    )}
+                  <td className="px-3 py-2">
+                    <div className="flex items-center justify-end gap-1.5">
+                      {identity.blocked ? (
+                        <Button size="sm" variant="secondary" disabled={busy === identity.id} onClick={() => void block(identity, false)}>
+                          {busy === identity.id ? <Loader2 size={12} className="animate-spin" /> : <><ShieldCheck size={12} className="mr-1" />Unblock</>}
+                        </Button>
+                      ) : (
+                        <>
+                          {identity.peerKey ? (
+                            <Button size="sm" variant="ghost" disabled={busy === identity.id} onClick={() => void link(identity, null)}>
+                              {busy === identity.id ? <Loader2 size={12} className="animate-spin" /> : 'Unlink'}
+                            </Button>
+                          ) : (
+                            <Button size="sm" variant="secondary" disabled={busy === identity.id || !me} onClick={() => me && void link(identity, me.id)}>
+                              {busy === identity.id ? <Loader2 size={12} className="animate-spin" /> : 'Link to me'}
+                            </Button>
+                          )}
+                          <Button size="sm" variant="ghost" disabled={busy === identity.id} title="Block this sender" onClick={() => void block(identity, true)}>
+                            <Ban size={12} />
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

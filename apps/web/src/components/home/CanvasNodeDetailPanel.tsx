@@ -17,6 +17,8 @@ import {
 } from '../../lib/observability';
 import { SelectedAgentModelControl } from '../agents/SelectedAgentModelControl';
 import { ApprovalPreviewCard, ApprovalReviewModal } from '../shared/ApprovalReviewModal';
+import { NodeColorPicker } from './NodeColorPicker';
+import { ORCHESTRATOR_DEFAULT_ACCENT } from './homeCanvasTypes';
 import type { CanvasNode } from './homeCanvasTypes';
 
 export function CanvasNodeDetailPanel({
@@ -89,6 +91,14 @@ export function CanvasNodeDetailPanel({
               adapterType={node.agent.adapterType}
               onUpdated={onRefresh}
               variant="rail"
+            />
+          )}
+          {node.agent && node.role === 'orchestrator' && (
+            <NodeColorPicker
+              agentId={node.agent.id}
+              colorHex={node.agent.colorHex}
+              defaultColor={ORCHESTRATOR_DEFAULT_ACCENT}
+              onUpdated={onRefresh}
             />
           )}
           <NodeRealtimeSummary node={node} state={state} events={nodeEvents} />

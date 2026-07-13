@@ -30,9 +30,10 @@ import {
   X,
 } from 'lucide-react';
 import type { AppRecord, AppSurface } from '@agentis/core';
-import type { AppUpdatePayload } from '../../lib/appsApi';
+import { appsApi, type AppUpdatePayload } from '../../lib/appsApi';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
+import { useConfirm } from '../shared/ConfirmDialog';
 import { nestedDomainOptions } from '../shared/DomainToolbar';
 
 /** App-level run analytics — shape of `GET /v1/apps/:id/analytics`. */
@@ -114,6 +115,7 @@ export function AppEngineModal({
   agents = [],
   onClose,
   onSave,
+  onDeleted,
 }: {
   open: boolean;
   app: AppRecord | null;
@@ -122,6 +124,8 @@ export function AppEngineModal({
   agents?: AppEngineAgent[];
   onClose: () => void;
   onSave: (patch: AppUpdatePayload) => Promise<AppRecord>;
+  /** Called after the app has been permanently deleted on the server. */
+  onDeleted: (appId: string) => void;
 }) {
   const [page, setPage] = useState<AppEnginePage>('overview');
   const [name, setName] = useState('');
@@ -161,6 +165,28 @@ export function AppEngineModal({
   }, [app, open]);
 
   const appId = app?.id ?? null;
+  const confirm = useConfirm();
+  const [deleting, setDeleting] = useState(false);
+  const deleteApp = useCallback(async () => {
+    if (!app) return;
+    const ok = await confirm({
+      title: `Delete "${app.name}"?`,
+      body: 'This permanently deletes the app, its workflows, surfaces, data, and conversation history. This cannot be undone.',
+      confirmLabel: 'Delete app',
+      tone: 'danger',
+      typeToConfirm: app.name,
+    });
+    if (!ok) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await appsApi.remove(app.id);
+      onDeleted(app.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to delete app');
+      setDeleting(false);
+    }
+  }, [app, confirm, onDeleted]);
   const [exporting, setExporting] = useState(false);
   const exportApp = useCallback(async () => {
     if (!app) return;
@@ -377,6 +403,22 @@ export function AppEngineModal({
                     className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
                   >
                     {exporting ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Export
+                  </button>
+                </div>
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft/20 p-3">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium text-danger">Delete this app</div>
+                    <div className="text-[11px] text-text-muted">
+                      Permanently removes the app, its workflows, surfaces, and data. This cannot be undone.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void deleteApp()}
+                    disabled={deleting}
+                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-danger/40 bg-transparent px-2.5 text-[12px] font-medium text-danger hover:bg-danger-soft disabled:opacity-50"
+                  >
+                    {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
                   </button>
                 </div>
               </div>

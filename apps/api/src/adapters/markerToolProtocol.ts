@@ -124,6 +124,13 @@ export function isProcessNoiseLine(line: string): boolean {
   if (mentionsPid && mentionsTermination) return true;
   // Bare success/error banners that only carry a PID payload.
   if (/^(ÊXITO|EXITO|SUCCESS|ERRO|ERROR|INFO|AVISO|WARN(ING)?)\s*[:!]/i.test(value) && /\bPID\b/i.test(value)) return true;
+  // `taskkill`'s FAILURE banner — "process already gone" — fires whenever the
+  // kill signal loses a benign race against a child process that already
+  // exited on its own. Unlike the success banner, it names the numeric id
+  // directly ("ERRO: o processo \"12172\" não foi encontrado.") without the
+  // word PID, so it needs its own locale-agnostic "not found" match.
+  const mentionsNotFound = /(not (?:be )?found|não foi encontrado|no (?:fue|ha sido) encontrado|nicht gefunden|non trovato|introuvable|не найден)/i.test(value);
+  if (mentionsPid && mentionsNotFound) return true;
   return false;
 }
 

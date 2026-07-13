@@ -43,7 +43,7 @@ export interface UsePackageResult {
 
 import type { Logger } from '../logger.js';
 import type { SkillService } from './skillService.js';
-import { ensureReportsToTarget, ensureSingleOrchestrator } from './agent/agentCommission.js';
+import { ensureReportsToTarget, ensureSingleOrchestrator, ORCHESTRATOR_DEFAULT_COLOR } from './agent/agentCommission.js';
 
 export interface UsePackageOptions {
   agent?: {
@@ -323,8 +323,10 @@ export class PackagerService {
     }
     if (contents.kind === 'agent') {
       const id = randomUUID();
-      const colorHex = CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
       const role = options.agent && 'role' in options.agent ? options.agent.role ?? null : contents.agent.role ?? 'agent';
+      const colorHex = role === 'orchestrator'
+        ? ORCHESTRATOR_DEFAULT_COLOR
+        : CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
       const reportsTo = options.agent?.reportsTo ?? null;
       ensureSingleOrchestrator(this.deps.db, scope.workspaceId, role);
       if (reportsTo) ensureReportsToTarget(this.deps.db, scope.workspaceId, reportsTo);
@@ -499,7 +501,9 @@ export class PackagerService {
 
     for (const agent of contents.agents) {
       const id = randomUUID();
-      const colorHex = CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
+      const colorHex = agent.role === 'orchestrator'
+        ? ORCHESTRATOR_DEFAULT_COLOR
+        : CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)];
       this.deps.db
         .insert(schema.agents)
         .values({

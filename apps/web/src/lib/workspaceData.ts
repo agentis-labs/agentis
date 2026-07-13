@@ -1,5 +1,5 @@
 ﻿import { useEffect, useSyncExternalStore } from 'react';
-import { REALTIME_EVENTS } from '@agentis/core';
+import { REALTIME_EVENTS, type ActiveWorkflowSummary } from '@agentis/core';
 import { api, workspace as workspaceStore } from './api';
 import { useRealtime } from './realtime';
 
@@ -193,12 +193,15 @@ export interface WorkspaceSnapshot {
   completedRuns: WorkspaceCompletedRun[];
   artifacts: WorkspaceArtifact[];
   issues: WorkspaceIssue[];
+  /** Always-on workflows: entry trigger currently armed (schedule/webhook/listener). */
+  activeWorkflows: ActiveWorkflowSummary[];
   fleet: WorkspaceFleetOverview | null;
   latestActivity: WorkspaceActivityRow | null;
   notifications: WorkspaceNotification[];
   counts: {
     liveAgents: number;
     activeRuns: number;
+    armedWorkflows: number;
   };
   updatedAt: number;
 }
@@ -214,10 +217,11 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   completedRuns: [],
   artifacts: [],
   issues: [],
+  activeWorkflows: [],
   fleet: null,
   latestActivity: null,
   notifications: [],
-  counts: { liveAgents: 0, activeRuns: 0 },
+  counts: { liveAgents: 0, activeRuns: 0, armedWorkflows: 0 },
   updatedAt: 0,
 };
 
@@ -245,6 +249,12 @@ export const WORKSPACE_DATA_REFRESH_EVENTS = [
   REALTIME_EVENTS.ISSUE_CREATED,
   REALTIME_EVENTS.ISSUE_UPDATED,
   REALTIME_EVENTS.ISSUE_DELETED,
+  // Arming a workflow (schedule/webhook/listener) is not a run — refresh the
+  // Active section when a trigger is armed/disarmed or an App goes live.
+  REALTIME_EVENTS.WORKFLOW_CREATED,
+  REALTIME_EVENTS.WORKFLOW_UPDATED,
+  REALTIME_EVENTS.WORKFLOW_DELETED,
+  REALTIME_EVENTS.APP_UPDATED,
 ] as const;
 
 const ACTIVE_RUN_STATUSES = new Set(['RUNNING', 'WAITING', 'PAUSED', 'CREATED', 'running', 'waiting', 'paused', 'pending']);
@@ -378,10 +388,11 @@ function selfHealIncidentSummary(incident: WorkspaceSelfHealIncident, run: Works
   return `${run.workflowName ?? 'Workflow'} - ${node}: ${reason}`;
 }
 
-function deriveCounts(agents: WorkspaceAgent[], activeRuns: WorkspaceActiveRun[]) {
+function deriveCounts(agents: WorkspaceAgent[], activeRuns: WorkspaceActiveRun[], activeWorkflows: ActiveWorkflowSummary[]) {
   return {
     liveAgents: agents.filter((agent) => LIVE_AGENT_STATUSES.has(agent.status ?? '')).length,
     activeRuns: activeRuns.filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length,
+    armedWorkflows: activeWorkflows.filter((wf) => wf.status === 'active').length,
   };
 }
 
@@ -407,7 +418,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
   setSnapshot({ ...base, workspaceId, loading: firstLoadForWorkspace });
 
   inflight = (async () => {
-    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, completedRunsRes, artifactsRes, fleetRes, activityRes, issuesRes] =
+    const [meRes, agentsRes, approvalsRes, activeRunsRes, failedRunsRes, completedRunsRes, artifactsRes, fleetRes, activityRes, issuesRes, activeWorkflowsRes] =
       await Promise.allSettled([
         api<{ user: WorkspaceUser }>('/v1/auth/me'),
         api<{ agents: WorkspaceAgent[] }>('/v1/agents'),
@@ -419,6 +430,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
         api<WorkspaceFleetOverview>('/v1/dashboard/fleet-overview'),
         api<{ events: WorkspaceActivityRow[] }>('/v1/activity?limit=1'),
         api<{ issues: WorkspaceIssue[] }>('/v1/issues'),
+        api<{ workflows: ActiveWorkflowSummary[] }>('/v1/workflows/active'),
       ]);
 
     const previous = keepPreviousForWorkspace(workspaceId);
@@ -432,6 +444,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
     const fleet = fleetRes.status === 'fulfilled' ? fleetRes.value : previous.fleet;
     const latestActivity = (fulfilled(activityRes, { events: previous.latestActivity ? [previous.latestActivity] : [] }).events ?? [])[0] ?? null;
     const issues = fulfilled(issuesRes, { issues: previous.issues }).issues ?? [];
+    const activeWorkflows = fulfilled(activeWorkflowsRes, { workflows: previous.activeWorkflows }).workflows ?? [];
 
     setSnapshot({
       workspaceId,
@@ -444,10 +457,11 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
       completedRuns,
       artifacts,
       issues,
+      activeWorkflows,
       fleet,
       latestActivity,
       notifications: deriveNotifications(approvals, failedRuns, completedRuns, agents),
-      counts: deriveCounts(agents, activeRuns),
+      counts: deriveCounts(agents, activeRuns, activeWorkflows),
       updatedAt: Date.now(),
     });
   })().finally(() => {

@@ -41,9 +41,13 @@ export interface SourceDeps {
 }
 
 const MIN_POLL_MS = 5_000;
+/** Heartbeat floor — no external call, so it can tick faster than a network poll. */
+const MIN_INTERVAL_MS = 1_000;
 
 export function createSourceDriver(source: ListenerSource, deps: SourceDeps): SourceDriver {
   switch (source.kind) {
+    case 'interval':
+      return new IntervalSource(source, deps);
     case 'http_poll':
       return new HttpPollSource(source, deps);
     case 'websocket':
@@ -66,6 +70,44 @@ export function createSourceDriver(source: ListenerSource, deps: SourceDeps): So
       return new UnavailableSource('message_queue', `Message-queue sources (${source.protocol}) require a broker client add-on not installed on this host.`);
     case 'db_notify':
       return new UnavailableSource('db_notify', 'Postgres LISTEN/NOTIFY sources require a pg client add-on not installed on this host.');
+  }
+}
+
+// ── interval (heartbeat / "run every N seconds") ─────────────────────────────
+
+class IntervalSource implements SourceDriver {
+  readonly kind = 'interval' as const;
+  #timer: ReturnType<typeof setInterval> | null = null;
+  #closed = false;
+  #tick = 0;
+  #intervalMs: number;
+
+  constructor(private readonly source: Extract<ListenerSource, { kind: 'interval' }>, private readonly deps: SourceDeps) {
+    this.#intervalMs = Math.max(MIN_INTERVAL_MS, source.intervalMs);
+  }
+
+  async start(onEvent: (payload: Record<string, unknown>) => void): Promise<void> {
+    // A timer is "connected" the moment it is scheduled — there is no transport.
+    this.deps.onConnectionChange?.(true);
+    const fire = () => {
+      if (this.#closed) return;
+      this.#tick += 1;
+      onEvent({ ...(this.source.payload ?? {}), tick: this.#tick, firedAt: new Date().toISOString() });
+    };
+    if (this.source.fireOnStart) fire();
+    this.#timer = setInterval(fire, this.#intervalMs);
+    this.#timer.unref?.();
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+    if (this.#timer) clearInterval(this.#timer);
+    this.#timer = null;
+    this.deps.onConnectionChange?.(false);
+  }
+
+  isConnected(): boolean {
+    return !this.#closed && this.#timer !== null;
   }
 }
 

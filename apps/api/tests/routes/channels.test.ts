@@ -11,6 +11,7 @@ import { schema } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ChannelBridge, type PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
+import { ConnectionGrantService } from '../../src/services/connectionGrants.js';
 import { buildChannelRoutes } from '../../src/routes/channels.js';
 import { buildWebhookRoutes } from '../../src/routes/webhooks.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -41,6 +42,7 @@ class StubAdapter implements ChannelAdapter {
 let ctx: TestContext;
 let bridge: ChannelBridge;
 let adapter: StubAdapter;
+let connectionGrants: ConnectionGrantService;
 
 function seedAgent() {
   const id = randomUUID();
@@ -60,7 +62,7 @@ function seedAgent() {
 
 function app() {
   return ctx.buildApp([
-    { path: '/v1/channels', app: buildChannelRoutes({ db: ctx.db, auth: ctx.auth, bridge }) },
+    { path: '/v1/channels', app: buildChannelRoutes({ db: ctx.db, auth: ctx.auth, bridge, connectionGrants }) },
     {
       path: '/v1/webhooks',
       app: buildWebhookRoutes({
@@ -94,6 +96,7 @@ beforeEach(async () => {
     logger: ctx.logger,
     adapters: { telegram: adapter, slack: new SlackChannelAdapter() },
   });
+  connectionGrants = new ConnectionGrantService(ctx.db);
 });
 
 afterEach(() => ctx.close());
@@ -233,6 +236,44 @@ describe('GET /v1/channels', () => {
     const body = (await res.json()) as { connections: Array<Record<string, unknown>> };
     expect(body.connections).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain('"tok"');
+  });
+});
+
+describe('/v1/channels/:id/grants', () => {
+  it('grants and revokes per-agent authority over a connection', async () => {
+    const owner = seedAgent();
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: null,
+      userId: ctx.user.id,
+      agentId: owner,
+      kind: 'telegram',
+      name: 'tg',
+      token: 'tok',
+    });
+    const other = seedAgent();
+
+    const empty = await app().request(`/v1/channels/${connection.id}/grants`, { headers: ctx.authHeaders });
+    expect((await empty.json() as { grants: unknown[] }).grants).toHaveLength(0);
+
+    const granted = await app().request(`/v1/channels/${connection.id}/grants`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ agentId: other, scope: 'send' }),
+    });
+    expect(granted.status).toBe(201);
+    const { grant } = (await granted.json()) as { grant: { id: string; agentId: string; status: string } };
+    expect(grant.agentId).toBe(other);
+    expect(grant.status).toBe('active');
+
+    const listed = await app().request(`/v1/channels/${connection.id}/grants`, { headers: ctx.authHeaders });
+    expect((await listed.json() as { grants: unknown[] }).grants).toHaveLength(1);
+
+    const revoked = await app().request(`/v1/channels/${connection.id}/grants/${grant.id}`, {
+      method: 'DELETE',
+      headers: ctx.authHeaders,
+    });
+    expect(revoked.status).toBe(200);
   });
 });
 

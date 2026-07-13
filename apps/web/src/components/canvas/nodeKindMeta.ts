@@ -65,6 +65,9 @@ export const NODE_KIND_META: Record<string, NodeKindMeta> = {
   // MCP capability plane: one deterministic tool call on a mounted MCP server
   // (Supabase, Linear, …) — the workflow-side twin of agentis.mcp.call.
   mcp: { label: 'MCP tool', glyph: '⌬', category: 'data' },
+  // Deterministic send on a native channel (WhatsApp/Telegram/…) — the zero-token
+  // "actually reach the world" step, twin of agentis.channel.send.
+  channel: { label: 'Channel', glyph: '💬', category: 'data' },
   data_query: { label: 'Data query', glyph: '⌕', category: 'data' },
   data_mutate: { label: 'Data mutate', glyph: '✎', category: 'data' },
   aggregate_window: { label: 'Aggregate', glyph: '∑', category: 'data' },

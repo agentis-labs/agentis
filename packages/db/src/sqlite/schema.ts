@@ -1074,10 +1074,11 @@ export const channelConnections = sqliteTable('channel_connections', {
   userId: text('user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
-  /** Routes inbound channel messages into this agent's conversation. */
+  /** Owning agent for inbound routing + conversational identity. NULL = a
+   *  workspace-owned (global/agentless) connection: inbound routes to the
+   *  orchestrator; deterministic sends use it; any agent may send on it. */
   agentId: text('agent_id')
-    .notNull()
-    .references(() => agents.id, { onDelete: 'cascade' }),
+    .references(() => agents.id, { onDelete: 'set null' }),
   /** When set, inbound turns on this channel run in the App's context (Living Apps Phase 0, migration v95). */
   appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'set null' }),
   /** telegram | discord */
@@ -1168,6 +1169,8 @@ export const channelPeerIdentities = sqliteTable('channel_peer_identities', {
   userId: text('user_id').references(() => users.id, { onDelete: 'set null' }),
   /** Stable cross-channel identity key once linked (e.g. `user:<id>`). */
   peerKey: text('peer_key'),
+  /** Operator-blocked sender: inbound turns from this handle are silently ignored. */
+  blocked: integer('blocked', { mode: 'boolean' }).notNull().default(false),
   messageCount: integer('message_count').notNull().default(0),
   firstSeenAt: text('first_seen_at').notNull().default(isoNow() as unknown as string),
   lastSeenAt: text('last_seen_at').notNull().default(isoNow() as unknown as string),

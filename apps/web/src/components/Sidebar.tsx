@@ -1,7 +1,7 @@
 ﻿/**
  * Sidebar — primary navigation rail.
  *
- * Home / Apps / Agents / Brain / Assets.
+ * Home / Agentic Apps / Agents / Brain / Assets.
  * (Packages lives in the header profile menu; Extensions open as a modal from
  * the Apps hub header and each workflow canvas toolbar — they're a
  * workflow-building block, not a top-level destination.)
@@ -35,7 +35,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/home', label: 'Home', icon: HomeIcon },
-  { to: '/apps', label: 'Apps', icon: AppsIcon },
+  { to: '/apps', label: 'Agentic Apps', icon: AppsIcon },
   { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
   { to: '/brain', label: 'Brain', icon: BrainIcon },
   { to: '/assets', label: 'Assets', icon: AssetsIcon },

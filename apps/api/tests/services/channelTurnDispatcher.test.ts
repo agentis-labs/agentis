@@ -15,6 +15,7 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ChannelBridge } from '../../src/services/conversation/channelBridge.js';
 import { ChannelTurnDispatcher, interpretConfirmation } from '../../src/services/conversation/channelTurnDispatcher.js';
+import { ChannelIdentityService } from '../../src/services/conversation/channelIdentityService.js';
 import { ConversationSummaryService } from '../../src/services/conversation/conversationSummaryService.js';
 import { AppContactService } from '../../src/services/app/appContacts.js';
 import { AppStore } from '@agentis/app';
@@ -86,6 +87,33 @@ describe('ChannelTurnDispatcher', () => {
     const agentMsg = messages.find((m) => m.authorType === 'agent');
     expect(agentMsg?.body).toBe('Hello from the orchestrator.');
     expect((agentMsg?.metadata as { channelReply?: boolean })?.channelReply).toBe(true);
+  });
+
+  it('silently drops an inbound turn from a BLOCKED sender (no reply, no agent turn)', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const identity = new ChannelIdentityService({ db: ctx.db, logger: ctx.logger });
+    identity.setBlocked({ workspaceId: ctx.workspace.id, channelKind: 'telegram', handle: '999', blocked: true });
+
+    const delivered: unknown[] = [];
+    let turnRan = false;
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      identity,
+      logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); },
+      fallbackAdapter: () => { turnRan = true; return chatStub('should not run'); },
+    });
+
+    const result = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      connectionId: 'conn-1', kind: 'telegram', chatId: '999', text: 'spam',
+    });
+
+    expect(result).toEqual({ replied: false, reason: 'blocked' });
+    expect(delivered).toEqual([]);
+    expect(turnRan).toBe(false);
   });
 
   it('publishes channel turn progress into the workspace activity feed', async () => {

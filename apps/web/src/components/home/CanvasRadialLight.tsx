@@ -10,10 +10,10 @@ export function CanvasRadialLight({
   if (!orchestratorCanvasPos) return null;
   const a = isActive ? 0.16 : 0.09;
   const spread = isActive ? 68 : 52;
-  // A cool slate-grey glow — reads as depth/ambient light around the orchestrator,
-  // never the harsh white that a pure-accent tint produced.
-  const inner = `rgba(130, 136, 152, ${a})`;
-  const outer = `rgba(130, 136, 152, ${(a * 0.4).toFixed(3)})`;
+  // Dark blue glow — matches the orchestrator's blue identity color instead of
+  // reading as a stray white/grey halo.
+  const inner = `rgba(29, 78, 216, ${a})`;
+  const outer = `rgba(29, 78, 216, ${(a * 0.4).toFixed(3)})`;
   return (
     <div
       className="absolute inset-0 pointer-events-none"

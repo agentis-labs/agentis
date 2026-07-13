@@ -14,6 +14,7 @@
 
 import {
   AgentisError,
+  appWorkflowBindingSchema,
   collectionSchemaSchema,
   createAppSchema,
   dataQuerySchema,
@@ -22,6 +23,8 @@ import {
   uiPatchOpSchema,
   uiPerformRegionSchema,
   viewNodeSchema,
+  REALTIME_EVENTS,
+  REALTIME_ROOMS,
   type AgentisToolContext,
   type AppSurface,
 } from '@agentis/core';
@@ -117,9 +120,62 @@ function emitCreation(
   }
 }
 
+/** Read a workflow's App-binding off `settings.appBinding` with safe defaults. */
+function readWorkflowBinding(settings: unknown): z.infer<typeof appWorkflowBindingSchema> {
+  const raw = settings && typeof settings === 'object' ? (settings as Record<string, unknown>).appBinding : undefined;
+  const parsed = appWorkflowBindingSchema.safeParse(raw ?? {});
+  return parsed.success ? parsed.data : appWorkflowBindingSchema.parse({});
+}
+
+/** Detect a dependency cycle in a workflowId → dependsOn[] adjacency map (DFS). */
+function firstDependencyCycle(graph: Map<string, string[]>): string[] | null {
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map<string, number>();
+  const stack: string[] = [];
+  const visit = (node: string): string[] | null => {
+    color.set(node, GRAY);
+    stack.push(node);
+    for (const next of graph.get(node) ?? []) {
+      const c = color.get(next) ?? WHITE;
+      if (c === GRAY) return [...stack.slice(stack.indexOf(next)), next];
+      if (c === WHITE) { const cyc = visit(next); if (cyc) return cyc; }
+    }
+    stack.pop();
+    color.set(node, BLACK);
+    return null;
+  };
+  for (const node of graph.keys()) {
+    if ((color.get(node) ?? WHITE) === WHITE) { const cyc = visit(node); if (cyc) return cyc; }
+  }
+  return null;
+}
+
+const chainItemSchema = z.object({
+  workflowId: z.string().min(1),
+  order: z.number().int().min(0).optional(),
+  dependsOn: z.array(z.string()).optional(),
+  chainOn: z.enum(['success', 'always']).optional(),
+  concurrency: z.enum(['parallel', 'exclusive']).optional(),
+  enabled: z.boolean().optional(),
+  purpose: z.string().max(400).optional(),
+});
+
 export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   const stores: AppStores = buildAppStores({ db: deps.db, bus: deps.bus });
   const { store, data, surfaces } = stores;
+
+  /** Publish a workflow-binding change to the workflow + app + workspace rooms so
+   *  the canvas / App control plane / home refetch the new order live. */
+  const publishBindingChange = (workspaceId: string, appId: string, workflowId: string): void => {
+    try {
+      const payload = { workflowId, appId };
+      deps.bus.publish(REALTIME_ROOMS.workflow(workflowId), REALTIME_EVENTS.WORKFLOW_UPDATED, payload);
+      deps.bus.publish(REALTIME_ROOMS.app(appId), REALTIME_EVENTS.APP_UPDATED, { appId, op: 'updated' });
+      deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.APP_UPDATED, { appId, op: 'updated' });
+    } catch {
+      /* realtime must never fail a write */
+    }
+  };
 
   /**
    * Resolve the target App for a data/surface tool call. Order: explicit `appId`
@@ -247,6 +303,42 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
     },
     {
       definition: {
+        id: 'agentis.app.update',
+        family: 'app',
+        description:
+          'Update an App\'s identity/organization: rename it, change its icon, or retarget its owning specialist agent (ownerAgentId) or Domain/Space (domainId). Use to fix a wrong name, assign an owner, or move an App under a Domain. Does NOT touch workflows, data, or surfaces (use the workflow/data/ui tools for those).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            name: { type: 'string', description: 'New display name.' },
+            description: { type: 'string' },
+            icon: { type: 'string', description: 'Emoji or short icon token.' },
+            ownerAgentId: { type: 'string', description: 'Specialist agent that owns this App. null to clear.' },
+            domainId: { type: 'string', description: 'Domain/Space this App belongs to. null to clear.' },
+          },
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const patch: Record<string, unknown> = {};
+        if (typeof args.name === 'string') patch.name = args.name.trim();
+        if (typeof args.description === 'string') patch.description = args.description;
+        if (typeof args.icon === 'string') patch.icon = args.icon;
+        if ('ownerAgentId' in args) patch.ownerAgentId = args.ownerAgentId === null ? null : String(args.ownerAgentId);
+        if ('domainId' in args) patch.domainId = args.domainId === null ? null : String(args.domainId);
+        if (Object.keys(patch).length === 0) {
+          throw new AgentisError('VALIDATION_FAILED', 'app.update: pass at least one field to change (name, description, icon, ownerAgentId, domainId).');
+        }
+        const updated = store.update(ctx.workspaceId, appId, patch); // emits APP_UPDATED
+        return { appId: updated.id, name: updated.name, icon: updated.icon, ownerAgentId: updated.ownerAgentId, domainId: updated.domainId };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.app.adopt_workflow',
         family: 'app',
         description: 'Adopt an existing workflow into an App as additional logic (the workflow keeps running; it just gains an owning App). Use when refactoring/adding a workflow to an App you already created or are viewing.',
@@ -259,6 +351,133 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const workflowId = resolveWorkflowId(args, ctx);
         store.adoptWorkflow(ctx.workspaceId, appId, workflowId);
         return { appId, adoptedWorkflowId: workflowId, workflowIds: store.listWorkflowIds(ctx.workspaceId, appId) };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.chain',
+        family: 'app',
+        description:
+          'Wire the App-level RUN ORDER and DEPENDENCIES between workflows — the "runs after" chaining the App Orchestrator executes. ' +
+          'CRITICAL DISTINCTION: `order` is ONLY a display/tie-break sort number — it does NOT make workflows run one-after-another. To actually chain them (B waits for A), you MUST set `dependsOn`. ' +
+          'To make workflows run in SEQUENCE (the usual intent of "put them in order" / "run them one after another"), pass `sequence`: an ordered list of workflow IDs — this sets BOTH order AND the dependsOn chain (each depends on the previous) in one call. That is what shows up as ticked "runs after" boxes. ' +
+          'Use `workflows` instead (or as well) for fine-grained per-workflow control: dependsOn (workflow IDs that must finish first), chainOn ("success" default | "always"), concurrency ("parallel" | "exclusive" = skip an orchestrated start while a run is still active), enabled, purpose, order. ' +
+          'Omitted fields are preserved. Rejects self-dependencies and cycles.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            appId: { type: 'string', description: 'App whose workflows to order. Omit to use the App in context.' },
+            sequence: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Ordered workflow IDs to run one-after-another. Sets order AND wires dependsOn as a linear chain (2nd runs after 1st, 3rd after 2nd, …). The simplest way to fulfill "run these in order".',
+            },
+            chainOn: { type: 'string', enum: ['success', 'always'], description: 'Applied to every link when using `sequence` (default "success").' },
+            workflows: {
+              type: 'array',
+              description: 'Per-workflow bindings for fine control. Each: { workflowId, order?, dependsOn?: [workflowId], chainOn?: "success"|"always", concurrency?: "parallel"|"exclusive", enabled?, purpose? }.',
+              items: {
+                type: 'object',
+                properties: {
+                  workflowId: { type: 'string' },
+                  order: { type: 'number' },
+                  dependsOn: { type: 'array', items: { type: 'string' }, description: 'Workflow IDs that must run before this one (the real "runs after").' },
+                  chainOn: { type: 'string', enum: ['success', 'always'] },
+                  concurrency: { type: 'string', enum: ['parallel', 'exclusive'] },
+                  enabled: { type: 'boolean' },
+                  purpose: { type: 'string' },
+                },
+                required: ['workflowId'],
+              },
+            },
+          },
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        // `sequence` = the ergonomic "run these one after another": expand it into
+        // per-workflow patches that set BOTH order and the dependsOn chain, so the
+        // agent can't set a hollow display-order with no real "runs after" links.
+        const sequenceItems: z.infer<typeof chainItemSchema>[] = [];
+        if (Array.isArray(args.sequence)) {
+          const seq = z.array(z.string().min(1)).min(1).parse(args.sequence);
+          const seqChainOn = args.chainOn === 'always' ? 'always' as const : 'success' as const;
+          seq.forEach((workflowId, i) => {
+            sequenceItems.push({ workflowId, order: i, dependsOn: i === 0 ? [] : [seq[i - 1]!], chainOn: seqChainOn });
+          });
+        }
+        const explicitItems = args.workflows !== undefined ? z.array(chainItemSchema).parse(args.workflows) : [];
+        // Explicit per-workflow entries win over the sequence-derived ones (later merge).
+        const items = [...sequenceItems, ...explicitItems];
+        if (items.length === 0) {
+          throw new AgentisError('VALIDATION_FAILED', 'workflow.chain: pass `sequence` (ordered workflow IDs to run one-after-another) or `workflows` (per-workflow bindings).');
+        }
+        const memberIds = store.listWorkflowIds(ctx.workspaceId, appId);
+        const memberSet = new Set(memberIds);
+
+        // Read every member's CURRENT binding so we can validate the full graph
+        // (cycles, dependsOn membership) against the post-patch state before writing.
+        const rows = deps.db
+          .select({ id: schema.workflows.id, title: schema.workflows.title, settings: schema.workflows.settings })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.workspaceId, ctx.workspaceId), eq(schema.workflows.appId, appId)))
+          .all();
+        const titleById = new Map(rows.map((r) => [r.id, r.title]));
+        const settingsById = new Map(rows.map((r) => [r.id, r.settings]));
+        const bindings = new Map(rows.map((r) => [r.id, readWorkflowBinding(r.settings)]));
+
+        // Apply patches in-memory first.
+        const changed = new Set<string>();
+        for (const item of items) {
+          if (!memberSet.has(item.workflowId)) {
+            throw new AgentisError('VALIDATION_FAILED', `workflow ${item.workflowId} is not part of app ${appId} — adopt it first with agentis.app.adopt_workflow, or fix the id. App workflows: ${memberIds.join(', ') || '(none)'}.`);
+          }
+          for (const dep of item.dependsOn ?? []) {
+            if (dep === item.workflowId) throw new AgentisError('VALIDATION_FAILED', `workflow ${item.workflowId} cannot depend on itself.`);
+            if (!memberSet.has(dep)) throw new AgentisError('VALIDATION_FAILED', `dependsOn "${dep}" (for ${item.workflowId}) is not a workflow in app ${appId}.`);
+          }
+          const { workflowId, ...patch } = item;
+          const merged = appWorkflowBindingSchema.parse({ ...bindings.get(workflowId), ...patch });
+          bindings.set(workflowId, merged);
+          changed.add(workflowId);
+        }
+
+        // Reject cycles across the FULL post-patch dependency graph.
+        const graph = new Map([...bindings].map(([id, b]) => [id, (b.dependsOn ?? []).filter((d) => memberSet.has(d))]));
+        const cycle = firstDependencyCycle(graph);
+        if (cycle) {
+          throw new AgentisError('VALIDATION_FAILED', `dependsOn would form a cycle: ${cycle.join(' → ')}. Workflows cannot depend on each other in a loop.`);
+        }
+
+        // Commit only the changed workflows, then publish realtime.
+        const now = new Date().toISOString();
+        for (const workflowId of changed) {
+          const settings = (settingsById.get(workflowId) as Record<string, unknown> | undefined) ?? {};
+          deps.db.update(schema.workflows)
+            .set({ settings: { ...settings, appBinding: bindings.get(workflowId) }, updatedAt: now })
+            .where(eq(schema.workflows.id, workflowId))
+            .run();
+          publishBindingChange(ctx.workspaceId, appId, workflowId);
+        }
+
+        const runOrder = memberIds
+          .map((id) => ({
+            workflowId: id,
+            title: titleById.get(id) ?? id,
+            order: bindings.get(id)?.order ?? 0,
+            dependsOn: (bindings.get(id)?.dependsOn ?? []).map((d) => ({ workflowId: d, title: titleById.get(d) ?? d })),
+          }))
+          .sort((a, b) => a.order - b.order);
+        // A real chain has ≥1 dependsOn link. Warn when the operator set an ORDER on
+        // multiple workflows but wired NO dependencies — that's a display sort only,
+        // not "runs after", and the run-all would start them all as roots.
+        const anyDependency = runOrder.some((w) => w.dependsOn.length > 0);
+        const note = !anyDependency && runOrder.length > 1
+          ? 'This set an ORDER only — no "runs after" links, so the workflows are NOT chained (they would all start as roots). To make them run one-after-another, call again with `sequence: [<ids in order>]`.'
+          : undefined;
+        return { appId, updated: [...changed], chained: anyDependency, runOrder, ...(note ? { note } : {}) };
       },
     },
     {

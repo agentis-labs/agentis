@@ -5,29 +5,39 @@
 
 ## Own the agents. Rent the models.
 
-Agentis is the open-source, self-hosted command center for agents you own. It gives your
-agents durable memory, skills, workflow execution, app surfaces, approvals, channels, and
-a local dashboard that survives model swaps and process restarts.
+Agentis is the open-source, self-hosted command center for agents you own. Import the
+agents you already run, give them a permanent Brain of memory and skills, swap the model
+underneath them anytime, and ship what they build as real apps, workflows, and channels
+from your own machine.
+
+Agents should not disappear when a vendor changes, a subscription ends, or a local process
+restarts. Agentis gives them durable identity, memory, orchestration, tools, approvals,
+and a live product surface they can operate with you.
+
+> **Status: pre-release (0.2.x).** Agentis is already usable, but APIs may still change
+> before 1.0.
 
 This package launches the whole local runtime: API, WebSocket bridge, workflow engine,
 embedded SQLite, credential vault, and bundled React dashboard.
 
-## Quick start
+## Start in one line
 
 ```sh
 npx @agentis-labs/cli@latest up
 ```
 
-Then open <http://127.0.0.1:3737>. First boot prints the operator credential once.
+Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed.
+Agentis boots at `http://127.0.0.1:3737`, creates local secrets, initializes SQLite,
+seeds the first operator user, and serves the dashboard from the same process.
 
-Install it globally if you want the `agentis` binary on PATH:
+Prefer a persistent binary?
 
 ```sh
 npm install -g @agentis-labs/cli
 agentis up
 ```
 
-## Why run Agentis
+## Why Agentis
 
 - Permanent Brain: local semantic memory, knowledge bases, living skills, cited answers.
 - Agentic apps: typed data, generated interfaces, actions, run monitors, approvals.
@@ -36,7 +46,15 @@ agentis up
 - Omni-Reach: Slack, Telegram, WhatsApp, email, webhooks, MCP, A2A, and integrations.
 - Sovereignty: SQLite, secrets, assets, logs, and memories stay under your data directory.
 
-## What you get on first boot
+## What You Can Build
+
+- Agent-run internal tools with durable data, live ops, approvals, and memory.
+- Self-healing workflows that replay, diagnose, and improve from real outcomes.
+- Specialist fleets that use Claude Code, Codex, Cursor, local models, or custom HTTP agents.
+- Agentic apps that package workflows, interfaces, collections, and tests into `.agentisapp`.
+- Channel-native agents that respond across Slack, Telegram, WhatsApp, email, MCP, and A2A.
+
+## First Boot
 
 1. An RSA-2048 keypair for JWTs and an AES-256 key for the credential vault.
 2. An embedded SQLite database at `.agentis/agentis.db`.

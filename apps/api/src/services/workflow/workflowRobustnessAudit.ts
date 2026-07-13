@@ -30,7 +30,11 @@ export interface RobustnessAuditResult {
 /** Default fan-out bound applied to an unbounded batch node (D5). */
 const DEFAULT_BATCH_CONCURRENCY = 5;
 
-const DELIVERY_KINDS = new Set(['integration']);
+// A `channel` node is the native "reach the world" delivery for messaging
+// (WhatsApp/Telegram/…) — the same delivery class as an integration, so the
+// robustness audit counts it: an outreach workflow that only COMPUTES a message
+// but has no channel/integration delivery node is the exact hollow-send gap.
+const DELIVERY_KINDS = new Set(['integration', 'channel']);
 const FETCH_KINDS = new Set(['http_request', 'browser']);
 const GUARD_KINDS = new Set(['evaluator', 'checkpoint', 'guardrails']);
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

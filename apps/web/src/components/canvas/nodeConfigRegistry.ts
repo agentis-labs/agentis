@@ -60,6 +60,7 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   transform: { label: 'Transform', reason: 'Reshapes data deterministically without spending LLM tokens.' },
   filter: { label: 'Filter', reason: 'Stops data that does not satisfy a deterministic condition.' },
   integration: { label: 'Integration', reason: 'Calls a connector operation with credentials only when that connector requires them.' },
+  channel: { label: 'Channel', reason: 'Delivers on a connected channel (WhatsApp/Telegram/Discord/Slack) — resolves the workspace default for the kind, an explicit connection, or lets an agent-owned connection stay scoped to its owner.' },
   http_request: { label: 'HTTP request', reason: 'Calls a raw HTTP endpoint with templated inputs and retry controls.' },
   workflow_store: { label: 'Workflow store', reason: 'Reads or writes persistent state scoped to this workflow.' },
   workspace_store: { label: 'Workspace store', reason: 'Reads or writes state shared across workflows in this workspace.' },
@@ -154,6 +155,9 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
       return stringOf(c.url) ? ready() : missing('Enter the request URL.');
     case 'mcp':
       return stringOf(c.toolId) ? ready() : missing('Choose a tool from a mounted MCP server.');
+    case 'channel':
+      if (!stringOf(c.body).trim() && !nonEmptyArray(c.attachments)) return missing('Write the message body (or add an attachment).');
+      return stringOf(c.channelKind) || stringOf(c.connectionId) ? ready() : missing('Choose a channel (e.g. WhatsApp) or a specific connection.');
     case 'extension_task':
       if (!stringOf(c.extensionId) && !stringOf(c.extensionSlug)) return missing('Choose an extension.');
       return stringOf(c.operationName) ? ready() : missing('Choose an extension operation.');

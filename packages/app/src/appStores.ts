@@ -23,9 +23,23 @@ export interface AppRealtimePublisher {
   publish(room: string, event: string, payload: unknown): void;
 }
 
+const APP_LIFECYCLE_EVENT = {
+  created: REALTIME_EVENTS.APP_CREATED,
+  updated: REALTIME_EVENTS.APP_UPDATED,
+  deleted: REALTIME_EVENTS.APP_DELETED,
+} as const;
+
 export function buildAppStores(deps: { db: AgentisSqliteDb; bus?: AppRealtimePublisher }): AppStores {
   const bus = deps.bus;
-  const store = new AppStore(deps.db);
+  const store = new AppStore(deps.db, (e) => {
+    if (!bus) return;
+    // App-entity/membership change → app room (open App view) + workspace room
+    // (the app list / home), the same dual-publish pattern as DATA_CHANGED so the
+    // web refetches without a manual reload.
+    const payload = { appId: e.appId, op: e.op };
+    bus.publish(REALTIME_ROOMS.app(e.appId), APP_LIFECYCLE_EVENT[e.op], payload);
+    bus.publish(REALTIME_ROOMS.workspace(e.workspaceId), APP_LIFECYCLE_EVENT[e.op], payload);
+  });
   const data = new AppDatastore(deps.db, (e) => {
     if (!bus) return;
     const payload = { appId: e.appId, collection: e.collection, op: e.op, id: e.id };

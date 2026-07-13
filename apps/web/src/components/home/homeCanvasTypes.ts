@@ -11,6 +11,10 @@ export interface Vec2 {
   y: number;
 }
 
+// The orchestrator's default identity color when no personal colorHex is set.
+// Mirrors ORCHESTRATOR_DEFAULT_COLOR in apps/api/src/services/agent/agentCommission.ts.
+export const ORCHESTRATOR_DEFAULT_ACCENT = '#3b82f6';
+
 export type CanvasNodeKind =
   | 'orchestrator'
   | 'manager'

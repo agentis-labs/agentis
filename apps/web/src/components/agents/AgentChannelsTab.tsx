@@ -46,7 +46,7 @@ interface ChannelAccess {
 
 interface ChannelConnection {
   id: string;
-  agentId: string;
+  agentId: string | null;
   kind: ChannelKind;
   name: string;
   status: ChannelStatus;
@@ -82,13 +82,36 @@ const EMPTY_HEALTH: ChannelHealth = {
 export function AgentChannelsTab({ agentId, agentName }: { agentId: string; agentName: string }) {
   const toast = useToast();
   const [connections, setConnections] = useState<ChannelConnection[] | null>(null);
+  // Workspace-owned (agentless) connections — shared, so THIS agent can send on
+  // them too without connecting its own. Shown read-only so the operator sees the
+  // "global instance" is already usable here instead of creating a duplicate.
+  const [workspaceConnections, setWorkspaceConnections] = useState<ChannelConnection[]>([]);
+  // §3.3 — a shared connection CAN be restricted to specific agents (Settings →
+  // Channels → Permissions). null = still checking; true = open or this agent is
+  // granted; false = restricted and this agent is not on the list.
+  const [access, setAccess] = useState<Record<string, boolean | null>>({});
 
   const refresh = useCallback(async () => {
     try {
       const data = await api<{ connections: ChannelConnection[] }>('/v1/channels');
-      setConnections((data.connections ?? []).filter((conn) => conn.agentId === agentId));
+      const all = data.connections ?? [];
+      setConnections(all.filter((conn) => conn.agentId === agentId));
+      const shared = all.filter((conn) => conn.agentId == null);
+      setWorkspaceConnections(shared);
+      const results = await Promise.allSettled(
+        shared.map((conn) => api<{ grants: Array<{ agentId: string; status: string }> }>(`/v1/channels/${conn.id}/grants`)),
+      );
+      const next: Record<string, boolean | null> = {};
+      shared.forEach((conn, i) => {
+        const r = results[i];
+        if (r?.status !== 'fulfilled') { next[conn.id] = null; return; }
+        const activeGrants = r.value.grants.filter((g) => g.status === 'active');
+        next[conn.id] = activeGrants.length === 0 || activeGrants.some((g) => g.agentId === agentId);
+      });
+      setAccess(next);
     } catch {
       setConnections([]);
+      setWorkspaceConnections([]);
     }
   }, [agentId]);
 
@@ -103,9 +126,40 @@ export function AgentChannelsTab({ agentId, agentName }: { agentId: string; agen
       <div>
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">Channels</div>
         <p className="mt-1 text-[13px] text-text-secondary">
-          Connect messaging channels to {agentName}'s inbox. Saved channels are verified before they are marked active.
+          Give {agentName} its OWN channel (its identity, its inbox), or use a shared workspace channel below.
+          Saved channels are verified before they are marked active.
         </p>
       </div>
+
+      {workspaceConnections.length > 0 && (
+        <div className="rounded-card border border-line bg-surface-2/40 p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Shared workspace channels</div>
+          <p className="mt-1 text-[12px] text-text-secondary">
+            Connected globally in Settings → Channels — no separate connection needed unless it&apos;s been restricted below.
+          </p>
+          <div className="mt-2 space-y-1.5">
+            {workspaceConnections.map((conn) => {
+              const ok = access[conn.id];
+              return (
+                <div key={conn.id} className="flex items-center gap-2 text-[13px] text-text-primary">
+                  <span className="capitalize">{conn.kind}</span>
+                  <span className="text-text-muted">·</span>
+                  <span className="text-text-secondary">{conn.name}</span>
+                  <span className={clsx(
+                    'ml-auto rounded-full px-1.5 py-0.5 text-[10px] uppercase tracking-wide',
+                    ok == null ? 'bg-surface-3 text-text-muted'
+                      : ok ? 'bg-success-soft text-success'
+                      : 'bg-warn-soft text-warn',
+                  )}>
+                    {ok == null ? 'checking…' : ok ? `${agentName} can send` : 'restricted — no access'}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {PROVIDERS.map((provider) => (
         <ProviderCard
           key={provider.kind}
@@ -192,7 +246,7 @@ function ProviderCard({
           /* transient polling failure */
         }
       })();
-    }, 2500);
+    }, 1000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };

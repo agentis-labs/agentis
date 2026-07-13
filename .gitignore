@@ -65,5 +65,7 @@ scratch_*
 tmp-*
 /tmp/
 /demos/
+/landing-run-logs/
+/landing-run-logs.zip
 .playwright-mcp/
 .codex-*

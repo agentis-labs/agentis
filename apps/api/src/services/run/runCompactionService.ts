@@ -35,6 +35,7 @@ export interface RunCompactionOptions {
 
 interface RunCompactionSummary {
   compactedRunStates: number;
+  deletedSnapshots: number;
   deletedLedgerRows: number;
   durationMs: number;
 }
@@ -123,6 +124,29 @@ export class RunCompactionService {
       compactedRunStates += 1;
     }
 
+    // 1b) Sweep recovery snapshots of terminal runs. `workflow_run_snapshots`
+    //     exists only to cold-resume an in-flight run; once a run is terminal its
+    //     snapshots are never read again. The engine deletes them on clean
+    //     settle, so this sweep only reclaims legacy accumulation and rows left
+    //     by runs that terminated via a crash path. Not time-gated — a terminal
+    //     run's snapshots are dead weight immediately.
+    const terminalRunIds = this.#db
+      .select({ id: schema.workflowRuns.id })
+      .from(schema.workflowRuns)
+      .where(inArray(schema.workflowRuns.status, TERMINAL_STATUSES))
+      .all()
+      .map((row) => row.id);
+    let deletedSnapshots = 0;
+    for (let i = 0; i < terminalRunIds.length; i += 500) {
+      const batch = terminalRunIds.slice(i, i + 500);
+      if (batch.length === 0) continue;
+      const res = this.#db
+        .delete(schema.workflowRunSnapshots)
+        .where(inArray(schema.workflowRunSnapshots.runId, batch))
+        .run();
+      deletedSnapshots += (res as { changes?: number }).changes ?? 0;
+    }
+
     // 2) Delete ledger events whose run finished long ago. We key off the
     //    event's createdAt (cheaper) and let foreign-key cascade handle any
     //    events from already-deleted runs.
@@ -139,6 +163,7 @@ export class RunCompactionService {
 
     const summary = {
       compactedRunStates,
+      deletedSnapshots,
       deletedLedgerRows,
       durationMs: Date.now() - startedAt,
     };

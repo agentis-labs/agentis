@@ -467,7 +467,10 @@ export class AgentToolRuntime {
         const title = typeof args.title === 'string' && args.title.trim() ? args.title : `${collection} record`;
         const memoryId = this.deps.memory.write({
           workspaceId,
-          scopeId: null,
+          // Bind to the App's brain scope (AGENTIC-APPS-10X §5.4), not the whole
+          // workspace — so what an App learns lives with the App and appears as
+          // a node in its own scoped Brain map, not only the Workspace Brain.
+          scopeId: appId,
           kind: 'fact',
           source: 'agent',
           title,

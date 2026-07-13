@@ -6,6 +6,8 @@
  * AppRuntime binds to. This is the "no developer in the loop" claim, tested.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import { AppDatastore, AppStore, AppSurfaceStore } from '@agentis/app';
 import { AgentToolRuntime } from '../../src/services/agent/agentToolRuntime.js';
 import { MemoryStore } from '../../src/services/memory/memoryStore.js';
@@ -98,7 +100,16 @@ describe('Agentic App agent tools', () => {
     const promoted = await run('data_promote_memory', { collection: 'customers', id: recordId, title: 'Acme contact pref' });
     expect(promoted.ok).toBe(true);
     expect((promoted.result as { promoted: boolean; memoryId: string }).promoted).toBe(true);
-    expect((promoted.result as { memoryId: string }).memoryId).toBeTruthy();
+    const memoryId = (promoted.result as { memoryId: string }).memoryId;
+    expect(memoryId).toBeTruthy();
+
+    // Regression: a promoted memory MUST be scoped to the App (AGENTIC-APPS-10X
+    // §5.4) so it appears as a node in the App's own Brain map, not only —
+    // invisibly to the App — in the Workspace Brain. A stale duplicate tool
+    // handler once wrote scopeId: null here, silently orphaning every App's
+    // promoted learning from its own Brain.
+    const row = ctx.db.select().from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.id, memoryId)).get();
+    expect(row?.scopeId).toBe(appId);
   });
 
   it('rejects data tools when no App context is resolvable', async () => {

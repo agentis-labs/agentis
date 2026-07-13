@@ -14,6 +14,9 @@ import type {
   AppInstallPreview,
   AppWorkflowSummary,
   AppWorkflowBinding,
+  AppDeploymentSummary,
+  AppActivationResult,
+  WorkflowTriggerDeploymentStatus,
   UpdateAppWorkflowBindingInput,
   SurfaceAction,
   ViewNode,
@@ -218,6 +221,31 @@ export const appsApi = {
     api<Wrapped<AppWorkflowBinding>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/binding`, {
       method: 'PATCH',
       body: JSON.stringify(binding),
+    }).then((r) => r.data),
+  /** App-level always-on state: which workflows author unattended triggers and whether they're armed. */
+  getDeployment: (id: string) =>
+    api<Wrapped<AppDeploymentSummary>>(`/v1/apps/${id}/deployment`).then((r) => r.data),
+  /** Go Live: arm every workflow in the App that authors an unattended trigger. */
+  activate: (id: string, override?: { ack: string }) =>
+    api<Wrapped<{ deployment: AppDeploymentSummary; results: AppActivationResult[] }>>(`/v1/apps/${id}/activate`, {
+      method: 'POST',
+      body: JSON.stringify(override ? { override } : {}),
+    }).then((r) => r.data),
+  /** Disarm every armed trigger in the App. */
+  deactivate: (id: string) =>
+    api<Wrapped<{ deployment: AppDeploymentSummary; results: AppActivationResult[] }>>(`/v1/apps/${id}/deactivate`, {
+      method: 'POST',
+    }).then((r) => r.data),
+  /** Arm a single workflow's trigger from the control deck. */
+  armWorkflow: (id: string, workflowId: string, override?: { ack: string }) =>
+    api<Wrapped<WorkflowTriggerDeploymentStatus>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/arm`, {
+      method: 'POST',
+      body: JSON.stringify(override ? { override } : {}),
+    }).then((r) => r.data),
+  /** Disarm (pause) a single workflow's trigger. */
+  disarmWorkflow: (id: string, workflowId: string) =>
+    api<Wrapped<WorkflowTriggerDeploymentStatus>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/disarm`, {
+      method: 'POST',
     }).then((r) => r.data),
   adoptWorkflow: (id: string, workflowId: string) =>
     api<Wrapped<string[]>>(`/v1/apps/${id}/workflows`, {

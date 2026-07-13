@@ -12,16 +12,25 @@ const KINDS: Array<{ value: MemoryKind; label: string }> = [
   { value: 'lesson', label: 'Lesson' },
 ];
 
+/** Derive a short title from free-form content when the caller skips the title field. */
+function titleFromContent(content: string): string {
+  const firstLine = content.split('\n')[0]!.trim();
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
+}
+
 export function MemoryWriteForm({
   submitLabel = 'Save memory',
   placeholder = 'What should this surface always remember?',
   onSubmit,
   className,
+  showTitle = true,
 }: {
   submitLabel?: string;
   placeholder?: string;
   onSubmit: (entry: { kind: MemoryKind; title: string; content: string }) => Promise<void>;
   className?: string;
+  /** Hide the title field — a title is auto-derived from the content instead. */
+  showTitle?: boolean;
 }) {
   const [kind, setKind] = useState<MemoryKind>('fact');
   const [title, setTitle] = useState('');
@@ -30,8 +39,8 @@ export function MemoryWriteForm({
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    const cleanTitle = title.trim();
     const cleanContent = content.trim();
+    const cleanTitle = showTitle ? title.trim() : titleFromContent(cleanContent);
     if (!cleanTitle || !cleanContent || saving) return;
     setSaving(true);
     try {
@@ -63,13 +72,15 @@ export function MemoryWriteForm({
           </button>
         ))}
       </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-[240px_1fr]">
-        <input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="Title"
-          className="h-10 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-        />
+      <div className={clsx('mt-3 grid gap-3', showTitle && 'md:grid-cols-[240px_1fr]')}>
+        {showTitle && (
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Title"
+            className="h-10 rounded-input border border-line bg-surface-2 px-3 text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+          />
+        )}
         <textarea
           value={content}
           onChange={(event) => setContent(event.target.value)}
@@ -79,7 +90,7 @@ export function MemoryWriteForm({
         />
       </div>
       <div className="mt-3 flex justify-end">
-        <Button type="submit" variant="primary" size="sm" loading={saving} iconLeft={<Save size={12} />} disabled={!title.trim() || !content.trim()}>
+        <Button type="submit" variant="primary" size="sm" loading={saving} iconLeft={<Save size={12} />} disabled={!content.trim()}>
           {submitLabel}
         </Button>
       </div>

@@ -4,6 +4,7 @@
  * URL auto-derived (loopback), token auto-minted, on by default.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { McpHarnessSessionService, harnessMcpArgs, type McpHarnessServer } from '../../src/services/mcp/mcpHarnessSession.js';
@@ -79,8 +80,36 @@ describe('harnessMcpArgs', () => {
     expect(argsLine).toContain('x-agentis-workspace: ws_1');
   });
 
+  it('resolves the stdio bridge to an EXISTING file (a bad ../ count made Codex spawn a missing script → zero tools)', () => {
+    const argsLine = harnessMcpArgs('codex', [server]).find((a) => a.startsWith('mcp_servers.agentis.args='))!;
+    // First TOML-array element is the bridge path (backslashes doubled for TOML).
+    const bridge = argsLine.slice(argsLine.indexOf('["') + 2, argsLine.indexOf('.mjs') + 4).replace(/\\\\/g, '\\');
+    expect(existsSync(bridge)).toBe(true);
+  });
+
   it('is a no-op for non-CLI adapters / empty servers', () => {
     expect(harnessMcpArgs('http', [server])).toEqual([]);
     expect(harnessMcpArgs('codex', [])).toEqual([]);
+  });
+
+  it('does NOT tag the descriptor with an execution-mode header for a normal (chat) turn', () => {
+    const claude = harnessMcpArgs('claude_code', [server], 'chat');
+    expect(JSON.parse(claude[2]!).mcpServers.agentis.headers['x-agentis-execution-mode']).toBeUndefined();
+    const codex = harnessMcpArgs('codex', [server], 'chat').find((a) => a.startsWith('mcp_servers.agentis.args='));
+    expect(codex).not.toContain('x-agentis-execution-mode');
+  });
+
+  it('tags the descriptor with x-agentis-execution-mode=plan so Plan mode is registry-enforced', () => {
+    const claude = harnessMcpArgs('claude_code', [server], 'plan');
+    expect(JSON.parse(claude[2]!).mcpServers.agentis.headers['x-agentis-execution-mode']).toBe('plan');
+    const codex = harnessMcpArgs('codex', [server], 'plan').find((a) => a.startsWith('mcp_servers.agentis.args='));
+    expect(codex).toContain('x-agentis-execution-mode: plan');
+  });
+
+  it('tags the descriptor with x-agentis-execution-mode=ask so Ask mode is registry-enforced', () => {
+    const claude = harnessMcpArgs('claude_code', [server], 'ask');
+    expect(JSON.parse(claude[2]!).mcpServers.agentis.headers['x-agentis-execution-mode']).toBe('ask');
+    const codex = harnessMcpArgs('codex', [server], 'ask').find((a) => a.startsWith('mcp_servers.agentis.args='));
+    expect(codex).toContain('x-agentis-execution-mode: ask');
   });
 });

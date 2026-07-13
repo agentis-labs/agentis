@@ -62,6 +62,22 @@ export class ActiveWorkflowRegistry {
   }
 
   async deactivate(triggerId: string): Promise<void> {
+    await this.#teardown(triggerId);
+    // Operator intent: persist paused so it stays disarmed across restarts.
+    this.db
+      .update(schema.triggers)
+      .set({ status: 'paused', updatedAt: new Date().toISOString() })
+      .where(eq(schema.triggers.id, triggerId))
+      .run();
+  }
+
+  /**
+   * Run cleanup + drop in-memory state WITHOUT changing the DB status. Used on
+   * process shutdown so an armed ("active") trigger stays active in the DB and
+   * `loadActiveFromDb()` re-hydrates it on the next boot — otherwise every
+   * restart would silently disarm every 24/7 trigger.
+   */
+  async #teardown(triggerId: string): Promise<void> {
     const c = this.#cleanup.get(triggerId);
     if (c) {
       try {
@@ -72,11 +88,6 @@ export class ActiveWorkflowRegistry {
     }
     this.#cleanup.delete(triggerId);
     this.#active.delete(triggerId);
-    this.db
-      .update(schema.triggers)
-      .set({ status: 'paused', updatedAt: new Date().toISOString() })
-      .where(eq(schema.triggers.id, triggerId))
-      .run();
   }
 
   /** Load all `status='active'` triggers from DB. Caller wires them through TriggerRuntime. */
@@ -98,8 +109,10 @@ export class ActiveWorkflowRegistry {
   }
 
   async shutdown(): Promise<void> {
+    // Tear down runtime resources but PRESERVE each trigger's DB status, so an
+    // armed trigger survives a restart (re-hydrated by loadActiveFromDb on boot).
     for (const triggerId of Array.from(this.#cleanup.keys())) {
-      await this.deactivate(triggerId);
+      await this.#teardown(triggerId);
     }
   }
 }

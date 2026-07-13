@@ -13,6 +13,14 @@ export const CONSTANTS = {
   RUN_STATE_SNAPSHOT_INTERVAL_EVENTS: 50,
   // Compact run-state snapshot cadence; bounds recovery replay cost.
 
+  RUN_STATE_PERSIST_DEBOUNCE_MS: 250,
+  // Coalescing window for best-effort mid-run run_state checkpoints. The
+  // append-only ledger is the source of truth for replay; the run_state blob is
+  // a resume cache, so many in-flight persists within this window collapse into
+  // one write. Boundary writes (terminal settle, approvals) still flush
+  // immediately. Keeps a growing multi-MB blob from stalling the (synchronous
+  // SQLite) event loop on every node transition.
+
   MAX_REPLAN_ATTEMPTS_DEFAULT: 3,
 
   // ────────────────────────────────────────────────────────────

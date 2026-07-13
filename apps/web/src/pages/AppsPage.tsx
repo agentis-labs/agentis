@@ -6,7 +6,7 @@
  * (`/apps/:id`). A legacy bare workflow is promoted transactionally to an
  * App-of-one when opened, so every detail page has the same App contract.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import {
@@ -25,6 +25,8 @@ import {
   X,
 } from 'lucide-react';
 import type { AppInstallPreview, AppManifestEnvelope, AppRecord, AppSurface } from '@agentis/core';
+import { REALTIME_EVENTS } from '@agentis/core';
+import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
 import { APP_TEMPLATES } from '../lib/appTemplates';
 import { api, apiCached, peekCached, apiErrorMessage } from '../lib/api';
@@ -127,6 +129,24 @@ export function AppsPage() {
   }
 
   useEffect(() => { void refresh(); }, []);
+
+  // Live-refresh the apps + workflows grid when an AGENT (or anyone) creates,
+  // deletes, or restructures an App/workflow — otherwise a deleted app lingers
+  // until a manual reload, and an agent's new app never appears. The workspace
+  // room carries these (App/workflow mutations dual-publish there).
+  useEffect(() => rtSubscribe('workspace', {}), []);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useRealtime(
+    useMemo(() => [
+      REALTIME_EVENTS.APP_CREATED, REALTIME_EVENTS.APP_UPDATED, REALTIME_EVENTS.APP_DELETED,
+      REALTIME_EVENTS.WORKFLOW_CREATED, REALTIME_EVENTS.WORKFLOW_DELETED,
+    ], []),
+    () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      refreshTimer.current = setTimeout(() => { void refresh(); }, 400);
+    },
+  );
+  useEffect(() => () => { if (refreshTimer.current) clearTimeout(refreshTimer.current); }, []);
 
   useEffect(() => {
     if (!newMenuOpen) return;
@@ -494,6 +514,10 @@ export function AppsPage() {
         agents={agents as AppEngineAgent[]}
         onClose={() => setEngineAppId(null)}
         onSave={saveAppSettings}
+        onDeleted={(deletedId) => {
+          setApps((current) => current.filter((app) => app.id !== deletedId));
+          setEngineAppId(null);
+        }}
       />
       {extensionsOpen && <ExtensionsModal onClose={() => setExtensionsOpen(false)} />}
     </div>

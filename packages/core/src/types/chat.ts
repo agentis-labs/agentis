@@ -269,7 +269,7 @@ export interface AgentisToolContext {
   agentId?: string;
   runId?: string;
   conversationId?: string;
-  executionMode?: 'chat' | 'plan';
+  executionMode?: 'chat' | 'plan' | 'ask';
   viewport?: ViewportContext | null;
   /**
    * Ambient Agentic App for this turn (Living Apps Phase 0). When set, App-scoped

@@ -34,6 +34,7 @@ import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
 import { AGENTIS_MCP_SERVER_INSTRUCTIONS } from '../services/orchestrator/orchestratorPrompt.js';
+import { listMcpResources, readMcpResource } from '../services/mcp/mcpResources.js';
 import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWorkflow.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
@@ -134,6 +135,12 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
   app.post('/rpc', async (c) => {
     const ws = getWorkspace(c);
     const agentId = resolveMcpAgentId(deps.db, ws.workspaceId, c.req.header('x-agentis-agent'));
+    // Per-turn permission posture: an mcp_native harness tags its descriptor with
+    // this header, so the tool registry gates mutating tools for the harness's OWN
+    // loop — real enforcement, not just the prompt addendum. `plan` hard-blocks,
+    // `ask` blocks-and-instructs (operator approves), anything else = Auto (allow).
+    const headerMode = c.req.header('x-agentis-execution-mode');
+    const executionMode: 'chat' | 'plan' | 'ask' = headerMode === 'plan' ? 'plan' : headerMode === 'ask' ? 'ask' : 'chat';
     const body = (await c.req.json().catch(() => null)) as JsonRpcRequest | null;
     if (!body || body.jsonrpc !== '2.0' || typeof body.method !== 'string') {
       return c.json(rpcError(body?.id ?? null, -32600, 'Invalid Request'));
@@ -157,15 +164,22 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
           // Notification — no response body expected, but return 202-style ack.
           return c.body(null, 202);
         case 'resources/list':
-          return c.json(rpcResult(id, { resources: [] }));
+          return c.json(rpcResult(id, { resources: listMcpResources() }));
         case 'resources/templates/list':
           return c.json(rpcResult(id, { resourceTemplates: [] }));
+        case 'resources/read': {
+          const params = (body.params ?? {}) as { uri?: string };
+          if (!params.uri) return c.json(rpcError(id, -32602, 'resources/read requires params.uri'));
+          const contents = readMcpResource(deps.db, ws.workspaceId, params.uri);
+          if (!contents) return c.json(rpcError(id, -32602, `Unknown resource '${params.uri}'`));
+          return c.json(rpcResult(id, contents));
+        }
         case 'tools/list':
           return c.json(rpcResult(id, { tools: collectMcpTools(deps, ws.workspaceId).map(toMcpDescriptor) }));
         case 'tools/call': {
           const params = (body.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
           if (!params.name) return c.json(rpcError(id, -32602, 'tools/call requires params.name'));
-          const result = await callMcpTool(deps, { ...ws, agentId }, params.name, params.arguments ?? {});
+          const result = await callMcpTool(deps, { ...ws, agentId, executionMode }, params.name, params.arguments ?? {});
           return c.json(rpcResult(id, result));
         }
         default:
@@ -262,7 +276,7 @@ function toMcpDescriptor(t: McpTool) {
 /** Execute an MCP tool call → MCP `content` result shape. */
 async function callMcpTool(
   deps: McpRoutesDeps,
-  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string },
+  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask' },
   name: string,
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
@@ -289,6 +303,7 @@ async function callMcpTool(
       userId: ws.user.id,
       ambientId: ws.ambientId,
       ...(ws.agentId ? { agentId: ws.agentId } : {}),
+      ...(ws.executionMode ? { executionMode: ws.executionMode } : {}),
       caller: 'mcp',
     };
     const res = await deps.toolRegistry.execute({ id: '', toolId: name, arguments: args }, ctx);

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import type { AdapterType, AgentisToolContext, ChatMessage, NormalizedTask } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type AdapterType, type AgentisToolContext, type ChatMessage, type NormalizedTask, type RealtimeEventName } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import { publishAgentWorkStep, publishChatDeltaProgress } from '../agent/agentWorkProgress.js';
 import type { ToolHandlerDeps } from './deps.js';
@@ -43,6 +43,115 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
             registered: Boolean(deps.adapters.get(agent.id)),
           }));
         return { count: agents.length, agents };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.agents.update',
+        mcpExposed: true,
+        family: 'environment',
+        description:
+          "Update an agent's profile and behavior: name, description, instructions (its operating prompt / agentis.md), runtimeModel, role (manager|worker|specialist), reportsTo (manager agentId), domain/space tag, budget, or PAUSE/resume it (isPaused). Pausing takes the agent offline immediately. Does NOT change the harness adapter/credentials (operator territory via agent settings). Changing role to \"orchestrator\" is not allowed here — do that in agent settings.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string', description: 'Agent to update. Omit to use the current agent.' },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            instructions: { type: 'string', description: 'The agent\'s operating prompt (its agentis.md identity/config).' },
+            runtimeModel: { type: 'string', description: 'Model id the agent runs on, e.g. gpt-5.6-sol / claude-opus-4-8.' },
+            role: { type: 'string', enum: ['manager', 'worker', 'specialist'] },
+            reportsTo: { type: 'string', description: 'Manager agentId this agent reports to. null to clear.' },
+            spaceTag: { type: 'string', description: 'Domain/team label, e.g. "marketing".' },
+            monthlyBudgetCents: { type: 'number' },
+            isPaused: { type: 'boolean', description: 'true = take offline; false = resume.' },
+          },
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: async (args, ctx) => {
+        const agentId = resolveAgentId(args, ctx);
+        const existing = loadWorkspaceAgent(deps, ctx.workspaceId, agentId);
+        if (args.role === 'orchestrator') {
+          throw new AgentisError('VALIDATION_FAILED', 'Promoting an agent to "orchestrator" must be done in agent settings (it re-points the whole team). Use manager/worker/specialist here.');
+        }
+        if (typeof args.reportsTo === 'string' && args.reportsTo) {
+          if (args.reportsTo === agentId) throw new AgentisError('VALIDATION_FAILED', 'an agent cannot report to itself.');
+          loadWorkspaceAgent(deps, ctx.workspaceId, args.reportsTo); // validate target in workspace
+        }
+        const set: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+        if (typeof args.name === 'string' && args.name.trim()) set.name = args.name.trim();
+        if (typeof args.description === 'string') set.description = args.description;
+        if (typeof args.instructions === 'string') set.instructions = args.instructions;
+        if (typeof args.runtimeModel === 'string') set.runtimeModel = args.runtimeModel.trim() || null;
+        if (typeof args.role === 'string') set.role = args.role;
+        if ('reportsTo' in args) set.reportsTo = args.reportsTo === null ? null : String(args.reportsTo);
+        if (typeof args.spaceTag === 'string') set.spaceTag = args.spaceTag;
+        if (typeof args.monthlyBudgetCents === 'number') set.monthlyBudgetCents = Math.max(0, Math.round(args.monthlyBudgetCents));
+        let pausedNow = false;
+        if (typeof args.isPaused === 'boolean' && args.isPaused !== Boolean(existing.isPaused)) {
+          set.isPaused = args.isPaused;
+          set.status = args.isPaused ? 'paused' : 'online';
+          pausedNow = args.isPaused;
+        }
+        deps.db.update(schema.agents).set(set).where(eq(schema.agents.id, agentId)).run();
+        // Pausing takes it offline immediately; resuming lets the next dispatch
+        // re-register. (Full harness/config re-registration stays with the route.)
+        if (pausedNow) { try { await deps.adapters.unregister(agentId); } catch { /* best-effort */ } }
+        publishAgentChange(deps, ctx.workspaceId, agentId, REALTIME_EVENTS.AGENT_UPDATED);
+        const row = loadWorkspaceAgent(deps, ctx.workspaceId, agentId);
+        return { agentId, name: row.name, role: row.role, runtimeModel: row.runtimeModel, isPaused: Boolean(row.isPaused), status: row.status };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.agents.delete',
+        mcpExposed: true,
+        family: 'environment',
+        description:
+          'PERMANENTLY delete an agent. Destructive and irreversible. Called WITHOUT confirm:true it returns a preview; call again with confirm:true to proceed. By default the agent\'s memory is PROMOTED to the workspace Brain (not lost); pass memoryDisposition:"delete" to erase it or "transfer"+targetAgentId to move it. Prefer pausing (agentis.agents.update { isPaused:true }) if you only want it to stop.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string' },
+            confirm: { type: 'boolean', description: 'Must be true to actually delete. Omit/false for a preview.' },
+            memoryDisposition: { type: 'string', enum: ['promote', 'delete', 'transfer'], description: 'What to do with the agent\'s memory. Default promote.' },
+            targetAgentId: { type: 'string', description: 'Required when memoryDisposition="transfer".' },
+          },
+          required: ['agentId'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const agentId = String(args.agentId ?? '').trim();
+        if (!agentId) throw new AgentisError('VALIDATION_FAILED', 'agents.delete requires agentId');
+        const existing = loadWorkspaceAgent(deps, ctx.workspaceId, agentId);
+        const disposition = (typeof args.memoryDisposition === 'string' ? args.memoryDisposition : 'promote') as 'promote' | 'delete' | 'transfer';
+        if (args.confirm !== true) {
+          return {
+            deleted: false,
+            preview: true,
+            agent: { agentId, name: existing.name, role: existing.role },
+            willRemove: 'this agent and its registration; its memory will be ' + (disposition === 'delete' ? 'ERASED' : disposition === 'transfer' ? 'transferred' : 'promoted to the workspace Brain'),
+            next: `Call agentis.agents.delete again with { agentId: "${agentId}", confirm: true } to proceed. To just stop it, use agentis.agents.update { agentId: "${agentId}", isPaused: true }.`,
+          };
+        }
+        // Decide the fate of the agent's scoped memory BEFORE the row is gone.
+        let memoryMoved = 0, memoryDeleted = 0;
+        if (deps.episodes) {
+          if (disposition === 'delete') memoryDeleted = deps.episodes.deleteScope(ctx.workspaceId, agentId);
+          else if (disposition === 'transfer') {
+            const target = String(args.targetAgentId ?? '').trim();
+            if (!target) throw new AgentisError('VALIDATION_FAILED', 'memoryDisposition "transfer" requires targetAgentId.');
+            loadWorkspaceAgent(deps, ctx.workspaceId, target);
+            memoryMoved = deps.episodes.reassignScope(ctx.workspaceId, agentId, target);
+          } else memoryMoved = deps.episodes.reassignScope(ctx.workspaceId, agentId, null); // promote to workspace
+        }
+        try { await deps.adapters.unregister(agentId); } catch { /* best-effort */ }
+        deps.db.delete(schema.agents).where(eq(schema.agents.id, agentId)).run();
+        publishAgentChange(deps, ctx.workspaceId, agentId, REALTIME_EVENTS.AGENT_DELETED);
+        return { deleted: true, agentId, name: existing.name, memoryDisposition: disposition, memoryMoved, memoryDeleted };
       },
     },
     {
@@ -404,6 +513,36 @@ function normalizeStatus(status: string): string {
   if (value === 'idle') return 'online';
   if (value === 'paused') return 'offline';
   return value;
+}
+
+/** Resolve the target agent: explicit arg → the current turn's agent. */
+function resolveAgentId(args: Record<string, unknown>, ctx: AgentisToolContext): string {
+  if (typeof args.agentId === 'string' && args.agentId.trim()) return args.agentId.trim();
+  if (ctx.agentId) return ctx.agentId;
+  throw new AgentisError('VALIDATION_FAILED', 'no agent in context — pass "agentId".');
+}
+
+/** Load an agent row scoped to the workspace, or throw NOT_FOUND. */
+function loadWorkspaceAgent(deps: ToolHandlerDeps, workspaceId: string, agentId: string): typeof schema.agents.$inferSelect {
+  const row = deps.db
+    .select()
+    .from(schema.agents)
+    .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, workspaceId)))
+    .get();
+  if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${agentId} not found in this workspace`);
+  return row;
+}
+
+/** Publish an agent lifecycle change to the agent + workspace rooms so the fleet
+ *  canvas / team strips / home refetch live. */
+function publishAgentChange(deps: ToolHandlerDeps, workspaceId: string, agentId: string, event: RealtimeEventName): void {
+  try {
+    const payload = { agentId, workspaceId };
+    deps.bus.publish(REALTIME_ROOMS.agent(agentId), event, payload);
+    deps.bus.publish(REALTIME_ROOMS.workspace(workspaceId), event, payload);
+  } catch {
+    /* realtime must never fail a write */
+  }
 }
 function normalizeAdapterType(value: unknown): AdapterType {
   const adapterType = String(value ?? 'http') as AdapterType;

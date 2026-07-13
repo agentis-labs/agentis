@@ -139,8 +139,13 @@ export class CapabilityRegistry {
     ctx: InvokeCtx,
     handler: CapabilityHandler,
   ): Promise<unknown> {
-    if (ctx.executionMode === 'plan' && capability.mutating) {
-      throw new AgentisError('VALIDATION_FAILED', `capability '${capability.id}' cannot mutate state in Plan mode`);
+    if ((ctx.executionMode === 'plan' || ctx.executionMode === 'ask') && capability.mutating) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        ctx.executionMode === 'ask'
+          ? `capability '${capability.id}' changes state and the conversation is in Ask mode — not executed. Summarize the intended action and ask the operator to approve (they can switch to Auto).`
+          : `capability '${capability.id}' cannot mutate state in Plan mode`,
+      );
     }
     const args = coerceArgs(input);
     const validation = validateArgs(capability.inputSchema, args);

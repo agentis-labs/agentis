@@ -29,6 +29,8 @@ import {
   upsertAppEnvironmentSchema,
   appWorkflowBindingSchema,
   updateAppWorkflowBindingSchema,
+  REALTIME_EVENTS,
+  REALTIME_ROOMS,
   type AppInstallPreview,
   type AppRecord,
   type AppWorkflowBinding,
@@ -60,6 +62,8 @@ import { AppLearningService as AppLearningStatic } from '../services/app/appLear
 import type { ConversationSimulatorService } from '../services/conversation/conversationSimulator.js';
 import type { OutboundPolicyService } from '../services/outboundPolicy.js';
 import type { AppOrchestratorService } from '../services/app/appOrchestrator.js';
+import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
+import { WorkflowTriggerDeploymentService } from '../services/workflow/workflowTriggerDeployment.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -91,6 +95,8 @@ export interface AppRoutesDeps {
   outboundPolicy?: OutboundPolicyService;
   /** Multi-workflow rules executor (APP-INTERFACE-10X §2.3) — chains, schedules, run-all. */
   orchestrator?: AppOrchestratorService;
+  /** Trigger arming runtime — powers the App's always-on (Go Live) lifecycle. */
+  triggerRuntime?: TriggerRuntime;
 }
 
 const addMemberSchema = z.object({
@@ -259,6 +265,15 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   const packager = new AppPackager(deps.db);
   const lifecycle = new AppLifecycle(deps.db);
   const environments = new AppEnvironmentStore(deps.db);
+  const triggerDeployments = deps.triggerRuntime
+    ? new WorkflowTriggerDeploymentService(deps.db, deps.triggerRuntime)
+    : null;
+
+  /** Fan out an App-lifecycle change so the control deck + home refetch live. */
+  const emitAppChanged = (workspaceId: string, appId: string) => {
+    deps.bus?.publish(REALTIME_ROOMS.app(appId), REALTIME_EVENTS.APP_UPDATED, { appId, op: 'updated' });
+    deps.bus?.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.APP_UPDATED, { appId, op: 'updated' });
+  };
 
   // ── Public, unauthed surface sharing (AGENTIC-APPS-10X §4.7) ────────────────
   // Registered BEFORE auth. Gated by the surface's `shareable` flag.
@@ -423,6 +438,9 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       // Oldest first so a newly created workflow always lands on the right of the tab row.
       .orderBy(asc(schema.workflows.createdAt))
       .all();
+    // Arming state for every armable workflow in this App (one composite read).
+    const appDeployment = triggerDeployments?.getForApp(ws.workspaceId, appId) ?? null;
+    const deploymentByWorkflow = new Map(appDeployment?.workflows.map((w) => [w.workflowId, w]) ?? []);
     const summaries: AppWorkflowSummary[] = rows.map((row) => {
       const binding = readAppWorkflowBinding(row.settings);
       const lastRun = deps.db.select({
@@ -459,9 +477,93 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         nextRunAt: deps.orchestrator?.nextScheduledFire(row.id) ?? null,
         concurrency: binding.concurrency ?? 'parallel',
         chainOn: binding.chainOn ?? 'success',
+        deployment: (() => {
+          const dep = deploymentByWorkflow.get(row.id);
+          if (!dep || dep.status === 'manual' || dep.triggerType === 'manual') return null;
+          return {
+            triggerType: dep.triggerType as 'cron' | 'webhook' | 'persistent_listener',
+            status: dep.status as 'active' | 'paused' | 'error' | 'unarmed',
+            lastFiredAt: dep.lastFiredAt,
+            ...(dep.health !== undefined ? { health: dep.health } : {}),
+          };
+        })(),
       };
     }).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
     return c.json({ data: summaries });
+  });
+
+  // ── App-level always-on lifecycle (Go Live) ─────────────────────────────────
+  // An App is multi-workflow; "going live" arms every workflow that authors an
+  // unattended trigger (schedule / webhook / listener). These compose the same
+  // per-workflow activation the canvas uses — SWIFT arming gate included.
+
+  app.get('/:id/deployment', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    if (!triggerDeployments) throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Trigger activation is unavailable in this runtime.');
+    return c.json({ data: triggerDeployments.getForApp(ws.workspaceId, appId) });
+  });
+
+  app.post('/:id/activate', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    if (!triggerDeployments) throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Trigger activation is unavailable in this runtime.');
+    const body = (await c.req.json().catch(() => ({}))) as { override?: { ack?: string } };
+    const override = body.override?.ack?.trim() ? { ack: body.override.ack.trim() } : undefined;
+    const result = await triggerDeployments.activateApp({ workspaceId: ws.workspaceId, appId, userId: user.id, override });
+    emitAppChanged(ws.workspaceId, appId);
+    return c.json({ data: result });
+  });
+
+  app.post('/:id/deactivate', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    if (!triggerDeployments) throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Trigger activation is unavailable in this runtime.');
+    const result = await triggerDeployments.deactivateApp({ workspaceId: ws.workspaceId, appId });
+    emitAppChanged(ws.workspaceId, appId);
+    return c.json({ data: result });
+  });
+
+  // Per-workflow arm/disarm from the App control deck (single trigger).
+  app.post('/:id/workflows/:wid/arm', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const appId = c.req.param('id');
+    const wid = c.req.param('wid');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    if (!triggerDeployments) throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Trigger activation is unavailable in this runtime.');
+    const wf = deps.db
+      .select({ id: schema.workflows.id, ambientId: schema.workflows.ambientId })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, ws.workspaceId), eq(schema.workflows.appId, appId), eq(schema.workflows.id, wid)))
+      .get();
+    if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found in this app: ${wid}`);
+    const body = (await c.req.json().catch(() => ({}))) as { override?: { ack?: string } };
+    const override = body.override?.ack?.trim() ? { ack: body.override.ack.trim() } : undefined;
+    const deployment = await triggerDeployments.activate({
+      workspaceId: ws.workspaceId,
+      workflowId: wid,
+      ambientId: wf.ambientId ?? null,
+      userId: user.id,
+      override,
+    });
+    emitAppChanged(ws.workspaceId, appId);
+    return c.json({ data: deployment });
+  });
+
+  app.post('/:id/workflows/:wid/disarm', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const wid = c.req.param('wid');
+    if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
+    if (!triggerDeployments) throw new AgentisError('LISTENER_RUNTIME_UNAVAILABLE', 'Trigger activation is unavailable in this runtime.');
+    const deployment = await triggerDeployments.setStatus(ws.workspaceId, wid, 'paused');
+    emitAppChanged(ws.workspaceId, appId);
+    return c.json({ data: deployment });
   });
 
   // Run every enabled root workflow (no dependsOn), in order; dependsOn chains
@@ -518,6 +620,11 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       .where(eq(schema.workflows.id, wid)).run();
     // Rules changed — re-arm the App-level schedule for this workflow.
     deps.orchestrator?.rearm(wid);
+    // Realtime: the App control plane + canvas + home refetch the new order live
+    // (same signal the agent's agentis.workflow.chain tool emits).
+    deps.bus?.publish(REALTIME_ROOMS.workflow(wid), REALTIME_EVENTS.WORKFLOW_UPDATED, { workflowId: wid, appId });
+    deps.bus?.publish(REALTIME_ROOMS.app(appId), REALTIME_EVENTS.APP_UPDATED, { appId, op: 'updated' });
+    deps.bus?.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.APP_UPDATED, { appId, op: 'updated' });
     return c.json({ data: next });
   });
 

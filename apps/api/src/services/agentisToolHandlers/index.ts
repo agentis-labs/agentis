@@ -33,6 +33,7 @@ import { registerMcpBridgeTools } from './mcp.js';
 import { registerIntegrationTools } from './integration.js';
 import { registerAppDataTools } from './appData.js';
 import { registerBrainTools } from './brain.js';
+import { registerSpaceTools } from './spaceTools.js';
 
 export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registerOrientTools(registry, deps);
@@ -59,6 +60,7 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerIntegrationTools(registry, deps);
   registerAppDataTools(registry, deps);
   registerBrainTools(registry, deps);
+  registerSpaceTools(registry, deps);
   // Registered last, but its SDK surface is resolved lazily at call time, so it
   // still exposes every tool above (§3.7 code-mode over the whole registry).
   registerCodeTools(registry, deps);

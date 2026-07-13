@@ -138,6 +138,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   // Live Workspace §C (migration v91) — issues become the schedulable backlog.
   addColumn('issues', 'scheduled_for', 'TEXT');
   addColumn('issues', 'recurrence_cron', 'TEXT');
+  addColumn('channel_peer_identities', 'blocked', 'INTEGER NOT NULL DEFAULT 0');
 
   // Company OS layer (migration v2): conversation messages can be linked to an
   // issue. embedded-sql.ts predates this column — patch the drift here.
@@ -167,6 +168,48 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
 CREATE INDEX IF NOT EXISTS idx_channel_connections_app ON channel_connections(app_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_app ON conversations(app_id);
 `);
+
+  // Agentless (workspace-owned) channel connections: drop the NOT NULL + cascade
+  // on agent_id so a connection can be workspace-global (NULL agent → inbound
+  // routes to the orchestrator, any agent may send). SQLite can't ALTER a
+  // column's NOT NULL, so rebuild the (tiny) table. Guarded on the current
+  // agent_id being NOT NULL so it runs at most once.
+  if (tableExists('channel_connections')) {
+    const agentCol = (sqlite.prepare(`SELECT "notnull" AS nn FROM pragma_table_info('channel_connections') WHERE name = 'agent_id'`).get() as { nn?: number } | undefined);
+    if (agentCol && agentCol.nn === 1) {
+      sqlite.exec(`
+PRAGMA foreign_keys = OFF;
+CREATE TABLE channel_connections_next (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  ambient_id      TEXT REFERENCES ambients(id) ON DELETE SET NULL,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id        TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  app_id          TEXT REFERENCES apps(id) ON DELETE SET NULL,
+  kind            TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  token_encrypted TEXT NOT NULL,
+  webhook_secret  TEXT,
+  settings        TEXT NOT NULL DEFAULT '{}',
+  status          TEXT NOT NULL DEFAULT 'active',
+  last_event_at   TEXT,
+  last_error      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+INSERT OR IGNORE INTO channel_connections_next (
+  id, workspace_id, ambient_id, user_id, agent_id, app_id, kind, name, token_encrypted, webhook_secret, settings, status, last_event_at, last_error, created_at, updated_at
+)
+SELECT
+  id, workspace_id, ambient_id, user_id, agent_id, app_id, kind, name, token_encrypted, webhook_secret, settings, status, last_event_at, last_error, created_at, updated_at
+FROM channel_connections;
+DROP TABLE channel_connections;
+ALTER TABLE channel_connections_next RENAME TO channel_connections;
+CREATE INDEX IF NOT EXISTS idx_channel_connections_app ON channel_connections(app_id);
+PRAGMA foreign_keys = ON;
+`);
+    }
+  }
   sqlite.exec(`
 DROP INDEX IF EXISTS uq_conversation_agent;
 DROP INDEX IF EXISTS uq_conversation_agent_active;
@@ -316,6 +359,7 @@ CREATE TABLE IF NOT EXISTS channel_peer_identities (
   display_name TEXT,
   user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   peer_key TEXT,
+  blocked INTEGER NOT NULL DEFAULT 0,
   message_count INTEGER NOT NULL DEFAULT 0,
   first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))

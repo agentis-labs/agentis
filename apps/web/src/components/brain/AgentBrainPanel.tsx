@@ -1,11 +1,10 @@
 ﻿import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { BookOpen, Check, ChevronDown, Download, FileCode, Network, NotebookPen, Plus, RefreshCw, Search, Sparkles, Trash2, type LucideIcon } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, Download, FileCode, Network, NotebookPen, RefreshCw, Search, Sparkles, type LucideIcon } from 'lucide-react';
 import { RoleGlyph } from '../agents/AgentRoleGlyphs';
 import clsx from 'clsx';
 import { api, apiErrorMessage, workspace as wsStore } from '../../lib/api';
 import { harnessOf } from '../agents/harnessMeta';
 import { importAgents, checkImportUpdates, type ImportUpdate } from '../../lib/agentImport';
-import { Button } from '../shared/Button';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { ScopedBrainMap } from './ScopedBrainMap';
@@ -13,31 +12,12 @@ import { KnowledgeTab } from '../knowledge/KnowledgeTab';
 import { ScopeVisibilityToggle } from './ScopeVisibilityToggle';
 import { SkillsTab } from './SkillsTab';
 import { ExamplesTab } from './ExamplesTab';
+import { WorkspaceMemoryTab } from '../knowledge/WorkspaceMemoryTab';
+import { EpisodesTab } from '../knowledge/EpisodesTab';
+import { Button } from '../shared/Button';
 
 interface ImportOrigin { adapterType: string; externalId: string }
 interface AgentRow { id: string; name: string; role?: string | null; description?: string | null; capabilityTags?: string[] | null; importOrigin?: ImportOrigin | null; domainName?: string | null }
-
-/** One agent-scoped episodic memory atom (the real Brain content). */
-interface EpisodeRow {
-  id: string;
-  title: string;
-  summary: string;
-  source: string;
-  tags: string[];
-  metadata?: Record<string, unknown>;
-  reinforcedAt?: string | null;
-  createdAt: string;
-}
-
-type MemoryOrigin = 'imported' | 'learned' | 'operator';
-
-/** Where a memory came from — drives the provenance badge in the Memory tab. */
-function memoryOrigin(ep: EpisodeRow): MemoryOrigin {
-  const harnessMeta = (ep.metadata?.harness ?? (ep.metadata?.provenance as Record<string, unknown> | undefined)?.adapterType) != null;
-  if (ep.source === 'harness_ingest' || harnessMeta || ep.tags.includes('imported')) return 'imported';
-  if (ep.source === 'operator_write') return 'operator';
-  return 'learned';
-}
 
 type SubjectTier = 'orchestrator' | 'manager' | 'specialist';
 
@@ -47,7 +27,6 @@ function subjectTier(role?: string | null): SubjectTier {
   if (r === 'manager') return 'manager';
   return 'specialist';
 }
-interface MemoryRecord { id: string; section: string; content: string; createdAt: string }
 
 export type AgentBrainView = 'map' | 'memory' | 'knowledge' | 'skills' | 'examples';
 
@@ -71,12 +50,12 @@ export function AgentBrainPanel({
   const confirm = useConfirm();
   const [loadedAgents, setLoadedAgents] = useState<AgentRow[]>([]);
   const [internalAgentId, setInternalAgentId] = useState('');
-  const [entries, setEntries] = useState<MemoryRecord[]>([]);
-  const [episodes, setEpisodes] = useState<EpisodeRow[]>([]);
+  // Full memory/episode content now renders via WorkspaceMemoryTab + EpisodesTab
+  // (self-fetching); this count only feeds the imported-agent provenance strip.
+  const [episodeCount, setEpisodeCount] = useState(0);
   const [skillCount, setSkillCount] = useState(0);
   const [imports, setImports] = useState<ImportUpdate[]>([]);
   const [pulling, setPulling] = useState(false);
-  const [content, setContent] = useState('');
   const [internalView, setInternalView] = useState<AgentBrainView>('map');
   // The orchestrator has no domain, so its subject-picker row shows the
   // workspace name it presides over instead.
@@ -101,18 +80,16 @@ export function AgentBrainPanel({
   }, []);
 
   const loadMemory = useCallback(async (id: string) => {
-    if (!id) { setEntries([]); setEpisodes([]); return; }
-    // The agent's real Brain content lives in the episodic substrate — imported
-    // (the agent that actually executed the run), not `scopeId`: scopeId is the
-    // App id for App-owned runs, so a scopeId-only filter would silently miss
-    // every episode formed while this agent worked inside an App. The
-    // provenance badge.
-    const [mem, eps] = await Promise.all([
-      api<{ entries: MemoryRecord[] }>(`/v1/brain/agents/${id}/memory`).catch(() => ({ entries: [] as MemoryRecord[] })),
-      api<{ episodes: EpisodeRow[] }>(`/v1/memory/episodes?agentId=${encodeURIComponent(id)}&limit=200`).catch(() => ({ episodes: [] as EpisodeRow[] })),
-    ]);
-    setEntries(mem.entries);
-    setEpisodes(eps.episodes);
+    if (!id) { setEpisodeCount(0); return; }
+    // Episodes are recorded against their own agentId column — not `scopeId`,
+    // which is the App id for App-owned runs — so an agentId filter is what
+    // finds every episode formed while this agent worked, including inside Apps.
+    try {
+      const { episodes } = await api<{ episodes: Array<{ id: string }> }>(`/v1/memory/episodes?agentId=${encodeURIComponent(id)}&limit=200`);
+      setEpisodeCount(episodes.length);
+    } catch {
+      setEpisodeCount(0);
+    }
   }, []);
 
   const loadImports = useCallback(async () => {
@@ -188,32 +165,6 @@ export function AgentBrainPanel({
     }
   }
 
-  async function save() {
-    if (!agentId || !content.trim()) return;
-    try {
-      await api(`/v1/brain/agents/${agentId}/memory`, {
-        method: 'POST',
-        body: JSON.stringify({ section: 'Operator notes', content: content.trim() }),
-      });
-      setContent('');
-      await loadMemory(agentId);
-    } catch (error) {
-      toast.error('Could not save agent memory', apiErrorMessage(error));
-    }
-  }
-
-  async function remove(id: string) {
-    const ok = await confirm({
-      title: 'Delete memory entry?',
-      body: 'This memory entry will be permanently removed from this agent.',
-      tone: 'danger',
-      confirmLabel: 'Delete',
-    });
-    if (!ok) return;
-    await api(`/v1/brain/agents/${agentId}/memory/${id}`, { method: 'DELETE' });
-    await loadMemory(agentId);
-  }
-
   const scopeCluster = (
     <div className="flex h-9 items-center gap-1 rounded-lg border border-line bg-surface-2/90 px-1 backdrop-blur-md">
       <BrainSubjectDropdown agents={agents} selectedId={agentId} onSelect={selectAgent} workspaceName={workspaceName} />
@@ -243,55 +194,34 @@ export function AgentBrainPanel({
 
   const otherViewContent =
     activeView === 'memory' ? (
-          <div className="h-full overflow-y-auto px-6 py-5">
-            <div className="mx-auto max-w-4xl space-y-4">
-              <section className="rounded-card border border-line bg-surface p-5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="mt-1 text-[13px] text-text-muted">Persistent expertise and failure lessons owned by one agent.</p>
-            </div>
+      agentId && (
+        <div className="h-full overflow-y-auto px-6 py-5">
+          <div className="mx-auto max-w-4xl space-y-4">
+            <section className="rounded-card border border-line bg-surface p-4">
+              <div className="mb-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Memory</div>
+                <p className="mt-1 text-[12px] text-text-muted">Facts, rules, preferences, and patterns this agent always recalls.</p>
+              </div>
+              <WorkspaceMemoryTab
+                scopeId={agentId}
+                showTitle={false}
+                maxHeightClassName="max-h-[65vh]"
+                submitLabel="Save to agent memory"
+                placeholder="What should this agent always remember?"
+                emptyBody="Add facts, rules, and preferences that only this agent recalls."
+              />
+            </section>
+            <section className="rounded-card border border-line bg-surface p-4">
+              <div className="mb-4">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Episodes</div>
+                <p className="mt-1 text-[12px] text-text-muted">Decisions, failures, recoveries, and lessons distilled from this agent's own runs.</p>
+              </div>
+              <EpisodesTab agentId={agentId} maxHeightClassName="max-h-[65vh]" />
+            </section>
           </div>
-          <textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Add a lesson or operating note for this agent..." rows={3} className="mt-4 w-full resize-none rounded-input border border-line bg-surface-2 p-3 text-[13px] text-text-primary outline-none focus:border-accent" />
-          <div className="mt-3 flex justify-end">
-            <Button variant="primary" iconLeft={<Plus size={13} />} disabled={!agentId || !content.trim()} onClick={() => void save()}>Add memory</Button>
-          </div>
-              </section>
-              <section className="rounded-card border border-line bg-surface p-4">
-          <div className="space-y-2">
-            {episodes.length === 0 && entries.length === 0 && (
-              <p className="py-10 text-center text-[13px] text-text-muted">No memory has accumulated for this agent yet.</p>
-            )}
-            {episodes.map((ep) => {
-              const origin = memoryOrigin(ep);
-              return (
-                <article key={ep.id} className="rounded-card border border-line bg-surface-2 px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <OriginBadge origin={origin} harness={current?.importOrigin?.adapterType} />
-                    {ep.reinforcedAt && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent">reinforced</span>}
-                    <span className="ml-auto text-[10px] text-text-muted">{relTime(ep.createdAt)}</span>
-                  </div>
-                  <p className="mt-1.5 text-[13px] font-medium text-text-primary">{ep.title}</p>
-                  <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-5 text-text-secondary">{ep.summary}</p>
-                </article>
-              );
-            })}
-            {entries.map((entry) => (
-              <article key={entry.id} className="flex items-start justify-between gap-3 rounded-card border border-line bg-surface-2 px-4 py-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <OriginBadge origin="operator" />
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-text-muted">{entry.section}</span>
-                  </div>
-                  <p className="mt-1 whitespace-pre-wrap text-[13px] leading-5 text-text-secondary">{entry.content}</p>
-                </div>
-                <button type="button" aria-label="Delete memory" className="rounded-btn p-1.5 text-text-muted hover:bg-danger-soft hover:text-danger" onClick={() => void remove(entry.id)}><Trash2 size={13} /></button>
-              </article>
-            ))}
-          </div>
-              </section>
-            </div>
-          </div>
-        ) : activeView === 'knowledge' ? (
+        </div>
+      )
+    ) : activeView === 'knowledge' ? (
           agentId ? <KnowledgeTab scopeId={agentId} scopeName={current?.name} /> : null
         ) : activeView === 'skills' ? (
           agentId ? <SkillsTab scopeId={agentId} scopeName={current?.name} /> : null
@@ -304,7 +234,7 @@ export function AgentBrainPanel({
       {current?.importOrigin && (
         <ProviderBrainStrip
           origin={current.importOrigin}
-          memoryCount={episodes.length}
+          memoryCount={episodeCount}
           skillCount={skillCount}
           pending={pending}
           pulling={pulling}
@@ -383,28 +313,6 @@ function ProviderBrainStrip({
       </div>
     </div>
   );
-}
-
-/** Provenance badge for a memory entry in the Memory tab (Solution 3). */
-function OriginBadge({ origin, harness }: { origin: MemoryOrigin; harness?: string | null }) {
-  if (origin === 'imported') {
-    return <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">imported{harness ? ` · ${harnessOf(harness).label}` : ''}</span>;
-  }
-  if (origin === 'operator') {
-    return <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">operator note</span>;
-  }
-  return <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">learned</span>;
-}
-
-function relTime(iso: string): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return '';
-  const mins = Math.round((Date.now() - t) / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.round(hrs / 24)}d ago`;
 }
 
 const SUBJECT_GROUPS: Array<{ tier: SubjectTier; label: string }> = [

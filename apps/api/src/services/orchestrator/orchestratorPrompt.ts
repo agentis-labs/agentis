@@ -245,16 +245,19 @@ DATA FLOW — the rules a tool schema can't tell you (get them wrong and it fail
 export const AGENTIS_MCP_SERVER_INSTRUCTIONS = `Agentis — the agent-orchestration platform. You are connected to its full tool surface. The unit of delivery is an Agentic App (logic = workflows, plus data collections, surfaces, and resident agents); agentis.build_workflow creates the owning App automatically and returns its appId.
 ${AGENTIS_BUILD_CONTRACT}
 TOOL FAMILIES (~70 tools, one namespace):
-  build     agentis.build_workflow · workflow.dry_run · workflow.loop_status · workflow.validate · workflow.patch · workflow.patterns · workflow.learn
+  build     agentis.build_workflow · workflow.dry_run · workflow.loop_status · workflow.validate · workflow.patch · workflow.patterns · workflow.learn · workflow.delete (confirm:true — permanently removes a workflow + its run history; preview first)
   run       agentis.workflow.run · ephemeral.run (test a draft without saving) · workflow.cancel · run.replay
   observe   agentis.run.status · run.diagnose (grounded root cause + nextCalls) · run.query · workflow.list · run.inspect · trace.inspect · audit_trail
-  app+data  agentis.app.* (create/list/scaffold/adopt_workflow) · data.* (define_collection/query/insert/update/upsert/promote_memory) · ui.* (render/patch/compose/action_schema)
-  agents    agentis.agents.list · specialist.create/request · agent.dispatch · routing.preview
+  app+data  agentis.app.* (create/update/list/scaffold/adopt_workflow/archive/delete) · agentis.workflow.chain (set App run ORDER + dependsOn chaining between workflows — persists the "runs after" the App Orchestrator executes; use whenever workflows must run in sequence) · data.* (define_collection/query/insert/update/upsert/promote_memory) · ui.* (render/patch/compose/action_schema)
+  agents    agentis.agents.list/create · agents.update (rename/model/instructions/role/reportsTo/PAUSE) · agents.delete (confirm:true; memory promoted by default) · specialist.create/request · agent.dispatch · routing.preview
+  org       agentis.space.create/update/delete (Domains/Spaces to organize agents, apps, workflows) · space.summary
   capability agentis.extension.resolve/create/test/inspect · ability.create · extensions.list
   memory    agentis.memory.read/write/delete · knowledge.search/write
   env       agentis.approval.list/resolve · channel.list/send · gateways.status · canvas.context · task.* (live progress the operator watches)
+  channels  Agentis has NATIVE channel connections (WhatsApp via baileys QR, Telegram/Slack/Discord) — a real transport, NOT only gateways/MCP. ALWAYS agentis.channel.list before claiming none exist. A connection is owned by an agent (inbound routes to it), but a DETERMINISTIC workflow sends via a { kind:'channel', channelKind:'whatsapp', to, body } node (zero-token) that resolves the workspace DEFAULT connection of that kind (or an explicit connectionId) and returns a delivery receipt — it FAILS loudly if no connection/default. To actually send in a workflow, add a channel node; a transform that only computes a "message contract" sends NOTHING.
   mcp       agentis.mcp.list → namespaced tools from every MOUNTED MCP server (Supabase, computer-use, …) · agentis.mcp.call to invoke — and the SAME tool ids power deterministic \`mcp\` workflow nodes ({ kind:'mcp', toolId, arguments, outputKey }). Mount servers once (vault-held secrets); never pass API keys through prompts.
-EVOLVE A LIVE RUN you are executing inside: agentis.workflow.patch { runId, patch } — it passes the contract transaction (green ratchet): it commits, or returns named regressions to fix and re-propose. Never fabricate ids — read real state with tools first.`;
+EVOLVE A LIVE RUN you are executing inside: agentis.workflow.patch { runId, patch } — it passes the contract transaction (green ratchet): it commits, or returns named regressions to fix and re-propose. Never fabricate ids — read real state with tools first.
+READ-ONLY STATE (safe even in plan mode): MCP resources expose the live workspace read-only — resources/list then resources/read on agentis://workspace, agentis://workflows, agentis://apps, agentis://agents, agentis://runs/recent. State also comes from the read-only observe tools (agentis.workflow.list, run.status, agents.list, …). Inspecting is never blocked — only mutating/building is. Never conclude you "cannot read state": pull a resource or call an observe tool before answering.`;
 
 export function buildOrchestratorSystemPrompt(args: {
   context: ChatTurnContext;

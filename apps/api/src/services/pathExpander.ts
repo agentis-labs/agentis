@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -242,6 +243,86 @@ function pathExists(candidate: string): boolean {
   }
 }
 
+/**
+ * CLIs whose NEWEST install must win even when an older copy sits earlier on
+ * PATH. Codex is the motivating case: the Codex Desktop app bundles a stale
+ * `codex.exe` under %LOCALAPPDATA%\OpenAI\Codex\bin (a `windowsPreferredCandidates`
+ * entry, so it is prepended ahead of everything), which shadows the user's
+ * npm-global `codex` install. Because the two builds differ by version, only the
+ * brand-new GPT-5.6 model tier — absent from the older bundled build — silently
+ * 400s ("The 'gpt-5.6-sol' model requires a newer version of Codex …") while
+ * every older model keeps working, which reads as "the model is broken" rather
+ * than "we ran the wrong binary". Empirically selecting the newest WORKING binary
+ * fixes that AND still deprioritizes a broken Store/WindowsApps execution-alias
+ * shim (it cannot report `--version`), preserving the original reason the Desktop
+ * bin was ever preferred. `claude` is included for the same class of hazard.
+ */
+const VERSION_SENSITIVE_COMMANDS: ReadonlySet<string> = new Set(['codex', 'claude']);
+
+/** Extract a dotted numeric version (e.g. "0.144.1") from `<cli> --version` output. */
+export function parseBinaryVersion(output: string): string | null {
+  const match = /\d+(?:\.\d+)+/.exec(output);
+  return match ? match[0] : null;
+}
+
+/**
+ * Choose the newest binary among `candidates`, reading each one's version with
+ * `versionOf` (null = indeterminate → deprioritized). Pure and order-stable: an
+ * all-unknown set or a tie falls back to the first candidate (PATH order), so a
+ * single-install machine (the common case) picks the only entry with no probing.
+ * Separated from the spawn so the selection logic is unit-testable without real
+ * binaries.
+ */
+export function chooseNewestBinary(candidates: string[], versionOf: (binaryPath: string) => string | null): string | null {
+  const unique = [...new Set(candidates)];
+  if (unique.length <= 1) return unique[0] ?? null;
+  let best = unique[0]!;
+  let bestVersion = versionOf(best);
+  for (const candidate of unique.slice(1)) {
+    const version = versionOf(candidate);
+    if (!version) continue;
+    // compareVersionDesc(a, b) < 0 ⇔ a is a newer version than b.
+    if (!bestVersion || compareVersionDesc(version, bestVersion) < 0) {
+      best = candidate;
+      bestVersion = version;
+    }
+  }
+  return best;
+}
+
+/**
+ * Per-process cache of `<binary> --version`. Keyed by resolved path, so adding or
+ * removing an install (a different candidate set) re-probes, while an in-place
+ * upgrade of the SAME path is picked up on the next server start — an acceptable
+ * trade to avoid spawning a heavy CLI on every resolve.
+ */
+const binaryVersionCache = new Map<string, string | null>();
+
+function probeBinaryVersion(binary: string, env: NodeJS.ProcessEnv): string | null {
+  const cached = binaryVersionCache.get(binary);
+  if (cached !== undefined) return cached;
+  let version: string | null = null;
+  try {
+    const isCmd = process.platform === 'win32' && /\.(cmd|bat)$/i.test(binary);
+    const command = isCmd ? resolveWindowsCmdShell(env) : binary;
+    const args = isCmd ? ['/d', '/s', '/c', 'call', binary, '--version'] : ['--version'];
+    const out = execFileSync(command, args, {
+      env,
+      timeout: 7000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    });
+    version = parseBinaryVersion(out);
+  } catch {
+    // A binary that can't report a version (broken shim, EPERM alias, timeout) is
+    // deprioritized rather than fatal — chooseNewestBinary skips a null.
+    version = null;
+  }
+  binaryVersionCache.set(binary, version);
+  return version;
+}
+
 export function resolveCommandPath(command: string, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string | null {
   const expandedEnv = withExpandedPath(env);
   const hasPathSeparator = command.includes('/') || command.includes('\\');
@@ -255,6 +336,13 @@ export function resolveCommandPath(command: string, cwd = process.cwd(), env: No
   const exts = process.platform === 'win32' ? windowsPathExts(expandedEnv) : [''];
   const hasExtension = process.platform === 'win32' && path.extname(command).length > 0;
 
+  // Version-sensitive CLIs collect ALL matches across PATH and pick the newest,
+  // so a stale app-bundled binary earlier on PATH cannot shadow a newer install.
+  // Everything else keeps the fast first-match semantics.
+  const stem = path.basename(command, path.extname(command)).toLowerCase();
+  const versionSensitive = VERSION_SENSITIVE_COMMANDS.has(stem);
+  const matches: string[] = [];
+
   for (const dir of dirs) {
     const candidates = process.platform === 'win32'
       ? hasExtension
@@ -262,10 +350,15 @@ export function resolveCommandPath(command: string, cwd = process.cwd(), env: No
         : exts.map((ext) => path.join(dir, `${command}${ext}`))
       : [path.join(dir, command)];
     for (const candidate of candidates) {
-      if (pathExists(candidate)) return candidate;
+      if (!pathExists(candidate)) continue;
+      if (!versionSensitive) return candidate;
+      matches.push(candidate);
     }
   }
 
+  if (versionSensitive && matches.length > 0) {
+    return chooseNewestBinary(matches, (binaryPath) => probeBinaryVersion(binaryPath, expandedEnv));
+  }
   return null;
 }
 

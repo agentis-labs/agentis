@@ -931,7 +931,16 @@ export class ChatSessionExecutor {
           timeoutMs: modelRoundTimeoutMs,
           sessionKey: options.sessionKey ?? ctx.conversationId,
           ...(adapterMcpNative
-            ? { toolMode: options.lightweightConversation ? 'caller_loop' : 'adapter_native' }
+            ? {
+                toolMode: options.lightweightConversation ? 'caller_loop' : 'adapter_native',
+                // Real (registry-level) permission enforcement for the harness's own
+                // tool loop: the adapter turns this into an execution-mode header on
+                // the per-turn MCP descriptor. `plan` hard-blocks mutations; `ask`
+                // blocks-and-instructs (operator approves / switches to Auto); `auto`
+                // → chat (allow). This is what makes Ask/Plan real on mcp_native,
+                // where there is no interceptable per-tool confirmation dialog.
+                executionMode: permissionMode === 'plan' ? 'plan' : permissionMode === 'ask' ? 'ask' : 'chat',
+              }
             : {}),
           ...(options.preferredModel ? { preferredModel: options.preferredModel } : {}),
         };
@@ -1003,9 +1012,17 @@ export class ChatSessionExecutor {
         // not when the turn already surfaced a confirmation card (that IS the
         // content) or failed (the route surfaces the adapter error message).
         if (noOutput) {
-          // If the model reasoned but still wouldn't answer (even after the retry),
-          // say so honestly rather than implying the operator was unclear.
-          yield { type: 'text', delta: producedThinking ? REASONED_NO_ANSWER_MESSAGE : EMPTY_TURN_MESSAGE };
+          // Pick the most honest fallback for HOW the turn came up empty:
+          // - tools already ran this turn (real work, possibly with side effects),
+          //   then the runtime's wrap-up round returned nothing → warn that a blind
+          //   retry may REPEAT that work, instead of implying a free retry;
+          // - the model reasoned but wouldn't answer even after the retry;
+          // - otherwise a bare empty completion (a remote-model harness returning
+          //   no output — often an unavailable / rate-limited / out-of-quota model).
+          const message = toolCallCount > 0
+            ? DID_WORK_NO_ANSWER_MESSAGE
+            : producedThinking ? REASONED_NO_ANSWER_MESSAGE : EMPTY_TURN_MESSAGE;
+          yield { type: 'text', delta: message };
         }
         // `length` is not a clean stop — report it as max_turns so the route/UI
         // treats it as a guardrail outcome, not a satisfied answer.
@@ -1759,6 +1776,11 @@ const TURN_LIMIT_MESSAGE =
   'I worked through several steps but reached the per-turn action limit before finishing. Tell me to continue and I’ll keep going from where I left off.';
 const EMPTY_TURN_MESSAGE =
   'The runtime completed without returning an answer. I stopped the turn so you can retry without wondering whether it is still running.';
+/** Shown when tools already ran this turn but the runtime's final round returned
+ *  no closing answer — so the operator knows real work happened and that a blind
+ *  retry may repeat it (relevant for re-spawn/marker-protocol harnesses). */
+const DID_WORK_NO_ANSWER_MESSAGE =
+  'I ran one or more tools this turn but the runtime didn’t return a closing answer. Check the workspace for what changed before retrying — repeating the request may run those actions again.';
 /** Shown when the model reasoned but never surfaced an answer, even after the
  *  recovery retry — honest about what happened instead of blaming the operator. */
 const REASONED_NO_ANSWER_MESSAGE =

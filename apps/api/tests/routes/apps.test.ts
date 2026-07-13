@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AppManifestEnvelope } from '@agentis/core';
 import { buildAppRoutes } from '../../src/routes/apps.js';
+import { graphContentHash } from '../../src/services/workflow/workflowCompass.js';
 import { AppDatastore, AppPackager, AppStore, AppSurfaceStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
@@ -830,5 +831,42 @@ describe('App workflow control plane (E0)', () => {
       method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({}),
     });
     expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('exposes App-level always-on state and Go Live over HTTP', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'News Monitor' }).id;
+    // Seed a cron workflow (armable) HARDENED so the SWIFT arming gate passes.
+    const cronWf = seedWorkflow(appId, 'Poll', 'cron');
+    const cronGraph = {
+      version: 1 as const,
+      nodes: [{ id: 't', type: 'trigger', title: 'T', position: { x: 0, y: 0 }, config: { kind: 'trigger' as const, triggerType: 'cron' as const, schedule: '*/5 * * * *', timezone: 'UTC' } }],
+      edges: [],
+    };
+    ctx.db.update(schema.workflows).set({
+      graph: cronGraph,
+      settings: { buildLoop: { hardened: { at: new Date().toISOString(), graphHash: graphContentHash(cronGraph as never), specHash: 'x' } } },
+    }).where(eq(schema.workflows.id, cronWf)).run();
+
+    // A mock trigger runtime that flips the DB row on activate/deactivate.
+    const runtime = {
+      activate: async (t: { triggerId: string }) => {
+        ctx.db.update(schema.triggers).set({ status: 'active' }).where(eq(schema.triggers.id, t.triggerId)).run();
+      },
+      deactivate: async (id: string) => {
+        ctx.db.update(schema.triggers).set({ status: 'paused' }).where(eq(schema.triggers.id, id)).run();
+      },
+      listeners: { health: () => ({ connected: true, eventCount: 0, fireCount: 0 }) },
+    };
+    const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({ db: ctx.db, auth: ctx.auth, triggerRuntime: runtime as never }) }]);
+
+    const before = await (await routed.request(`/v1/apps/${appId}/deployment`, { headers: ctx.authHeaders })).json() as { data: { status: string; armable: number; armed: number } };
+    expect(before.data).toMatchObject({ status: 'paused', armable: 1, armed: 0 });
+
+    const live = await (await routed.request(`/v1/apps/${appId}/activate`, { method: 'POST', headers: ctx.authHeaders, body: '{}' })).json() as { data: { deployment: { status: string; armed: number } } };
+    expect(live.data.deployment).toMatchObject({ status: 'live', armed: 1 });
+
+    const off = await (await routed.request(`/v1/apps/${appId}/deactivate`, { method: 'POST', headers: ctx.authHeaders })).json() as { data: { deployment: { armed: number } } };
+    expect(off.data.deployment.armed).toBe(0);
   });
 });

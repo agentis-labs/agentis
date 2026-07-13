@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import {
   Activity, AlertTriangle, ArrowDownToLine, Bot, Brain, CalendarClock, Check, ChevronDown, ChevronRight,
-  CircleDot, GitBranch, Link2, Loader2, Pause, Play, ShieldCheck, Workflow, Wrench, X, Zap,
+  CircleDot, GitBranch, Link2, Loader2, Pause, Play, Power, Radio, ShieldCheck, Workflow, Wrench, X, Zap,
 } from 'lucide-react';
 import type { AppWorkflowSummary } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
@@ -37,6 +37,15 @@ const RUN_EVENTS = [
   REALTIME_EVENTS.RUN_CREATED, REALTIME_EVENTS.RUN_RUNNING, REALTIME_EVENTS.RUN_PAUSED,
   REALTIME_EVENTS.RUN_CANCELLED, REALTIME_EVENTS.RUN_COMPLETED, REALTIME_EVENTS.RUN_FAILED,
   REALTIME_EVENTS.RUN_RECOVERED, REALTIME_EVENTS.RUN_QUEUED, REALTIME_EVENTS.RUN_DEQUEUED,
+];
+
+// Structural changes an AGENT can make to the App's control plane — a workflow
+// created/deleted, or its binding (run order / dependsOn chaining) rewritten via
+// agentis.workflow.chain, or the App itself updated. Without live-reacting to
+// these, the agent's delete/reorder is invisible until a manual page refresh.
+const STRUCTURE_EVENTS = [
+  REALTIME_EVENTS.WORKFLOW_CREATED, REALTIME_EVENTS.WORKFLOW_UPDATED, REALTIME_EVENTS.WORKFLOW_DELETED,
+  REALTIME_EVENTS.APP_UPDATED, REALTIME_EVENTS.APP_DELETED,
 ];
 
 /**
@@ -74,11 +83,22 @@ export function useAppWorkflows(appId: string): {
 
   // Refresh on any run transition for one of OUR workflows (debounced).
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bump = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => { void reload(); }, 400);
+  }, [reload]);
   useRealtime(RUN_EVENTS, (env: RealtimeEnvelope) => {
     const wfId = (env.payload as { workflowId?: string } | undefined)?.workflowId;
     if (!wfId || !idsRef.current.has(wfId)) return;
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => { void reload(); }, 400);
+    bump();
+  });
+  // Refresh when the agent restructures this App: a workflow deleted/created, the
+  // run order (dependsOn) rewritten, or the App updated. Match by our appId or one
+  // of our workflow ids so an unrelated App's change never triggers a reload.
+  useRealtime(STRUCTURE_EVENTS, (env: RealtimeEnvelope) => {
+    const p = env.payload as { appId?: string; workflowId?: string } | undefined;
+    const pertains = (p?.appId != null && p.appId === appId) || (p?.workflowId != null && idsRef.current.has(p.workflowId));
+    if (pertains) bump();
   });
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
@@ -215,6 +235,43 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
     catch (e) { setActionError(e instanceof Error ? e.message : 'Could not update the rule'); }
   }, [appId, reload]);
 
+  // ── Always-on lifecycle: arm/disarm unattended triggers ──────
+  const [deployBusy, setDeployBusy] = useState<string | null>(null);
+
+  const armApp = useCallback(async () => {
+    setDeployBusy('__app'); setActionError(null);
+    try {
+      const { results } = await appsApi.activate(appId);
+      const failed = results.filter((r) => r.outcome === 'blocked' || r.outcome === 'error');
+      const armed = results.filter((r) => r.outcome === 'armed').length;
+      if (failed.length > 0) {
+        setActionError(`${armed} armed · ${failed.length} couldn't arm — ${failed[0]!.message ?? 'see workflow'}`);
+      }
+    } catch (e) { setActionError(e instanceof Error ? e.message : 'Could not go live'); }
+    finally { setDeployBusy(null); await reload(); }
+  }, [appId, reload]);
+
+  const disarmApp = useCallback(async () => {
+    setDeployBusy('__app'); setActionError(null);
+    try { await appsApi.deactivate(appId); }
+    catch (e) { setActionError(e instanceof Error ? e.message : 'Could not disarm'); }
+    finally { setDeployBusy(null); await reload(); }
+  }, [appId, reload]);
+
+  const armWorkflow = useCallback(async (wfId: string) => {
+    setDeployBusy(wfId); setActionError(null);
+    try { await appsApi.armWorkflow(appId, wfId); }
+    catch (e) { setActionError(e instanceof Error ? e.message : 'Could not arm this trigger'); }
+    finally { setDeployBusy(null); await reload(); }
+  }, [appId, reload]);
+
+  const disarmWorkflow = useCallback(async (wfId: string) => {
+    setDeployBusy(wfId); setActionError(null);
+    try { await appsApi.disarmWorkflow(appId, wfId); }
+    catch (e) { setActionError(e instanceof Error ? e.message : 'Could not disarm this trigger'); }
+    finally { setDeployBusy(null); await reload(); }
+  }, [appId, reload]);
+
   const icon = <Workflow size={14} />;
   const heading = title ?? 'Orchestration';
   const loadedWorkflows = workflows ?? [];
@@ -222,6 +279,13 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
   const activeWfs = loadedWorkflows.filter((w) => w.activeRun && isActiveRunStatus(w.activeRun.status));
   const running = activeWfs.filter((w) => (w.activeRun?.status ?? '').toUpperCase() === 'RUNNING').length;
   const waiting = activeWfs.length - running;
+  // Always-on: workflows whose graph authors an unattended trigger (schedule / webhook / listener).
+  const armable = loadedWorkflows.filter((w) => w.deployment);
+  const armedCount = armable.filter((w) => w.deployment?.status === 'active').length;
+  const listenerEvents = armable.reduce((sum, w) => {
+    const h = w.deployment?.health as { eventCount?: number } | undefined;
+    return sum + Number(h?.eventCount ?? 0);
+  }, 0);
 
   useEffect(() => {
     if (activeWfs.length > 0 || actionError || openRules) setExpanded(true);
@@ -250,6 +314,30 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
             <span className="inline-flex items-center gap-1.5 rounded-full bg-warn-soft px-2.5 py-1 text-[11px] font-medium text-warn">
               <span className="h-1.5 w-1.5 rounded-full bg-warn" /> {waiting} waiting
             </span>
+          ) : null}
+          {armable.length > 0 ? (
+            armedCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => void disarmApp()}
+                disabled={deployBusy !== null}
+                title={`${armedCount} of ${armable.length} triggers armed${listenerEvents > 0 ? ` · ${listenerEvents} events seen` : ''} — click to take offline`}
+                className="inline-flex h-7 items-center gap-1.5 rounded-full bg-success-soft px-3 text-[12px] font-semibold text-success transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {deployBusy === '__app' ? <Loader2 size={13} className="animate-spin" /> : <span className="s-pulse h-2 w-2 rounded-full bg-success text-success" />}
+                {armedCount === armable.length ? 'Live' : `Live ${armedCount}/${armable.length}`}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void armApp()}
+                disabled={deployBusy !== null}
+                title={`Arm ${armable.length} always-on ${armable.length === 1 ? 'trigger' : 'triggers'} so this app runs on its own`}
+                className="inline-flex h-7 items-center gap-1.5 rounded-full border border-success/40 px-3 text-[12px] font-semibold text-success transition-colors hover:bg-success-soft disabled:opacity-50"
+              >
+                {deployBusy === '__app' ? <Loader2 size={13} className="animate-spin" /> : <Radio size={13} />} Go Live
+              </button>
+            )
           ) : null}
           <button
             type="button"
@@ -284,7 +372,9 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
                         <span className={clsx('h-1.5 w-1.5 rounded-full', live.dot)} /> {live.label}
                       </span>
                     ) : null}
-                    {wf.schedule ? (
+                    {wf.deployment ? (
+                      <TriggerStateChip deployment={wf.deployment} />
+                    ) : wf.schedule ? (
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary" title={`cron: ${wf.schedule.cron}${wf.nextRunAt ? ` · next ${new Date(wf.nextRunAt).toLocaleString()}` : ''}`}>
                         <CalendarClock size={10} /> {cronHint(wf.schedule.cron)}
                       </span>
@@ -324,12 +414,38 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
                     >
                       {wf.enabled === false ? <Play size={13} /> : <Pause size={13} />}
                     </button>
+                    {wf.deployment ? (
+                      wf.deployment.status === 'active' ? (
+                        <button
+                          type="button"
+                          disabled={deployBusy === wf.id}
+                          onClick={() => void disarmWorkflow(wf.id)}
+                          className="inline-flex h-7 items-center gap-1 rounded-btn border border-success/40 bg-success-soft px-2 text-[11px] font-semibold text-success transition-colors hover:opacity-90 disabled:opacity-50"
+                          title="Trigger is armed and listening — click to disarm"
+                          aria-label={`Disarm ${wf.title}`}
+                        >
+                          {deployBusy === wf.id ? <Loader2 size={12} className="animate-spin" /> : <Power size={12} />} Disarm
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={deployBusy === wf.id}
+                          onClick={() => void armWorkflow(wf.id)}
+                          className="inline-flex h-7 items-center gap-1 rounded-btn border border-success/40 px-2 text-[11px] font-semibold text-success transition-colors hover:bg-success-soft disabled:opacity-50"
+                          title={wf.deployment.status === 'error' ? 'Trigger errored — click to re-arm' : 'Arm this trigger so it runs on its own'}
+                          aria-label={`Arm ${wf.title}`}
+                        >
+                          {deployBusy === wf.id ? <Loader2 size={12} className="animate-spin" /> : <Radio size={12} />} Arm
+                        </button>
+                      )
+                    ) : null}
                     <button
                       type="button"
                       disabled={busy === wf.id}
                       onClick={() => void run(wf.id)}
                       className="inline-flex h-7 items-center gap-1 rounded-btn border border-line px-2 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
-                      aria-label={`Run ${wf.title}`}
+                      aria-label={`Run ${wf.title}${wf.deployment ? ' once now' : ''}`}
+                      title={wf.deployment ? 'Run once now (a manual test run)' : undefined}
                     >
                       {busy === wf.id ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />} Run
                     </button>
@@ -359,6 +475,47 @@ function relativeFuture(iso: string): string {
   if (s < 3600) return `in ${Math.max(1, Math.floor(s / 60))}m`;
   if (s < 86400) return `in ${Math.floor(s / 3600)}h`;
   return `in ${Math.floor(s / 86400)}d`;
+}
+
+const TRIGGER_LABEL: Record<string, string> = {
+  cron: 'schedule',
+  webhook: 'webhook',
+  persistent_listener: 'listener',
+};
+
+/** Always-on trigger state — how a workflow is armed, distinct from a one-off run. */
+function TriggerStateChip({ deployment }: { deployment: NonNullable<AppWorkflowSummary['deployment']> }) {
+  const kind = TRIGGER_LABEL[deployment.triggerType] ?? deployment.triggerType;
+  const health = deployment.health as { eventCount?: number; connected?: boolean } | null | undefined;
+  if (deployment.status === 'active') {
+    const events = Number(health?.eventCount ?? 0);
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full bg-success-soft px-2 py-0.5 text-[11px] font-medium text-success"
+        title={`Armed ${kind}${events > 0 ? ` · ${events} events seen` : ''}`}
+      >
+        <span className="s-pulse h-1.5 w-1.5 rounded-full bg-success text-success" />
+        {deployment.triggerType === 'persistent_listener' ? 'listening' : `${kind} armed`}
+        {events > 0 ? <span className="tabular-nums opacity-70">· {events}</span> : null}
+      </span>
+    );
+  }
+  if (deployment.status === 'error') {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-danger-soft px-2 py-0.5 text-[11px] font-medium text-danger" title="Trigger failed to arm">
+        <AlertTriangle size={10} /> {kind} error
+      </span>
+    );
+  }
+  // unarmed | paused
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border border-line px-2 py-0.5 text-[11px] text-text-muted"
+      title={deployment.status === 'unarmed' ? `${kind} trigger — not armed yet` : `${kind} trigger — paused`}
+    >
+      <Radio size={10} /> {deployment.status === 'unarmed' ? `${kind} · off` : `${kind} · paused`}
+    </span>
+  );
 }
 
 /** Inline rule editor: schedule preset/custom cron, depends-on chain, concurrency, chain trigger. */

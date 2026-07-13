@@ -43,8 +43,28 @@ function slugify(input: string): string {
 
 type AppRow = typeof schema.apps.$inferSelect;
 
+/** Lifecycle signal emitted on every App-entity/membership mutation so the
+ *  realtime layer can refetch bound App views + the workspace app list. */
+export interface AppLifecycleEvent {
+  workspaceId: string;
+  appId: string;
+  op: 'created' | 'updated' | 'deleted';
+}
+
 export class AppStore {
-  constructor(private readonly db: AgentisSqliteDb) {}
+  constructor(
+    private readonly db: AgentisSqliteDb,
+    /** Optional realtime sink — fired after each committed lifecycle mutation. */
+    private readonly onLifecycle?: (e: AppLifecycleEvent) => void,
+  ) {}
+
+  #emit(workspaceId: string, appId: string, op: AppLifecycleEvent['op']): void {
+    try {
+      this.onLifecycle?.({ workspaceId, appId, op });
+    } catch {
+      // A realtime sink must never break a persistence path.
+    }
+  }
 
   private toRecord(row: AppRow): AppRecord {
     const manifest = appIdentitySchema.parse(
@@ -128,6 +148,7 @@ export class AppStore {
     if (input.entryWorkflowId) {
       this.adoptWorkflow(workspaceId, id, input.entryWorkflowId);
     }
+    this.#emit(workspaceId, id, 'created');
     return this.get(workspaceId, id);
   }
 
@@ -195,6 +216,7 @@ export class AppStore {
       })
       .where(eq(schema.apps.id, appId))
       .run();
+    this.#emit(workspaceId, appId, 'updated');
     return this.get(workspaceId, appId);
   }
 
@@ -202,6 +224,7 @@ export class AppStore {
     this.get(workspaceId, appId); // throws NOT_FOUND if absent
     // workflows.app_id is ON DELETE SET NULL → adopted workflows survive as bare.
     this.db.delete(schema.apps).where(eq(schema.apps.id, appId)).run();
+    this.#emit(workspaceId, appId, 'deleted');
   }
 
   // ── Membership ──────────────────────────────────────────────
@@ -245,6 +268,7 @@ export class AppStore {
       .get();
     if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow not found: ${workflowId}`);
     this.db.update(schema.workflows).set({ appId }).where(eq(schema.workflows.id, workflowId)).run();
+    this.#emit(workspaceId, appId, 'updated');
   }
 
   listWorkflowIds(workspaceId: string, appId: string): string[] {

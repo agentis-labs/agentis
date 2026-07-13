@@ -18,6 +18,14 @@ const writeMemorySchema = z.object({
   importance: z.number().min(0).max(10).optional(),
 });
 
+const patchMemorySchema = z.object({
+  title: z.string().trim().min(1).max(300).optional(),
+  content: z.string().trim().min(1).max(20_000).optional(),
+  trust: z.number().min(0).max(1).optional(),
+  importance: z.number().min(0).max(1).optional(),
+  tags: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
+});
+
 const askSchema = z.object({
   query: z.string().trim().min(1).max(2_000),
   scopeId: z.string().trim().min(1).optional(),
@@ -87,6 +95,14 @@ export function buildMemoryRoutes(deps: {
       limit: numberQuery(c.req.query('limit'), 80, 500),
     }).filter((ep) => !ep.tags.includes('plane:workspace_memory'));
     return c.json({ episodes });
+  });
+
+  app.patch('/:id', async (c) => {
+    const ws = getWorkspace(c);
+    const body = patchMemorySchema.parse(await c.req.json());
+    const updated = deps.memory.update(ws.workspaceId, c.req.query('scopeId') ?? '', c.req.param('id'), body);
+    if (!updated) throw new AgentisError('RESOURCE_NOT_FOUND', 'Memory entry not found');
+    return c.json({ memory: updated });
   });
 
   app.delete('/:id', (c) => {

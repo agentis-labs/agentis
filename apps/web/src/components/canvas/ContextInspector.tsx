@@ -18,7 +18,6 @@ import { connectorLogoUrl, connectorAccent } from './connectorLogo';
 import { CustomIntegrationDialog } from '../integrations/CustomIntegrationDialog';
 import { TemplatedTextField } from './TemplatedTextField';
 import { FieldPicker } from './FieldPicker';
-import { CanvasBuildComposer } from './CanvasBuildComposer';
 import type { UpstreamNode } from './VariablePicker';
 import type { AdapterType } from '../agents/RuntimePicker';
 import {
@@ -38,6 +37,7 @@ import {
   type IntegrationManifestLite,
 } from './nodeConfigRegistry';
 import { useAgentisStore } from '../../store/agentisStore';
+import { StatusBadge } from '../shared/StatusBadge';
 
 /** A brand logo for a connector slug, falling back to a colored initial chip. */
 function ConnectorLogo({ slug, name, size = 22 }: { slug: string; name: string; size?: number }) {
@@ -80,6 +80,7 @@ interface WorkflowRow { id: string; title?: string; name?: string; isReusable?: 
 interface KnowledgeBaseRow { id: string; name: string; description?: string | null; }
 interface CredentialRow { id: string; name: string; credentialType: string; }
 interface OAuthProvider { id: string; label: string; slugs: string[]; configured?: boolean; mode?: string; }
+interface ChannelConnectionRow { id: string; kind: string; name: string; status?: string; isDefault?: boolean; agentId?: string | null; }
 
 function credentialMatchesIntegration(credential: CredentialRow, slug: string): boolean {
   const normalized = slug.toLowerCase();
@@ -108,6 +109,7 @@ const KIND_LABEL: Record<string, string> = {
   return_output: 'Return Output',
   artifact_save: 'Save Artifact',
   browser: 'Browser',
+  channel: 'Channel',
 };
 
 // "Why this node?" rationale per kind (mirrors the engine's nodeReason()).
@@ -133,6 +135,7 @@ const NODE_REASON: Record<string, string> = {
   subflow: 'Runs a reusable sub-workflow as one step.',
   workflow_store: 'Reads/writes shared state across runs of this workflow.',
   scratchpad: 'Holds working variables for the run.',
+  channel: 'Delivers on a connected channel (WhatsApp/Telegram/Discord/Slack) — deterministic, no LLM tokens spent.',
 };
 
 export function ContextInspector({
@@ -182,13 +185,15 @@ export function ContextInspector({
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationManifestLite[]>([]);
+  const [channelConnections, setChannelConnections] = useState<ChannelConnectionRow[]>([]);
 
   const kind = ((editData.kind as string | undefined) ?? selection.nodeType ?? '').toLowerCase();
-  const needsAgents = kind === 'agent_task' || kind === 'agent_session' || kind === 'agenttask';
+  const needsAgents = kind === 'agent_task' || kind === 'agent_session' || kind === 'agenttask' || kind === 'channel';
   const needsSkills = kind === 'skill_task' || kind === 'skill' || kind === 'extension_task';
   const needsWorkflows = kind === 'subflow' || kind === 'loop';
   const needsKnowledge = kind === 'knowledge';
   const needsCredentials = kind === 'integration' || kind === 'http_request';
+  const needsChannels = kind === 'channel';
 
   useEffect(() => {
     const d = selection.data ?? {};
@@ -221,7 +226,10 @@ export function ContextInspector({
     if (needsCredentials && integrations.length === 0) {
       void api<{ integrations: IntegrationManifestLite[] }>('/v1/integrations').then((d) => setIntegrations(d.integrations ?? [])).catch(() => {});
     }
-  }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length, integrations.length]);
+    if (needsChannels && channelConnections.length === 0) {
+      void api<{ connections: ChannelConnectionRow[] }>('/v1/channels').then((d) => setChannelConnections(d.connections ?? [])).catch(() => {});
+    }
+  }, [needsAgents, needsSkills, needsWorkflows, needsKnowledge, needsCredentials, needsChannels, agents.length, skills.length, workflows.length, knowledgeBases.length, credentials.length, oauthProviders.length, integrations.length, channelConnections.length]);
 
   // Resource-name registry — lets the node explainer resolve an extension id to
   // its real name instead of showing a raw identifier.
@@ -345,16 +353,6 @@ export function ContextInspector({
             onOpenRun={onOpenRun}
           />
         )}
-        {pane === 'form' && selection.kind === 'node' && workflowId && selection.nodeId && (
-          <Field label="Edit in plain English" hint="Describe a change; the orchestrator patches this step on the canvas.">
-            <CanvasBuildComposer
-              workflowId={workflowId}
-              variant="node"
-              nodeId={selection.nodeId}
-              nodeLabel={selection.title ?? headingLabel}
-            />
-          </Field>
-        )}
         {pane === 'form' && selection.kind === 'node' && onTitleChange && (
           <Field label="Node name" hint="Shown as the node's label on the canvas.">
             <input
@@ -416,6 +414,7 @@ export function ContextInspector({
               credentials={credentials}
               oauthProviders={oauthProviders}
               integrations={integrations}
+              channelConnections={channelConnections}
               refreshCredentials={refreshCredentials}
               refreshIntegrations={refreshIntegrations}
               upstream={upstream}
@@ -490,6 +489,7 @@ interface NodeFormProps {
   credentials: CredentialRow[];
   oauthProviders: OAuthProvider[];
   integrations: IntegrationManifestLite[];
+  channelConnections: ChannelConnectionRow[];
   refreshCredentials: () => void;
   refreshIntegrations: () => void;
   /** Other nodes in the same workflow — populates the variable picker. */
@@ -498,7 +498,7 @@ interface NodeFormProps {
   onAgentsChange?: () => void;
 }
 
-function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, integrations, refreshCredentials, refreshIntegrations, upstream, onSkillsChange, onAgentsChange }: NodeFormProps) {
+function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBases, credentials, oauthProviders, integrations, channelConnections, refreshCredentials, refreshIntegrations, upstream, onSkillsChange, onAgentsChange }: NodeFormProps) {
   switch (kind) {
     case 'trigger':
       return <TriggerForm data={data} update={update} />;
@@ -542,6 +542,8 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <IntegrationForm data={data} update={update} upstream={upstream} credentials={credentials} oauthProviders={oauthProviders} integrations={integrations} refreshCredentials={refreshCredentials} refreshIntegrations={refreshIntegrations} />;
     case 'mcp':
       return <McpForm data={data} update={update} />;
+    case 'channel':
+      return <ChannelForm data={data} update={update} upstream={upstream} connections={channelConnections} agents={agents} />;
     case 'http_request':
       return <HttpRequestForm data={data} update={update} upstream={upstream} credentials={credentials} />;
     case 'workflow_store':
@@ -663,9 +665,17 @@ function TriggerForm({ data, update }: { data: Record<string, unknown>; update: 
           <option value="manual">Manual — run on demand</option>
           <option value="cron">Schedule — recurring (cron)</option>
           <option value="webhook">Webhook — inbound POST</option>
-          <option value="persistent_listener">Persistent listener — long-poll source</option>
+          <option value="persistent_listener">Persistent listener — always-on event source</option>
         </select>
       </Field>
+      {triggerType === 'manual' && (
+        <div className="mb-3 rounded-md border border-line bg-surface-2 px-2.5 py-2 text-[11px] leading-4 text-text-secondary">
+          This workflow only runs when you press <span className="text-text-primary">Run</span>. For something that
+          should run on its own — 24/7 monitoring, a schedule, an inbound webhook, or a live source (HTTP poll,
+          websocket, another workflow) — pick a trigger type above, then <span className="text-text-primary">Activate</span> it
+          from the header (or <span className="text-text-primary">Go&nbsp;Live</span> on the app).
+        </div>
+      )}
       {triggerType === 'cron' && (
         <>
           <Field label="Cron expression" hint="Five fields: minute hour day-of-month month day-of-week.">
@@ -1917,6 +1927,141 @@ function McpForm({ data, update }: { data: Record<string, unknown>; update: Node
           onChange={(e) => update({ outputKey: e.target.value || undefined })}
         />
       </Field>
+    </>
+  );
+}
+
+const CHANNEL_KIND_LABEL: Record<string, string> = { whatsapp: 'WhatsApp', telegram: 'Telegram', discord: 'Discord', slack: 'Slack' };
+const CHANNEL_KIND_ORDER = ['whatsapp', 'telegram', 'discord', 'slack'];
+
+/**
+ * Channel node — sends on a native connection (WhatsApp/Telegram/Discord/Slack).
+ * "Send via" picks either an exact connection or "Automatic" for a kind, which
+ * resolves to the workspace-designated default at run time. Zero-token, deterministic.
+ */
+function ChannelForm({ data, update, upstream, connections, agents }: { data: Record<string, unknown>; update: NodeFormProps['update']; upstream?: UpstreamNode[]; connections: ChannelConnectionRow[]; agents: AgentRow[] }) {
+  const { setSettingsOpen } = useAgentisStore();
+  const channelKind = asStr(data.channelKind);
+  const connectionId = asStr(data.connectionId);
+  const attachments = Array.isArray(data.attachments) ? data.attachments : [];
+  const agentName = new Map(agents.map((a) => [a.id, a.name]));
+
+  const byKind = new Map<string, ChannelConnectionRow[]>();
+  for (const c of connections) {
+    const group = byKind.get(c.kind) ?? [];
+    group.push(c);
+    byKind.set(c.kind, group);
+  }
+  const kindsPresent = CHANNEL_KIND_ORDER.filter((k) => byKind.has(k));
+  const selectedConnection = connectionId ? connections.find((c) => c.id === connectionId) : undefined;
+
+  // Encodes both fields into one dropdown value: "" = unset, "auto:<kind>" =
+  // resolve the workspace default at run time, "<connectionId>" = pin an exact one.
+  const selectValue = connectionId ? connectionId : channelKind ? `auto:${channelKind}` : '';
+
+  function handleSelect(value: string) {
+    if (!value) { update({ channelKind: undefined, connectionId: undefined }); return; }
+    if (value.startsWith('auto:')) { update({ channelKind: value.slice(5), connectionId: undefined }); return; }
+    const conn = connections.find((c) => c.id === value);
+    update({ connectionId: value, channelKind: conn?.kind ?? channelKind });
+  }
+
+  return (
+    <>
+      <Field label="Send via" hint="Pin an exact connection, or send Automatically — the workspace's default connection for that kind is resolved at run time.">
+        {connections.length === 0 ? (
+          <div className="rounded-md border border-line bg-surface-2 px-2 py-2 text-[11px] leading-4 text-text-secondary">
+            No channel connections yet. Connect WhatsApp, Telegram, Discord, or Slack — once connected, agents and workflows can send on it.
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true, 'channels')}
+              className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-on-accent hover:bg-accent/90"
+            >
+              Connect a channel →
+            </button>
+          </div>
+        ) : (
+          <select className={selectCls} value={selectValue} onChange={(e) => handleSelect(e.target.value)}>
+            <option value="">Choose how to send…</option>
+            {kindsPresent.map((k) => (
+              <optgroup key={k} label={CHANNEL_KIND_LABEL[k] ?? k}>
+                <option value={`auto:${k}`}>Automatic — workspace default {CHANNEL_KIND_LABEL[k] ?? k}</option>
+                {(byKind.get(k) ?? []).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}{c.isDefault ? ' (default)' : ''} — {c.agentId ? (agentName.get(c.agentId) ?? 'agent-owned') : 'workspace-shared'}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        )}
+      </Field>
+      {selectedConnection && (
+        <div className="-mt-1.5 mb-3 flex items-center justify-between text-[11px] text-text-muted">
+          <span>
+            {selectedConnection.status && <StatusBadge status={selectedConnection.status} size="sm" />}
+            <span className="ml-1.5">{selectedConnection.agentId ? `Owned by ${agentName.get(selectedConnection.agentId) ?? 'an agent'}` : 'Shared workspace connection — open to every agent unless restricted.'}</span>
+          </span>
+          <button type="button" onClick={() => setSettingsOpen(true, 'channels')} className="text-accent hover:underline">
+            Manage in Settings →
+          </button>
+        </div>
+      )}
+      <Field label="To" hint="Phone/JID/username, or leave blank / 'default' to use the connection's saved default target. Type `{{` to insert a variable.">
+        <TemplatedTextField
+          placeholder="default"
+          value={asStr(data.to)}
+          onChange={(next) => update({ to: next || undefined })}
+          upstream={upstream}
+        />
+      </Field>
+      <Field label="Message" hint="Type `{{` to insert a variable.">
+        <TemplatedTextField
+          multiline
+          rows={4}
+          placeholder="Hi {{nodes.lookup.name}}, …"
+          value={asStr(data.body)}
+          onChange={(next) => update({ body: next })}
+          upstream={upstream}
+        />
+        <div className="mt-1.5">
+          <FieldPicker
+            upstream={upstream ?? []}
+            dialect="template"
+            onInsert={(expr) => {
+              const cur = asStr(data.body);
+              update({ body: cur.trim() ? `${cur}${expr}` : expr });
+            }}
+          />
+        </div>
+      </Field>
+      <Accordion title="Attachments" defaultOpen={attachments.length > 0}>
+        <Field label="Attachments (JSON array)" hint='Each item: { "url": "https://…" } or { "artifactId": "…" }. Values support templates.'>
+          <textarea
+            rows={4}
+            spellCheck={false}
+            className={textareaCls + ' font-mono text-[11px]'}
+            value={JSON.stringify(attachments, null, 2)}
+            onChange={(e) => {
+              try {
+                const parsed = JSON.parse(e.target.value) as unknown;
+                update({ attachments: Array.isArray(parsed) ? parsed : undefined });
+              } catch { /* keep prior until valid */ }
+            }}
+          />
+        </Field>
+      </Accordion>
+      <Accordion title="Advanced">
+        <Field label="Output key" hint="Store the delivery receipt under this key (default: delivery).">
+          <input
+            type="text"
+            className={inputCls + ' font-mono'}
+            value={asStr(data.outputKey)}
+            placeholder="delivery"
+            onChange={(e) => update({ outputKey: e.target.value || undefined })}
+          />
+        </Field>
+      </Accordion>
     </>
   );
 }

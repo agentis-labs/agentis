@@ -2,7 +2,7 @@
 import { useWorkspaceData } from '../lib/workspaceData';
 
 export function HomePage() {
-  const { me, agents, approvals, activeRuns, failedRuns, artifacts, loading, fleet, counts, issues } = useWorkspaceData();
+  const { me, agents, approvals, activeRuns, failedRuns, artifacts, loading, fleet, counts, issues, activeWorkflows } = useWorkspaceData();
 
   return (
     <div className="h-full min-h-0 bg-canvas">
@@ -17,6 +17,7 @@ export function HomePage() {
         fleet={fleet}
         counts={counts}
         issues={issues}
+        activeWorkflows={activeWorkflows}
       />
     </div>
   );

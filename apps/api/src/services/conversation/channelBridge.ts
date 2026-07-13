@@ -57,7 +57,8 @@ export interface CreateConnectionInput {
   workspaceId: string;
   ambientId: string | null;
   userId: string;
-  agentId: string;
+  /** Owning agent, or null/undefined for a workspace-owned (global) connection. */
+  agentId?: string | null;
   kind: ChannelKind;
   name: string;
   /** Plaintext bot token. Encrypted on the way in. Omitted for QR-auth kinds (WhatsApp). */
@@ -93,7 +94,8 @@ export interface PublicConnection {
   id: string;
   workspaceId: string;
   ambientId: string | null;
-  agentId: string;
+  /** Owning agent, or null for a workspace-owned (global/agentless) connection. */
+  agentId: string | null;
   kind: ChannelKind;
   name: string;
   status: string;
@@ -103,6 +105,8 @@ export interface PublicConnection {
   transport: string | null;
   mode: string | null;
   transportStatus: string | null;
+  /** Workspace default for this kind — deterministic sends resolve to it. */
+  isDefault: boolean;
   health: ChannelHealth;
   lastEventAt: string | null;
   lastError: string | null;
@@ -151,6 +155,10 @@ type ChannelSettings = {
   transportStatus?: string;
   selfId?: string;
   health?: ChannelHealth;
+  /** Workspace default for this KIND — the one deterministic sends (the `channel`
+   *  workflow node / agentis.channel.send by kind) use when several exist. At most
+   *  one connection per (workspace, kind) carries this. */
+  isDefault?: boolean;
 };
 
 const GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v20.0';
@@ -330,13 +338,17 @@ export class ChannelBridge {
         );
       }
     }
-    const agent = this.deps.db
-      .select()
-      .from(schema.agents)
-      .where(eq(schema.agents.id, input.agentId))
-      .get();
-    if (!agent || agent.workspaceId !== input.workspaceId) {
-      throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${input.agentId} not found`);
+    // A specific owning agent must belong to the workspace; null = workspace-owned.
+    const ownerAgentId = input.agentId ?? null;
+    if (ownerAgentId) {
+      const agent = this.deps.db
+        .select()
+        .from(schema.agents)
+        .where(eq(schema.agents.id, ownerAgentId))
+        .get();
+      if (!agent || agent.workspaceId !== input.workspaceId) {
+        throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${ownerAgentId} not found`);
+      }
     }
     const webhookSecret = randomBytes(24).toString('hex');
     // tokenEncrypted is NOT NULL; QR-auth kinds store an encrypted marker.
@@ -351,7 +363,7 @@ export class ChannelBridge {
         workspaceId: input.workspaceId,
         ambientId: input.ambientId,
         userId: input.userId,
-        agentId: input.agentId,
+        agentId: ownerAgentId,
         kind: input.kind,
         name: input.name,
         tokenEncrypted: this.deps.vault.encrypt(tokenPlain),
@@ -366,6 +378,51 @@ export class ChannelBridge {
     this.#persistent?.onCreated?.(ref);
     const connection = this.get(input.workspaceId, id);
     return { connection, webhookSecret };
+  }
+
+  /**
+   * Designate (or clear) the workspace DEFAULT connection for its kind — the one
+   * deterministic sends resolve to when several connections of that kind exist.
+   * Setting a default clears the flag on every sibling of the same kind, so the
+   * (workspace, kind) → default invariant holds. Passing `isDefault:false` clears
+   * it, leaving no default for that kind.
+   */
+  setDefault(workspaceId: string, id: string, isDefault: boolean): PublicConnection {
+    const row = this.#row(workspaceId, id); // 404s if missing / wrong workspace
+    const now = new Date().toISOString();
+    if (isDefault) {
+      // Clear the flag on all other connections of the same kind first.
+      const siblings = this.deps.db
+        .select()
+        .from(schema.channelConnections)
+        .where(and(eq(schema.channelConnections.workspaceId, workspaceId), eq(schema.channelConnections.kind, row.kind)))
+        .all();
+      for (const s of siblings) {
+        if (s.id === id) continue;
+        const ss = this.#settings(s);
+        if (ss.isDefault) {
+          this.deps.db.update(schema.channelConnections)
+            .set({ settings: { ...ss, isDefault: false }, updatedAt: now })
+            .where(eq(schema.channelConnections.id, s.id)).run();
+        }
+      }
+    }
+    this.deps.db.update(schema.channelConnections)
+      .set({ settings: { ...this.#settings(row), isDefault }, updatedAt: now })
+      .where(eq(schema.channelConnections.id, id)).run();
+    return this.get(workspaceId, id);
+  }
+
+  /** The default connection id for a kind: the explicitly-flagged one (honored
+   *  regardless of live status — a down default still fails loudly at delivery,
+   *  not as "ambiguous"), else the sole ACTIVE one so a single-connection
+   *  workspace needs no explicit default, else null (ambiguous). */
+  defaultConnectionFor(workspaceId: string, kind: string): string | null {
+    const ofKind = this.list(workspaceId).filter((c) => c.kind === kind);
+    const flagged = ofKind.find((c) => c.isDefault);
+    if (flagged) return flagged.id;
+    const active = ofKind.filter((c) => c.status === 'active');
+    return active.length === 1 ? active[0]!.id : null;
   }
 
   updateTargets(workspaceId: string, id: string, input: UpdateConnectionTargetsInput): PublicConnection {
@@ -556,11 +613,18 @@ export class ChannelBridge {
 
     this.#rememberDefaultChat(row, parsed.chatId);
 
+    // A workspace-owned (null-agent) connection routes inbound to the orchestrator
+    // — the workspace's front door — which then handles or delegates.
+    const inboundAgentId = row.agentId ?? this.#resolveInboundAgentId(row.workspaceId);
+    if (!inboundAgentId) {
+      this.#markActive(row.id);
+      return { accepted: false, idempotent: false };
+    }
     const conversation = this.deps.conversations.getOrCreateByChannel({
       workspaceId: row.workspaceId,
       ambientId: row.ambientId,
       userId: row.userId,
-      agentId: row.agentId,
+      agentId: inboundAgentId,
       channelConnectionId: row.id,
       channelChatId: parsed.chatId,
       appId: row.appId ?? null,
@@ -607,7 +671,7 @@ export class ChannelBridge {
         workspaceId: row.workspaceId,
         ambientId: row.ambientId,
         userId: row.userId,
-        agentId: row.agentId,
+        agentId: inboundAgentId,
         appId: row.appId ?? null,
         conversationId: conversation.id,
         connectionId: row.id,
@@ -807,9 +871,15 @@ export class ChannelBridge {
   }
 
   async #runtimeCheck(row: ChannelConnectionRow): Promise<ChannelHealthCheck> {
+    // Workspace-owned (agentless) connection: no specific agent runtime to probe —
+    // inbound routes to the orchestrator, deterministic sends need no runtime.
+    if (!row.agentId) {
+      return this.#check('runtime', true, 'workspace_connection', 'Workspace-owned connection — inbound routes to the orchestrator; no dedicated agent runtime.');
+    }
+    const ownerAgentId = row.agentId;
     if (this.deps.runtimeHealth) {
       try {
-        return await this.deps.runtimeHealth({ workspaceId: row.workspaceId, agentId: row.agentId });
+        return await this.deps.runtimeHealth({ workspaceId: row.workspaceId, agentId: ownerAgentId });
       } catch (err) {
         return this.#check(
           'runtime',
@@ -820,7 +890,7 @@ export class ChannelBridge {
         );
       }
     }
-    const agent = this.deps.db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, row.agentId)).get();
+    const agent = this.deps.db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, ownerAgentId)).get();
     return agent
       ? this.#check('runtime', true, 'agent_runtime_target_exists', 'Channel is attached to an existing agent runtime target.')
       : this.#check('runtime', false, 'agent_missing', 'The connected agent no longer exists.', 'Reconnect the channel to an existing agent.');
@@ -1263,6 +1333,23 @@ export class ChannelBridge {
     }
   }
 
+  /** The agent a workspace-owned connection's inbound routes to: the orchestrator
+   *  (the workspace front door), else the first agent, else null (no agents). */
+  #resolveInboundAgentId(workspaceId: string): string | null {
+    const orchestrator = this.deps.db
+      .select({ id: schema.agents.id })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.role, 'orchestrator')))
+      .get();
+    if (orchestrator) return orchestrator.id;
+    const any = this.deps.db
+      .select({ id: schema.agents.id })
+      .from(schema.agents)
+      .where(eq(schema.agents.workspaceId, workspaceId))
+      .get();
+    return any?.id ?? null;
+  }
+
   #toPublic(row: typeof schema.channelConnections.$inferSelect): PublicConnection {
     const settings = this.#settings(row);
     return {
@@ -1279,6 +1366,7 @@ export class ChannelBridge {
       transport: settings.transport ?? null,
       mode: settings.mode ?? null,
       transportStatus: settings.transportStatus ?? null,
+      isDefault: settings.isDefault === true,
       health: this.#healthFromRow(row),
       lastEventAt: row.lastEventAt,
       lastError: row.lastError,

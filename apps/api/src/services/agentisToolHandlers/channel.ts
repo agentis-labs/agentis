@@ -2,6 +2,7 @@ import { AgentisError } from '@agentis/core';
 import type { ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
+import { resolveAndSend } from '../conversation/channelSend.js';
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
@@ -78,95 +79,20 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       },
       handler: async (args, ctx) => {
         if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
-        const body = typeof args.body === 'string' ? args.body.trim() : '';
-        const attachments = parseAttachments(args.attachments);
-        if (!body && attachments.length === 0) throw new AgentisError('VALIDATION_FAILED', 'provide a body or at least one attachment');
-        const kind = parseKind(args.kind);
-        const connectionId = typeof args.connectionId === 'string' && args.connectionId.trim()
-          ? args.connectionId.trim()
-          : null;
-        const requestedTo = typeof args.to === 'string' ? args.to.trim() : '';
-
-        const connections = deps.channels.list(ctx.workspaceId);
-        const candidate = connectionId
-          ? connections.find((connection) => connection.id === connectionId)
-          : resolveCandidate(connections, kind, requestedTo);
-        if (!candidate) {
-          const filtered = connections
-            .filter((connection) => !kind || connection.kind === kind)
-            .map((connection) => ({
-              id: connection.id,
-              kind: connection.kind,
-              name: connection.name,
-              status: connection.status,
-              defaultChatId: connection.defaultChatId,
-              targetAliases: connection.targetAliases,
-              healthStatus: connection.health.status,
-            }));
-          return {
-            sent: false,
-            errorCode: 'CHANNEL_TARGET_AMBIGUOUS_OR_MISSING',
-            error: requestedTo && !isMe(requestedTo)
-              ? 'No single active channel matched the explicit destination. Provide connectionId when more than one connection is active.'
-              : 'No single active channel with a default target matched. Provide connectionId, destination, or configure a default recipient.',
-            candidates: filtered,
-          };
-        }
-
-        // §3.3 — a calling AGENT may only send on a connection it owns or was granted.
-        // Deterministic/system callers (no ctx.agentId) and ungoverned connections pass through.
-        if (ctx.agentId && deps.connectionGrants) {
-          const decision = deps.connectionGrants.authorize({
+        // Shared resolve→authorize→deliver flow (same one the deterministic
+        // `channel` workflow node uses) so tool and node behave identically.
+        return resolveAndSend(
+          { channels: deps.channels, ...(deps.connectionGrants ? { connectionGrants: deps.connectionGrants } : {}) },
+          {
             workspaceId: ctx.workspaceId,
-            connectionId: candidate.id,
-            agentId: ctx.agentId,
-            required: 'send',
-          });
-          if (!decision.ok) {
-            return {
-              sent: false,
-              errorCode: 'CONNECTION_SCOPE_MISSING',
-              error: decision.reason,
-              remediation: `You are not authorized to send on '${candidate.name}'. Request it with agentis.connection.request { connectionId: "${candidate.id}", scope: "send", reason: "…" } — an operator approves it.`,
-              connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
-            };
-          }
-        }
-
-        const resolved = deps.channels.resolveDestination({ connectionId: candidate.id, to: requestedTo || null });
-        const chatId = resolved.chatId;
-        if (!chatId) {
-          return {
-            sent: false,
-            errorCode: 'CHANNEL_DEFAULT_TARGET_MISSING',
-            error: `${candidate.kind} connection '${candidate.name}' has no saved default target.`,
-            remediation: candidate.kind === 'whatsapp'
-              ? 'Provide a WhatsApp phone number/JID in "to", or save a default recipient for "default".'
-              : 'Send a first inbound message or save a default chat/recipient ID.',
-            connection: {
-              id: candidate.id,
-              kind: candidate.kind,
-              status: candidate.status,
-              health: candidate.health,
-            },
-          };
-        }
-
-        await deps.channels.deliverToConnection({
-          connectionId: candidate.id,
-          chatId,
-          body,
-          ...(attachments.length ? { attachments } : {}),
-        });
-        return {
-          sent: true,
-          connectionId: candidate.id,
-          kind: candidate.kind,
-          to: chatId,
-          targetSource: resolved.source,
-          status: candidate.status,
-          attachments: attachments.length,
-        };
+            body: typeof args.body === 'string' ? args.body : '',
+            kind: typeof args.kind === 'string' ? args.kind : null,
+            connectionId: typeof args.connectionId === 'string' ? args.connectionId : null,
+            to: typeof args.to === 'string' ? args.to : null,
+            agentId: ctx.agentId ?? null,
+            attachments: parseAttachments(args.attachments),
+          },
+        );
       },
     },
     {
@@ -303,19 +229,3 @@ function parseKind(value: unknown): ChannelKind | null {
   return CHANNEL_KINDS.has(value as ChannelKind) ? value as ChannelKind : null;
 }
 
-function resolveCandidate(
-  connections: ReturnType<NonNullable<ToolHandlerDeps['channels']>['list']>,
-  kind: ChannelKind | null,
-  to: string,
-) {
-  const active = connections.filter((connection) => connection.status === 'active' && (!kind || connection.kind === kind));
-  if (to && !isMe(to)) {
-    return active.length === 1 ? active[0] : null;
-  }
-  const withDefault = active.filter((connection) => Boolean(connection.defaultChatId));
-  return withDefault.length === 1 ? withDefault[0] : null;
-}
-
-function isMe(value: string): boolean {
-  return /^(me|default)$/i.test(value.trim());
-}

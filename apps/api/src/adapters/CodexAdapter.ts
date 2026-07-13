@@ -369,14 +369,15 @@ export class CodexAdapter implements AgentAdapter {
     const interactive = options?.latencyClass === 'interactive';
     const structured = options?.latencyClass === 'structured';
     const callerOwnsToolLoop = options?.toolMode === 'caller_loop';
+    const execMode = options?.executionMode ?? 'chat';
     const baseArgs = buildCodexArgs(this.opts, options?.preferredModel, interactive
       // `minimal` is rejected when Codex built-ins such as web_search or
       // image_gen are available. `low` is the fastest universally compatible
       // interactive profile.
-      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop }
+      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode }
       : structured
-        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop }
-        : { mountMcp: !callerOwnsToolLoop });
+        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode }
+        : { mountMcp: !callerOwnsToolLoop, executionMode: execMode });
     const args = storedSession
       ? ['exec', 'resume', storedSession, ...baseArgs.slice(1)]
       : baseArgs;
@@ -498,6 +499,7 @@ function buildCodexArgs(
     reasoningEffort?: CodexAdapterOptions['modelReasoningEffort'];
     fastMode?: boolean;
     mountMcp?: boolean;
+    executionMode?: 'chat' | 'plan' | 'ask';
   } = {},
 ): string[] {
   const fastMode = options.fastMode ?? opts.fastMode ?? false;
@@ -531,7 +533,7 @@ function buildCodexArgs(
     // backend) when the browser is opted in; only disable them when loading the
     // config purely for a custom provider, where they would be dead-weight boots.
     ? (loadUserConfig && !browser ? disableConfiguredMcpArgs(opts) : [])
-    : harnessMcpArgs('codex', opts.mcpServers ?? []);
+    : harnessMcpArgs('codex', opts.mcpServers ?? [], options.executionMode ?? 'chat');
   // Honor the model Agentis resolved for this agent/turn. With the user config
   // ignored the CLI no longer reads `model` from config.toml, so we MUST pass it
   // ourselves — and this is also the fix for the agent model picker being silently

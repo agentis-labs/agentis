@@ -144,13 +144,19 @@ export class AgentisToolRegistry {
       };
     }
 
-    if (ctx.executionMode === 'plan' && tool.definition.mutating) {
+    if ((ctx.executionMode === 'plan' || ctx.executionMode === 'ask') && tool.definition.mutating) {
+      const ask = ctx.executionMode === 'ask';
       return {
         id: callId,
         toolId: req.toolId,
         ok: false,
-        errorCode: 'PLAN_MODE_MUTATION_BLOCKED',
-        errorMessage: `tool '${req.toolId}' cannot mutate workspace state while the conversation is in Plan mode`,
+        errorCode: ask ? 'ASK_MODE_CONFIRMATION_REQUIRED' : 'PLAN_MODE_MUTATION_BLOCKED',
+        errorMessage: ask
+          // Ask mode: the operator must approve a state change. Do NOT retry — it
+          // will keep failing until they switch to Auto (or approve). Tell the model
+          // to surface the intent and stop, not to loop on the block.
+          ? `tool '${req.toolId}' changes workspace state and the conversation is in Ask mode — it was NOT executed. Do not retry. Summarize exactly what you were about to do and ask the operator to approve; they can switch to Auto to let it run.`
+          : `tool '${req.toolId}' cannot mutate workspace state while the conversation is in Plan mode`,
         durationMs: Date.now() - startedAt,
       };
     }

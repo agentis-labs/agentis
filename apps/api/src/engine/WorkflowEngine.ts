@@ -50,6 +50,7 @@ import {
   type FilterNodeConfig,
   type IntegrationNodeConfig,
   type McpNodeConfig,
+  type ChannelSendNodeConfig,
   type DataQueryNodeConfig,
   type DataMutateNodeConfig,
   type AggregateWindowNodeConfig,
@@ -96,6 +97,7 @@ import {
   DEFAULT_SPECIALIST_TOOLS,
   normalizeRole,
   isAgentRole,
+  buildNodeAliasMap,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -111,6 +113,7 @@ import type { WorktreeManager, WorktreeHandle } from '../services/worktreeManage
 import type { SubflowExecutor } from '../services/subflowExecutor.js';
 import type { KnowledgeBaseService } from '../services/knowledge/knowledgeBase.js';
 import type { ConversationStore } from '../services/conversation/conversationStore.js';
+import type { ChannelSendPort } from '../services/conversation/channelSend.js';
 import { buildIntegrationDeliveryReceipt, manifestHttpConnector, type ConnectorRegistry } from '@agentis/integrations';
 import type { WorkflowStoreService } from '../services/workflow/workflowStore.js';
 import type { WorkspaceStoreService } from '../services/workspace/workspaceStore.js';
@@ -177,6 +180,7 @@ export { capabilityGapReason } from './selfHeal/selfHealHelpers.js';
 import { sleep, backoffMs, redactUrl, asString } from './executorHelpers.js';
 import { ConvergeLoopController, type LoopEngineHost } from './convergeLoop.js';
 import { nodeIdempotencyKey } from './idempotency.js';
+import { toPersistedRunState } from './runStatePersistence.js';
 import { NodeHandlerRegistry, type PureNodeHandler } from './handlers/NodeHandler.js';
 import { registerPureNodeHandlers } from './handlers/pureHandlers.js';
 import { registerUtilityNodeHandlers } from './handlers/utilityHandlers.js';
@@ -206,6 +210,8 @@ export interface EngineDeps {
   connectors?: ConnectorRegistry;
   /** Registered MCP servers' tools, callable from an `mcp` node (masterplan 2.3). */
   mcpBridge?: McpBridgePort;
+  /** Native channel send — required for the deterministic `channel` node. */
+  channelSend?: ChannelSendPort;
   /** Agentic App datastore access for the `data_query` / `data_mutate` nodes. */
   appData?: AppDataPort;
   /** Resolve the owning App id from the running workflow when a data node omits `appId`. */
@@ -406,6 +412,18 @@ export class WorkflowEngine {
    * never shows "EVENTS 0". Dropped when the run leaves memory.
    */
   readonly #runActivity = new Map<string, RunActivityEnvelope[]>();
+  /**
+   * Coalesced run_state persistence. Best-effort mid-run checkpoints
+   * (`#schedulePersist`) collapse into at most one write per run per
+   * RUN_STATE_PERSIST_DEBOUNCE_MS window — a growing multi-MB blob rewritten
+   * synchronously on every node transition was stalling the event loop. Keyed
+   * by runId: `#persistTimers` holds the pending flush timer, `#pendingPersist`
+   * the latest context to write. Boundary writes (`#persistRun`,
+   * `#transitionRunStatus`) cancel any pending flush so a stale trailing write
+   * can never clobber a durable one.
+   */
+  readonly #persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #pendingPersist = new Map<string, RunningContext>();
   readonly #telemetry: Telemetry;
   /** Decomposition seam (NATIVE-ADVANCEMENT Proposal 4): pure node kinds resolve here, not in the dispatch switch. */
   readonly #nodeHandlers = new NodeHandlerRegistry();
@@ -1563,6 +1581,9 @@ export class WorkflowEngine {
    * forever). Call this anywhere a run reaches a terminal status.
    */
   #disposeRunState(runId: string): void {
+    // Drop any pending coalesced flush — the terminal write already landed via
+    // #transitionRunStatus, so a trailing flush would only re-write stale state.
+    this.#cancelPendingPersist(runId);
     this.#runs.delete(runId);
     this.#runActivity.delete(runId);
     this.#debugRuns.delete(runId);
@@ -2428,6 +2449,11 @@ export class WorkflowEngine {
       }
       case 'mcp': {
         const result = await this.#executors.executeMcp(ctx, node, resolvedConfig as McpNodeConfig);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'channel': {
+        const result = await this.#executors.executeChannelSend(ctx, node, resolvedConfig as ChannelSendNodeConfig);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -6520,7 +6546,14 @@ export class WorkflowEngine {
     }
 
     await this.#maybeSnapshot(ctx);
-    await this.#persistRun(ctx);
+    // Per-node-completion checkpoint of the run_state resume cache. This is the
+    // hot path — it fires on EVERY node completion, and a growing multi-MB blob
+    // rewritten synchronously here on each one is what stalls the (single-thread,
+    // synchronous SQLite) event loop mid-run. Coalesce it: the completion is
+    // already durable in the ledger and live via the NODE_COMPLETED realtime
+    // event, so the DB cache lagging by ≤debounce is safe. Any immediate boundary
+    // write (downstream dispatch transition, terminal settle) flushes it early.
+    this.#schedulePersist(ctx);
     return normalizedOutput;
   }
 
@@ -6941,6 +6974,7 @@ export class WorkflowEngine {
       inputData: item.inputData ?? {},
       triggerInputs: triggerInputs ?? item.inputData ?? {},
       nodeOutputs,
+      graphNodes: ctx.graph.nodes,
       scratchpad: scratchpadSnap,
       store: storeSnap,
       workspace: { id: ctx.workspaceId, kv: workspaceKvSnap },
@@ -6961,6 +6995,11 @@ export class WorkflowEngine {
     const nodeOutputs: Record<string, Record<string, unknown>> = {};
     for (const [id, ns] of Object.entries(ctx.state.nodeStates)) {
       if (ns.outputData) nodeOutputs[id] = ns.outputData as Record<string, unknown>;
+    }
+    // Same readable-slug aliasing as buildTemplateContext, so a condition like
+    // `nodes.qualified_lead.status === 'ok'` resolves identically to the raw id.
+    for (const [slug, id] of Object.entries(buildNodeAliasMap(ctx.graph.nodes))) {
+      if (nodeOutputs[id] !== undefined) nodeOutputs[slug] = nodeOutputs[id]!;
     }
     const triggerNode = ctx.graph.nodes.find((n) => n.type === 'trigger');
     const triggerInputs = (triggerNode && ctx.state.nodeStates[triggerNode.id]?.inputData) as
@@ -7221,11 +7260,14 @@ export class WorkflowEngine {
       || status === 'COMPLETED_WITH_ERRORS'
       || status === 'FAILED'
       || status === 'CANCELLED';
+    // This IS the durable status write; a pending coalesced flush would only
+    // race it with a staler snapshot, so drop it first.
+    this.#cancelPendingPersist(ctx.runId);
     await this.deps.db
       .update(schema.workflowRuns)
       .set({
         status,
-        runState: ctx.state as unknown as object,
+        runState: toPersistedRunState(ctx.state),
         ...(status === 'RUNNING' && !ctx.startedAt
           ? { startedAt: new Date().toISOString() }
           : {}),
@@ -7233,6 +7275,15 @@ export class WorkflowEngine {
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflowRuns.id, ctx.runId));
+    // A finished run's periodic recovery snapshots are dead weight — they exist
+    // only to cold-resume an in-flight run and are never read once terminal.
+    if (finishing) {
+      try {
+        this.deps.db.delete(schema.workflowRunSnapshots).where(eq(schema.workflowRunSnapshots.runId, ctx.runId)).run();
+      } catch (err) {
+        this.deps.logger.warn('engine.snapshot.cleanup_failed', { runId: ctx.runId, err: (err as Error).message });
+      }
+    }
 
     // Finalize all internal bookkeeping (terminal conversation message,
     // subflow parent notification) BEFORE we publish the terminal event.
@@ -7418,14 +7469,62 @@ export class WorkflowEngine {
     this.#appendActivityTail(ctx.runId, eventName, runStatusPayload);
   }
 
+  /**
+   * Durable checkpoint of the run_state resume cache. Immediate + synchronous:
+   * callers that need read-after-write (approvals, evolve, terminal boundaries)
+   * use this. Cancels any pending coalesced flush for the run first so ordering
+   * stays correct.
+   */
   async #persistRun(ctx: RunningContext): Promise<void> {
-    await this.deps.db
+    this.#cancelPendingPersist(ctx.runId);
+    this.#writeRunState(ctx);
+  }
+
+  /**
+   * Best-effort mid-run checkpoint. Coalesces into at most one write per run per
+   * debounce window (throttle-with-trailing: the first call arms the timer,
+   * later calls within the window only refresh the pending context). The ledger
+   * is the replay source of truth, so a ≤debounce lag in this cache is safe and
+   * keeps a large blob from stalling the event loop on every transition.
+   */
+  #schedulePersist(ctx: RunningContext): void {
+    this.#pendingPersist.set(ctx.runId, ctx);
+    if (this.#persistTimers.has(ctx.runId)) return;
+    const timer = setTimeout(() => {
+      this.#persistTimers.delete(ctx.runId);
+      const pending = this.#pendingPersist.get(ctx.runId);
+      if (!pending) return;
+      this.#pendingPersist.delete(ctx.runId);
+      try {
+        this.#writeRunState(pending);
+      } catch (err) {
+        this.deps.logger.warn('engine.persist.coalesced_failed', { runId: ctx.runId, err: (err as Error).message });
+      }
+    }, CONSTANTS.RUN_STATE_PERSIST_DEBOUNCE_MS);
+    timer.unref?.();
+    this.#persistTimers.set(ctx.runId, timer);
+  }
+
+  /** Drop any pending coalesced flush for a run without writing. */
+  #cancelPendingPersist(runId: string): void {
+    const timer = this.#persistTimers.get(runId);
+    if (timer) {
+      clearTimeout(timer);
+      this.#persistTimers.delete(runId);
+    }
+    this.#pendingPersist.delete(runId);
+  }
+
+  /** The actual synchronous write, shaping the state to its persisted form. */
+  #writeRunState(ctx: RunningContext): void {
+    this.deps.db
       .update(schema.workflowRuns)
       .set({
-        runState: ctx.state as unknown as object,
+        runState: toPersistedRunState(ctx.state),
         updatedAt: new Date().toISOString(),
       })
-      .where(eq(schema.workflowRuns.id, ctx.runId));
+      .where(eq(schema.workflowRuns.id, ctx.runId))
+      .run();
   }
 
   /**
@@ -7750,11 +7849,15 @@ export class WorkflowEngine {
   async #maybeSnapshot(ctx: RunningContext): Promise<void> {
     if (ctx.eventsSinceSnapshot < CONSTANTS.RUN_STATE_SNAPSHOT_INTERVAL_EVENTS) return;
     ctx.eventsSinceSnapshot = 0;
+    // Only the latest snapshot per run is ever needed to cold-resume it, so
+    // supersede older ones instead of accumulating multi-MB rows for the life of
+    // the run. Shape it the same lean way as the run_state cache.
+    this.deps.db.delete(schema.workflowRunSnapshots).where(eq(schema.workflowRunSnapshots.runId, ctx.runId)).run();
     await this.deps.db.insert(schema.workflowRunSnapshots).values({
       id: randomUUID(),
       runId: ctx.runId,
       sequenceNumber: ctx.state.lastLedgerSequence,
-      runState: ctx.state as unknown as object,
+      runState: toPersistedRunState(ctx.state),
     });
   }
 
@@ -8658,6 +8761,7 @@ function checkpointTemplateContext(ctx: RunningContext, inputData: Record<string
     inputData,
     triggerInputs: triggerInputs ?? inputData,
     nodeOutputs,
+    graphNodes: ctx.graph.nodes,
     scratchpad: ctx.scratchpad?.snapshot ?? {},
     store: {},
     workspace: { id: ctx.workspaceId, kv: {} },

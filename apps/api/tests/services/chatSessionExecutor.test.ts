@@ -1387,4 +1387,30 @@ describe('ChatSessionExecutor', () => {
     expect(text).toContain('didn’t manage to put my answer into words');
     expect(adapter.calls.length).toBe(2);
   });
+
+  it('warns about repeated work when tools ran but the final round returned nothing', async () => {
+    // Round 0 runs a real tool (side effects), then every later round (incl. the
+    // retry) returns an empty stop — how a re-spawn/marker harness ends when its
+    // wrap-up round surfaces nothing. The operator must be told work happened and
+    // that a blind retry may repeat it — NOT the generic "retry freely" fallback.
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'tool_call', id: 'tool_1', name: 'agentis.plan', args: { goal: 'rebuild interface' } };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'do it', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_didwork',
+    }));
+
+    const text = deltas.filter((d): d is Extract<ChatDelta, { type: 'text' }> => d.type === 'text').map((d) => d.delta).join('');
+    expect(deltas.some((d) => d.type === 'tool_result' && d.name === 'agentis.plan')).toBe(true);
+    expect(text).toMatch(/ran one or more tools/i);
+    expect(text).toMatch(/repeating the request may run those actions again/i);
+    // Not the generic empty-turn message that implies a free retry.
+    expect(text).not.toContain('completed without returning an answer');
+  });
 });

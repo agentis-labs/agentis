@@ -41,6 +41,7 @@ import { ConversationSummaryService } from './services/conversation/conversation
 import { SessionMirror } from './services/sessionMirror.js';
 import { RegistryClient } from './services/registryClient.js';
 import { ChannelBridge } from './services/conversation/channelBridge.js';
+import { createChannelSendPort } from './services/conversation/channelSend.js';
 import { TelegramChannelAdapter } from './adapters/channels/telegram.js';
 import { DiscordChannelAdapter } from './adapters/channels/discord.js';
 import { SlackChannelAdapter } from './adapters/channels/slack.js';
@@ -646,6 +647,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     conversations,
     connectors: defaultConnectorRegistry,
     mcpBridge: mcpToolBridge,
+    // Deterministic `channel` node — send on a native connection (WhatsApp/…)
+    // from a workflow. Runs as a system caller (no per-agent grant gate).
+    channelSend: createChannelSendPort({ channels: channelBridge }),
     appData: appStores.data,
     resolveAppIdForWorkflow: (workspaceId, workflowId) => {
       const row = sqlite
@@ -976,6 +980,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     replay,
     knowledgeBases: knowledgeBaseService,
     memory: memoryStore,
+    episodes: episodicMemoryStore,
     sharedIntelligence: SharedIntelligence,
     skills: skillService,
     // Late-bound: the model router is constructed below. The closure is only
@@ -1558,6 +1563,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     channelSupervisor,
     chatMemoryCapture,
     commandAutonomyMaster,
+    connectionGrants,
     conversationParticipants,
     conversationSimulator,
     defaultCognitiveCompleter,
@@ -1602,7 +1608,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         fetch: app.fetch,
       });
       httpServer = node as unknown as HttpServer;
-      realtime = createRealtimeServer({ bus, auth, db: sqlite, logger, viewportStore, allowedOrigins });
+      realtime = createRealtimeServer({ bus, auth, db: sqlite, logger, viewportStore, allowedOrigins, dev: env.NODE_ENV !== 'production' });
       realtime.attach(httpServer);
       await listenHttpServer(httpServer, {
         port: env.AGENTIS_HTTP_PORT,

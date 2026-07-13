@@ -1,7 +1,7 @@
 ﻿import { useMemo, useState } from 'react';
 import { Plus } from 'lucide-react';
 import clsx from 'clsx';
-import type { UpstreamNode } from './VariablePicker';
+import { slugForNode, type UpstreamNode } from './VariablePicker';
 import { generateFieldExpression, type ExpressionDialect, type FieldSource } from './fieldExpression';
 
 
@@ -28,12 +28,13 @@ export function FieldPicker({ upstream, dialect, onInsert, className }: FieldPic
 
   const selectedNode = useMemo(() => upstream.find((n) => n.id === step), [upstream, step]);
   const fieldOptions = useMemo(() => selectedNode?.outputKeys ?? [], [selectedNode]);
+  const slugOf = useMemo(() => slugForNode(upstream), [upstream]);
 
   function sourceFor(): FieldSource | null {
     if (!step) return null;
     if (step === 'trigger') return { origin: 'trigger', path: field || undefined };
     if (step === 'input') return { origin: 'input', path: field || undefined };
-    return { origin: 'node', nodeId: step, path: field || undefined };
+    return { origin: 'node', nodeId: slugOf.get(step) ?? step, path: field || undefined };
   }
 
   function insert() {

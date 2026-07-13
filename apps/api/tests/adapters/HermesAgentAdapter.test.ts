@@ -38,13 +38,13 @@ describe('HermesAgentAdapter', () => {
     spawnMock.mockReset();
   });
 
-  it('defaults interactive chat to the stable CLI transport', () => {
+  it('defaults interactive chat to ACP-first auto transport with native Agentis tools', () => {
     const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
     const caps = adapter.capabilities();
     expect(caps.interactiveChat).toBe(true);
     expect(caps.toolCalling).toBe(true);
-    expect(caps.toolForwarding).toBe('marker_protocol');
-    expect(caps.limitations).toContainEqual(expect.stringContaining('stable Hermes CLI chat transport'));
+    expect(caps.toolForwarding).toBe('mcp_native');
+    expect(caps.limitations).toBeUndefined();
   });
 
   it('keeps the one-shot CLI transport as an explicit compatibility mode', () => {
@@ -165,7 +165,7 @@ describe('HermesAgentAdapter', () => {
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
   });
 
-  it('fails an INTERACTIVE acp-pinned turn fast (~8s) with an honest stall message, not a guessed root cause', async () => {
+  it('fails an INTERACTIVE acp-pinned turn after the first-output budget with an honest stall message', async () => {
     vi.useFakeTimers();
     const child = fakeAcpChild();
     spawnMock.mockReturnValue(child);
@@ -180,8 +180,8 @@ describe('HermesAgentAdapter', () => {
       { sessionKey: 'conversation-a', latencyClass: 'interactive' },
     ));
     // Still waiting just before the interactive stall budget...
-    await vi.advanceTimersByTimeAsync(7_500);
-    // ...fails just after 8s, long before the 90s non-interactive budget.
+    await vi.advanceTimersByTimeAsync(29_500);
+    // ...fails just after 30s, long before the 90s non-interactive budget.
     await vi.advanceTimersByTimeAsync(1_000);
     const deltas = await run;
 
@@ -218,8 +218,8 @@ describe('HermesAgentAdapter', () => {
       [],
       { sessionKey: 'conversation-a', latencyClass: 'interactive' },
     ));
-    // ACP first-event budget (~8s interactive) elapses, then the CLI answers.
-    await vi.advanceTimersByTimeAsync(9_000);
+    // ACP first-event budget (~30s interactive) elapses, then the CLI answers.
+    await vi.advanceTimersByTimeAsync(31_000);
     await vi.advanceTimersByTimeAsync(0);
     const deltas = await run;
 
@@ -252,9 +252,9 @@ describe('HermesAgentAdapter', () => {
     const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', chatTransport: 'auto' });
     acp.on('__prompt', () => { /* never streams a first event */ });
 
-    // Turn 1: ACP stalls (~8s) then CLI answers — trips the breaker.
+    // Turn 1: ACP stalls (~30s) then CLI answers — trips the breaker.
     const run1 = collectDeltas(adapter.chat([{ role: 'user', content: 'one' }], [], { sessionKey: 'c', latencyClass: 'interactive' }));
-    await vi.advanceTimersByTimeAsync(9_000);
+    await vi.advanceTimersByTimeAsync(31_000);
     await vi.advanceTimersByTimeAsync(0);
     const deltas1 = await run1;
     expect(deltas1).toContainEqual({ type: 'text', delta: 'FIRST' });
@@ -498,7 +498,7 @@ describe('HermesAgentAdapter', () => {
     expect(child.promptSessionIds).toEqual(['sess-1', 'sess-1', 'sess-2']);
   });
 
-  it('allows long provider silence after an ACP lifecycle event without reporting a stream stall', async () => {
+  it('does not mistake ACP lifecycle metadata for the first model/tool event', async () => {
     vi.useFakeTimers();
     const child = fakeAcpChild();
     spawnMock.mockReturnValue(child);
@@ -511,21 +511,20 @@ describe('HermesAgentAdapter', () => {
     const run = collectDeltas(adapter.chat(
       [{ role: 'user', content: 'take the time you need' }],
       [],
-      { sessionKey: 'slow-conversation', timeoutMs: 90_000 },
+      { sessionKey: 'slow-conversation', timeoutMs: 90_000, latencyClass: 'interactive' },
     ));
     await vi.advanceTimersByTimeAsync(0);
     expect(prompted).toBe(true);
 
     child.update({ sessionUpdate: 'available_commands_update', availableCommands: [] });
-    await vi.advanceTimersByTimeAsync(300_000);
-    child.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Still here.' } });
-    child.finishPrompt('end_turn');
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(31_000);
 
     const deltas = await run;
-    expect(deltas).toContainEqual({ type: 'text', delta: 'Still here.' });
-    expect(deltas.some((delta) => delta.type === 'tool_result' && Boolean(delta.error))).toBe(false);
-    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      error: expect.stringContaining('first_event_timeout'),
+    }));
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
   });
 
   it('does not yield chat spawn failures as assistant text', async () => {
@@ -640,10 +639,35 @@ describe('HermesAgentAdapter', () => {
     }
   });
 
+  it('dispatches background tasks through ACP and streams runtime progress', async () => {
+    const child = fakeAcpChild();
+    spawnMock.mockReturnValue(child);
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
+    const events: NormalizedAgentEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    child.on('__prompt', () => {
+      child.update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Planning the task' } });
+      child.update({ sessionUpdate: 'tool_call', toolCallId: 'tc1', title: 'Build interface', status: 'pending' });
+      child.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Interface created.' } });
+      child.finishPrompt('end_turn');
+    });
+
+    await adapter.dispatchTask(task);
+    await vi.waitFor(() => expect(events.some((event) => event.eventType === 'task.completed')).toBe(true));
+
+    expect(spawnMock.mock.calls[0]![1]).toEqual(['acp']);
+    expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Planning the task' }));
+    expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Using Build interface' }));
+    expect(events).toContainEqual(expect.objectContaining({
+      eventType: 'task.completed',
+      output: { text: 'Interface created.' },
+    }));
+  });
+
   it('dispatches workflow tasks through the real `hermes chat -q … -Q --ignore-rules` contract', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
-    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', model: 'hermes-pro' });
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', model: 'hermes-pro', chatTransport: 'cli' });
     const events: NormalizedAgentEvent[] = [];
     adapter.onEvent((event) => events.push(event));
 
@@ -677,7 +701,7 @@ describe('HermesAgentAdapter', () => {
       });
       return child;
     });
-    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', chatTransport: 'cli' });
     const deltas: ChatDelta[] = [];
     for await (const d of adapter.chat([{ role: 'user', content: 'fix the workflow' }], [])) deltas.push(d);
 
@@ -687,6 +711,30 @@ describe('HermesAgentAdapter', () => {
     expect(err?.error).toContain('owl-alpha');
     expect(err?.error).toMatch(/switch this agent/i); // actionable next step
     expect(err?.error).not.toContain('session_id');    // boilerplate stripped
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
+  });
+
+  it('classifies an out-of-credits (402) exit into an actionable "add credits" message', async () => {
+    const child = fakeChildProcess();
+    // OpenRouter/Nous reports a depleted account on STDERR as a 402 JSON blob; the
+    // raw text buries the real cause, so the adapter must name it and point at fixes.
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => {
+        child.stderr.write("Error: Error code: 402 - {'error': {'message': 'This request requires more credits, or fewer max_tokens. You requested up to 16384 tokens, but can only afford 8556.'}}\n");
+        child.stderr.write('\nsession_id: 20260713_090238_d32e47\n');
+        child.emit('exit', 1);
+      });
+      return child;
+    });
+    const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test', chatTransport: 'cli' });
+    const deltas: ChatDelta[] = [];
+    for await (const d of adapter.chat([{ role: 'user', content: 'do it' }], [])) deltas.push(d);
+
+    const err = deltas.find((d): d is Extract<ChatDelta, { type: 'tool_result' }> =>
+      d.type === 'tool_result' && d.name === 'adapter.chat');
+    expect(err?.error).toMatch(/out of credits/i);      // named, not a raw HTTP code
+    expect(err?.error).toMatch(/add credits|afford/i);  // actionable next step
+    expect(err?.error).not.toContain('session_id');     // boilerplate stripped
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
   });
 });

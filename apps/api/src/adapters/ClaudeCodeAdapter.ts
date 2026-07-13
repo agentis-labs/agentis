@@ -413,7 +413,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ...(storedSession ? ['--resume', storedSession] : []),
       '--strict-mcp-config',
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
-      ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
+      // `executionMode` tags the descriptor so Plan mode is registry-enforced, not
+      // just prompt-level, for Claude's own tool loop.
+      ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? [], options?.executionMode ?? 'chat'),
       ...(this.opts.extraArgs ?? []),
     ];
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0

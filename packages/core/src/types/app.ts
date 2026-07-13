@@ -211,6 +211,111 @@ export interface AppWorkflowSummary {
   concurrency: 'parallel' | 'exclusive';
   /** When dependents of this workflow fire. */
   chainOn: 'success' | 'always';
+  /**
+   * Trigger activation (arming) state — distinct from a single run. `null` for a
+   * manual-run workflow (nothing to arm; use Run). For an unattended trigger
+   * (schedule / webhook / listener) this reports whether it is armed and live.
+   */
+  deployment: WorkflowTriggerDeploymentStatus | null;
+}
+
+/**
+ * The activation state of a workflow's *entry trigger* — the always-on layer,
+ * as opposed to a one-off run. `unarmed` = the graph authors an unattended
+ * trigger that has never been activated; `manual` never appears here (a manual
+ * workflow has `deployment: null`).
+ */
+export interface WorkflowTriggerDeploymentStatus {
+  /** Runtime trigger type (error_trigger/rss_feed/email_imap collapse to persistent_listener). */
+  triggerType: 'cron' | 'webhook' | 'persistent_listener';
+  status: 'active' | 'paused' | 'error' | 'unarmed';
+  /** Last time this trigger fired a run, if ever. */
+  lastFiredAt: string | null;
+  /** Live listener health (persistent_listener only): connected, event/fire counts, lastError. */
+  health?: unknown;
+}
+
+/**
+ * An App's composite activation state. An App is multi-workflow, so "going live"
+ * means arming every workflow that authors an unattended trigger. This is the
+ * always-on lifecycle the App control plane exposes on top of per-workflow
+ * activation.
+ */
+export interface AppDeploymentSummary {
+  appId: string;
+  /**
+   * - `none`    — no workflow authors an unattended trigger (nothing to arm)
+   * - `paused`  — has armable triggers, none currently armed
+   * - `partial` — some but not all armable triggers are armed
+   * - `live`    — every armable trigger is armed
+   */
+  status: 'none' | 'paused' | 'partial' | 'live';
+  /** Count of workflows whose graph authors an unattended (non-manual) trigger. */
+  armable: number;
+  /** Count of those currently active (armed). */
+  armed: number;
+  /** Aggregate live-source health across armed listeners. */
+  listeners: { connected: number; events: number; runs: number; errors: number };
+  workflows: AppWorkflowDeploymentRow[];
+}
+
+export interface AppWorkflowDeploymentRow {
+  workflowId: string;
+  title: string;
+  /** Effective runtime trigger type, or `manual`. */
+  triggerType: 'manual' | 'cron' | 'webhook' | 'persistent_listener';
+  /** `manual` for run-on-demand workflows; otherwise the arming state. */
+  status: 'manual' | 'active' | 'paused' | 'error' | 'unarmed';
+  lastFiredAt: string | null;
+  health?: unknown;
+}
+
+/**
+ * A workspace-wide "always-on" workflow — one whose entry trigger is currently
+ * armed (schedule / webhook / listener). Powers /home's Active section and any
+ * platform-wide live indicator, distinct from a one-off run.
+ */
+export interface ActiveWorkflowSummary {
+  workflowId: string;
+  title: string;
+  /** Owning App, when the workflow belongs to one. */
+  appId: string | null;
+  appName: string | null;
+  triggerType: 'cron' | 'webhook' | 'persistent_listener';
+  status: 'active' | 'paused' | 'error';
+  /** Last time this trigger fired a run. */
+  lastFiredAt: string | null;
+  /** Next scheduled fire (cron + interval triggers), when computable. */
+  nextRunAt: string | null;
+  /** Fixed period between runs (ms) for cron/interval — lets the UI tick a live countdown. */
+  intervalMs: number | null;
+  /** Live listener health (persistent_listener only). */
+  health?: unknown;
+  /** Most recent run of this workflow. */
+  lastRun: { id: string; status: string; at: string } | null;
+  /** A run currently in flight, if any. */
+  activeRun: { id: string; status: string; startedAt: string } | null;
+  /** Recent run history, most-recent first — for a live sparkline/timeline. */
+  recentRuns: ActiveWorkflowRun[];
+  /** Total runs this trigger has fired (from listener health / run count). */
+  totalRuns: number;
+}
+
+export interface ActiveWorkflowRun {
+  id: string;
+  status: string;
+  at: string;
+  /** Wall-clock run duration in ms, when finished. */
+  durationMs: number | null;
+}
+
+/** Per-workflow outcome of an App-level arm/disarm sweep. */
+export interface AppActivationResult {
+  workflowId: string;
+  title: string;
+  outcome: 'armed' | 'disarmed' | 'skipped' | 'blocked' | 'error';
+  /** Human-readable reason for `skipped` / `blocked` / `error`. */
+  message?: string;
 }
 
 

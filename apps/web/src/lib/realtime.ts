@@ -17,25 +17,23 @@ let socketConnected = false;
 let socketConnecting = true;
 let fallbackOpenCount = 0;
 
-/** Common dev/preview server ports that are NOT the API. */
-const DEV_SERVER_PORTS = new Set(['5173', '4173', '3000']);
-
 function realtimeUrl(): string | undefined {
   const configured =
     (import.meta.env.VITE_AGENTIS_REALTIME_URL as string | undefined)
     ?? (import.meta.env.VITE_AGENTIS_API_URL as string | undefined);
   if (configured?.trim()) return configured.trim().replace(/\/+$/, '');
   if (typeof window === 'undefined') return undefined;
-  // Dev/preview: the front-end server (Vite 5173/4173, or a static host on 3000)
-  // is NOT the API. socket.io defaults to the page origin, so without this it
-  // connects back to the front-end and receives ZERO events — the canvas/chat go
-  // silent during builds and runs. Redirect to the API port on the SAME host for
-  // ANY local/LAN access. Override the port via VITE_AGENTIS_API_PORT. In
-  // production the web is served BY the API (same origin), so page origin is
-  // correct and we return undefined.
+  // Dev/preview: the front-end server (Vite, or any static host) is NOT the API.
+  // socket.io defaults to the page origin, so without this it connects back to the
+  // front-end and receives ZERO events — the canvas/chat go silent. Connect
+  // straight to the API on the SAME host whenever the page is served from a
+  // DIFFERENT port than the API (5173, 4173, a Vite autoPort fallback, a LAN IP,
+  // …). The socket CORS reflects local origins in dev so any port works. In
+  // production the web is served BY the API (same origin / standard 80·443 with
+  // an empty port), so the page origin is correct and we return undefined.
   const { protocol, hostname, port } = window.location;
-  if (DEV_SERVER_PORTS.has(port)) {
-    const apiPort = (import.meta.env.VITE_AGENTIS_API_PORT as string | undefined)?.trim() || '3737';
+  const apiPort = (import.meta.env.VITE_AGENTIS_API_PORT as string | undefined)?.trim() || '3737';
+  if (port && port !== apiPort) {
     return `${protocol}//${hostname}:${apiPort}`;
   }
   return undefined;
@@ -100,7 +98,13 @@ function getSocket(): Socket {
   const socket = io(realtimeUrl(), {
     auth: { token },
     path: '/socket.io',
-    transports: ['websocket', 'polling'],
+    // Polling FIRST, then upgrade to websocket. The API runs behind Hono's node
+    // adapter, whose HTTP server does not always forward the WS `upgrade` — a
+    // websocket-first client then errors out instead of falling back, silently
+    // killing live updates on every page. Polling always connects (it's plain
+    // HTTP through the same origin/CORS as the REST API); socket.io upgrades to
+    // websocket transparently when the upgrade succeeds.
+    transports: ['polling', 'websocket'],
     reconnection: true,
   });
   socket.on('connect', () => {

@@ -4,8 +4,8 @@ import clsx from 'clsx';
 import { api } from '../../lib/api';
 
 /**
- * CanvasBuildComposer — describe a workflow (or a single step) in plain English
- * and let the orchestrator build it onto *this* canvas.
+ * CanvasBuildComposer — describe a workflow in plain English and let the
+ * orchestrator build it onto *this* canvas.
  *
  * It posts to the same conversation/build pipeline the chat uses, binding the
  * turn to this workflow via `viewportOverride` (resourceKind: 'workflow'). The
@@ -13,29 +13,18 @@ import { api } from '../../lib/api';
  * scoped to this workflow id, which the canvas page already renders live — so
  * nodes appear here as the agent builds, no refresh.
  *
- * Two surfaces:
- *  - `variant="empty"` — the empty-canvas hero composer ("describe the whole flow").
- *  - `variant="node"`  — "edit this step in plain English" inside the inspector.
+ * This is the empty-canvas hero composer ("describe the whole flow").
  */
 
 export interface CanvasBuildComposerProps {
   workflowId: string;
   workflowTitle?: string;
-  variant: 'empty' | 'node';
-  /** For node-edit: the step being edited, so the instruction can name it. */
-  nodeId?: string;
-  nodeLabel?: string;
-  onSent?: () => void;
   onDismiss?: () => void;
 }
 
 export function CanvasBuildComposer({
   workflowId,
   workflowTitle,
-  variant,
-  nodeId,
-  nodeLabel,
-  onSent,
   onDismiss,
 }: CanvasBuildComposerProps) {
   const [draft, setDraft] = useState('');
@@ -49,16 +38,11 @@ export function CanvasBuildComposer({
     setSending(true);
     setError(null);
 
-    // For a node edit, name the target step so the build tool patches it in place.
-    const message = variant === 'node' && nodeId
-      ? `In this workflow, edit the "${nodeLabel ?? nodeId}" step (id: ${nodeId}): ${intent}`
-      : intent;
-
     try {
       await api('/v1/conversations/orchestrator/send', {
         method: 'POST',
         body: JSON.stringify({
-          body: message,
+          body: intent,
           // Bind this turn to the open workflow so the build/patch targets it and
           // its canvas events stream onto this page.
           viewportOverride: {
@@ -71,47 +55,12 @@ export function CanvasBuildComposer({
       });
       setDraft('');
       setSent(true);
-      onSent?.();
       window.setTimeout(() => setSent(false), 4000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not reach the orchestrator');
     } finally {
       setSending(false);
     }
-  }
-
-  if (variant === 'node') {
-    return (
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-1.5">
-          <input
-            type="text"
-            value={draft}
-            disabled={sending}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void send();
-              }
-            }}
-            placeholder="Edit this step in plain English…"
-            className="h-8 flex-1 rounded-input border border-line bg-surface-2 px-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-          />
-          <button
-            type="button"
-            onClick={() => void send()}
-            disabled={!draft.trim() || sending}
-            className="inline-flex h-8 items-center gap-1 rounded-btn bg-accent px-2 text-[11px] font-medium text-canvas hover:bg-accent-hover disabled:opacity-40"
-          >
-            {sending ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-            Apply
-          </button>
-        </div>
-        {sent && <p className="text-[11px] text-accent">Sent to the orchestrator — edits stream onto the canvas.</p>}
-        {error && <p className="text-[11px] text-danger">{error}</p>}
-      </div>
-    );
   }
 
   return (

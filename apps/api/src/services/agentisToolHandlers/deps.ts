@@ -27,6 +27,7 @@ import type { SpecialistProfileService } from '../specialist/specialistProfileSe
 import type { SpecialistRuntimeService } from '../specialist/specialistRuntimeService.js';
 import type { OrchestratorModelRouter } from '../orchestrator/orchestratorModelRouter.js';
 import type { MemoryStore } from '../memory/memoryStore.js';
+import type { EpisodicMemoryStore } from '../episodicMemoryStore.js';
 import type { SharedIntelligenceService } from '../sharedIntelligence.js';
 import type { SkillService } from '../skillService.js';
 import type { PlanService } from '../planService.js';
@@ -58,6 +59,9 @@ export interface ToolHandlerDeps {
   knowledgeBases?: KnowledgeBaseService;
   /** §B4 — typed workspace memory facade over the unified episode substrate. */
   memory?: MemoryStore;
+  /** Episodic (per-agent scoped) memory — lets agent-delete promote/transfer an
+   *  agent's memory to the workspace Brain instead of orphaning it. */
+  episodes?: EpisodicMemoryStore;
   /** Backs agentis.brain.search — agent-initiated semantic recall over the Brain. */
   sharedIntelligence?: SharedIntelligenceService;
   /** Backs agentis.skill.load — returns a Skill's full SKILL.md body on demand. */

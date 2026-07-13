@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq, or, sql } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import {
   AgentisError,
@@ -503,6 +503,75 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         if (!run || run.workspaceId !== ctx.workspaceId) throw new Error(`run ${args.runId} not found`);
         await deps.engine.cancelRun(run.id);
         return { runId: run.id, status: 'cancelled' };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.delete',
+        family: 'build',
+        description:
+          'PERMANENTLY delete a workflow and its entire run history (runs, snapshots, triggers cascade). Destructive and irreversible. Called WITHOUT confirm:true it returns a preview of exactly what will be removed — review it, then call again with confirm:true. To STOP a workflow without losing it, disable it instead via agentis.workflow.chain { workflows:[{ workflowId, enabled:false }] }. If the workflow is the sole logic of an App you want gone, use agentis.app.delete.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' },
+            confirm: { type: 'boolean', description: 'Must be true to actually delete. Omit/false to get a preview first.' },
+          },
+          required: ['workflowId'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const workflowId = String(args.workflowId ?? '').trim();
+        if (!workflowId) throw new Error('workflow.delete requires workflowId');
+        const wf = deps.db
+          .select({ id: schema.workflows.id, title: schema.workflows.title, appId: schema.workflows.appId })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.id, workflowId), eq(schema.workflows.workspaceId, ctx.workspaceId)))
+          .get();
+        if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${workflowId} not found`);
+        const runCount = deps.db
+          .select({ c: sql<number>`count(*)` })
+          .from(schema.workflowRuns)
+          .where(eq(schema.workflowRuns.workflowId, workflowId))
+          .get()?.c ?? 0;
+
+        if (args.confirm !== true) {
+          return {
+            deleted: false,
+            preview: true,
+            workflow: { workflowId, title: wf.title, appId: wf.appId ?? null },
+            willRemove: `this workflow and its ${runCount} run(s), plus their snapshots and triggers (cascade)`,
+            next: `Call agentis.workflow.delete again with { workflowId: "${workflowId}", confirm: true } to proceed. To keep the history and just stop it, use agentis.workflow.chain { workflows: [{ workflowId: "${workflowId}", enabled: false }] } instead.`,
+          };
+        }
+
+        // Cancel any in-flight run first — the FK cascade would otherwise delete a
+        // run row out from under a live execution. Terminal runs are left alone.
+        const active = deps.db
+          .select({ id: schema.workflowRuns.id })
+          .from(schema.workflowRuns)
+          .where(and(
+            eq(schema.workflowRuns.workflowId, workflowId),
+            sql`${schema.workflowRuns.status} NOT IN ('COMPLETED','FAILED','CANCELLED','COMPLETED_WITH_CONTRACT_VIOLATION')`,
+          ))
+          .all();
+        for (const run of active) {
+          try { await deps.engine.cancelRun(run.id); } catch { /* best-effort; the cascade removes it anyway */ }
+        }
+
+        deps.db.delete(schema.workflows).where(eq(schema.workflows.id, workflowId)).run();
+
+        // Realtime: the canvas/app control-plane/home refetch and drop the workflow.
+        try {
+          const payload = { workflowId, appId: wf.appId ?? null };
+          deps.bus.publish(REALTIME_ROOMS.workflow(workflowId), REALTIME_EVENTS.WORKFLOW_DELETED, payload);
+          deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.WORKFLOW_DELETED, payload);
+          if (wf.appId) deps.bus.publish(REALTIME_ROOMS.app(wf.appId), REALTIME_EVENTS.APP_UPDATED, { appId: wf.appId, op: 'updated' });
+        } catch { /* realtime must never fail the delete */ }
+
+        return { deleted: true, workflowId, title: wf.title, runsRemoved: runCount };
       },
     },
     {

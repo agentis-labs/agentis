@@ -17,7 +17,7 @@ import { evalCondition } from '../SafeConditionParser.js';
 import { readDotPath } from '../dotPath.js';
 import { evaluateExpression } from '../safeExpression.js';
 import { resolveTemplate, type TemplateContext } from '../templateResolver.js';
-import { AgentisError, type AggregateWindowNodeConfig, type BrowserNodeConfig, type CodeNodeConfig, type DataMutateNodeConfig, type DataQueryNodeConfig, type GraphQlNodeConfig, type GuardrailsNodeConfig, type HttpRequestNodeConfig, type IntegrationNodeConfig, type McpNodeConfig, type RouterNodeConfig, type SpreadsheetNodeConfig, type WorkflowNode, type WorkflowStoreNodeConfig, type WorkspaceStoreNodeConfig } from '@agentis/core';
+import { AgentisError, type AggregateWindowNodeConfig, type BrowserNodeConfig, type ChannelSendNodeConfig, type CodeNodeConfig, type DataMutateNodeConfig, type DataQueryNodeConfig, type GraphQlNodeConfig, type GuardrailsNodeConfig, type HttpRequestNodeConfig, type IntegrationNodeConfig, type McpNodeConfig, type RouterNodeConfig, type SpreadsheetNodeConfig, type WorkflowNode, type WorkflowStoreNodeConfig, type WorkspaceStoreNodeConfig } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { manifestHttpConnector, type ConnectorRegistry } from '@agentis/integrations';
 import { and, eq } from 'drizzle-orm';
@@ -272,6 +272,64 @@ export class NodeExecutorController {
         throw new AgentisError('INTEGRATION_OPERATION_FAILED', `MCP tool ${config.toolId} failed: ${result.error ?? 'unknown error'}`);
       }
       return config.outputKey ? { [config.outputKey]: result.result ?? null } : { result: result.result ?? null };
+    } finally {
+      delete ctx.state.activeExecutions[node.id];
+    }
+  }
+
+  /**
+   * Deterministically send a message on a native channel (WhatsApp/Telegram/…).
+   * Resolves the connection by kind (or explicit id), delivers via the shared
+   * channel-send flow, and returns a delivery receipt. A failure to resolve,
+   * authorize, or deliver THROWS — the node fails loudly instead of reporting a
+   * hollow success (the exact gap that let "deterministic first contact" workflows
+   * claim a send that never happened).
+   */
+  async executeChannelSend(ctx: RunningContext, node: WorkflowNode, config: ChannelSendNodeConfig): Promise<Record<string, unknown>> {
+    if (!this.host.deps.channelSend) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'channel node present but no channel bridge is configured — connect a channel in Settings → Channels');
+    }
+    // `config` arrives with all {{templates}} already resolved (resolveTemplateDeep
+    // in the engine dispatch), so use body/to/attachments directly.
+    const body = typeof config.body === 'string' ? config.body : '';
+    const to = typeof config.to === 'string' ? config.to : undefined;
+    const attachments = (config.attachments ?? [])
+      .map((a) => ({
+        ...(a.url ? { url: a.url } : {}),
+        ...(a.artifactId ? { artifactId: a.artifactId } : {}),
+        ...(a.filename ? { filename: a.filename } : {}),
+        ...(a.mimeType ? { mimeType: a.mimeType } : {}),
+        ...(a.kind ? { kind: a.kind } : {}),
+      }))
+      .filter((a) => a.url || a.artifactId);
+    // Spec constraint plane: a `channel:<kind>` scope gates which channels a
+    // constrained run may reach.
+    this.host.enforceSpecConstraints(ctx, 'channel', `channel:${config.channelKind ?? config.connectionId ?? 'any'}`, config.channelKind ? `channel:${config.channelKind}` : 'channel');
+    ctx.state.activeExecutions[node.id] = {
+      taskId: `channel:${node.id}`,
+      nodeId: node.id,
+      executorType: 'integration',
+      executorRef: config.channelKind ?? config.connectionId ?? 'channel',
+      startedAt: new Date().toISOString(),
+    };
+    try {
+      const result = await this.host.deps.channelSend.send({
+        workspaceId: ctx.workspaceId,
+        body,
+        ...(config.channelKind ? { kind: config.channelKind } : {}),
+        ...(config.connectionId ? { connectionId: config.connectionId } : {}),
+        ...(to ? { to } : {}),
+        ...(attachments.length ? { attachments } : {}),
+        // Deterministic/system caller — the node runs with the workflow's authority,
+        // not a specific agent's, so §3.3 grants don't gate it (the operator author
+        // put the node there deliberately).
+        agentId: null,
+      });
+      if (!result.sent) {
+        throw new AgentisError('INTEGRATION_OPERATION_FAILED', `channel send failed: ${result.error}${result.errorCode ? ` [${result.errorCode}]` : ''}`);
+      }
+      const key = config.outputKey ?? 'delivery';
+      return { [key]: { sent: true, connectionId: result.connectionId, kind: result.kind, to: result.to, targetSource: result.targetSource, deliveredAt: new Date().toISOString() } };
     } finally {
       delete ctx.state.activeExecutions[node.id];
     }
