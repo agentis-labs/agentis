@@ -140,6 +140,48 @@ describe('promote() — form policy with a Formation Judge model', () => {
   });
 });
 
+describe('promote() — Judge ADD-path duplicate backstop (§Mem0-teardown-followup)', () => {
+  // NOTE: unverified this session (see notes on the broken packages/db
+  // migration blocking DB-backed test runs). Guards against the exact failure
+  // mode a real Mem0 production audit hit — a Judge that (incorrectly, via its
+  // own semantic-neighbor search) keeps deciding ADD for a fact that's already
+  // present should still be caught by the deterministic cosine/lexical
+  // backstop, not compound into duplicate atoms.
+  it('reinforces instead of duplicating when the Judge decides ADD twice for the same fact', async () => {
+    const alwaysAdd: StructuredCompleter = {
+      label: 'stub-judge-always-add',
+      lastError: null,
+      async completeStructured() {
+        return {
+          memories: [
+            {
+              operation: 'ADD',
+              type: 'success_pattern',
+              title: 'Validate healthcare AI before publishing',
+              statement: REAL_LESSON,
+              scope: 'workspace',
+              confidence: 0.82,
+              targetIndex: null,
+            },
+          ],
+        } as unknown as Record<string, unknown>;
+      },
+    };
+    brain.setFormationCompleter(alwaysAdd);
+
+    const first = await brain.promote({ workspaceId: ctx.workspace.id, taskTitle: 'Publish health brief', taskOutput: REAL_LESSON, memoryPolicy: 'form' });
+    expect(first.created).toBe(1);
+
+    // Same fact again, judge STILL says ADD (simulating a neighbor-search miss)
+    // — the deterministic backstop, not the judge, is what has to catch this.
+    const second = await brain.promote({ workspaceId: ctx.workspace.id, taskTitle: 'Publish health brief', taskOutput: REAL_LESSON, memoryPolicy: 'form' });
+    expect(second.created).toBe(0);
+    expect(second.reinforced).toBe(1);
+
+    expect(allEpisodes().filter((e) => e.summary === REAL_LESSON)).toHaveLength(1);
+  });
+});
+
 describe('quarantineRunPromotionJunk — §P4 cleanup backfill', () => {
   beforeEach(() => {
     // Seed the exact legacy pollution as pre-formation run_promotion atoms.

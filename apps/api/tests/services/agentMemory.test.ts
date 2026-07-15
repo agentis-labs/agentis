@@ -61,6 +61,21 @@ describe('AgentMemoryService', () => {
     expect(hits[0]!.content).toContain('SAML SSO');
   });
 
+  it('rejects structural garbage instead of storing it (§Mem0-teardown-followup)', () => {
+    const agentId = seedAgent();
+    expect(() => agentMemory.append({ agentId, workspaceId: ctx.workspace.id, content: '| 8 | hn:48446141 | 3.70 | some ranked row' }))
+      .toThrow(/does not look like a durable memory/i);
+    expect(agentMemory.list(agentId, ctx.workspace.id)).toHaveLength(0);
+  });
+
+  it('reinforces instead of duplicating a near-identical append (§Mem0-teardown-followup)', () => {
+    const agentId = seedAgent();
+    const first = agentMemory.append({ agentId, workspaceId: ctx.workspace.id, section: 'Notes', content: 'The operator prefers Telegram over WhatsApp for status updates.' });
+    const second = agentMemory.append({ agentId, workspaceId: ctx.workspace.id, section: 'Notes', content: 'The operator prefers Telegram over WhatsApp for status updates.' });
+    expect(second.id).toBe(first.id);
+    expect(agentMemory.list(agentId, ctx.workspace.id)).toHaveLength(1);
+  });
+
   it('scopes memory per agent', () => {
     const a = seedAgent();
     const b = seedAgent();

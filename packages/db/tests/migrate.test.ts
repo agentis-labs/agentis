@@ -19,6 +19,19 @@ function tempDbPath(): string {
 }
 
 describe('runSqliteMigrations', () => {
+  it('uses an external-content ledger FTS index instead of duplicating payload storage', () => {
+    const { sqlite } = openSqlite({ path: tempDbPath() });
+    try {
+      const fts = sqlite.prepare("SELECT sql FROM sqlite_master WHERE name = 'ledger_events_fts'").get() as { sql: string };
+      expect(fts.sql).toContain("content='ledger_events_search_content'");
+      const shadow = sqlite.prepare("SELECT name FROM sqlite_master WHERE name = 'ledger_events_fts_content'").get();
+      expect(shadow).toBeUndefined();
+      const triggers = sqlite.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'ledger_events_fts_%'").get() as { count: number };
+      expect(triggers.count).toBe(2);
+    } finally {
+      sqlite.close();
+    }
+  });
   it('reserves the Agentic App migration versions and mirrors schema exports', () => {
     // The Agentic App migration block (82–88), asserted by version so unrelated
     // later migrations (memory indexes, artifacts) don't make this brittle.
@@ -200,6 +213,50 @@ VALUES ('q2', 'ws-1', 'conv-1', 'msg-1', 'pending');
     }
   });
 
+  it('v111 creates the outbound channel idempotency journal', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const v111 = SQLITE_MIGRATIONS.find((m) => m.version === 111);
+      expect(v111?.name).toBe('channel_outbound_delivery_journal');
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='channel_outbound_deliveries'").get()).toBeDefined();
+      const cols = sqlite.prepare("PRAGMA table_info('channel_outbound_deliveries')").all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toEqual(expect.arrayContaining([
+        'workspace_id', 'connection_id', 'idempotency_key', 'chat_id', 'body_hash',
+        'status', 'provider_message_id', 'receipt_json', 'error',
+      ]));
+      sqlite.pragma('foreign_keys = OFF');
+      sqlite.exec("INSERT INTO channel_outbound_deliveries (id,workspace_id,connection_id,idempotency_key,chat_id,body_hash) VALUES ('d1','w1','c1','run:node','chat','hash')");
+      expect(() => sqlite.exec("INSERT INTO channel_outbound_deliveries (id,workspace_id,connection_id,idempotency_key,chat_id,body_hash) VALUES ('d2','w1','c1','run:node','chat','hash')")).toThrow(/UNIQUE/i);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('v113 creates the leased workflow-event journal and queue idempotency key', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const v113 = SQLITE_MIGRATIONS.find((m) => m.version === 113);
+      expect(v113?.name).toBe('durable_workflow_event_delivery');
+      const queueCols = sqlite.prepare("PRAGMA table_info('workflow_run_queue')").all() as Array<{ name: string }>;
+      expect(queueCols.map((column) => column.name)).toEqual(expect.arrayContaining(['run_id', 'idempotency_key']));
+      const deliveryCols = sqlite.prepare("PRAGMA table_info('workflow_event_deliveries')").all() as Array<{ name: string }>;
+      expect(deliveryCols.map((column) => column.name)).toEqual(expect.arrayContaining([
+        'subscription_id', 'event_identity', 'event_payload', 'source_run_id',
+        'status', 'attempts', 'available_at', 'lease_owner', 'lease_expires_at',
+        'target_queue_id', 'target_run_id', 'last_error', 'delivered_at',
+      ]));
+      const indexes = sqlite.prepare("PRAGMA index_list('workflow_event_deliveries')").all() as Array<{ name: string; unique: number }>;
+      expect(indexes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'idx_workflow_event_delivery_identity', unique: 1 }),
+        expect.objectContaining({ name: 'idx_workflow_event_delivery_due' }),
+      ]));
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('applies all registered migrations on a fresh database', () => {
     const path = tempDbPath();
     const sqlite = new Database(path);
@@ -234,13 +291,16 @@ VALUES ('q2', 'ws-1', 'conv-1', 'msg-1', 'pending');
     const sqlite = new Database(path);
     try {
       runSqliteMigrations(sqlite);
-      sqlite.prepare('DELETE FROM schema_migrations WHERE version = ?').run(52);
+      // Use an additive migration whose target table is still part of the
+      // current schema. v52 targeted `abilities`, which v106 intentionally
+      // removed, so replaying it no longer represents a recoverable state.
+      sqlite.prepare('DELETE FROM schema_migrations WHERE version = ?').run(104);
 
       const result = runSqliteMigrations(sqlite);
 
-      expect(result.applied.map((migration) => migration.version)).toEqual([52]);
+      expect(result.applied.map((migration) => migration.version)).toEqual([104]);
       expect(
-        sqlite.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(52),
+        sqlite.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(104),
       ).toBeDefined();
     } finally {
       sqlite.close();

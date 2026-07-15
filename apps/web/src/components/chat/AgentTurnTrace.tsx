@@ -32,7 +32,10 @@ import type { ToolCallData } from './toolCalls';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 
 type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
-type ThoughtState = 'active' | 'done' | 'error';
+/** 'recovered' = this step errored, but the agent produced more work after it —
+ * a self-corrected retry, not the run's final outcome. Only the LAST step, if
+ * it errored, keeps the alarming 'error' treatment. */
+type ThoughtState = 'active' | 'done' | 'error' | 'recovered';
 
 interface Thought {
   id: string;
@@ -62,15 +65,20 @@ function buildThoughts(activities: ChatActivity[], streaming: boolean): Thought[
 
   return meaningful.map(({ activity, label }, index, entries) => {
     const isLast = index === entries.length - 1;
+    // A step after this one exists, so the agent already moved past whatever
+    // went wrong here — a mid-turn retry, not the turn's unresolved outcome.
+    const recovered = activity.status === 'error' && !isLast;
     return {
       id: activity.id,
       text: label,
       detail: activity.detail,
-      state: activity.status === 'error'
-        ? 'error'
-        : streaming && isLast && activity.status !== 'success'
-          ? 'active'
-          : 'done',
+      state: recovered
+        ? 'recovered'
+        : activity.status === 'error'
+          ? 'error'
+          : streaming && isLast && activity.status !== 'success'
+            ? 'active'
+            : 'done',
     } satisfies Thought;
   });
 }
@@ -166,6 +174,8 @@ export function AgentTurnTrace({
                 <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin text-accent" />
               ) : thought.state === 'error' ? (
                 <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />
+              ) : thought.state === 'recovered' ? (
+                <Check size={12} className="mt-0.5 shrink-0 text-warn/70" />
               ) : (
                 <Check size={12} className="mt-0.5 shrink-0 text-text-muted/70" />
               )}
@@ -174,6 +184,7 @@ export function AgentTurnTrace({
                   'min-w-0 flex-1 break-words text-[12px] leading-5 [overflow-wrap:anywhere]',
                   isLast ? 'text-text-secondary' : 'text-text-muted',
                   thought.state === 'error' && 'text-danger',
+                  thought.state === 'recovered' && 'text-warn',
                 )}
               >
                 {thought.text}
@@ -239,10 +250,17 @@ export function AgentTurnTrace({
               <span
                 className={clsx(
                   'absolute -left-[17px] top-1.5 h-1.5 w-1.5 rounded-full border bg-surface',
-                  thought.state === 'error' ? 'border-danger bg-danger' : 'border-line',
+                  thought.state === 'error'
+                    ? 'border-danger bg-danger'
+                    : thought.state === 'recovered'
+                      ? 'border-warn bg-warn'
+                      : 'border-line',
                 )}
               />
-              <div className={clsx('text-[12px] leading-5', thought.state === 'error' ? 'text-danger' : 'text-text-secondary')}>
+              <div className={clsx(
+                'text-[12px] leading-5',
+                thought.state === 'error' ? 'text-danger' : thought.state === 'recovered' ? 'text-warn' : 'text-text-secondary',
+              )}>
                 {thought.text}
               </div>
               {thought.detail && (

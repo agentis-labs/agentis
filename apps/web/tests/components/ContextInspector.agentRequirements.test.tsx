@@ -55,13 +55,13 @@ describe('<ContextInspector /> agent requirements', () => {
       />,
     );
 
-    expect(await screen.findByText('RAL runtime requirements')).toBeInTheDocument();
+    expect(await screen.findByText('What this agent can do')).toBeInTheDocument();
     await user.click(screen.getByLabelText('Native browser'));
 
     await waitFor(() => expect(screen.getAllByText('Browser Agent').length).toBeGreaterThan(0));
     expect(screen.getAllByText('Terminal Agent').length).toBeGreaterThan(0);
     expect(screen.getByText('ready')).toBeInTheDocument();
-    expect(screen.getByText(/missing Native browser/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Enable Native browser' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({

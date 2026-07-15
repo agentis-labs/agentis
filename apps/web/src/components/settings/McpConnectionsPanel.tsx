@@ -252,7 +252,7 @@ export function McpConnectionsPanel() {
               <div className="flex flex-wrap items-end gap-2">
                 <label className="min-w-[140px] flex-1 text-caption text-text-muted">
                   Name
-                  <input className="mt-1 w-full rounded border border-line bg-bg px-2 py-1 text-[13px] text-text-primary" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-mcp-server" />
+                  <input className="mt-1 w-full rounded border border-line bg-bg px-2 py-1 text-[13px] text-text-primary" value={name} onChange={(e) => setName(e.target.value)} placeholder="context7" />
                 </label>
                 <label className="min-w-[200px] flex-[2] text-caption text-text-muted">
                   URL

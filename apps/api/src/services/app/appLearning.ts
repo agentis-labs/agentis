@@ -1,32 +1,44 @@
 ﻿/**
- * AppLearningService — the conversational learning loop (LIVING-APPS-10X Phase M2 · G10).
+ * AppLearningService — everything an App learns, and the ONLY writer that can make an
+ * App's Brain map fill.
  *
- * Closes the loop so a resident App agent gets MEASURABLY better over time:
+ * THE SCOPE RULE: an App's lessons are scoped to the APP (`scopeId === appId`), never
+ * to whichever agent happened to operate it. The App Brain map reads exactly that
+ * scope, so anything written elsewhere is invisible there — and an App's intelligence
+ * has to travel with the App, not with a borrowed agent. The operating/owner agent is
+ * recorded as `agentId` (attribution), never as the scope. A workflow that no App owns
+ * is its own scope, which is what fills the Workflow Brain.
  *
- *   1. OUTCOME  — a relationship reaches a terminal state (won | lost | abandoned),
- *      derived from `app_contacts.stage`/an explicit setter, or "abandoned" = no
- *      touch past a threshold. Recorded durably on the contact (`outcome`/`outcomeAt`).
- *   2. GRADED LESSON — on outcome, a distilled, durable lesson (what worked / what
- *      didn't for this App + role) is deposited through the EXISTING brain-formation
- *      path (`SharedIntelligence.addAtom` → a `distilled_lesson` episode), scoped to
- *      the App's owner agent so it lands in that agent's memory plane — never a raw
- *      transcript, and it respects the formation/scrubbing the brain already does.
- *   3. GRADUATION — those lessons live in the SAME episodic plane the cross-session
- *      `MemoryReflectionService` already reflects over. When lessons of the same
- *      shape recur (its ≥2-distinct-sources + ≥3-for-skill thresholds), reflection
- *      derives a generalized rule and fires the EXISTING `SkillProposer` hook —
- *      since the 2026-07-04 Abilities deletion that hook feeds the Living Skills
- *      path (Brain `skill` atoms), attributable to the agent scope, so future
- *      turns of that role inherit it.
- *      We trigger a SCOPED reflection pass on each terminal outcome so graduation is
- *      prompt, rather than only on the periodic cron.
- *   4. VISIBILITY — `recentLearnings` returns the recent graded lessons + graduated
- *      abilities for an App, so an operator can watch the skill grow.
+ * Two things feed that scope:
+ *
+ *   1. RUN OUTCOMES (`onRunSettled`) — every terminal run deposits one durable, graded
+ *      atom: what it proved, or what it failed at and why. This is what a deterministic
+ *      App (compute/http/channel, no agent node) learns from, and it is the ONLY thing
+ *      such an App ever learns from.
+ *   2. RELATIONSHIP OUTCOMES (`recordOutcome` / `recordConversationOutcome`) — a contact
+ *      or per-contact conversation reaches a terminal state (won | lost | abandoned) and
+ *      deposits a distilled "what worked / what didn't" lesson. Never a raw transcript.
+ *
+ * Both commit through `SharedIntelligence.commitDurableAtom`, which writes CONSOLIDATED
+ * atoms and reinforces a scope-local near-duplicate instead of writing a second copy.
+ * That distinction is load-bearing: the other path into a scope — `promote()`, which
+ * mines untrusted agent prose — stages everything as `unconsolidated`, and the graph
+ * deliberately hides those. A scope fed only by mining can never render a single node.
+ * Dedup also means a hundred runs converge onto a handful of strong, reinforced nodes
+ * rather than a hundred clones.
+ *
+ * GRADUATION — these lessons live in the SAME episodic plane `MemoryReflectionService`
+ * reflects over. When lessons of the same shape recur, reflection derives a generalized
+ * rule and fires the existing SkillProposer hook (→ Brain `skill` atoms), so the App
+ * inherits it. A scoped pass is nudged on each terminal outcome so graduation is prompt
+ * rather than waiting on the periodic cron.
+ *
+ * VISIBILITY — `recentLearnings` returns what currently sits in the App's scope.
  *
  * ADDITIVE + NON-THROWING + MODEL-AGNOSTIC. Every step is wrapped so a failure is a
- * silent no-op: the learning loop must NEVER break a turn or a conversation. With no
+ * silent no-op: learning must NEVER break a run, a turn, or a conversation. With no
  * model wired, lessons are still deposited (deterministic) and reflection degrades to
- * recurrence-reinforcement — it never fabricates a rule or an ability.
+ * recurrence-reinforcement — it never fabricates a rule or a skill.
  */
 
 import { and, desc, eq, isNull, lte, or, sql } from 'drizzle-orm';
@@ -41,6 +53,8 @@ export type AppOutcome = 'won' | 'lost' | 'abandoned';
 const OUTCOME_VALUES: ReadonlySet<string> = new Set(['won', 'lost', 'abandoned']);
 /** Lesson episodes carry this tag so the visibility query can find them cheaply. */
 const LESSON_TAG = 'm2_lesson';
+/** Run-outcome atoms carry this tag — the App/workflow's own graded history. */
+const RUN_OUTCOME_TAG = 'run_outcome';
 /** Stages that themselves imply a terminal outcome (App-defined but conventional). */
 const STAGE_OUTCOME: Record<string, AppOutcome> = { won: 'won', closed_won: 'won', lost: 'lost', closed_lost: 'lost' };
 /** Default abandonment threshold: no touch in 14 days and no terminal outcome. */
@@ -58,6 +72,25 @@ export interface AppLearningDeps {
   logger: Logger;
   /** Optional — triggers a scoped reflection pass so graduation is prompt. */
   reflection?: Pick<MemoryReflectionService, 'run'>;
+}
+
+/** A terminal run, as the engine reports it to the learning loop. */
+export interface RunSettledInput {
+  workspaceId: string;
+  workflowId: string;
+  workflowTitle: string;
+  runId: string;
+  /** Terminal run status (COMPLETED, FAILED, COMPLETED_WITH_ERRORS, …). */
+  status: string;
+  /** The graded outcome, when the workflow declared a spec to grade against. */
+  verdict?: {
+    outcome: 'accomplished' | 'partial' | 'hollow' | 'failed_checks';
+    deficiencies: Array<{ claim: string; detail: string }>;
+  } | null;
+  /** Nodes that hard-failed, with their errors. */
+  failures?: Array<{ nodeId: string; nodeTitle: string; error: string }>;
+  /** The agent that operated the run, when one did. Attribution only. */
+  agentId?: string | null;
 }
 
 export interface RecordOutcomeInput {
@@ -93,6 +126,178 @@ export interface RecentLearnings {
 
 export class AppLearningService {
   constructor(private readonly deps: AppLearningDeps) {}
+
+  /**
+   * EVERY terminal run deposits one durable, graded atom into the brain scope that
+   * OWNS the run — the App when an App owns the workflow, else the workflow itself.
+   *
+   * This is the writer an App never had. The only other path into an App's scope is
+   * run-output mining (`SharedIntelligence.promote`), which stages everything as
+   * `unconsolidated` — and the graph deliberately hides those — so an App's Brain
+   * map was structurally empty no matter how many times it ran. Worse, mining only
+   * fires on agent/session nodes, so a deterministic App (compute/http/channel) never
+   * reached it at all.
+   *
+   * What lands here is the run's OWN graded history: what it accomplished, or what it
+   * failed at and why. Commits are scope-strict and dedup-by-similarity, so a hundred
+   * runs converge onto a handful of strong, reinforced nodes rather than a hundred
+   * clones. Never throws — learning must not be able to break a run's terminal path.
+   */
+  async onRunSettled(input: RunSettledInput): Promise<{ atomId: string; created: boolean; reinforced: boolean } | null> {
+    try {
+      const scopeId = this.#runScopeId(input.workspaceId, input.workflowId);
+      if (!scopeId) return null;
+      const appId = this.#appIdForWorkflow(input.workspaceId, input.workflowId);
+      const lesson = this.#composeRunLesson(input);
+      if (!lesson) return null;
+
+      return await this.deps.shared.commitDurableAtom({
+        workspaceId: input.workspaceId,
+        scopeId,
+        // Attribution only — the SCOPE is the App/workflow, so the lesson travels
+        // with it. Scoping to the operating agent (the old AppLearning behaviour)
+        // is what buried these in the agent's map, or in the workspace bucket when
+        // the App had no owner agent at all.
+        agentId: input.agentId ?? null,
+        workflowId: input.workflowId,
+        runId: input.runId,
+        title: lesson.title,
+        content: lesson.content,
+        type: lesson.type,
+        source: 'system_write',
+        confidence: lesson.confidence,
+        importance: lesson.success ? 0.6 : 0.75,
+        outcomeStatus: lesson.success ? 'good' : 'bad',
+        tags: [
+          RUN_OUTCOME_TAG,
+          `status:${input.status.toLowerCase()}`,
+          ...(input.verdict ? [`verdict:${input.verdict.outcome}`] : []),
+          ...(appId ? [`app:${appId}`] : []),
+        ],
+        metadata: {
+          runOutcome: true,
+          appId,
+          workflowId: input.workflowId,
+          runId: input.runId,
+          status: input.status,
+          verdict: input.verdict?.outcome ?? null,
+        },
+      });
+    } catch (err) {
+      this.deps.logger.warn('app.learning.run_settled_failed', {
+        workflowId: input.workflowId,
+        runId: input.runId,
+        err: (err as Error).message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Distil a terminal run into a durable, reusable statement. Deterministic and
+   * model-free: it states what the run PROVED, so repeats of the same shape collapse
+   * onto one atom via the commit's similarity dedup. Returns null when there is
+   * nothing worth keeping (a cancelled run proved nothing).
+   */
+  #composeRunLesson(input: RunSettledInput): { title: string; content: string; type: 'success_pattern' | 'failure'; confidence: number; success: boolean } | null {
+    const status = input.status.toUpperCase();
+    if (status === 'CANCELLED') return null;
+
+    const name = truncate(input.workflowTitle, 80);
+    const failures = input.failures ?? [];
+    const verdict = input.verdict ?? null;
+
+    // A run that finished AND graded clean is the only thing we call proven.
+    if (status === 'COMPLETED' && (!verdict || verdict.outcome === 'accomplished') && failures.length === 0) {
+      return {
+        title: truncate(`Proven: ${name}`, 88),
+        content: truncate(
+          `"${name}" ran end-to-end and delivered its declared outcome`
+          + (verdict ? ` (verdict: accomplished, ${verdict.deficiencies.length === 0 ? 'all acceptance checks passed' : 'checks graded clean'})` : ' (no acceptance checks declared)')
+          + '. This shape of the pipeline works — keep it as the baseline and prefer repairing a step over redesigning it.',
+          480,
+        ),
+        type: 'success_pattern',
+        confidence: 0.7,
+        success: true,
+      };
+    }
+
+    // Deficient: it "completed" but did not accomplish. This is the most valuable
+    // lesson in the system and the one that was being silently discarded.
+    if (verdict && verdict.outcome !== 'accomplished') {
+      const why = verdict.deficiencies.slice(0, 3).map((d) => `${d.claim} — ${d.detail}`).join('; ');
+      return {
+        title: truncate(`Deficient (${verdict.outcome}): ${name}`, 88),
+        content: truncate(
+          `"${name}" reached a terminal state but did NOT accomplish its objective (verdict: ${verdict.outcome}).`
+          + (why ? ` Unmet: ${why}.` : ' No acceptance check produced usable evidence.')
+          + ' Treat a completed run as unproven until the acceptance checks pass — verify the deliverable exists, not that the steps ran.',
+          480,
+        ),
+        type: 'failure',
+        confidence: 0.72,
+        success: false,
+      };
+    }
+
+    if (failures.length > 0) {
+      const first = failures[0]!;
+      const rest = failures.length > 1 ? ` (+${failures.length - 1} more failing step${failures.length > 2 ? 's' : ''})` : '';
+      return {
+        title: truncate(`Failure: ${name} @ ${first.nodeTitle}`, 88),
+        content: truncate(
+          `"${name}" failed at step "${first.nodeTitle}"${rest}: ${first.error}`
+          + ' Check this step first when the pipeline breaks again; it is the recurring weak point.',
+          480,
+        ),
+        type: 'failure',
+        confidence: 0.72,
+        success: false,
+      };
+    }
+
+    if (status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION') {
+      return {
+        title: truncate(`Failure: ${name}`, 88),
+        content: truncate(`"${name}" ended ${status} with no single failing step attributed — the failure is in how the steps compose, not in one of them.`, 480),
+        type: 'failure',
+        confidence: 0.6,
+        success: false,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * The brain scope a run's lessons belong to: the owning App when there is one,
+   * else the workflow itself. Both surfaces (App Brain, Workflow Brain) read their
+   * map at exactly this scope id, so this is what makes either of them fill.
+   *
+   * Null when the workflow doesn't exist — better to learn nothing than to strand
+   * an atom in a scope no surface will ever read.
+   */
+  #runScopeId(workspaceId: string, workflowId: string): string | null {
+    const row = this.#workflowRow(workspaceId, workflowId);
+    if (!row) return null;
+    return row.appId ?? workflowId;
+  }
+
+  #appIdForWorkflow(workspaceId: string, workflowId: string): string | null {
+    return this.#workflowRow(workspaceId, workflowId)?.appId ?? null;
+  }
+
+  #workflowRow(workspaceId: string, workflowId: string): { appId: string | null } | null {
+    try {
+      return this.deps.db
+        .select({ appId: schema.workflows.appId })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, workflowId)))
+        .get() ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Map a pipeline stage to a terminal outcome, if it implies one. Lets callers
@@ -138,18 +343,21 @@ export class AppLearningService {
       const lesson = this.#composeLesson({ contact, outcome: input.outcome, note: input.note });
       if (lesson) {
         try {
-          await this.deps.shared.addAtom({
+          await this.deps.shared.commitDurableAtom({
             workspaceId: input.workspaceId,
-            // Scope to the App's owner agent so it lands in that role's memory plane
-            // (scopeId === agentId for agent-scoped memory). Null degrades to workspace.
-            scopeId: ownerAgentId,
+            // The APP is the scope — what an App learns lives with the App and
+            // travels with it. Scoping to the owner agent (the old behaviour) put
+            // the lesson in that agent's map instead, and for an App with no owner
+            // agent it degraded to null, i.e. the workspace bucket: invisible in
+            // the App's Brain either way. The owner agent is attribution, not scope.
+            scopeId: input.appId,
             agentId: ownerAgentId,
             content: lesson.content,
             title: lesson.title,
             confidence: 0.62,
             source: 'system_write',
-            managed: true,
-            tags: [LESSON_TAG, `app:${input.appId}`, `outcome:${input.outcome}`, 'pacer:procedural', ...(ownerAgentId ? [`role:${ownerAgentId}`] : [])],
+            outcomeStatus: input.outcome === 'won' ? 'good' : 'bad',
+            tags: [LESSON_TAG, `app:${input.appId}`, `outcome:${input.outcome}`, ...(ownerAgentId ? [`role:${ownerAgentId}`] : [])],
             metadata: {
               m2: true,
               appId: input.appId,
@@ -173,21 +381,38 @@ export class AppLearningService {
       // reflection engine skips clusters it has already generalized). Waiting until the
       // first pass sees ≥3 lets graduation fire directly. The periodic brain-queue
       // reflection still runs independently for the slow path.
-      if (result.lessonDeposited && this.deps.reflection && ownerAgentId) {
-        const scopedLessons = this.#scopedLessonCount(input.workspaceId, ownerAgentId);
-        if (scopedLessons >= GRADUATION_THRESHOLD && scopedLessons % GRADUATION_THRESHOLD === 0) {
-          try {
-            const r = await this.deps.reflection.run({ workspaceId: input.workspaceId, scopeId: ownerAgentId, trigger: 'episode_threshold' });
-            result.reflection = { generalizations: r.generalizations, skillsProposed: r.skillsProposed };
-          } catch (err) {
-            this.deps.logger.warn('app.learning.reflection_failed', { appId: input.appId, err: (err as Error).message });
-          }
-        }
+      if (result.lessonDeposited && this.deps.reflection) {
+        result.reflection = await this.#maybeGraduate(input.workspaceId, input.appId);
       }
     } catch (err) {
       this.deps.logger.warn('app.learning.record_failed', { appId: input.appId, err: (err as Error).message });
     }
     return result;
+  }
+
+  /**
+   * Reflect over the App's (now-richer) scoped plane so recurring winning patterns
+   * can graduate into a skill via the existing SkillProposer hook.
+   *
+   * Gated on a recurrence THRESHOLD: only nudge a pass once the scoped lesson count
+   * crosses a multiple of GRADUATION_THRESHOLD. This matters — the SkillProposer
+   * needs ≥3 DISTINCT sources, so a too-eager pass at 2 lessons would commit a
+   * 2-source generalization that then blocks the 3-source pass (the reflection
+   * engine skips clusters it has already generalized). Waiting until the first pass
+   * sees ≥3 lets graduation fire directly. The periodic brain-queue reflection still
+   * runs independently for the slow path.
+   */
+  async #maybeGraduate(workspaceId: string, appId: string): Promise<{ generalizations: number; skillsProposed: number } | null> {
+    if (!this.deps.reflection) return null;
+    const scopedLessons = this.#scopedLessonCount(workspaceId, appId);
+    if (scopedLessons < GRADUATION_THRESHOLD || scopedLessons % GRADUATION_THRESHOLD !== 0) return null;
+    try {
+      const r = await this.deps.reflection.run({ workspaceId, scopeId: appId, trigger: 'episode_threshold' });
+      return { generalizations: r.generalizations, skillsProposed: r.skillsProposed };
+    } catch (err) {
+      this.deps.logger.warn('app.learning.reflection_failed', { appId, err: (err as Error).message });
+      return null;
+    }
   }
 
   /**
@@ -216,31 +441,22 @@ export class AppLearningService {
         `A per-contact conversation ended ${verb} for this App.\nContact: ${input.address}.`
         + (input.summary ? `\nWhat happened: ${input.summary}` : '');
       result.recorded = true;
-      await this.deps.shared.addAtom({
+      await this.deps.shared.commitDurableAtom({
         workspaceId: input.workspaceId,
-        scopeId: ownerAgentId,
+        // Scoped to the App (see recordOutcome) — the owner agent is attribution.
+        scopeId: input.appId,
         agentId: ownerAgentId,
         content,
         title,
         confidence: 0.62,
         source: 'system_write',
-        managed: true,
-        tags: [LESSON_TAG, `app:${input.appId}`, `outcome:${input.outcome}`, 'pacer:procedural', ...(ownerAgentId ? [`role:${ownerAgentId}`] : [])],
+        outcomeStatus: input.outcome === 'won' ? 'good' : 'bad',
+        tags: [LESSON_TAG, `app:${input.appId}`, `outcome:${input.outcome}`, ...(ownerAgentId ? [`role:${ownerAgentId}`] : [])],
         metadata: { m2: true, appId: input.appId, outcome: input.outcome, contactRef: input.address },
       });
       result.lessonDeposited = true;
       // GRADUATION — same recurrence-gated nudge as recordOutcome.
-      if (this.deps.reflection && ownerAgentId) {
-        const scopedLessons = this.#scopedLessonCount(input.workspaceId, ownerAgentId);
-        if (scopedLessons >= GRADUATION_THRESHOLD && scopedLessons % GRADUATION_THRESHOLD === 0) {
-          try {
-            const r = await this.deps.reflection.run({ workspaceId: input.workspaceId, scopeId: ownerAgentId, trigger: 'episode_threshold' });
-            result.reflection = { generalizations: r.generalizations, skillsProposed: r.skillsProposed };
-          } catch (err) {
-            this.deps.logger.warn('app.learning.reflection_failed', { appId: input.appId, err: (err as Error).message });
-          }
-        }
-      }
+      result.reflection = await this.#maybeGraduate(input.workspaceId, input.appId);
     } catch (err) {
       this.deps.logger.warn('app.learning.conversation_outcome_failed', { appId: input.appId, err: (err as Error).message });
     }
@@ -287,6 +503,10 @@ export class AppLearningService {
       const ownerAgentId = this.#ownerAgentId(appId);
       out.ownerAgentId = ownerAgentId;
 
+      // The App IS the brain scope, so "what this App learned" is simply what sits
+      // in its scope: relationship lessons AND the graded run outcomes that
+      // onRunSettled deposits. Reading the scope (not a tag LIKE) means a lesson
+      // written by any future App-scoped writer shows up here for free.
       const lessonRows = this.deps.db
         .select({
           id: schema.memoryEpisodes.id,
@@ -298,9 +518,11 @@ export class AppLearningService {
         .from(schema.memoryEpisodes)
         .where(and(
           eq(schema.memoryEpisodes.workspaceId, workspaceId),
+          eq(schema.memoryEpisodes.scopeId, appId),
           isNull(schema.memoryEpisodes.archivedAt),
-          sql`${schema.memoryEpisodes.tags} LIKE ${'%' + LESSON_TAG + '%'}`,
-          sql`${schema.memoryEpisodes.tags} LIKE ${'%app:' + appId + '%'}`,
+          // Staged run-output traces are noise here (and are hidden from the graph
+          // for the same reason) — only durable, formed lessons count as learning.
+          sql`${schema.memoryEpisodes.tags} NOT LIKE '%unconsolidated%'`,
         ))
         .orderBy(desc(schema.memoryEpisodes.createdAt))
         .limit(limit)

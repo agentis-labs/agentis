@@ -6,12 +6,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
+import type { AgentisToolContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { BrainAskService } from '../../src/services/brain/brainAskService.js';
-import { runBrainEval, BRAIN_EVAL_CASES } from '../../eval/brain/brainEvalHarness.js';
+import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
+import { registerBrainTools } from '../../src/services/agentisToolHandlers/brain.js';
+import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
+import { runBrainEval, runRecoveryEval, BRAIN_EVAL_CASES, BRAIN_RECOVERY_CASES } from '../../eval/brain/brainEvalHarness.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -48,5 +52,31 @@ describe('§C8 brain benchmark harness', () => {
     expect(card.overall.accuracy).toBeGreaterThanOrEqual(0.7);
     // Single-hop must be effectively solved.
     expect(card.byCategory.single_hop.accuracy).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it('recovers via agentis.brain.search after the upfront pass misses (CI gate)', async () => {
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerBrainTools(registry, { logger: ctx.logger, sharedIntelligence: brain } as unknown as ToolHandlerDeps);
+    const toolCtx = (workspaceId: string): AgentisToolContext =>
+      ({ workspaceId, agentId: null, caller: 'agent' } as unknown as AgentisToolContext);
+
+    const seed = async (facts: string[]): Promise<string> => {
+      ctx.db.delete(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).run();
+      for (const f of facts) {
+        // Below the 0.74 confidence bar that alone clears the relevance floor
+        // (§B2.3's `hit.confidence >= 0.74` short-circuit) — this case needs
+        // the mismatched initial query to abstain on RELEVANCE, the way an
+        // ordinary (not operator-authored) memory would.
+        await brain.addAtom({ workspaceId: ctx.workspace.id, content: f, source: 'system_write', confidence: 0.5 });
+      }
+      return ctx.workspace.id;
+    };
+
+    const card = await runRecoveryEval({ cases: BRAIN_RECOVERY_CASES, seed, brain, registry, toolCtx });
+
+    // The setup must actually exercise recovery — if the upfront pass didn't
+    // abstain, this case isn't testing what it claims to.
+    expect(card.results.every((r) => r.initialAbstained)).toBe(true);
+    expect(card.recoveryRate).toBe(1);
   });
 });

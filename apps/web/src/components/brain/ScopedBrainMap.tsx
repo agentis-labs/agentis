@@ -1,6 +1,7 @@
-﻿import { useEffect, useMemo, useState } from 'react';
-import type { BrainGraph, BrainNode, BrainResponse } from '@agentis/core';
+﻿import { useCallback, useEffect, useMemo, useState } from 'react';
+import { REALTIME_EVENTS, type BrainGraph, type BrainNode, type BrainResponse } from '@agentis/core';
 import { api, apiErrorMessage } from '../../lib/api';
+import { rtSubscribe, useRealtime } from '../../lib/realtime';
 import { useToast } from '../shared/Toast';
 import { Skeleton } from '../shared/Skeleton';
 import { BrainStage } from './BrainStage';
@@ -41,21 +42,33 @@ export function ScopedBrainMap({
   const search = searchQuery ?? internalSearch;
   const setSearch = onSearchQueryChange ?? setInternalSearch;
 
-  useEffect(() => {
+  const load = useCallback((showLoader: boolean) => {
     if (!endpoint) {
       setGraph(null);
       setLoading(false);
       return;
     }
-    setLoading(true);
-    setSelectedId(null);
+    if (showLoader) setLoading(true);
     void api<{ graph: BrainGraph }>(endpoint)
       .then((response) => setGraph(response.graph))
-      .catch((error) => toast.error('Could not load Brain map', apiErrorMessage(error)))
-      .finally(() => setLoading(false));
+      .catch((error) => { if (showLoader) toast.error('Could not load Brain map', apiErrorMessage(error)); })
+      .finally(() => { if (showLoader) setLoading(false); });
     // Toast context changes as messages render; reload only when the scope endpoint changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [endpoint]);
+
+  useEffect(() => {
+    setSelectedId(null);
+    load(true);
+  }, [load]);
+
+  // A run that just formed a lesson should show up as a node without a reload —
+  // the map is the surface you watch an App learn on.
+  useEffect(() => rtSubscribe('workspace', {}), []);
+  useRealtime(
+    [REALTIME_EVENTS.BRAIN_ATOM_CREATED, REALTIME_EVENTS.BRAIN_ATOM_REINFORCED],
+    () => load(false),
+  );
 
   const nodes = useMemo(() => graph ? graphToBrainNodes(graph) : [], [graph]);
   const brain = useMemo<BrainResponse | null>(() => graph ? {

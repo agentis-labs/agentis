@@ -20,6 +20,7 @@
  */
 
 import type { Logger } from '../../logger.js';
+import type { ChannelDeliveryReceipt } from './types.js';
 
 export type WhatsAppSessionStatus =
   | 'idle'
@@ -150,14 +151,37 @@ export class WhatsAppSession {
   }
 
   /** Send a text message to a JID. Throws if the socket isn't open. */
-  async sendText(jid: string, text: string): Promise<void> {
+  async sendText(jid: string, text: string): Promise<ChannelDeliveryReceipt> {
     if (!this.#sock || this.#status !== 'open') {
       throw new Error(`whatsapp session ${this.opts.connectionId} is not open (status=${this.#status})`);
     }
     // Reply to the exact JID the message came from (baileys threads it back to the
     // same chat — including `@lid` chats). Do NOT remap LID→PN: that resolves to a
     // different identity and lands the reply in a phantom chat.
-    await this.#sock.sendMessage(jid, { text });
+    // Resolve explicit phone-number JIDs first. A socket write can otherwise
+    // resolve for an invalid/unregistered address while no real chat exists.
+    // Provider-native LIDs/groups are intentionally left untouched.
+    let recipient = jid;
+    if (jid.endsWith('@s.whatsapp.net') && typeof this.#sock.onWhatsApp === 'function') {
+      const matches = await this.#sock.onWhatsApp(jid);
+      const match = Array.isArray(matches)
+        ? matches.find((entry: { exists?: boolean }) => entry?.exists === true)
+        : undefined;
+      if (!match) throw new Error(`whatsapp recipient ${jid} is not registered or could not be resolved`);
+      if (typeof match.jid === 'string' && match.jid) recipient = match.jid;
+    }
+    const sent = await this.#sock.sendMessage(recipient, { text });
+    const providerMessageId = typeof sent?.key?.id === 'string' ? sent.key.id.trim() : '';
+    if (!providerMessageId) {
+      throw new Error('whatsapp provider accepted no message id; outbound delivery is unverified');
+    }
+    return {
+      provider: 'whatsapp',
+      providerMessageId,
+      status: 'accepted',
+      acceptedAt: new Date().toISOString(),
+      recipient,
+    };
   }
 
   /** Show/clear the "typing…" presence in a chat (best-effort). */

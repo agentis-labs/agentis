@@ -103,3 +103,22 @@ export async function useVaultAuthState(deps: VaultAuthStateDeps): Promise<{
 
   return { state, saveCreds };
 }
+
+/**
+ * Wipe a connection's persisted auth rows (creds + signal keys).
+ *
+ * Once WhatsApp unlinks a device (phone-side "Remove device", or any close
+ * with `DisconnectReason.loggedOut`), the registered creds we still hold are
+ * permanently dead — WhatsApp's servers will keep rejecting them. Baileys only
+ * emits a fresh `qr` when it starts from UNREGISTERED creds
+ * (`initAuthCreds()`); reusing the stale row makes it silently retry the dead
+ * session and close again immediately, so a "Relink QR" click would spin
+ * forever with no QR ever rendered. Call this before restarting a session that
+ * is in `logged_out`/`error` state so the next connect attempt pairs fresh.
+ */
+export function clearVaultAuthState(deps: Pick<VaultAuthStateDeps, 'db' | 'connectionId'>): void {
+  deps.db
+    .delete(schema.channelAuthState)
+    .where(eq(schema.channelAuthState.connectionId, deps.connectionId))
+    .run();
+}

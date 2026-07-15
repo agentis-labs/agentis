@@ -137,16 +137,25 @@ export function AgentHierarchyCanvas({
   const [resettingLayout, setResettingLayout] = useState(false);
   const persistTimers = useRef(new Map<string, number>());
   const reconcileSignatureRef = useRef<string>('');
+  const autoLayoutSignatureRef = useRef<string>('');
   const fitSignatureRef = useRef<string>('');
   const flowRef = useRef<ReactFlowInstance<Node<AgentNodeData>, Edge> | null>(null);
 
   useEffect(() => {
-    // If there is any agent (other than ghost) that doesn't have a canvas position saved,
-    // automatically run resetLayout to calculate and save the layout.
-    const hasUnplaced = agents.some((agent) => !agent.isGhost && !isPosition(agent.canvasPosition));
-    if (hasUnplaced && agents.length > 0 && !resettingLayout) {
-      void resetLayout();
+    const unplacedSignature = agents
+      .filter((agent) => !agent.isGhost && !isPosition(agent.canvasPosition))
+      .map((agent) => agent.id)
+      .sort()
+      .join('|');
+    if (!unplacedSignature) {
+      autoLayoutSignatureRef.current = '';
+      return;
     }
+    if (resettingLayout || unplacedSignature === autoLayoutSignatureRef.current) return;
+    autoLayoutSignatureRef.current = unplacedSignature;
+    void resetLayout().catch(() => {
+      if (autoLayoutSignatureRef.current === unplacedSignature) autoLayoutSignatureRef.current = '';
+    });
   }, [agents, resettingLayout]);
 
   useEffect(() => {

@@ -2562,6 +2562,145 @@ CREATE TABLE IF NOT EXISTS conversation_message_queue (
 CREATE INDEX IF NOT EXISTS idx_conversation_message_queue_conversation ON conversation_message_queue(conversation_id, status, position);
 `,
   },
+  {
+    version: 111,
+    name: 'channel_outbound_delivery_journal',
+    sql: `
+-- Provider-proof-backed idempotency for outbound workflow channel nodes.
+-- Reserve before provider I/O; persist the provider receipt before node
+-- completion. A crash can never silently turn into a duplicate resend.
+CREATE TABLE IF NOT EXISTS channel_outbound_deliveries (
+  id                  TEXT PRIMARY KEY,
+  workspace_id        TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  connection_id       TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
+  idempotency_key     TEXT NOT NULL,
+  chat_id             TEXT NOT NULL,
+  body_hash           TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'sending',
+  provider_message_id TEXT,
+  receipt_json        TEXT,
+  error               TEXT,
+  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_outbound_workspace_key
+  ON channel_outbound_deliveries(workspace_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_channel_outbound_connection_status
+  ON channel_outbound_deliveries(connection_id, status);
+`,
+  },
+  {
+    version: 112,
+    name: 'ledger_fts_external_content',
+    sql: `
+-- The original FTS table stored a private copy of every searchable ledger
+-- payload in addition to its token index. Use an external-content view so the
+-- source JSON remains authoritative and FTS stores only derived index data.
+DROP TRIGGER IF EXISTS ledger_events_fts_insert;
+DROP TRIGGER IF EXISTS ledger_events_fts_delete;
+DROP TABLE IF EXISTS ledger_events_fts;
+DROP VIEW IF EXISTS ledger_events_search_content;
+
+CREATE VIEW ledger_events_search_content AS
+SELECT
+  rowid,
+  event_type,
+  trim(
+    coalesce(json_extract(payload, '$.content'), '') || ' ' ||
+    coalesce(json_extract(payload, '$.output'), '') || ' ' ||
+    coalesce(json_extract(payload, '$.summary'), '') || ' ' ||
+    coalesce(json_extract(payload, '$.error'), '') || ' ' ||
+    coalesce(payload, '')
+  ) AS payload_text
+FROM ledger_events;
+
+CREATE VIRTUAL TABLE ledger_events_fts USING fts5(
+  event_type,
+  payload_text,
+  content='ledger_events_search_content',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER ledger_events_fts_insert AFTER INSERT ON ledger_events BEGIN
+  INSERT INTO ledger_events_fts(rowid, event_type, payload_text)
+  VALUES (
+    new.rowid,
+    new.event_type,
+    trim(
+      coalesce(json_extract(new.payload, '$.content'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.output'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.summary'), '') || ' ' ||
+      coalesce(json_extract(new.payload, '$.error'), '') || ' ' ||
+      coalesce(new.payload, '')
+    )
+  );
+END;
+
+CREATE TRIGGER ledger_events_fts_delete AFTER DELETE ON ledger_events BEGIN
+  INSERT INTO ledger_events_fts(ledger_events_fts, rowid, event_type, payload_text)
+  VALUES (
+    'delete',
+    old.rowid,
+    old.event_type,
+    trim(
+      coalesce(json_extract(old.payload, '$.content'), '') || ' ' ||
+      coalesce(json_extract(old.payload, '$.output'), '') || ' ' ||
+      coalesce(json_extract(old.payload, '$.summary'), '') || ' ' ||
+      coalesce(json_extract(old.payload, '$.error'), '') || ' ' ||
+      coalesce(old.payload, '')
+    )
+  );
+END;
+
+INSERT INTO ledger_events_fts(ledger_events_fts) VALUES('rebuild');
+`,
+  },
+  {
+    version: 113,
+    name: 'durable_workflow_event_delivery',
+    sql: `
+-- Stable target-run identity for schedules and workflow event rules. NULL is
+-- intentionally allowed so existing/manual queue producers retain their
+-- historical semantics.
+ALTER TABLE workflow_run_queue ADD COLUMN run_id TEXT REFERENCES workflow_runs(id) ON DELETE CASCADE;
+ALTER TABLE workflow_run_queue ADD COLUMN idempotency_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_run_queue_idempotency
+  ON workflow_run_queue(workspace_id, idempotency_key);
+
+-- Durable event-rule delivery journal. A stable subscription+event identity
+-- deduplicates bus replay; leased claims recover after process death; the
+-- idempotency key above closes the enqueue-before-ack crash window.
+CREATE TABLE IF NOT EXISTS workflow_event_deliveries (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  subscription_id   TEXT NOT NULL REFERENCES workflow_event_subscriptions(id) ON DELETE CASCADE,
+  event_identity    TEXT NOT NULL,
+  event_type        TEXT NOT NULL,
+  event_payload     TEXT NOT NULL DEFAULT '{}',
+  event_emitted_at  TEXT NOT NULL,
+  correlation_id    TEXT,
+  source_run_id     TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  source_node_id    TEXT,
+  status            TEXT NOT NULL DEFAULT 'pending',
+  attempts          INTEGER NOT NULL DEFAULT 0,
+  available_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  lease_owner       TEXT,
+  lease_expires_at  TEXT,
+  target_queue_id   TEXT REFERENCES workflow_run_queue(id) ON DELETE SET NULL,
+  target_run_id     TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  last_error        TEXT,
+  delivered_at      TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_event_delivery_identity
+  ON workflow_event_deliveries(subscription_id, event_identity);
+CREATE INDEX IF NOT EXISTS idx_workflow_event_delivery_due
+  ON workflow_event_deliveries(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_event_delivery_lease
+  ON workflow_event_deliveries(status, lease_expires_at);
+`,
+  },
 ];
 
 

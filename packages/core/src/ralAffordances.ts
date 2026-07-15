@@ -81,22 +81,27 @@ export function configuredAffordances(
   adapterType: string | null | undefined,
   config?: Record<string, unknown> | null,
 ): Partial<Record<AgentAffordance, boolean>> {
+  const nativeMcp = Array.isArray(config?.mcpServers) && config.mcpServers.length > 0;
   switch (adapterType) {
     case 'openclaw':
       return { browser: true, computerUse: true, terminal: true };
     case 'codex':
       // loading the Codex browser config (CodexAdapterConfig.browser).
       return config?.browser === true
-        ? { fileSystem: true, terminal: true, browser: true, computerUse: true }
-        : { fileSystem: true, terminal: true };
+        ? { fileSystem: true, terminal: true, browser: true, computerUse: true, ...(nativeMcp ? { nativeMcp: true } : {}) }
+        : { fileSystem: true, terminal: true, ...(nativeMcp ? { nativeMcp: true } : {}) };
     case 'claude_code':
-      return { fileSystem: true, terminal: true, nativeMcp: true };
+      return { fileSystem: true, terminal: true, ...(nativeMcp ? { nativeMcp: true } : {}) };
     case 'cursor':
       return { codebaseIndex: true, fileSystem: true, terminal: true };
     case 'hermes_agent':
-      return { fileSystem: true, terminal: true };
+      return {
+        fileSystem: true,
+        terminal: true,
+        ...(config?.chatTransport !== 'cli' && nativeMcp ? { nativeMcp: true } : {}),
+      };
     case 'antigravity':
-      return { fileSystem: true, terminal: true, nativeMcp: true };
+      return { fileSystem: true, terminal: true };
     default:
       return {};
   }
@@ -110,7 +115,10 @@ export function configuredAffordances(
  * configured set.
  */
 export function potentialAffordances(adapterType: string | null | undefined): Partial<Record<AgentAffordance, boolean>> {
-  if (adapterType === 'codex') return { fileSystem: true, terminal: true, browser: true, computerUse: true };
+  if (adapterType === 'codex') return { fileSystem: true, terminal: true, browser: true, computerUse: true, nativeMcp: true };
+  if (adapterType === 'claude_code' || adapterType === 'hermes_agent') {
+    return { fileSystem: true, terminal: true, nativeMcp: true };
+  }
   return configuredAffordances(adapterType, null);
 }
 

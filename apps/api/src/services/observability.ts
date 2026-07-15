@@ -15,6 +15,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { BusMessage, EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
+import type { ColdArchiveStore } from './storage/coldArchiveStore.js';
 
 type ObservabilityKind =
   | 'run'
@@ -97,6 +98,7 @@ export class ObservabilityService {
     private readonly db: AgentisSqliteDb,
     private readonly bus: EventBus,
     private readonly logger?: Logger,
+    private readonly archive?: ColdArchiveStore,
   ) {}
 
   startLegacyBridge(): void {
@@ -200,7 +202,7 @@ export class ObservabilityService {
       default:
         break;
     }
-    return this.db
+    const hot = this.db
       .select()
       .from(schema.observabilityEvents)
       .where(and(...conditions))
@@ -208,6 +210,13 @@ export class ObservabilityService {
       .limit(limit)
       .all()
       .map(toEvent);
+    const archived = (this.archive?.listObservabilityEvents(args.workspaceId) ?? [])
+      .filter((row) => Number(row.sequenceNumber ?? 0) > after)
+      .map((row) => toEvent(row as typeof schema.observabilityEvents.$inferSelect))
+      .filter((event) => this.matchesScope(event, args));
+    const merged = new Map<string, ObservabilityEvent>();
+    for (const event of [...archived, ...hot]) merged.set(event.id, event);
+    return [...merged.values()].sort((a, b) => a.sequenceNumber - b.sequenceNumber).slice(0, limit);
   }
 
   matchesScope(event: ObservabilityEvent, args: { workspaceId: string; scopeType?: string; scopeId?: string | null }): boolean {

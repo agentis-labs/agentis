@@ -535,9 +535,15 @@ export const workflowRunQueue = sqliteTable('workflow_run_queue', {
   reason: text('reason').notNull(),
   parentRunId: text('parent_run_id'),
   chainDepth: integer('chain_depth').notNull().default(0),
+  /** Stable identity of the already-created workflow run carried by this queue row. */
+  runId: text('run_id').references(() => workflowRuns.id, { onDelete: 'cascade' }),
+  /** Caller-supplied durable enqueue identity. NULL keeps legacy/manual enqueues unrestricted. */
+  idempotencyKey: text('idempotency_key'),
   status: text('status').notNull().default('pending'),
   ...baseTimestamps(),
-});
+}, (table) => ({
+  idempotencyUnique: uniqueIndex('idx_workflow_run_queue_idempotency').on(table.workspaceId, table.idempotencyKey),
+}));
 
 export const nodeExecutionCache = sqliteTable(
   'node_execution_cache',
@@ -581,6 +587,47 @@ export const workflowEventSubscriptions = sqliteTable('workflow_event_subscripti
   enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   ...baseTimestamps(),
 });
+
+/**
+ * Durable inbox/outbox bridge for workflow-to-workflow event rules.
+ *
+ * An event is first journaled here with a stable identity, then claimed with a
+ * lease and idempotently converted into a workflow_run_queue row. This makes a
+ * bus replay, concurrent consumer, or process crash at-least-once at the
+ * delivery layer while keeping target-run creation exactly-once.
+ */
+export const workflowEventDeliveries = sqliteTable('workflow_event_deliveries', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  subscriptionId: text('subscription_id')
+    .notNull()
+    .references(() => workflowEventSubscriptions.id, { onDelete: 'cascade' }),
+  eventIdentity: text('event_identity').notNull(),
+  eventType: text('event_type').notNull(),
+  eventPayload: text('event_payload', { mode: 'json' }).notNull().default(sql`'{}'`),
+  eventEmittedAt: text('event_emitted_at').notNull(),
+  correlationId: text('correlation_id'),
+  sourceRunId: text('source_run_id')
+    .notNull()
+    .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+  sourceNodeId: text('source_node_id'),
+  status: text('status').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  availableAt: text('available_at').notNull().default(isoNow() as unknown as string),
+  leaseOwner: text('lease_owner'),
+  leaseExpiresAt: text('lease_expires_at'),
+  targetQueueId: text('target_queue_id').references(() => workflowRunQueue.id, { onDelete: 'set null' }),
+  targetRunId: text('target_run_id').references(() => workflowRuns.id, { onDelete: 'set null' }),
+  lastError: text('last_error'),
+  deliveredAt: text('delivered_at'),
+  ...baseTimestamps(),
+}, (table) => ({
+  eventUnique: uniqueIndex('idx_workflow_event_delivery_identity').on(table.subscriptionId, table.eventIdentity),
+  due: index('idx_workflow_event_delivery_due').on(table.status, table.availableAt),
+  lease: index('idx_workflow_event_delivery_lease').on(table.status, table.leaseExpiresAt),
+}));
 
 export const scheduleRuns = sqliteTable('schedule_runs', {
   id: text('id').primaryKey(),
@@ -1110,6 +1157,35 @@ export const channelDeliveries = sqliteTable('channel_deliveries', {
   receivedAt: text('received_at').notNull().default(isoNow() as unknown as string),
   conversationMessageId: text('conversation_message_id'),
 });
+
+/**
+ * Durable outbound idempotency journal. A workflow reserves its stable
+ * run+node key before touching a provider and stores the provider receipt before
+ * completing the node. A crash therefore reuses accepted proof or blocks an
+ * uncertain in-flight attempt instead of sending twice. Migration v111.
+ */
+export const channelOutboundDeliveries = sqliteTable(
+  'channel_outbound_deliveries',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    connectionId: text('connection_id').notNull().references(() => channelConnections.id, { onDelete: 'cascade' }),
+    idempotencyKey: text('idempotency_key').notNull(),
+    chatId: text('chat_id').notNull(),
+    /** SHA-256 only; message content is never duplicated into the journal. */
+    bodyHash: text('body_hash').notNull(),
+    /** sending | accepted | failed | uncertain */
+    status: text('status').notNull().default('sending'),
+    providerMessageId: text('provider_message_id'),
+    receipt: text('receipt_json', { mode: 'json' }),
+    error: text('error'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    uniqueWorkspaceKey: uniqueIndex('idx_channel_outbound_workspace_key').on(table.workspaceId, table.idempotencyKey),
+    byConnectionStatus: index('idx_channel_outbound_connection_status').on(table.connectionId, table.status),
+  }),
+);
 
 /**
  * Durable channel-turn queue (Living Apps Phase 5 / G2, migration v100).

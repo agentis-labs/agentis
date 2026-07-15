@@ -14,7 +14,7 @@
 import { join } from 'node:path';
 import { detectMode } from '@agentis/db';
 import { openSqlite, schema as sqliteSchema } from '@agentis/db/sqlite';
-import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { AgentisSqliteDb, AgentisSqliteRaw } from '@agentis/db/sqlite';
 import type { AgentisEnv } from './env.js';
 import { AgentisError } from '@agentis/core';
 
@@ -22,6 +22,8 @@ export interface DbHandle {
   mode: 'embedded' | 'standard';
   /** SQLite handle for embedded mode. Postgres adds a sibling field later. */
   sqlite?: AgentisSqliteDb;
+  /** Raw embedded handle for bounded maintenance operations and diagnostics. */
+  sqliteRaw?: AgentisSqliteRaw;
   schema: typeof sqliteSchema;
   close: () => Promise<void>;
 }
@@ -38,6 +40,7 @@ export async function openDatabase(env: AgentisEnv): Promise<DbHandle> {
     return {
       mode,
       sqlite: db,
+      sqliteRaw: sqlite,
       schema: sqliteSchema,
       close: async () => {
         sqlite.close();

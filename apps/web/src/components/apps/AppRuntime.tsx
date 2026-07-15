@@ -249,19 +249,35 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children, hideShel
   // Run feedback: a workflow action that starts a run announces itself (see
   // useActionInvoker) — surface a live chip that deep-links into the ops drawer.
   const [runToast, setRunToast] = useState<{ runId: string; action: string } | null>(null);
+  // Action-failure chip: a button whose action throws used to look "dead". The
+  // invoker now announces the failure (see useActionInvoker) so we surface why.
+  const [actionError, setActionError] = useState<{ action: string; message: string } | null>(null);
   useEffect(() => {
     const onRunStarted = (e: Event) => {
       const detail = (e as CustomEvent).detail as { runId?: string; action?: string } | undefined;
       if (detail?.runId) setRunToast({ runId: detail.runId, action: detail.action ?? 'workflow' });
     };
+    const onActionError = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { action?: string; message?: string } | undefined;
+      setActionError({ action: detail?.action ?? 'action', message: detail?.message ?? 'The action failed.' });
+    };
     window.addEventListener('agentis:run-started', onRunStarted);
-    return () => window.removeEventListener('agentis:run-started', onRunStarted);
+    window.addEventListener('agentis:app-action-error', onActionError);
+    return () => {
+      window.removeEventListener('agentis:run-started', onRunStarted);
+      window.removeEventListener('agentis:app-action-error', onActionError);
+    };
   }, []);
   useEffect(() => {
     if (!runToast) return;
     const t = setTimeout(() => setRunToast(null), 7000);
     return () => clearTimeout(t);
   }, [runToast]);
+  useEffect(() => {
+    if (!actionError) return;
+    const t = setTimeout(() => setActionError(null), 9000);
+    return () => clearTimeout(t);
+  }, [actionError]);
 
   const rootStyle = active.view?.style as { shell?: ShellMode; appearance?: 'auto' | 'light' | 'dark' } | undefined;
   const appearance = rootStyle?.appearance && rootStyle.appearance !== 'auto' ? rootStyle.appearance : undefined;
@@ -438,6 +454,20 @@ function AppShell({ app, appId, surfaces, active, onNavigate, children, hideShel
             View run
           </button>
           <button type="button" className="s-icon-btn !h-7 !w-7" onClick={() => setRunToast(null)} aria-label="Dismiss">
+            <X size={12} />
+          </button>
+        </div>
+      ) : null}
+
+      {/* Action-failure chip — a dead-looking button now says why it failed */}
+      {actionError ? (
+        <div className="s-panel absolute bottom-5 right-5 z-40 flex items-start gap-3 border-danger/30 px-4 py-3">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0 text-danger" aria-hidden />
+          <div className="min-w-0 max-w-[280px]">
+            <div className="text-[13px] font-semibold text-text-primary">{surfaceLabel(actionError.action)} failed</div>
+            <div className="break-words text-[11.5px] text-text-muted">{actionError.message}</div>
+          </div>
+          <button type="button" className="s-icon-btn !h-7 !w-7" onClick={() => setActionError(null)} aria-label="Dismiss">
             <X size={12} />
           </button>
         </div>

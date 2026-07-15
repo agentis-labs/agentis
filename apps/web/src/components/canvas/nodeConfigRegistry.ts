@@ -60,6 +60,7 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   transform: { label: 'Transform', reason: 'Reshapes data deterministically without spending LLM tokens.' },
   filter: { label: 'Filter', reason: 'Stops data that does not satisfy a deterministic condition.' },
   integration: { label: 'Integration', reason: 'Calls a connector operation with credentials only when that connector requires them.' },
+  mcp: { label: 'MCP tool', reason: 'Calls an allowlisted tool from a mounted MCP server with structured arguments.' },
   channel: { label: 'Channel', reason: 'Delivers on a connected channel (WhatsApp/Telegram/Discord/Slack) — resolves the workspace default for the kind, an explicit connection, or lets an agent-owned connection stay scoped to its owner.' },
   http_request: { label: 'HTTP request', reason: 'Calls a raw HTTP endpoint with templated inputs and retry controls.' },
   workflow_store: { label: 'Workflow store', reason: 'Reads or writes persistent state scoped to this workflow.' },

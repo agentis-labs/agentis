@@ -298,8 +298,8 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.workflow.patch',
     description:
-      'Replace a workflow graph ATOMICALLY: workflowId + the COMPLETE graph for an at-rest workflow, or runId + patch for a live run after diagnosing a concrete issue. ' +
-      'This is NOT a partial editor — for a scoped add/update/remove of nodes or edges, use agentis.build_workflow with workflowId + patchDraft instead.',
+      'DEPRECATED compatibility alias: workflowId + complete graph replaces a stored graph; runId + patch evolves a live run. ' +
+      'Use agentis.workflow.graph.patch for field-level stored edits, agentis.workflow.graph.replace for explicit replacement, or agentis.run.graph.evolve for live execution.',
     parameters: {
       type: 'object',
       properties: {
@@ -307,6 +307,75 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         graph: { type: 'object', description: 'Complete replacement workflow graph.' },
         runId: { type: 'string', description: 'Run ID for live graph patching.' },
         patch: { type: 'object', description: 'WorkflowGraphPatch payload for a live run.' },
+        baseHash: { type: 'string', description: 'Optional graph hash from the last inspection.' },
+      },
+    },
+  },
+  {
+    name: 'agentis.workflow.graph.replace',
+    description: 'Atomically replace a stored workflow with a complete graph. Supports optimistic concurrency and dry-run diff preview. Use graph.patch for scoped edits.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string' }, graph: { type: 'object' }, baseHash: { type: 'string' },
+        baseUpdatedAt: { type: 'string' }, dryRun: { type: 'boolean' }, confirmIntentChange: { type: 'boolean' },
+      },
+      required: ['workflowId', 'graph'],
+    },
+  },
+  {
+    name: 'agentis.workflow.graph.patch',
+    description:
+      'Atomically patch selected fields or structure of a stored workflow. Operations are add_node, patch_node, remove_node, add_edge, patch_edge, remove_edge, and patch_viewport. ' +
+      'Object patches merge recursively and preserve omitted fields. Supports optimistic concurrency and dry-run diff preview.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string' }, operations: { type: 'array', items: { type: 'object' } },
+        baseHash: { type: 'string' }, baseUpdatedAt: { type: 'string' }, dryRun: { type: 'boolean' }, confirmIntentChange: { type: 'boolean' },
+      },
+      required: ['workflowId', 'operations'],
+    },
+  },
+  {
+    name: 'agentis.workflow.graph.revisions',
+    description: 'List retained durable graph revisions for a stored workflow. Returns revision hashes and metadata without returning the stored graph snapshots.',
+    parameters: {
+      type: 'object', properties: { workflowId: { type: 'string' } }, required: ['workflowId'],
+    },
+  },
+  {
+    name: 'agentis.workflow.graph.rollback',
+    description: 'Preview or commit an atomic rollback to a retained workflow graph revision. Requires the current baseHash; commit requires confirm:true and records the replaced graph so the rollback is reversible.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string' }, targetHash: { type: 'string' }, baseHash: { type: 'string' },
+        dryRun: { type: 'boolean' }, confirm: { type: 'boolean' },
+      },
+      required: ['workflowId', 'targetHash', 'baseHash'],
+    },
+  },
+  {
+    name: 'agentis.run.graph.evolve',
+    description: 'Evolve a live run graph through the contract transaction. This does not edit the stored workflow.',
+    parameters: {
+      type: 'object', properties: { runId: { type: 'string' }, patch: { type: 'object' } }, required: ['runId', 'patch'],
+    },
+  },
+  {
+    name: 'agentis.workflow.rule',
+    description:
+      'Create, inspect, update, or delete a persisted executable workflow event rule. Use run.accomplished for verified business progression; run.completed is execution completion only. Supports source/target workflow ids, filters, input mapping, coalescing, and App ownership validation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'upsert', 'delete'] },
+        id: { type: 'string' }, appId: { type: 'string' }, sourceWorkflowId: { type: 'string' }, targetWorkflowId: { type: 'string' },
+        eventType: { type: 'string', enum: ['run.completed', 'run.accomplished', 'run.failed', 'node.completed', 'node.failed'] },
+        sourceNodeId: { type: 'string' }, filterExpression: { type: 'string' }, inputMapping: { type: 'object' },
+        coalescePolicy: { type: 'string', enum: ['always_enqueue', 'coalesce_pending', 'latest_only'] },
+        catchupPolicy: { type: 'string' }, enabled: { type: 'boolean' },
       },
     },
   },
@@ -662,7 +731,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   {
     name: 'agentis.brain.search',
     description:
-      'Search YOUR Brain by meaning, mid-task — durable memories, workspace knowledge, and (on request) your Skill library — instead of guessing when you need a fact, rule, or procedure you were not handed up front. Returns ranked atoms ({ id, kind, title, snippet, score }). Skills/examples are EXCLUDED by default; pass kind:"skill" (or "example"/"all") to include them, then read a skill\'s full procedure with agentis.skill.load. Prefer short keyword-first queries. Example: {"query":"deploy migrations safely","kind":"skill"}.',
+      'Search YOUR Brain by meaning, mid-task — durable memories, workspace knowledge, and (on request) your Skill library — instead of guessing when you need a fact, rule, or procedure you were not handed up front. Especially useful after a PRE-TASK MEMORY note says nothing matched: try again with different or broader terms before concluding it doesn\'t exist. Returns ranked atoms ({ id, kind, title, snippet, score }). Skills/examples are EXCLUDED by default; pass kind:"skill" (or "example"/"all") to include them, then read a skill\'s full procedure with agentis.skill.load. Prefer short keyword-first queries. Example: {"query":"deploy migrations safely","kind":"skill"}.',
     examples: [
       { description: 'Recall a durable rule or fact mid-task.', input: { query: 'customer refund policy over $500' } },
       { description: 'Find a relevant procedure in the skill library.', input: { query: 'triage stripe webhook failures', kind: 'skill' } },
@@ -887,8 +956,8 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     description:
       'Validate, enrich, save, and stream an agent-authored workflow graph or patch. ' +
       'For a new workflow, inspect the request and relevant Agentis state, design a complete WorkflowGraph, and pass it as graphDraft. ' +
-      'For an edit, inspect the current workflow and pass workflowId plus patchDraft. A configured fast synthesis runtime may accept description-only calls, but runtime-native agents should author the draft themselves. ' +
-      'Every build yields an Agentic App (Agentis ships Apps, not bare workflows): the tool returns workflowId AND appId plus runId, and emits live canvas build events. Use the returned appId with the data_*/ui_* tools to add the App a UI and data.',
+      'For a precise field-level edit use agentis.workflow.graph.patch; use workflowId plus patchDraft here when the edit should also pass through builder repair and enrichment. A configured fast synthesis runtime may accept description-only calls, but runtime-native agents should author the draft themselves. ' +
+      'Every build belongs to an Agentic App: pass appId to add a new workflow to an existing App, or omit it for an App-of-one. The tool returns workflowId AND appId plus runId and emits live canvas build events.',
     examples: [
       {
         description: 'Build the minimal Hello World workflow from an agent-authored graph draft.',
@@ -943,13 +1012,17 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
           type: 'string',
           description: 'Existing workflow ID to update. Omit to create a new one.',
         },
+        appId: {
+          type: 'string',
+          description: 'Existing App that should own a newly created workflow. Omit for an App-of-one.',
+        },
         graphDraft: {
           type: 'object',
           description: 'Complete agent-authored WorkflowGraph for a new workflow or intentional full replacement.',
         },
         patchDraft: {
           type: 'object',
-          description: 'Agent-authored edit patch: addNodes, updateNodes, removeNodeIds, addEdges, and removeEdgeIds.',
+          description: 'Legacy edit patch: addNodes, updateNodes, removeNodeIds, addEdges, and removeEdgeIds. updateNodes may contain only id plus changed fields; omitted fields are preserved.',
         },
       },
       required: ['description'],
@@ -1070,6 +1143,25 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   // ── Agentic Apps (AGENTIC-APPS-10X §4/§5) — chat-driven full-stack build. ──
   // Names match registry ids in agentisToolHandlers/appData.ts. data_*/ui_*
   // resolve the App from `appId` or the open App surface.
+  {
+    name: 'agentis.app.doctor',
+    description:
+      'Read-only cross-layer conformance inspection for an App. Verifies executable dependencies, triggers, event subscriptions, outcome contracts, connection bindings, conversation state references, and whether orchestration shown in the UI is backed by persisted rules. Run before claiming an App works.',
+    parameters: { type: 'object', properties: { appId: { type: 'string', description: 'App id; omit when an App is open.' } } },
+  },
+  {
+    name: 'agentis.app.doctor.repair',
+    description: 'Preview or apply only deterministic, intent-preserving Doctor repairs. Findings requiring business, workflow, credential, channel, or UI choices remain review_required. Omit confirm:true for preview.',
+    parameters: {
+      type: 'object',
+      properties: { appId: { type: 'string' }, findingIds: { type: 'array', items: { type: 'string' } }, confirm: { type: 'boolean' } },
+    },
+  },
+  {
+    name: 'agentis.apps.conformance.migrate',
+    description: 'Audit existing workspace Apps against current orchestration contracts and preview/apply deterministic safe migrations. Never invents missing business rules. Omit confirm:true for preview.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, confirm: { type: 'boolean' } } },
+  },
   {
     name: 'agentis.app.create',
     description:

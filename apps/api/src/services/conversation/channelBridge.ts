@@ -15,7 +15,7 @@
  * nor bus envelopes ever expose it.
  */
 
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -26,6 +26,7 @@ import type { EventBus } from '../../event-bus.js';
 import type { Logger } from '../../logger.js';
 import type {
   ChannelAdapter,
+  ChannelDeliveryReceipt,
   ChannelHealth,
   ChannelHealthCheck,
   ChannelHealthCheckName,
@@ -134,7 +135,7 @@ export interface PersistentChannelTransport {
   onCreated?(conn: PersistentChannelRef): void;
   /** Current live-session state, if this transport owns the connection. */
   status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
-  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[]): Promise<void>;
+  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[]): Promise<ChannelDeliveryReceipt>;
   /** Show/clear the typing indicator (best-effort). */
   setTyping?(connectionId: string, chatId: string, on: boolean): Promise<void>;
   /** Tear down the live session when a connection is deleted. */
@@ -222,7 +223,7 @@ export class ChannelBridge {
    * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
    * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
    */
-  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[] }): Promise<void> {
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string }): Promise<ChannelDeliveryReceipt> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
@@ -230,16 +231,87 @@ export class ChannelBridge {
       .get();
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
     const attachments = await this.#resolveAttachments(row.workspaceId, args.attachments);
+    const idempotencyKey = args.idempotencyKey?.trim() || null;
+    const bodyHash = createHash('sha256')
+      .update(args.chatId)
+      .update('\0')
+      .update(args.body)
+      .update('\0')
+      .update(JSON.stringify(attachments.map((attachment) => ({
+        kind: attachment.kind,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        digest: createHash('sha256').update(attachment.data).digest('hex'),
+      }))))
+      .digest('hex');
+    let journalId: string | null = null;
+    if (idempotencyKey) {
+      const existing = this.deps.db
+        .select()
+        .from(schema.channelOutboundDeliveries)
+        .where(and(
+          eq(schema.channelOutboundDeliveries.workspaceId, row.workspaceId),
+          eq(schema.channelOutboundDeliveries.idempotencyKey, idempotencyKey),
+        ))
+        .get();
+      if (existing) {
+        if (existing.connectionId !== row.id || existing.chatId !== args.chatId || existing.bodyHash !== bodyHash) {
+          throw new AgentisError('VALIDATION_FAILED', 'channel idempotency key was reused with a different connection, recipient, or message');
+        }
+        const stored = existing.receipt as ChannelDeliveryReceipt | null;
+        if (existing.status === 'accepted' && stored?.providerMessageId) {
+          return { ...stored, deduplicated: true, idempotencyKey };
+        }
+        throw new AgentisError(
+          'CHANNEL_SEND_FAILED',
+          `channel delivery ${idempotencyKey} already has status ${existing.status}; Agentis will not resend an uncertain/failed attempt automatically`,
+        );
+      }
+      journalId = randomUUID();
+      this.deps.db.insert(schema.channelOutboundDeliveries).values({
+        id: journalId,
+        workspaceId: row.workspaceId,
+        connectionId: row.id,
+        idempotencyKey,
+        chatId: args.chatId,
+        bodyHash,
+        status: 'sending',
+      }).run();
+    }
     try {
-      await this.#sendRow(row, args.chatId, args.body, attachments);
+      const receipt = await this.#sendRow(row, args.chatId, args.body, attachments);
+      if (!receipt.providerMessageId?.trim()) {
+        throw new AgentisError('CHANNEL_SEND_FAILED', `${row.kind} returned no provider message id; delivery is unverified`);
+      }
       this.#markActive(row.id);
+      const durableReceipt = idempotencyKey ? { ...receipt, idempotencyKey } : receipt;
+      if (journalId) {
+        this.deps.db.update(schema.channelOutboundDeliveries).set({
+          status: 'accepted',
+          providerMessageId: receipt.providerMessageId,
+          receipt: durableReceipt,
+          error: null,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+      }
       this.deps.bus.publish(
         REALTIME_ROOMS.workspace(row.workspaceId),
         REALTIME_EVENTS.CHANNEL_MESSAGE_SENT,
-        { connectionId: row.id, kind: row.kind, agentId: row.agentId },
+        { connectionId: row.id, kind: row.kind, agentId: row.agentId, providerMessageId: receipt.providerMessageId, status: receipt.status },
       );
+      return durableReceipt;
     } catch (err) {
       const msg = (err as Error).message ?? 'send failed';
+      if (journalId) {
+        // The process reached the provider boundary but lacks durable proof of
+        // acceptance. Keep the attempt non-retryable under this key: a blind
+        // resend is worse than an explicit uncertain outcome.
+        this.deps.db.update(schema.channelOutboundDeliveries).set({
+          status: 'uncertain',
+          error: msg,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+      }
       this.#markError(row.id, msg);
       throw err;
     }
@@ -823,8 +895,13 @@ export class ChannelBridge {
       const normalized = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
       const selfCheck = await this.#telegramSelfTargetCheck(row, normalized);
       if (selfCheck) return selfCheck;
-      await this.#sendRow(row, normalized, opts.body);
-      return this.#check('outbound', true, 'outbound_send_ok', `Test message delivered to ${normalized}.`);
+      const receipt = await this.#sendRow(row, normalized, opts.body);
+      return this.#check(
+        'outbound',
+        true,
+        'outbound_send_ok',
+        `Provider accepted the test message for ${normalized} (id ${receipt.providerMessageId}).`,
+      );
     } catch (err) {
       return this.#check(
         'outbound',
@@ -896,7 +973,7 @@ export class ChannelBridge {
       : this.#check('runtime', false, 'agent_missing', 'The connected agent no longer exists.', 'Reconnect the channel to an existing agent.');
   }
 
-  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<void> {
+  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<ChannelDeliveryReceipt> {
     const settings = this.#settings(row);
     const normalizedChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
     const selfCheck = await this.#telegramSelfTargetCheck(row, normalizedChatId);
@@ -904,16 +981,14 @@ export class ChannelBridge {
       throw new AgentisError('CHANNEL_SEND_FAILED', `${selfCheck.message} ${selfCheck.remediation ?? ''}`.trim());
     }
     if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
-      await this.#persistent.send(row.id, normalizedChatId, body, attachments.length ? attachments : undefined);
-      return;
+      return this.#persistent.send(row.id, normalizedChatId, body, attachments.length ? attachments : undefined);
     }
     if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
-      await this.#sendWhatsAppCloud(row, settings, normalizedChatId, body, attachments);
-      return;
+      return this.#sendWhatsAppCloud(row, settings, normalizedChatId, body, attachments);
     }
     const adapter = this.#requireAdapter(row.kind as ChannelKind);
     const token = this.deps.vault.decrypt(row.tokenEncrypted);
-    await adapter.send({
+    return adapter.send({
       token,
       chatId: normalizedChatId,
       body,
@@ -944,7 +1019,7 @@ export class ChannelBridge {
     return out;
   }
 
-  async #sendWhatsAppCloud(row: ChannelConnectionRow, settings: ChannelSettings, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<void> {
+  async #sendWhatsAppCloud(row: ChannelConnectionRow, settings: ChannelSettings, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<ChannelDeliveryReceipt> {
     const phoneNumberId = settings.phoneNumberId;
     if (!phoneNumberId) {
       throw new AgentisError('VALIDATION_FAILED', 'WhatsApp Cloud phone number ID is missing');
@@ -952,10 +1027,12 @@ export class ChannelBridge {
     const token = this.deps.vault.decrypt(row.tokenEncrypted);
     if (attachments.length > 0) {
       // First attachment carries the body as its caption; the rest go captionless.
+      const receipts: ChannelDeliveryReceipt[] = [];
       for (let i = 0; i < attachments.length; i += 1) {
-        await this.#sendWhatsAppCloudMedia(token, phoneNumberId, chatId, attachments[i]!, i === 0 ? body : '');
+        receipts.push(await this.#sendWhatsAppCloudMedia(token, phoneNumberId, chatId, attachments[i]!, i === 0 ? body : ''));
       }
-      return;
+      const first = receipts[0]!;
+      return { ...first, providerMessageIds: receipts.map((receipt) => receipt.providerMessageId) };
     }
     const res = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/messages`, {
       method: 'POST',
@@ -977,10 +1054,16 @@ export class ChannelBridge {
         `whatsapp cloud send failed (${res.status}): ${text.slice(0, 240) || res.statusText}`,
       );
     }
+    const json = await res.json().catch(() => ({})) as { messages?: Array<{ id?: string }> };
+    const providerMessageId = json.messages?.[0]?.id?.trim() ?? '';
+    if (!providerMessageId) {
+      throw new AgentisError('CHANNEL_SEND_FAILED', 'whatsapp cloud accepted no provider message id; delivery is unverified');
+    }
+    return { provider: 'whatsapp', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
   }
 
   /** Upload media to the WhatsApp Cloud media endpoint, then send a message referencing it. */
-  async #sendWhatsAppCloudMedia(token: string, phoneNumberId: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<void> {
+  async #sendWhatsAppCloudMedia(token: string, phoneNumberId: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<ChannelDeliveryReceipt> {
     const base = `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}`;
     const uploadForm = new FormData();
     uploadForm.set('messaging_product', 'whatsapp');
@@ -1009,6 +1092,12 @@ export class ChannelBridge {
       const text = await res.text().catch(() => '');
       throw new AgentisError('CHANNEL_SEND_FAILED', `whatsapp cloud media send failed (${res.status}): ${text.slice(0, 240) || res.statusText}`);
     }
+    const json = await res.json().catch(() => ({})) as { messages?: Array<{ id?: string }> };
+    const providerMessageId = json.messages?.[0]?.id?.trim() ?? '';
+    if (!providerMessageId) {
+      throw new AgentisError('CHANNEL_SEND_FAILED', 'whatsapp cloud accepted no provider message id for media; delivery is unverified');
+    }
+    return { provider: 'whatsapp', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
   }
 
   #saveHealth(row: ChannelConnectionRow, checks: ChannelHealthCheck[]): ChannelHealth {

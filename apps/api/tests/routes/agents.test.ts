@@ -229,12 +229,26 @@ describe('GET /v1/agents/:id', () => {
           toolCalling: boolean;
           toolForwarding: string;
         };
+        runtimeCapabilityManifest?: {
+          schemaVersion: number;
+          adapterType: string;
+          capabilities: Array<{ id: string; available: boolean; source: string }>;
+        };
       };
     };
     expect(body.agent.adapterCapabilities).toMatchObject({
       interactiveChat: true,
       toolCalling: true,
       toolForwarding: 'http_contract',
+    });
+    expect(body.agent.runtimeCapabilityManifest).toMatchObject({
+      schemaVersion: 1,
+      adapterType: 'http',
+      capabilities: expect.arrayContaining([
+        expect.objectContaining({ id: 'interaction.chat', available: true }),
+        expect.objectContaining({ id: 'interaction.tool-calling', available: true }),
+        expect.objectContaining({ id: 'execution.browser', available: false }),
+      ]),
     });
   });
 

@@ -97,8 +97,74 @@ normalization that infers missing fields.
 
 - HTTP: `/v1/workflows`, `/v1/runs` (status, stream, activity, ledger, scratchpad,
   blackboard, replay), `/v1/triggers`, `/v1/listeners`, `/v1/scheduler`, `/v1/ephemeral`.
-- Tools: `agentis.build_workflow`, `agentis.workflow.{create,patch,validate,dry_run,scope,test,harden,restore_blueprint,bless,deliver}`,
+- Tools: `agentis.build_workflow`, `agentis.workflow.{create,validate,dry_run,scope,test,harden,restore_blueprint,bless,deliver}`,
   `agentis.run.{await,status,diagnose,cancel,replay,inspect}`, `agentis.plan_workflow`.
+
+## Completion, accomplishment, and executable App rules
+
+`run.completed` is an execution lifecycle event. It says the graph stopped cleanly; it does
+not prove that the requested result exists. A scoped workflow emits `run.accomplished` only
+after its persisted definition-of-done passes. Success-gated App dependencies, event rules,
+conversation continuations, and operator status surfaces all use the same outcome interpreter
+(`services/workflow/runOutcome.ts`).
+
+Executable cross-workflow rules are persisted in `workflow_event_subscriptions` and authored
+with `agentis.workflow.rule`. App-level `dependsOn` remains the simple dependency primitive;
+event subscriptions add typed events, filters, input mapping, and coalescing. `agentis.app.doctor`
+inspects the whole App across bindings, triggers, subscriptions, outcome contracts, state
+machines, connections, and UI claims. The App interface exposes the same rules as first-class,
+editable automation: operators can create, edit, enable, disable, and delete rules, configure
+filters/mappings/coalescing/catch-up, and see Doctor blockers without inventing a second “run
+pipeline” action.
+
+Rule delivery is a durable state machine, not an in-memory event callback. Every source event is
+journaled in `workflow_event_deliveries` with a stable event/delivery identity, payload snapshot,
+status, retry count, lease, target queue/run evidence, and terminal error. CAS claims, expiring
+leases, bounded backoff, queue idempotency, and restart reconciliation close the duplicate-run and
+enqueue-before-ack crash windows. New rules only perform bounded catch-up for eligible runs created
+after the subscription. Operators can inspect and retry failed deliveries through
+`/v1/scheduler/deliveries`; delivered/skipped transitions are immutable and cannot be replayed into
+a duplicate business action.
+
+Doctor remediation is deliberately bounded. `agentis.app.doctor.repair` and
+`POST /v1/apps/:id/doctor/repair` preview by default and can apply only deterministic safe repairs
+(for example invalid dependencies or a stale source-node filter). Ambiguous findings remain
+`review_required`. `agentis.apps.conformance.migrate` applies the same policy workspace-wide; it
+does not make app-specific guesses.
+
+## Safe graph mutation
+
+Stored replacement, stored editing, and live-run evolution are separate contracts:
+
+- `agentis.workflow.graph.replace` — complete at-rest replacement;
+- `agentis.workflow.graph.patch` — recursive field/structural operations that preserve omitted
+  fields;
+- `agentis.run.graph.evolve` — live execution evolution only.
+
+Stored mutations support graph hashes / `updatedAt` optimistic concurrency, dry-run diffs,
+atomic validation, intent and approval guards, and the green ratchet. The old
+`agentis.workflow.patch` remains a deprecated compatibility alias.
+
+`workflow.patch` is therefore still a whole-graph replacement contract for compatibility. Agents
+must not “retry it with more complete fields” to simulate a scoped edit. They use
+`agentis.workflow.graph.patch` for field/structural operations; omitted node fields are preserved.
+Every committed mutation records a bounded graph revision snapshot. Operators and agents can list
+revision metadata with `agentis.workflow.graph.revisions` and preview/commit a rollback with
+`agentis.workflow.graph.rollback`. Rollback requires the current `baseHash`, revalidates the graph,
+and records the pre-rollback graph so the rollback itself is reversible.
+
+## P0–P4 platform acceptance
+
+| Phase | Platform invariant | Acceptance evidence |
+|---|---|---|
+| P0 — truth | Lifecycle completion never impersonates business accomplishment; channel delivery requires provider evidence. | Shared outcome interpreter, accomplishment events, provider receipts, no-false-success regressions. |
+| P1 — durability | Rules, schedules, and queue transitions survive replay, concurrency, crashes, and restarts without duplicate target runs. | Delivery journal, CAS leases, stable idempotency keys, recovery and retry tests. |
+| P2 — mutation safety | Scoped edits preserve omitted graph fields and every committed graph can be inspected and rolled back safely. | Preview/confirm, base-hash concurrency, validation/approval guards, revisions and reversible rollback tests. |
+| P3 — app operability | Automation rules are persisted and editable in the product; Doctor distinguishes safe repair from human review. | Rule CRUD API/editor, guarded actions, Doctor repair/migration, truthful UI failure states. |
+| P4 — agent power | Runtime powers are native, versioned, configuration-sensitive contracts enforced before dispatch. | Built-in adapter manifests, reusable conformance suite, structured mismatch evidence, third-party compatibility path. |
+
+These are domain-neutral invariants. No phase contains Fashion-specific states, WhatsApp-specific
+conversation logic, or assumptions about a particular app archetype.
 
 ---
 

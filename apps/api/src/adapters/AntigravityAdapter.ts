@@ -57,6 +57,7 @@ import {
 } from './cliChatRuntime.js';
 import { runtimeProgressActivity } from './runtimeProgress.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 20_000;
@@ -124,12 +125,22 @@ export class AntigravityAdapter implements AgentAdapter {
       affordances: {
         fileSystem: true,
         terminal: true,
-        nativeMcp: true,
       },
       memory: {
         ingestible: true,
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat',
+        'interaction.tool-calling',
+        'execution.file-system',
+        'execution.terminal',
+        'execution.long-running',
+        'memory.inject',
+        'memory.ingest',
+      ], {
+        limits: { 'execution.long-running': { maxConcurrent: 1 } },
+      }),
     };
   }
 

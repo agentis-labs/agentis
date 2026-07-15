@@ -32,6 +32,9 @@ describe('buildStarterSurface (create interface default)', () => {
   it('themes a status collection as a pipeline board', () => {
     const { view } = buildStarterSurface([coll('leads', [{ key: 'name', type: 'string' }, { key: 'stage', type: 'string' }])]);
     expect(view).toMatchObject({ type: 'Stack', style: { theme: 'product' } });
-    expect(JSON.stringify(view)).toContain('"type":"DataBoard"');
+    const json = JSON.stringify(view);
+    expect(json).toContain('"type":"OrchestrationPanel"');
+    expect(json).toContain('"type":"PipelineFlow"');
+    expect(json).toContain('"type":"Kanban"');
   });
 });

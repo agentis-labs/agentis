@@ -26,12 +26,14 @@ import { registerTaskSpineTools } from './taskSpine.js';
 import { registerChannelTools } from './channel.js';
 import { registerConversationTools } from './conversation.js';
 import { registerAppPlanTools } from './appPlan.js';
+import { registerOrchestrationRuleTools } from './orchestrationRules.js';
 import { registerMediaTools } from './media.js';
 import { registerBrowserTools } from './browser.js';
 import { registerAssetTools } from './assets.js';
 import { registerMcpBridgeTools } from './mcp.js';
 import { registerIntegrationTools } from './integration.js';
 import { registerAppDataTools } from './appData.js';
+import { registerAppDoctorTools } from './appDoctor.js';
 import { registerBrainTools } from './brain.js';
 import { registerSpaceTools } from './spaceTools.js';
 
@@ -53,12 +55,14 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerChannelTools(registry, deps);
   registerConversationTools(registry, deps);
   registerAppPlanTools(registry, deps);
+  registerOrchestrationRuleTools(registry, deps);
   registerMediaTools(registry, deps);
   registerBrowserTools(registry, deps);
   registerAssetTools(registry, deps);
   registerMcpBridgeTools(registry, deps);
   registerIntegrationTools(registry, deps);
   registerAppDataTools(registry, deps);
+  registerAppDoctorTools(registry, deps);
   registerBrainTools(registry, deps);
   registerSpaceTools(registry, deps);
   // Registered last, but its SDK surface is resolved lazily at call time, so it

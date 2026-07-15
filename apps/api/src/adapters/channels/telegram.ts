@@ -15,7 +15,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -149,20 +149,22 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<void> {
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<ChannelDeliveryReceipt> {
     const attachments = args.attachments ?? [];
     if (attachments.length === 0) {
-      await this.#sendMessage(args.token, args.chatId, args.body);
-      return;
+      return this.#sendMessage(args.token, args.chatId, args.body);
     }
     // First attachment carries the body as its caption; the rest go captionless.
+    const receipts: ChannelDeliveryReceipt[] = [];
     for (let i = 0; i < attachments.length; i += 1) {
       const caption = i === 0 ? args.body : '';
-      await this.#sendMedia(args.token, args.chatId, attachments[i]!, caption);
+      receipts.push(await this.#sendMedia(args.token, args.chatId, attachments[i]!, caption));
     }
+    const first = receipts[0]!;
+    return { ...first, providerMessageIds: receipts.map((receipt) => receipt.providerMessageId) };
   }
 
-  async #sendMessage(token: string, chatId: string, body: string): Promise<void> {
+  async #sendMessage(token: string, chatId: string, body: string): Promise<ChannelDeliveryReceipt> {
     const url = `${TELEGRAM_API}/bot${encodeURIComponent(token)}/sendMessage`;
     const res = await this.fetchImpl(url, {
       method: 'POST',
@@ -170,9 +172,10 @@ export class TelegramChannelAdapter implements ChannelAdapter {
       body: JSON.stringify({ chat_id: chatId, text: body }),
     });
     if (!res.ok) await this.#throwSendError(res, chatId, 'sendMessage');
+    return this.#receipt(res, chatId, 'sendMessage');
   }
 
-  async #sendMedia(token: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<void> {
+  async #sendMedia(token: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<ChannelDeliveryReceipt> {
     const isPhoto = attachment.kind === 'image';
     const method = isPhoto ? 'sendPhoto' : 'sendDocument';
     const field = isPhoto ? 'photo' : 'document';
@@ -183,6 +186,16 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     const url = `${TELEGRAM_API}/bot${encodeURIComponent(token)}/${method}`;
     const res = await this.fetchImpl(url, { method: 'POST', body: form });
     if (!res.ok) await this.#throwSendError(res, chatId, method);
+    return this.#receipt(res, chatId, method);
+  }
+
+  async #receipt(res: Response, chatId: string, method: string): Promise<ChannelDeliveryReceipt> {
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; result?: { message_id?: number | string } };
+    const providerMessageId = json.result?.message_id == null ? '' : String(json.result.message_id);
+    if (json.ok === false || !providerMessageId) {
+      throw new AgentisError('CHANNEL_SEND_FAILED', `telegram ${method} returned no provider message id; delivery is unverified`);
+    }
+    return { provider: 'telegram', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
   }
 
   async #throwSendError(res: Response, chatId: string, method: string): Promise<never> {

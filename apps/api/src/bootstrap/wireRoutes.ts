@@ -75,6 +75,7 @@ import { buildSchedulerRoutes } from '../routes/scheduler.js';
 import { buildSkillRoutes } from '../routes/skills.js';
 import { buildSovereigntyRoutes } from '../routes/sovereignty.js';
 import { buildSpecialistRoutes } from '../routes/specialists.js';
+import { buildStorageRoutes } from '../routes/storage.js';
 import { buildTaskRoutes } from '../routes/tasks.js';
 import { buildTerminalRoutes } from '../routes/terminal.js';
 import { buildTestHarnessRoutes } from '../routes/testHarness.js';
@@ -171,6 +172,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   outboundPolicy: OutboundPolicyService;
   planService: PlanService;
   scheduler: SchedulerService;
+  runCompaction: import('../services/run/runCompactionService.js').RunCompactionService;
   sessionStore: AgentSessionService;
   skillMaterializer: SkillMaterializer;
   skillService: SkillService;
@@ -305,6 +307,21 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/dashboard', buildDashboardRoutes({ db: sqlite, auth, approvals }));
   app.route('/v1/activity', buildActivityRoutes({ db: sqlite, auth, activity }));
   app.route('/v1/observability', buildObservabilityRoutes({ db: sqlite, auth, bus, observability }));
+  app.route('/v1/storage', buildStorageRoutes({
+    db: sqlite,
+    sqliteRaw: db.sqliteRaw!,
+    auth,
+    dataDir: env.AGENTIS_DATA_DIR,
+    archiveDir: env.AGENTIS_ARCHIVE_DIR,
+    maintenance: deps.runCompaction,
+    policy: {
+      fullRunDays: env.AGENTIS_STORAGE_FULL_RUN_DAYS,
+      ledgerDays: env.AGENTIS_STORAGE_LEDGER_DAYS,
+      observabilityDays: env.AGENTIS_STORAGE_OBSERVABILITY_DAYS,
+      maxHotDbBytes: env.AGENTIS_STORAGE_MAX_HOT_DB_MB * 1024 ** 2,
+      minFreeBytes: env.AGENTIS_STORAGE_MIN_FREE_MB * 1024 ** 2,
+    },
+  }));
   app.route('/v1/approvals', buildApprovalRoutes({ db: sqlite, auth, approvals }));
   app.route('/v1/workflows', buildWorkflowRoutes({
     db: sqlite,
@@ -328,7 +345,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/interactions', buildInteractionRoutes({ db: sqlite, auth }));
   app.route('/v1/governance', buildGovernanceRoutes({ db: sqlite, auth, adapters }));
   app.route('/v1/ephemeral', buildEphemeralRoutes({ db: sqlite, auth, engine, bus }));
-  app.route('/v1/runs', buildRunRoutes({ db: sqlite, auth, engine, ledger, scratchpad, bus }));
+  app.route('/v1/runs', buildRunRoutes({ db: sqlite, auth, engine, ledger, scratchpad, bus, archiveStore: deps.archiveStore }));
   app.route('/v1/runs', buildReplayRoutes({ db: sqlite, auth, engine, replay }));
   app.route('/v1/runs', buildAuditRoutes({ db: sqlite, auth, audit: auditTrail }));
   app.route('/v1/extensions', buildExtensionRoutes({ db: sqlite, auth, extensionLibrary, runtime: extensions, kv: extensionKv }));

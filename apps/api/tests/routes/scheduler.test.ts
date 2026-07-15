@@ -84,4 +84,61 @@ describe('/v1/scheduler', () => {
     const row = ctx.db.select().from(schema.workflowRunQueue).where(eq(schema.workflowRunQueue.id, queueId)).get();
     expect(row?.priority).toBe(1);
   });
+
+  it('lists durable event deliveries and safely releases dead ones for retry', async () => {
+    const source = seedWorkflowAndTrigger();
+    const target = seedWorkflowAndTrigger();
+    const sourceRunId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: sourceRunId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId: source.workflowId,
+      userId: ctx.user.id,
+      status: 'COMPLETED',
+      runState: {},
+    }).run();
+    const subscriptionId = randomUUID();
+    ctx.db.insert(schema.workflowEventSubscriptions).values({
+      id: subscriptionId,
+      workspaceId: ctx.workspace.id,
+      sourceWorkflowId: source.workflowId,
+      targetWorkflowId: target.workflowId,
+      eventType: 'run.completed',
+    }).run();
+    const deliveryId = randomUUID();
+    ctx.db.insert(schema.workflowEventDeliveries).values({
+      id: deliveryId,
+      workspaceId: ctx.workspace.id,
+      subscriptionId,
+      eventIdentity: randomUUID(),
+      eventType: 'run.completed',
+      eventPayload: { runId: sourceRunId },
+      eventEmittedAt: new Date().toISOString(),
+      sourceRunId,
+      status: 'dead',
+      attempts: 5,
+      availableAt: new Date().toISOString(),
+      lastError: 'transient outage',
+    }).run();
+
+    const list = await app().request('/v1/scheduler/deliveries', { headers: ctx.authHeaders });
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as { deliveries: unknown[] }).deliveries).toHaveLength(1);
+
+    const retry = await app().request(`/v1/scheduler/deliveries/${deliveryId}/retry`, {
+      method: 'POST', headers: ctx.authHeaders,
+    });
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ ok: true, status: 'pending', replayed: true });
+    expect(ctx.db.select().from(schema.workflowEventDeliveries).where(eq(schema.workflowEventDeliveries.id, deliveryId)).get())
+      .toMatchObject({ status: 'pending', lastError: null });
+
+    ctx.db.update(schema.workflowEventDeliveries).set({ status: 'delivered', targetRunId: sourceRunId })
+      .where(eq(schema.workflowEventDeliveries.id, deliveryId)).run();
+    const noDuplicate = await app().request(`/v1/scheduler/deliveries/${deliveryId}/retry`, {
+      method: 'POST', headers: ctx.authHeaders,
+    });
+    expect(await noDuplicate.json()).toMatchObject({ ok: true, status: 'delivered', replayed: false, targetRunId: sourceRunId });
+  });
 });

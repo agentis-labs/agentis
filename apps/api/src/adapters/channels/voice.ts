@@ -33,9 +33,9 @@
  * it fits the existing fire-and-forget turn spine with zero new turn engine.
  */
 
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, ParsedInboundMessage } from './types.js';
 
 /** A reply captured for a voice call, ready for the provider to vocalize. */
 export interface VoiceReply {
@@ -112,7 +112,7 @@ export class VoiceChannelAdapter implements ChannelAdapter {
     chatId: string;
     body: string;
     settings?: Record<string, unknown>;
-  }): Promise<void> {
+  }): Promise<ChannelDeliveryReceipt> {
     let ttsUrl: string | null = null;
     try {
       ttsUrl = await this.#synthesize({ text: args.body, callId: args.chatId, settings: args.settings });
@@ -126,6 +126,13 @@ export class VoiceChannelAdapter implements ChannelAdapter {
       ttsUrl,
       at: new Date().toISOString(),
     });
+    return {
+      provider: 'voice',
+      providerMessageId: `voice-queue:${randomUUID()}`,
+      status: 'queued',
+      acceptedAt: new Date().toISOString(),
+      recipient: args.chatId,
+    };
   }
 
   /**

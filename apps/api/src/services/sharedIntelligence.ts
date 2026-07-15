@@ -10,6 +10,7 @@ import {
   type BrainScopeKind,
   type KnowledgeAtomKind,
   type KnowledgeLinkRelation,
+  type RuntimeEpisodeOutcome,
   type RuntimeEpisodeType,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -17,6 +18,8 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { EpisodicMemoryStore } from './episodicMemoryStore.js';
+import { EMBED_HIGH_SIMILARITY, bestCosine, bestLexical, type EpisodeVector } from './util/brainDedup.js';
+import { directivePolarity, directiveTopicSignature, jaccard } from './memory/memoryReflectionService.js';
 import { SKILL_LIBRARY_PLANE } from './memory/memoryStore.js';
 
 /** SQL LIKE pattern matching the Skill-library plane tag on an episode row. */
@@ -211,7 +214,7 @@ const DEFAULT_GRAPH_LIMIT = 200;
 const MAX_GRAPH_LIMIT = 500;
 // The Brain MAP renders on a bespoke <canvas> + d3-force simulation (the Obsidian
 // approach), so node count is not the bottleneck and there is no product reason to
-// hide atoms — it shows every atom. Node responses carry no embeddings, so the
+// hide atoms - it shows every atom. Node responses carry no embeddings, so the
 // payload stays light regardless of count. This is only a query sanity valve
 // (matches the quarantine cap), NOT a "show fewer of your notes" limit.
 const GRAPH_RENDER_CAP = 20_000;
@@ -220,8 +223,6 @@ const RELATED_SIMILARITY = 0.52;
 const GLOBAL_CONFIDENCE_THRESHOLD = 0.7;
 
 // Brain & Abilities Replan — embedding-aware promotion (B4) thresholds.
-/** Cosine similarity above which two atoms are treated as the same concept. */
-const EMBED_HIGH_SIMILARITY = 0.88;
 /** Cosine similarity above which two atoms get a `refines`/`related` link. */
 /** Minimum cosine relevance for an atom to enter a dispatch context block. */
 const DISPATCH_MIN_RELEVANCE = 0.32;
@@ -256,6 +257,22 @@ const CONSTITUTIONAL_MAX = 5;
 const EVAL_DELTA_PASS = 0.04;
 const EVAL_DELTA_PASS_TOP = 0.08;
 const EVAL_DELTA_FAIL = -0.06;
+/** An atom that was injected but never cited in the response earns/loses only
+ * half credit — it was present, not necessarily useful. */
+const EVAL_DELTA_UNCITED_FACTOR = 0.5;
+
+/**
+ * Pull every `[mem:id8]`-style citation prefix out of a response (the format
+ * `renderLine` stamps on each injected atom — see §B2.4). Returns null when
+ * there's no text to scan, so callers can distinguish "no usage signal" from
+ * "usage signal found, but this response cited nothing."
+ */
+function extractCitedMemPrefixes(responseText: string | null | undefined): string[] | null {
+  if (!responseText) return null;
+  const matches = responseText.matchAll(/mem:([0-9a-f]{4,8})/gi);
+  const prefixes = [...matches].map((m) => m[1]!.toLowerCase());
+  return prefixes;
+}
 /** Atoms below this confidence are auto-archived. */
 const ARCHIVE_CONFIDENCE_FLOOR = 0.05;
 
@@ -581,6 +598,29 @@ export class SharedIntelligenceService {
         vec = await embedText(provider, mem.statement);
       } catch { /* embedding optional */ }
 
+      // Deterministic backstop: the Judge decided ADD by comparing against a
+      // fresh semantic-search neighbor set, which is a probabilistic judgment
+      // call, not a guarantee. Mirror the hard cosine/lexical dedup every OTHER
+      // write path in this file already applies (#stageOrReinforce,
+      // #commitOperatorMemory, commitDurableAtom) — without it, this is the one
+      // write path where a repeatedly-re-extracted fact (e.g. a hallucination
+      // that keeps getting surfaced back into context) could compound into
+      // duplicate atoms indefinitely instead of reinforcing one.
+      const dupe = vec ? bestCosine(existing, vec) : bestLexical(existing, mem.statement);
+      if (dupe && dupe.score >= EMBED_HIGH_SIMILARITY) {
+        const node = this.reinforceAtom(input.workspaceId, 'episode', dupe.entry.id, {
+          agentId: input.agentId ?? null,
+          adapterType,
+          runId: input.runId ?? null,
+          scopeId: input.scopeId ?? null,
+        });
+        if (node) {
+          reinforced += 1;
+          this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_REINFORCED, node);
+        }
+        continue;
+      }
+
       // PACER (Phase 1+2): classify the formed memory using the judge's type as
       // a prior plus the source surface and the (un-stripped) statement text.
       const pacer = classifyPacer({
@@ -725,7 +765,19 @@ export class SharedIntelligenceService {
     let vec: number[] | null = null;
     try { vec = await embedText(provider, cand.text); } catch { /* embedding optional */ }
     const best = vec ? bestCosine(existing, vec) : bestLexical(existing, cand.text);
-    if (best && best.score >= EMBED_HIGH_SIMILARITY) {
+    // Semantic embeddings intentionally place "always X" and "never X" very
+    // close because their topic is identical. Polarity must therefore be
+    // checked BEFORE cosine dedup: reinforcing the earlier rule would erase an
+    // operator correction and prevent the dispute gate below from ever seeing
+    // two atoms.
+    const candidatePolarity = directivePolarity(cand.text);
+    const opposingDirective = best && candidatePolarity !== 0
+      && directivePolarity(best.entry.text) === -candidatePolarity
+      && jaccard(
+        directiveTopicSignature(cand.text),
+        directiveTopicSignature(best.entry.text),
+      ) >= 0.4;
+    if (best && best.score >= EMBED_HIGH_SIMILARITY && !opposingDirective) {
       const node = this.reinforceAtom(input.workspaceId, 'episode', best.entry.id, {
         agentId: input.agentId ?? null, adapterType, runId: input.runId ?? null, scopeId: input.scopeId ?? null,
       });
@@ -759,7 +811,52 @@ export class SharedIntelligenceService {
     if (vec) this.#applyEmbedding(episode.id, vec);
     this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
     existing.push({ id: episode.id, vec, text: `${episode.title}\n${episode.summary}` });
+    // §Mem0-teardown-followup — an operator correction is exactly the
+    // highest-stakes contradiction case (two opposing "always X"/"never X"
+    // rules both active) and this write is constitutional-tier (importance
+    // 0.8) the moment it lands. Don't wait for the weekly reflection sweep to
+    // (maybe) notice — check it against this scope's existing high-importance
+    // atoms immediately, using the SAME polarity/similarity logic the sweep
+    // uses, just narrowed to one new atom instead of a 150-atom batch.
+    this.#checkGoverningContradiction(input.workspaceId, input.scopeId ?? null, episode.id, `${episode.title} ${episode.summary}`);
     return { created: 1, reinforced: 0, linked: 0 };
+  }
+
+  /**
+   * Narrow, immediate contradiction check for one newly-written constitutional-
+   * tier atom against others already active in the same scope. Best-effort and
+   * cheap (a handful of rows, no embedding call) — the full periodic sweep in
+   * `MemoryReflectionService` remains the broad safety net for everything else.
+   */
+  #checkGoverningContradiction(workspaceId: string, scopeId: string | null, newAtomId: string, newText: string): void {
+    try {
+      const polarity = directivePolarity(newText);
+      if (polarity === 0) return;
+      const conds = [
+        eq(schema.memoryEpisodes.workspaceId, workspaceId),
+        isNull(schema.memoryEpisodes.archivedAt),
+        isNull(schema.memoryEpisodes.supersededBy),
+        eq(schema.memoryEpisodes.isDisputed, false),
+      ];
+      if (scopeId) conds.push(eq(schema.memoryEpisodes.scopeId, scopeId));
+      const candidates = this.db.select().from(schema.memoryEpisodes).where(and(...conds))
+        .orderBy(desc(schema.memoryEpisodes.updatedAt)).limit(40).all()
+        .filter((r) => r.id !== newAtomId && ((Number(r.importance) || 0) >= 0.8 || Boolean(r.governing)));
+      const newSig = directiveTopicSignature(newText);
+      for (const row of candidates) {
+        const rowText = `${row.title} ${row.summary}`;
+        if (directivePolarity(rowText) === -polarity && jaccard(newSig, directiveTopicSignature(rowText)) >= 0.4) {
+          this.flagDispute({
+            workspaceId,
+            atomIdA: newAtomId,
+            atomIdB: row.id,
+            reason: 'Immediate check: a newly written rule opposes an existing constitutional-tier atom in the same scope.',
+            scopeId,
+          });
+          break; // one flagged dispute is enough to surface the conflict for review
+        }
+      }
+    } catch { /* best effort — the weekly sweep still covers this */ }
   }
 
   #applyEmbedding(episodeId: string, vec: number[]): void {
@@ -839,7 +936,7 @@ export class SharedIntelligenceService {
     /** §C5 — surface hint for multi-scale budget allocation (chat leans working+
      * semantic; a workflow node leans episodic+semantic). Default 'dispatch'. */
     surface?: 'chat' | 'dispatch';
-  }): Promise<{ block: string; atomIds: string[] }> {
+  }): Promise<{ block: string; atomIds: string[]; relevantCount: number }> {
     const limit = Math.min(Math.max(args.limit ?? 6, 1), 12);
     const scopeId = args.scopeId ?? null;
     const embeddingStatus = this.embeddingStatus(args.workspaceId);
@@ -847,6 +944,7 @@ export class SharedIntelligenceService {
       return {
         block: `WORKSPACE BRAIN [embedding migration running | retrieval paused | capacity: ${this.#capacityStatus(args.workspaceId).percent}%]\nBrain retrieval is paused while atoms are re-embedded for the configured provider.`,
         atomIds: [],
+        relevantCount: 0,
       };
     }
     // Tier 1 — constitutional: operator-authored binding context (the workspace
@@ -875,6 +973,7 @@ export class SharedIntelligenceService {
     // "relevant knowledge". A confident-looking but ungrounded memory is worse
     // than an honest "nothing matched".
     let relevanceAbstained = false;
+    let backfillCount = 0;
     if (remaining > 0) {
       // §C7 — recall the union of every brain scope this run belongs to. Each
       // pass returns shared (workspace) + own-scope atoms under team RLS; merging
@@ -912,7 +1011,10 @@ export class SharedIntelligenceService {
       // §C2 — Tier-0: when live retrieval left spare budget, backfill with the
       // precomputed working set's query-relevant core atoms (a cheap single-row
       // read, no embedding round-trip). The scope's core knowledge is present
-      // even when the live retriever was thin.
+      // even when the live retriever was thin. These pass a much weaker bar
+      // (similarity >= 0.08) than the relevance floor above, so they're
+      // counted separately — "recalled N" should mean N atoms that actually
+      // cleared relevance, not N padded up to the limit to look full.
       if (relevant.length < remaining) {
         const injected = new Set<string>([...charterIds, ...relevant.map((r) => r.id)]);
         for (const s of scopes) {
@@ -935,6 +1037,7 @@ export class SharedIntelligenceService {
               updatedAt: new Date().toISOString(),
             });
             injected.add(a.id);
+            backfillCount += 1;
             relevanceAbstained = false;
           }
         }
@@ -945,7 +1048,7 @@ export class SharedIntelligenceService {
     // When Grounding is wired, fall through — organizational claims can ground a
     // dispatch even before the workspace Brain has formed any atoms.
     if (charter.length === 0 && relevant.length === 0 && !(this.#groundingComposer && args.agentId)) {
-      return { block: '', atomIds: [] };
+      return { block: '', atomIds: [], relevantCount: 0 };
     }
 
     const atomIds: string[] = [];
@@ -985,7 +1088,7 @@ export class SharedIntelligenceService {
       // §B2.3 — honest absence. Only emit when something else (charter/Grounding) is
       // present so the block isn't header-only; the agent is told the brain
       // looked and found nothing, so it won't treat silence as "no rules".
-      sections.push('PRE-TASK MEMORY: no durable memory matched this task — proceed from first principles and the current inputs; do not assume prior context exists.');
+      sections.push('PRE-TASK MEMORY: no durable memory matched this task — proceed from first principles and the current inputs; do not assume prior context exists. If the task turns out to need something specific from memory, call agentis.brain.search with different or broader terms before concluding nothing exists — this upfront pass can miss things a targeted re-query finds.');
     }
     // Surfacing an episode into a live dispatch is the strongest possible signal
     // that it is still useful. Bump lastAccessedAt so adaptive forgetting
@@ -1017,9 +1120,9 @@ export class SharedIntelligenceService {
     }
     // Header-only (no atoms, no Grounding content) composes to nothing.
     if (charter.length === 0 && relevant.length === 0 && sections.length <= 1) {
-      return { block: '', atomIds: [] };
+      return { block: '', atomIds: [], relevantCount: 0 };
     }
-    return { block: sections.join('\n'), atomIds };
+    return { block: sections.join('\n'), atomIds, relevantCount: atomIds.length - backfillCount };
   }
 
   /**
@@ -1209,6 +1312,11 @@ export class SharedIntelligenceService {
     agentId?: string | null;
     verdict: 'pass' | 'fail' | 'partial';
     evaluatorConfidence?: number | null;
+    /** The text the evaluator actually judged. When present, an atom's delta
+     * is weighted by whether the response cited it ([mem:id8]) — an atom that
+     * was merely injected but never relied on shouldn't earn full credit or
+     * blame. Omit to keep the old injection-order-only behavior. */
+    responseText?: string | null;
   }): { adjusted: number; archived: number } {
     if (args.verdict === 'partial') return { adjusted: 0, archived: 0 };
     const injected = this.db
@@ -1224,12 +1332,23 @@ export class SharedIntelligenceService {
     if (atomIds.length === 0) return { adjusted: 0, archived: 0 };
 
     const strongPass = args.verdict === 'pass' && (args.evaluatorConfidence ?? 0) > 0.85;
+    const citedPrefixes = extractCitedMemPrefixes(args.responseText);
+    const isCited = citedPrefixes
+      ? (atomId: string) => citedPrefixes.some((prefix) => atomId.toLowerCase().startsWith(prefix))
+      : null;
     let adjusted = 0;
     let archived = 0;
 
     atomIds.forEach((atomId, index) => {
       let delta = args.verdict === 'pass' ? EVAL_DELTA_PASS : EVAL_DELTA_FAIL;
-      if (strongPass && index < 3) delta = EVAL_DELTA_PASS_TOP;
+      if (isCited) {
+        // Usage-based weighting supersedes the old order-based "strong pass
+        // top 3" bonus — that heuristic only existed as a proxy for relevance
+        // when we had no real usage signal.
+        if (!isCited(atomId)) delta *= EVAL_DELTA_UNCITED_FACTOR;
+      } else if (strongPass && index < 3) {
+        delta = EVAL_DELTA_PASS_TOP;
+      }
       const now = new Date().toISOString();
 
       const episode = this.db.select().from(schema.memoryEpisodes)
@@ -1256,6 +1375,7 @@ export class SharedIntelligenceService {
           eventType: 'atom_confidence_delta',
           atomId,
           delta,
+          ...(isCited ? { metadata: { used: isCited(atomId) } } : {}),
         });
         return;
       }
@@ -1472,6 +1592,95 @@ export class SharedIntelligenceService {
       managed: atom.node.managed ?? null,
       updatedAt: atom.node.updatedAt,
     }));
+  }
+
+  /**
+   * Commit a CONSOLIDATED atom into a scope, reinforcing a near-duplicate in that
+   * same scope instead of writing a second copy.
+   *
+   * This is the durable-write seam for callers that KNOW the fact is worth keeping
+   * — an App/workflow's graded run outcome, a closed relationship's lesson — as
+   * opposed to `promote()`, which mines untrusted agent prose and therefore stages
+   * everything as `unconsolidated` (and `loadAtoms` hides those from the graph).
+   * Without this, a scope fed only by `promote()` can never show a single node.
+   *
+   * Dedup is scope-STRICT: only atoms already owned by `scopeId` can absorb the
+   * reinforcement, so a similar workspace-wide atom can't silently swallow it and
+   * leave the scope empty. Repeated outcomes therefore converge onto one strong
+   * node per lesson rather than one node per run.
+   */
+  async commitDurableAtom(args: {
+    workspaceId: string;
+    scopeId: string | null;
+    agentId?: string | null;
+    workflowId?: string | null;
+    runId?: string | null;
+    title: string;
+    content: string;
+    type?: RuntimeEpisodeType;
+    source?: 'agent_write' | 'operator_write' | 'system_write' | 'run_promotion' | 'evaluator_write';
+    tags?: string[];
+    confidence?: number;
+    importance?: number;
+    outcomeStatus?: RuntimeEpisodeOutcome;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ atomId: string; created: boolean; reinforced: boolean }> {
+    // §Mem0-teardown-followup — this path (App Brain / operator-composed
+    // lessons) previously had a dedup check but no garbage-rejection gate, the
+    // one half of the Stage-1 filter `promote()` applies to chat-mined prose.
+    // Callers here compose curated text via templates, not raw agent output,
+    // so this rarely fires — it's a cheap backstop, not the primary defense.
+    if (isRejectable(args.content)) {
+      return { atomId: '', created: false, reinforced: false };
+    }
+    const provider = this.#resolveEmbeddingProvider(args.workspaceId);
+    const text = `${args.title}\n${args.content}`;
+    let vec: number[] | null = null;
+    try { vec = await embedText(provider, args.content); } catch { /* embedding optional */ }
+
+    const existing = this.#loadEpisodeVectors(args.workspaceId, args.scopeId, true);
+    const best = vec ? bestCosine(existing, vec) : bestLexical(existing, text);
+    if (best && best.score >= EMBED_HIGH_SIMILARITY) {
+      const node = this.reinforceAtom(args.workspaceId, 'episode', best.entry.id, {
+        agentId: args.agentId ?? null,
+        runId: args.runId ?? null,
+        scopeId: args.scopeId,
+      });
+      if (node) {
+        this.publishAtom(args.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_REINFORCED, node);
+        return { atomId: best.entry.id, created: false, reinforced: true };
+      }
+    }
+
+    const pacer = classifyPacer({ text: args.content, surface: 'run_completion', episodeType: args.type ?? 'distilled_lesson' });
+    const episode = this.episodes.write({
+      workspaceId: args.workspaceId,
+      scopeId: args.scopeId,
+      workflowId: args.workflowId ?? null,
+      runId: args.runId ?? null,
+      agentId: args.agentId ?? null,
+      type: args.type ?? 'distilled_lesson',
+      title: args.title,
+      summary: args.content,
+      source: args.source ?? 'system_write',
+      confidence: clamp01(args.confidence ?? 0.7),
+      importance: clamp01(args.importance ?? 0.65),
+      trust: clamp01(args.confidence ?? 0.7),
+      // `consolidated` is what keeps this atom OUT of the unconsolidated filter
+      // that hides staged traces from the graph — i.e. what makes it render.
+      tags: ['consolidated', `pacer:${pacer.pacerClass}`, ...(args.tags ?? [])],
+      outcomeStatus: args.outcomeStatus ?? 'mixed',
+      metadata: {
+        ...(args.metadata ?? {}),
+        pacerClass: pacer.pacerClass,
+        originSurface: 'run_completion',
+        formationMode: 'durable_commit',
+        embeddingProvider: provider.dimension,
+      },
+    });
+    if (vec) this.#applyEmbedding(episode.id, vec);
+    this.publishAtom(args.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
+    return { atomId: episode.id, created: true, reinforced: false };
   }
 
   async addAtom(args: {
@@ -1881,13 +2090,22 @@ export class SharedIntelligenceService {
   #loadEpisodeVectors(
     workspaceId: string,
     scopeId: string | null,
+    /**
+     * Restrict the candidate set to atoms owned by `scopeId` ALONE. The default
+     * (false) also considers workspace-shared atoms, which is right for recall
+     * but wrong for a scoped commit: a near-duplicate in the workspace bucket
+     * would absorb the reinforcement and the scope itself would stay empty.
+     */
+    strictScope = false,
   ): Array<{ id: string; vec: number[] | null; text: string }> {
     const rows = this.db.select().from(schema.memoryEpisodes)
       .where(and(
         eq(schema.memoryEpisodes.workspaceId, workspaceId),
         isNull(schema.memoryEpisodes.archivedAt),
         ...(scopeId
-          ? [or(eq(schema.memoryEpisodes.scopeId, scopeId), isNull(schema.memoryEpisodes.scopeId))!]
+          ? [strictScope
+              ? eq(schema.memoryEpisodes.scopeId, scopeId)
+              : or(eq(schema.memoryEpisodes.scopeId, scopeId), isNull(schema.memoryEpisodes.scopeId))!]
           : []),
       ))
       .orderBy(desc(schema.memoryEpisodes.updatedAt))
@@ -2644,6 +2862,11 @@ export class SharedIntelligenceService {
       const rows = this.db.select({ chunk: schema.kbChunks, scopeId: schema.knowledgeBases.scopeId })
         .from(schema.kbChunks)
         .innerJoin(schema.knowledgeBases, eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id))
+        .innerJoin(schema.kbDocuments, and(
+          eq(schema.kbDocuments.id, schema.kbChunks.documentId),
+          eq(schema.kbDocuments.workspaceId, workspaceId),
+          isNull(schema.kbDocuments.archivedAt),
+        ))
         .where(and(
           eq(schema.kbChunks.workspaceId, workspaceId),
           ...(scope === 'scoped' && scopeId
@@ -2656,7 +2879,6 @@ export class SharedIntelligenceService {
         .limit(perKind)
         .all();
       for (const { chunk, scopeId: knowledgeBaseScopeId } of rows) {
-        if (!this.isKbDocumentActive(workspaceId, chunk.documentId)) continue;
         const node = kbChunkRowToGraphNode({ ...chunk, scopeId: knowledgeBaseScopeId });
         if (node.confidence >= minConfidence) out.push({ id: chunk.id, kind: 'kb_chunk', text: chunk.content, node, embedding: chunk.embedding as number[] | null });
       }
@@ -3106,37 +3328,6 @@ function relationFor(fact: string, target: string): KnowledgeLinkRelation {
   return 'refines';
 }
 
-interface EpisodeVector {
-  id: string;
-  vec: number[] | null;
-  text: string;
-}
-
-interface ScoredEpisode {
-  entry: EpisodeVector;
-  score: number;
-}
-
-/** Best cosine match among episodes that carry a comparable embedding. */
-function bestCosine(entries: EpisodeVector[], vec: number[]): ScoredEpisode | null {
-  let best: ScoredEpisode | null = null;
-  for (const entry of entries) {
-    if (!entry.vec || entry.vec.length !== vec.length) continue;
-    const score = cosineSimilarity(vec, entry.vec);
-    if (!best || score > best.score) best = { entry, score };
-  }
-  return best;
-}
-
-/** Lexical fallback when no embedding is available for a candidate. */
-function bestLexical(entries: EpisodeVector[], fact: string): ScoredEpisode | null {
-  let best: ScoredEpisode | null = null;
-  for (const entry of entries) {
-    const score = similarity(fact, entry.text);
-    if (!best || score > best.score) best = { entry, score };
-  }
-  return best;
-}
 
 /** Parse a stored embedding column (JSON array or already-parsed array). */
 function parseEmbedding(raw: unknown): number[] | null {

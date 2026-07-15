@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { useVaultAuthState } from '../../src/adapters/channels/whatsappVaultAuthState.js';
+import { useVaultAuthState, clearVaultAuthState } from '../../src/adapters/channels/whatsappVaultAuthState.js';
 
 function seedConnection(ctx: TestContext): string {
   const agentId = randomUUID();
@@ -60,5 +60,24 @@ describe('useVaultAuthState', () => {
     await keys.set({ 'pre-key': { '1': null as unknown as Record<string, unknown> } });
     const after = await keys.get('pre-key', ['1', '2']);
     expect(after).toEqual({ '2': { keyPair: 'data-2' } });
+  });
+
+  it('clearVaultAuthState wipes creds + keys so the next load starts unregistered', async () => {
+    const connectionId = seedConnection(ctx);
+    const { state, saveCreds } = await useVaultAuthState({ db: ctx.db, vault: ctx.vault, connectionId });
+    await saveCreds();
+    const keys = state.keys as { set: (d: Record<string, Record<string, unknown>>) => Promise<void> };
+    await keys.set({ 'pre-key': { '1': { keyPair: 'data-1' } } });
+    expect(ctx.db.select().from(schema.channelAuthState).where(eq(schema.channelAuthState.connectionId, connectionId)).all().length)
+      .toBeGreaterThan(0);
+
+    clearVaultAuthState({ db: ctx.db, connectionId });
+
+    expect(ctx.db.select().from(schema.channelAuthState).where(eq(schema.channelAuthState.connectionId, connectionId)).all()).toEqual([]);
+    // A fresh load after clearing gets brand-new unregistered creds, not the
+    // dead registered session — this is what lets baileys actually emit a QR
+    // instead of silently retrying (and failing) the old link.
+    const reloaded = await useVaultAuthState({ db: ctx.db, vault: ctx.vault, connectionId });
+    expect(reloaded.state.creds.registrationId).not.toBe(state.creds.registrationId);
   });
 });

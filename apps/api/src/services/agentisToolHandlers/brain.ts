@@ -53,7 +53,7 @@ export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.brain.search',
         family: 'run',
         description:
-          'Search YOUR Brain by meaning, mid-task — durable memories, workspace knowledge, and (on request) your Skill library. Use it when you need a fact, rule, or procedure you were not handed at the start of the turn, instead of guessing. Returns ranked atoms ({ id, kind, title, snippet, score }). Skills/examples are EXCLUDED by default (they are reached on demand); pass kind:"skill" (or "example"/"all") to include them, then read a skill\'s full procedure with agentis.skill.load. Prefer short keyword-first queries. Example: {"query":"deploy migrations safely","kind":"skill"}.',
+          'Search YOUR Brain by meaning, mid-task — durable memories, workspace knowledge, and (on request) your Skill library. Use it when you need a fact, rule, or procedure you were not handed at the start of the turn, instead of guessing. Especially useful after a PRE-TASK MEMORY note says nothing matched: that upfront pass can miss things a targeted re-query with different or broader terms finds — try again before concluding it doesn\'t exist. Returns ranked atoms ({ id, kind, title, snippet, score }). Skills/examples are EXCLUDED by default (they are reached on demand); pass kind:"skill" (or "example"/"all") to include them, then read a skill\'s full procedure with agentis.skill.load. Prefer short keyword-first queries. Example: {"query":"deploy migrations safely","kind":"skill"}.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -12,6 +12,15 @@ const envSchema = z.object({
   // an external drive, OneDrive, a NAS — so large media never bloats the system
   // disk or (critically) the source tree. Never inside the repo.
   AGENTIS_ASSETS_DIR: z.string().optional(),
+  // Lossless cold storage + bounded hot-history policy. Archives can live on a
+  // separate disk/NAS; defaults keep setup zero-config under the data dir.
+  AGENTIS_ARCHIVE_DIR: z.string().optional(),
+  AGENTIS_STORAGE_FULL_RUN_DAYS: z.coerce.number().int().nonnegative().default(7),
+  AGENTIS_STORAGE_LEDGER_DAYS: z.coerce.number().int().nonnegative().default(30),
+  AGENTIS_STORAGE_OBSERVABILITY_DAYS: z.coerce.number().int().nonnegative().default(14),
+  AGENTIS_STORAGE_MAX_HOT_DB_MB: z.coerce.number().positive().default(2048),
+  AGENTIS_STORAGE_MIN_FREE_MB: z.coerce.number().nonnegative().default(2048),
+  AGENTIS_STORAGE_MAINTENANCE_INTERVAL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
   AGENTIS_HTTP_PORT: z.coerce.number().int().positive().default(CONSTANTS.DEFAULT_HTTP_PORT),
   AGENTIS_HTTP_HOST: z.string().default('127.0.0.1'),
   // Comma-separated web UI origins permitted to connect to the realtime socket.
@@ -157,16 +166,19 @@ const envSchema = z.object({
 export type AgentisEnv = z.infer<typeof envSchema> & {
   AGENTIS_DATA_DIR: string;
   AGENTIS_ASSETS_DIR: string;
+  AGENTIS_ARCHIVE_DIR: string;
 };
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AgentisEnv {
   const parsed = envSchema.parse(source);
   const dataDir = parsed.AGENTIS_DATA_DIR ?? resolveDefaultDataDir();
   const assetsDir = parsed.AGENTIS_ASSETS_DIR ?? join(dataDir, 'assets');
+  const archiveDir = parsed.AGENTIS_ARCHIVE_DIR ?? join(dataDir, 'archives');
   return {
     ...parsed,
     AGENTIS_DATA_DIR: dataDir,
     AGENTIS_ASSETS_DIR: assetsDir,
+    AGENTIS_ARCHIVE_DIR: archiveDir,
     AGENTIS_OAUTH_PROXY_URL: parsed.AGENTIS_OAUTH_PROXY_URL === undefined
       ? 'https://connect.agentis.dev'
       : parsed.AGENTIS_OAUTH_PROXY_URL,

@@ -141,6 +141,14 @@ function splitSqlStatements(sql: string): string[] {
     }
 
     if (char === ';') {
+      const trimmed = current.trim();
+      const triggerStatement = /^CREATE\s+(?:TEMP\s+)?TRIGGER\b/i.test(trimmed);
+      // Trigger bodies contain semicolon-terminated statements between BEGIN
+      // and END. Keep those together so sqlite.exec receives the complete DDL.
+      if (triggerStatement && !/\bEND\s*$/i.test(trimmed)) {
+        current += char;
+        continue;
+      }
       if (current.trim()) statements.push(current.trim());
       current = '';
       continue;

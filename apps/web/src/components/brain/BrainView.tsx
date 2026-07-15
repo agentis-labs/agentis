@@ -12,23 +12,19 @@ import { EmptyBrainStage } from './EmptyBrainStage';
 import { LayerFilterChips, type BrainVisibleLayers } from './LayerFilterChips';
 import { graphToBrainEdges, graphToBrainNodes } from './brainGraphAdapter';
 
-interface IntelligenceConfig {
-  embeddingProviderType: string;
-  degraded: boolean;
-  migration: unknown;
-}
-
 export function BrainView({
   onManage,
   onOpenConfig,
   search = '',
   onSearchChange,
+  intelligence = null,
 }: {
   onManage?: () => void;
   onOpenConfig?: () => void;
   /** Node-search query, driven by the page toolbar so search lives in one bar. */
   search?: string;
   onSearchChange?: (value: string) => void;
+  intelligence?: { degraded: boolean } | null;
 }) {
   const [data, setData] = useState<BrainResponse | null>(null);
   const [graph, setGraph] = useState<BrainGraph | null>(null);
@@ -39,7 +35,6 @@ export function BrainView({
   const [showWarnings, setShowWarnings] = useState(true);
   const [showGaps, setShowGaps] = useState(true);
   const [livePulse, setLivePulse] = useState(0);
-  const [intelligence, setIntelligence] = useState<IntelligenceConfig | null>(null);
   const toast = useToast();
   const graphUrl = '/v1/brain/graph';
 
@@ -50,18 +45,12 @@ export function BrainView({
       setGraph(null);
     }
     try {
-      const [brain, graphResponse, intelligenceResponse, overlayResponse] = await Promise.all([
+      const [brain, graphResponse] = await Promise.all([
         api<BrainResponse>('/v1/brain'),
         api<{ graph: BrainGraph }>(graphUrl),
-        api<IntelligenceConfig>('/v1/workspace/intelligence').catch(() => null),
-        // Organizational overlay (sources, entities, claims). Optional: the
-        // map stays fully functional when the engine has nothing to show.
-        api<{ graph: BrainGraph }>('/v1/grounding/graph').catch(() => null),
       ]);
       setData(brain);
       setGraph(graphResponse.graph);
-      setIntelligence(intelligenceResponse);
-      setOrgOverlay(overlayResponse?.graph ?? null);
     } catch (error) {
       toast.error('Failed to load Brain', apiErrorMessage(error));
     } finally {
@@ -72,13 +61,22 @@ export function BrainView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const reloadSupplemental = useCallback(async () => {
+    // Organizational overlay is optional and must never hold up the atom map.
+    const overlayResponse = await api<{ graph: BrainGraph }>('/v1/grounding/graph').catch(() => null);
+    setOrgOverlay(overlayResponse?.graph ?? null);
+  }, []);
+
   const reloadGraph = useCallback(() => {
     void api<{ graph: BrainGraph }>(graphUrl)
       .then((response) => setGraph(response.graph))
       .catch(() => {});
   }, []);
 
-  useEffect(() => { void reloadBrain(true); }, [reloadBrain]);
+  useEffect(() => {
+    void reloadBrain(true);
+    void reloadSupplemental();
+  }, [reloadBrain, reloadSupplemental]);
   useEffect(() => rtSubscribe('workspace', {}), []);
   useEffect(() => {
     const refresh = () => { if (document.visibilityState === 'visible') reloadGraph(); };
@@ -94,14 +92,10 @@ export function BrainView({
     REALTIME_EVENTS.BRAIN_ATOM_CREATED,
     REALTIME_EVENTS.BRAIN_ATOM_REINFORCED,
     REALTIME_EVENTS.BRAIN_LINK_CREATED,
-    REALTIME_EVENTS.BRAIN_CONFIG_DEGRADED,
-    REALTIME_EVENTS.BRAIN_EMBEDDING_MIGRATION_STARTED,
-    REALTIME_EVENTS.BRAIN_EMBEDDING_MIGRATION_COMPLETED,
   ], () => {
     setLivePulse((value) => value + 1);
     void reloadBrain(false);
   });
-
   // Merge the organizational overlay into the atom graph so sources, entities,
   // and claims share the same constellation, simulation, search, and filters.
   const mergedGraph = useMemo<BrainGraph | null>(() => {
@@ -242,7 +236,10 @@ export function BrainView({
           <OrgDetailRail
             node={selectedNode}
             onClose={() => setSelectedId(null)}
-            onChanged={() => reloadBrain(false)}
+            onChanged={() => {
+              void reloadBrain(false);
+              void reloadSupplemental();
+            }}
           />
         )}
         {selectedNode && !selectedNode.metadata?.grounding && (

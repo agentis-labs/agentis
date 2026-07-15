@@ -52,13 +52,13 @@ describe('ClaudeCodeAdapter chat', () => {
       affordances: expect.objectContaining({
         fileSystem: true,
         terminal: true,
-        nativeMcp: true,
       }),
       memory: expect.objectContaining({
         ingestible: true,
         injectable: true,
       }),
     }));
+    expect(adapter.capabilities().affordances?.nativeMcp).toBeUndefined();
   });
 
   it('turns AGENTIS_TOOL_CALL markers into chat tool calls', async () => {

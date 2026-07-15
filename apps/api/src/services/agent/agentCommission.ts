@@ -22,6 +22,7 @@ import { repairCliHarnessConfig } from '../harness/harnessConfigRepair.js';
 import { RuntimeSessionStore } from '../runtime/runtimeSessionStore.js';
 import { harnessAgentHomeDir } from '../harness/harnessAgentHome.js';
 import type { SkillMaterializer } from '../skillMaterializer.js';
+import type { RuntimeCapabilityDeclaration, RuntimeCapabilityId } from '@agentis/core';
 
 /** The orchestrator's identity color — distinct from the random palette used for managers/specialists. */
 export const ORCHESTRATOR_DEFAULT_COLOR = '#3b82f6';
@@ -254,6 +255,7 @@ export async function registerAdapter(
       healthUrl: httpUrlFromConfig(config, 'healthPath', 'healthUrl') ?? undefined,
       chatUrl: httpUrlFromConfig(config, 'chatPath', 'chatUrl') ?? undefined,
       supportsTools: booleanOf(config.supportsTools) === true,
+      capabilityManifest: runtimeCapabilityDeclarationsOf(config.capabilityManifest),
       model: stringOf(config.model) ?? undefined,
       method: httpMethodOf(config.method),
       headers: recordStringOf(config.headers),
@@ -566,6 +568,33 @@ function recordStringOf(value: unknown): Record<string, string> | undefined {
 function recordObjectOf(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return value as Record<string, unknown>;
+}
+
+function runtimeCapabilityDeclarationsOf(value: unknown): RuntimeCapabilityDeclaration[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const declarations: RuntimeCapabilityDeclaration[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const raw = item as Record<string, unknown>;
+    const id = stringOf(raw.id);
+    if (!id?.includes('.') || typeof raw.available !== 'boolean') continue;
+    const rawLimits = recordObjectOf(raw.limits);
+    const limits: Record<string, string | number | boolean> | undefined = rawLimits
+      ? Object.fromEntries(Object.entries(rawLimits).filter((entry): entry is [string, string | number | boolean] =>
+        typeof entry[1] === 'string' || typeof entry[1] === 'number' || typeof entry[1] === 'boolean'))
+      : undefined;
+    const version = stringOf(raw.version);
+    const description = stringOf(raw.description);
+    declarations.push({
+      id: id as RuntimeCapabilityId,
+      available: raw.available,
+      source: 'advertised',
+      ...(version ? { version } : {}),
+      ...(description ? { description } : {}),
+      ...(limits && Object.keys(limits).length > 0 ? { limits } : {}),
+    });
+  }
+  return declarations.length > 0 ? declarations : undefined;
 }
 
 function booleanOf(value: unknown): boolean | undefined {

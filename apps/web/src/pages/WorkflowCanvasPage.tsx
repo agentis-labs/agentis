@@ -1945,7 +1945,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
           onClearFocus={clearPhaseFocus}
           onAskAgentForPhases={askAgentForPhases}
         />
-        <div ref={overlayHostRef} className="relative min-h-0 flex-1">
+        <div ref={overlayHostRef} className="relative h-full min-h-0 flex-1">
           {/* Embedded (App Workflow facet) hides the header below, so surface a compact
               operations cluster: the engine (inputs & settings) + Run. Run enables only
               once there's something to run. */}
@@ -2548,8 +2548,8 @@ export function WorkflowBrainTab({
             scopeName={workflow.title}
             scopeId={workflow.id}
             emptyMessage={kind === 'app'
-              ? 'This App has not formed Brain knowledge yet. Promote a record to memory (the agent\'s data_promote_memory tool) or have the operator run its logic to build its map.'
-              : 'This workflow has not produced scoped Brain knowledge yet. Add knowledge, save memory, or run it once to form its map.'}
+              ? 'Run this App once. Every run deposits what it proved — or what it failed at and why — and those become the nodes here. You can also add knowledge or save memory to it directly.'
+              : 'Run this workflow once. Every run deposits its graded outcome here as a node. You can also add knowledge or save memory to it directly.'}
           />
         ) : view === 'knowledge' ? (
           <KnowledgeTab scopeId={workflow.id} scopeName={workflow.title} />
@@ -2563,7 +2563,7 @@ export function WorkflowBrainTab({
           // runs are written scoped to the executing agent instead, but every episode
           // still records its own workflowId column — filter on that instead of the
           // (never-matching) scopeId so this tab isn't structurally always empty.
-          <InsightsTab scopeId={workflow.id} episodeWorkflowId={kind === 'workflow' ? workflow.id : undefined} />
+          <InsightsTab scopeId={workflow.id} scopeNoun={kind === 'app' ? 'App' : 'workflow'} episodeWorkflowId={kind === 'workflow' ? workflow.id : undefined} />
         )}
       </div>
     </div>

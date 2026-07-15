@@ -25,6 +25,19 @@ vi.mock('../../src/lib/appsApi', async (importOriginal) => {
     appsApi: {
       ...mod.appsApi,
       listWorkflows: vi.fn(async () => []),
+      doctor: vi.fn(async () => ({
+        appId: 'app-1', generatedAt: new Date().toISOString(), health: 'healthy', readyForUnattended: true,
+        summary: { critical: 0, error: 0, warning: 0, info: 0, workflows: 1, executableRules: 1 },
+        topology: { roots: ['wf-1'], dependencyEdges: 0, activeEventSubscriptions: 1, activeTriggers: 0, conversationTransitions: 0 },
+        findings: [],
+      })),
+      orchestrationRules: vi.fn(async () => [{
+        id: 'rule-1', sourceWorkflowId: 'wf-1', targetWorkflowId: 'wf-1', eventType: 'run.accomplished',
+        sourceNodeId: null, filterExpression: null, inputMapping: {}, coalescePolicy: 'latest_only', catchupPolicy: 'none', enabled: true,
+      }]),
+      createOrchestrationRule: vi.fn(async (_appId, body) => ({ id: 'rule-new', ...body })),
+      updateOrchestrationRule: vi.fn(async (_appId, ruleId, body) => ({ id: ruleId, ...body })),
+      deleteOrchestrationRule: vi.fn(async () => ({ ok: true as const })),
     },
   };
 });
@@ -93,7 +106,62 @@ describe('OrchestrationPanel', () => {
     expect(screen.queryByText('Fashion ICP Finder')).toBeNull();
 
     await userEvent.click(expand);
-    expect(await screen.findByText('Fashion ICP Finder')).toBeTruthy();
+    expect((await screen.findAllByText('Fashion ICP Finder')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('Executable control plane')).toBeTruthy();
+    expect(screen.getByText('run.accomplished')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /run pipeline/i })).toBeNull();
+  });
+
+  it('creates a persisted success-gated rule with mapped inputs', async () => {
+    vi.mocked(appsApi.listWorkflows).mockResolvedValueOnce([
+      { id: 'wf-1', title: 'Discover', purpose: null, order: 0, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null },
+      { id: 'wf-2', title: 'Contact', purpose: null, order: 1, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null },
+    ] as Awaited<ReturnType<typeof appsApi.listWorkflows>>);
+    vi.mocked(appsApi.orchestrationRules).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    renderNode({ type: 'OrchestrationPanel' } as ViewNode);
+    await userEvent.click(await screen.findByRole('button', { name: /expand orchestration/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /new event rule/i }));
+    await userEvent.click(screen.getByRole('button', { name: /add mapping/i }));
+    await userEvent.type(screen.getByLabelText('Target input key'), 'leadId');
+    await userEvent.type(screen.getByLabelText('Source event path'), 'payload.output.lead.id');
+    const doctorCallsBeforeSave = vi.mocked(appsApi.doctor).mock.calls.length;
+    await userEvent.click(screen.getByRole('button', { name: /persist rule/i }));
+
+    await waitFor(() => expect(appsApi.createOrchestrationRule).toHaveBeenCalledWith('app-1', expect.objectContaining({
+      sourceWorkflowId: 'wf-1',
+      targetWorkflowId: 'wf-2',
+      eventType: 'run.accomplished',
+      inputMapping: { leadId: 'payload.output.lead.id' },
+      coalescePolicy: 'coalesce_pending',
+      enabled: true,
+    })));
+    expect(vi.mocked(appsApi.doctor).mock.calls.length).toBeGreaterThan(doctorCallsBeforeSave);
+  });
+
+  it('edits, disables, and deletes an executable rule through persisted API operations', async () => {
+    vi.mocked(appsApi.listWorkflows).mockResolvedValueOnce([
+      { id: 'wf-1', title: 'Discover', purpose: null, order: 0, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null },
+      { id: 'wf-2', title: 'Contact', purpose: null, order: 1, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null },
+    ] as Awaited<ReturnType<typeof appsApi.listWorkflows>>);
+    vi.mocked(appsApi.orchestrationRules).mockResolvedValue([{
+      id: 'rule-1', sourceWorkflowId: 'wf-1', targetWorkflowId: 'wf-2', eventType: 'run.accomplished',
+      sourceNodeId: null, filterExpression: null, inputMapping: {}, coalescePolicy: 'latest_only', catchupPolicy: 'none', enabled: true,
+    }]);
+
+    renderNode({ type: 'OrchestrationPanel' } as ViewNode);
+    await userEvent.click(await screen.findByRole('button', { name: /expand orchestration/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /edit rule from discover/i }));
+    await userEvent.type(screen.getByLabelText('Filter expression'), 'payload.score >= 0.8');
+    await userEvent.click(screen.getByRole('button', { name: /persist rule/i }));
+    await waitFor(() => expect(appsApi.updateOrchestrationRule).toHaveBeenCalledWith('app-1', 'rule-1', expect.objectContaining({ filterExpression: 'payload.score >= 0.8' })));
+
+    await userEvent.click(screen.getByRole('button', { name: /disable rule from discover/i }));
+    await waitFor(() => expect(appsApi.updateOrchestrationRule).toHaveBeenCalledWith('app-1', 'rule-1', { enabled: false }));
+
+    await userEvent.click(screen.getByRole('button', { name: /delete rule from discover/i }));
+    await userEvent.click(screen.getByRole('button', { name: /confirm delete rule/i }));
+    await waitFor(() => expect(appsApi.deleteOrchestrationRule).toHaveBeenCalledWith('app-1', 'rule-1'));
   });
 });
 

@@ -750,7 +750,7 @@ describe('App workflow control plane (E0)', () => {
     return id;
   }
 
-  function seedRun(workflowId: string, status: string, createdAt: string): string {
+  function seedRun(workflowId: string, status: string, createdAt: string, runState: Record<string, unknown> = {}): string {
     const id = randomUUID();
     ctx.db.insert(schema.workflowRuns).values({
       id,
@@ -759,7 +759,7 @@ describe('App workflow control plane (E0)', () => {
       workflowId,
       userId: ctx.user.id,
       status,
-      runState: {},
+      runState,
       createdAt,
       startedAt: status === 'RUNNING' ? createdAt : null,
     }).run();
@@ -801,6 +801,87 @@ describe('App workflow control plane (E0)', () => {
     const liveRes = await app().request(`/v1/apps/${appId}/workflows`, { headers: ctx.authHeaders });
     const live = await liveRes.json() as { data: Array<{ activeRun: { id: string; status: string } | null }> };
     expect(live.data[0]?.activeRun).toEqual(expect.objectContaining({ id: liveRunId, status: 'RUNNING' }));
+  });
+
+  it('reports the verified outcome instead of presenting every completion as success', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Truthful Status' }).id;
+    const wf = seedWorkflow(appId, 'Publish', 'manual');
+    ctx.db.update(schema.workflows).set({
+      settings: { spec: { version: 1, objective: 'publish', acceptance: [{ id: 'ok', claim: 'published', verify: 'expr', expr: 'output.ok == true' }], createdAt: new Date().toISOString() } },
+    }).where(eq(schema.workflows.id, wf)).run();
+    seedRun(wf, 'COMPLETED', '2026-07-04T10:00:00.000Z', { verdict: { outcome: 'failed_checks' } });
+
+    const res = await app().request(`/v1/apps/${appId}/workflows`, { headers: ctx.authHeaders });
+    const body = await res.json() as { data: Array<{ lastRun: { status: string; verified: boolean; accomplished: boolean; outcome: string } }> };
+    expect(body.data[0]?.lastRun).toMatchObject({ status: 'COMPLETED', verified: true, accomplished: false, outcome: 'failed_checks' });
+  });
+
+  it('exposes persisted event rules and a cross-layer doctor report for the App', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Observable Rules' }).id;
+    const source = seedWorkflow(appId, 'Source', 'manual');
+    const target = seedWorkflow(appId, 'Target', 'manual');
+    ctx.db.insert(schema.workflowEventSubscriptions).values({
+      id: randomUUID(), workspaceId: ctx.workspace.id, sourceWorkflowId: source, targetWorkflowId: target,
+      eventType: 'run.accomplished', inputMapping: {}, coalescePolicy: 'always_enqueue', catchupPolicy: 'none', enabled: true,
+    }).run();
+
+    const rulesRes = await app().request(`/v1/apps/${appId}/orchestration-rules`, { headers: ctx.authHeaders });
+    expect(rulesRes.status).toBe(200);
+    const rules = await rulesRes.json() as { data: Array<{ eventType: string }> };
+    expect(rules.data).toEqual([expect.objectContaining({ eventType: 'run.accomplished' })]);
+
+    const doctorRes = await app().request(`/v1/apps/${appId}/doctor`, { headers: ctx.authHeaders });
+    expect(doctorRes.status).toBe(200);
+    const doctor = await doctorRes.json() as { data: { appId: string; summary: { executableRules: number }; topology: { activeEventSubscriptions: number } } };
+    expect(doctor.data).toMatchObject({ appId, topology: { activeEventSubscriptions: 1 } });
+    expect(doctor.data.summary.executableRules).toBeGreaterThanOrEqual(1);
+  });
+
+  it('authors, updates, and deletes executable rules and previews/applies Doctor repairs through App routes', async () => {
+    const store = new AppStore(ctx.db);
+    const appId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Rule Authoring' }).id;
+    const source = seedWorkflow(appId, 'Source', 'manual');
+    const target = seedWorkflow(appId, 'Target', 'manual');
+    ctx.db.update(schema.workflows).set({ settings: { appBinding: { dependsOn: [source] } } }).where(eq(schema.workflows.id, source)).run();
+
+    const createRes = await app().request(`/v1/apps/${appId}/orchestration-rules`, {
+      method: 'POST', headers: { ...ctx.authHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sourceWorkflowId: source, targetWorkflowId: target, eventType: 'run.accomplished',
+        inputMapping: { leadId: 'output.leadId' }, coalescePolicy: 'coalesce_pending', enabled: true,
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json() as { data: { id: string; enabled: boolean } };
+
+    const patchRes = await app().request(`/v1/apps/${appId}/orchestration-rules/${created.data.id}`, {
+      method: 'PATCH', headers: { ...ctx.authHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false, filterExpression: 'event.output.ready == true' }),
+    });
+    expect(patchRes.status).toBe(200);
+    expect(await patchRes.json()).toMatchObject({ data: { id: created.data.id, enabled: false } });
+
+    const previewRes = await app().request(`/v1/apps/${appId}/doctor/repair`, {
+      method: 'POST', headers: { ...ctx.authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({}),
+    });
+    expect(previewRes.status).toBe(200);
+    expect(await previewRes.json()).toMatchObject({ data: { committed: false } });
+    expect(((ctx.db.select().from(schema.workflows).all().find((row) => row.id === source)!.settings as { appBinding: { dependsOn: string[] } }).appBinding.dependsOn)).toEqual([source]);
+
+    const repairRes = await app().request(`/v1/apps/${appId}/doctor/repair`, {
+      method: 'POST', headers: { ...ctx.authHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true }),
+    });
+    expect(repairRes.status).toBe(200);
+    expect(await repairRes.json()).toMatchObject({ data: { committed: true } });
+    expect(((ctx.db.select().from(schema.workflows).all().find((row) => row.id === source)!.settings as { appBinding: { dependsOn: string[] } }).appBinding.dependsOn)).toEqual([]);
+
+    const deleteRes = await app().request(`/v1/apps/${appId}/orchestration-rules/${created.data.id}`, {
+      method: 'DELETE', headers: ctx.authHeaders,
+    });
+    expect(deleteRes.status).toBe(200);
+    expect(await deleteRes.json()).toEqual({ data: { ok: true } });
   });
 
   it('updates a workflow binding (order + purpose) and reflects it in the ordered list', async () => {

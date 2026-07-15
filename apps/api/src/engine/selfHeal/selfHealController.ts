@@ -771,7 +771,13 @@ export class SelfHealController {
     clip: (s: string, n: number) => string,
   ): void {
     if (delta.type === 'activity') {
-      this.host.emitWorkStep(ctx, node, delta.phase === 'error' ? 'fail' : delta.phase === 'complete' ? 'complete' : 'thinking', [delta.label, delta.detail].filter(Boolean).join(' - '));
+      // `status` carries the real outcome ('running'|'success'|'error') of a
+      // per-tool activity; `phase` is only 'error' for a terminal turn-level
+      // failure (e.g. no chat adapter). Checking `phase` alone let a REAL
+      // failed tool call (phase:'tool', status:'error') during the repair
+      // loop fall through to 'thinking' — never surfaced as a failure.
+      const failed = delta.status === 'error' || delta.phase === 'error';
+      this.host.emitWorkStep(ctx, node, failed ? 'fail' : delta.phase === 'complete' ? 'complete' : 'thinking', [delta.label, delta.detail].filter(Boolean).join(' - '));
       return;
     }
     if (delta.type === 'thinking') {

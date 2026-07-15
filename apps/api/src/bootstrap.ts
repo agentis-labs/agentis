@@ -399,6 +399,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     oauthService,
     mcpOAuthService,
     auth,
+    archiveStore,
     ledger,
     scratchpad,
     activity,
@@ -938,8 +939,23 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const runCompaction = new RunCompactionService({
     db: sqlite,
     logger,
-    keepFullStateDays: 30,
-    keepLedgerDays: 90,
+    archiveStore,
+    dataDir: env.AGENTIS_DATA_DIR,
+    keepFullStateDays: env.AGENTIS_STORAGE_FULL_RUN_DAYS,
+    keepLedgerDays: env.AGENTIS_STORAGE_LEDGER_DAYS,
+    keepObservabilityDays: env.AGENTIS_STORAGE_OBSERVABILITY_DAYS,
+    intervalMs: env.AGENTIS_STORAGE_MAINTENANCE_INTERVAL_MS,
+    maxHotDbBytes: env.AGENTIS_STORAGE_MAX_HOT_DB_MB * 1024 ** 2,
+    minFreeBytes: env.AGENTIS_STORAGE_MIN_FREE_MB * 1024 ** 2,
+    // Production installations self-maintain after boot. Development/test
+    // workspaces only run on the normal cadence, avoiding surprise fixture churn.
+    runOnStart: env.NODE_ENV === 'production',
+    reclaimStorage: () => {
+      db.sqliteRaw?.pragma('wal_checkpoint(PASSIVE)');
+      if (Number(db.sqliteRaw?.pragma('auto_vacuum', { simple: true })) === 2) {
+        db.sqliteRaw?.pragma('incremental_vacuum(2048)');
+      }
+    },
   });
 
   const toolRegistry = new AgentisToolRegistry({ logger });
@@ -952,6 +968,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // Model can fuse each App's graded lessons into a manager's briefing. Referenced
   // later by the app routes + scheduler sweep.
   const appLearning = new AppLearningService({ db: sqlite, shared: SharedIntelligence, logger, reflection: memoryReflection });
+  // Every terminal run deposits its graded outcome into the scope that owns it (the
+  // App, else the workflow) — the writer that makes an App's Brain map fill.
+  engineDeps.appBrain = appLearning;
   // The fractal Command Model — an orchestrator/manager's progressive comprehension
   // of what it manages: scoped inventory + progress/deltas + App minds.
   const commandModel = new CommandModelService({ db: sqlite, logger, appLearning });
@@ -1129,6 +1148,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     channels: channelBridge,
     resolveCompleter: (workspaceId: string, task: string) => resolveSynthesisCompleter(toolHandlerDeps, workspaceId, undefined, task),
     learning: appLearning,
+    sharedIntelligence: SharedIntelligence,
     logger,
   });
   toolHandlerDeps.conversation = conversationService;
@@ -1547,6 +1567,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     harnessImportSync,
   } = wireRoutes({
     ...foundation,
+    runCompaction,
     PeerProfiles,
     Reflection,
     SessionMoments,
@@ -1751,6 +1772,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 const WORKFLOW_AGENT_TOOL_BLOCKLIST = new Set<string>([
   'agentis.build_workflow',
   'agentis.workflow.patch',
+  'agentis.workflow.graph.replace',
+  'agentis.workflow.graph.patch',
+  'agentis.workflow.graph.rollback',
+  'agentis.run.graph.evolve',
   'agentis.workflow.run',
   'agentis.workflow.deliver',
   'agentis.ephemeral.run',

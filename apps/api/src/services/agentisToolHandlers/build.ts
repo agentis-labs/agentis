@@ -58,6 +58,14 @@ import { generateEdgeCases, readWorkflowTests, type WorkflowTestCase } from '../
 import { connectorCatalog } from '@agentis/integrations';
 import { stringify as yamlStringify } from 'yaml';
 import { WORKFLOW_FILE_API_VERSION, type WorkflowFile } from '@agentis/core';
+import { hashWorkflowGraph } from '../graphHash.js';
+import {
+  applyLegacyWorkflowPatchDraft,
+  applyWorkflowGraphOperations,
+  diffWorkflowGraphs,
+  WorkflowGraphMutationError,
+  type WorkflowGraphMutationDiff,
+} from '../workflow/workflowGraphMutation.js';
 
 /**
  * Conversation → last-built workflow id. A build conversation is bound to ONE
@@ -309,6 +317,143 @@ function acquireBuildSlot(workspaceId: string, latchKey: string | null): () => v
 }
 
 export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
+  type StoredWorkflow = typeof schema.workflows.$inferSelect;
+  type StoredGraphRevision = {
+    hash: string;
+    replacedByHash: string;
+    graph: WorkflowGraph;
+    createdAt: string;
+    operation: 'replace' | 'patch' | 'rollback';
+    actorId?: string;
+  };
+  const GRAPH_REVISION_HISTORY_KEY = 'workflowGraphRevisionHistory';
+  const GRAPH_REVISION_HISTORY_LIMIT = 20;
+
+  const readGraphRevisionHistory = (settings: unknown): StoredGraphRevision[] => {
+    if (!settings || typeof settings !== 'object') return [];
+    const value = (settings as Record<string, unknown>)[GRAPH_REVISION_HISTORY_KEY];
+    if (!Array.isArray(value)) return [];
+    return value.filter((entry): entry is StoredGraphRevision => {
+      if (!entry || typeof entry !== 'object') return false;
+      const row = entry as Partial<StoredGraphRevision>;
+      return typeof row.hash === 'string'
+        && typeof row.replacedByHash === 'string'
+        && typeof row.createdAt === 'string'
+        && (row.operation === 'replace' || row.operation === 'patch' || row.operation === 'rollback')
+        && Boolean(row.graph && typeof row.graph === 'object');
+    });
+  };
+
+  const loadStoredWorkflow = (workflowId: unknown, workspaceId: string): StoredWorkflow => {
+    const wf = deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, String(workflowId))).get();
+    if (!wf || wf.workspaceId !== workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${String(workflowId)} not found`);
+    return wf;
+  };
+
+  const validateStoredMutation = (
+    wf: StoredWorkflow,
+    candidate: WorkflowGraph,
+    confirmIntentChange: boolean,
+  ): void => {
+    validateWorkflowGraph(candidate);
+    const priorGraph = wf.graph as WorkflowGraph;
+    const priorIntent = (wf.settings as { intentManifest?: IntentManifest } | null)?.intentManifest ?? null;
+    const violations = checkIntentIntegrity(candidate, priorIntent);
+    const approvalBypass = violations.filter((v) => v.code === 'AUTO_APPROVAL_BYPASS');
+    if (approvalBypass.length > 0) {
+      throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+        `Rejected (approval integrity): ${approvalBypass.map((v) => v.message).slice(0, 2).join(' | ')}`);
+    }
+    const capabilityRemoved = violations.filter((v) => v.code === 'CAPABILITY_REMOVED');
+    if (capabilityRemoved.length > 0 && !confirmIntentChange) {
+      throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+        `Rejected (this mutation hollows out the workflow): ${capabilityRemoved.map((v) => v.message).slice(0, 2).join(' | ')} `
+        + 'If this intent change is deliberate, retry with confirmIntentChange: true.');
+    }
+    const introduced = introducedRegressions(priorGraph, candidate);
+    if (introduced.length > 0) {
+      throw new AgentisError('WORKFLOW_DRAFT_INVALID',
+        `This mutation would REGRESS the workflow (green ratchet): it introduces ${introduced.length} critical issue(s) the prior graph did not have — `
+        + `${introduced.slice(0, 3).join(' | ')}. The workflow was NOT changed; fix the mutation and retry.`);
+    }
+  };
+
+  const commitStoredMutation = (input: {
+    wf: StoredWorkflow;
+    graph: WorkflowGraph;
+    diff: WorkflowGraphMutationDiff;
+    baseHash?: unknown;
+    baseUpdatedAt?: unknown;
+    dryRun?: boolean;
+    operation: 'replace' | 'patch' | 'rollback';
+    deprecatedAlias?: boolean;
+    actorId?: string;
+  }) => {
+    const beforeHash = hashWorkflowGraph(input.wf.graph as WorkflowGraph);
+    if (input.baseHash !== undefined && String(input.baseHash) !== beforeHash) {
+      throw new AgentisError('GRAPH_REVISION_CONFLICT',
+        `Workflow changed since inspection: expected graph hash ${String(input.baseHash)}, current hash is ${beforeHash}. Inspect the workflow and rebase the mutation; do not retry the stale payload.`);
+    }
+    if (input.baseUpdatedAt !== undefined && String(input.baseUpdatedAt) !== input.wf.updatedAt) {
+      throw new AgentisError('GRAPH_REVISION_CONFLICT',
+        `Workflow changed since inspection: expected updatedAt ${String(input.baseUpdatedAt)}, current value is ${input.wf.updatedAt}. Inspect and rebase the mutation.`);
+    }
+    const afterHash = hashWorkflowGraph(input.graph);
+    const revision = { beforeHash, afterHash, basedOnUpdatedAt: input.wf.updatedAt };
+    if (input.dryRun) {
+      return { workflowId: input.wf.id, operation: input.operation, committed: false, preview: true, revision, diff: input.diff };
+    }
+
+    const now = new Date().toISOString();
+    const currentSettings = ((input.wf.settings as Record<string, unknown>) ?? {});
+    const priorHistory = readGraphRevisionHistory(currentSettings);
+    const revisionEntry: StoredGraphRevision = {
+      hash: beforeHash,
+      replacedByHash: afterHash,
+      graph: input.wf.graph as WorkflowGraph,
+      createdAt: now,
+      operation: input.operation,
+      ...(input.actorId ? { actorId: input.actorId } : {}),
+    };
+    const revisionHistory = [revisionEntry, ...priorHistory.filter((entry) => entry.hash !== beforeHash)]
+      .slice(0, GRAPH_REVISION_HISTORY_LIMIT);
+    const result = deps.db.update(schema.workflows).set({
+      graph: input.graph,
+      contentHash: afterHash,
+      settings: {
+        ...currentSettings,
+        [GRAPH_REVISION_HISTORY_KEY]: revisionHistory,
+        intentManifest: deriveIntentManifest(input.graph, input.wf.description ?? input.wf.title),
+      },
+      updatedAt: now,
+    }).where(and(eq(schema.workflows.id, input.wf.id), eq(schema.workflows.updatedAt, input.wf.updatedAt))).run() as { changes?: number };
+    if (result.changes === 0) {
+      throw new AgentisError('GRAPH_REVISION_CONFLICT',
+        'Workflow changed while this mutation was being validated. Nothing was written; inspect the latest graph and rebase the mutation.');
+    }
+    const buildLoop = stampBuildLoop(deps.db, input.wf.id, {
+      graphHash: graphContentHash(input.graph),
+      validatedAt: new Date().toISOString(),
+    });
+    const saved = deps.db.select({ updatedAt: schema.workflows.updatedAt }).from(schema.workflows).where(eq(schema.workflows.id, input.wf.id)).get();
+    return {
+      workflowId: input.wf.id,
+      operation: input.operation,
+      committed: true,
+      patched: true,
+      revision: { ...revision, updatedAt: saved?.updatedAt ?? now },
+      diff: input.diff,
+      ...(input.deprecatedAlias ? {
+        deprecation: {
+          tool: 'agentis.workflow.patch',
+          replacement: input.operation === 'replace' ? 'agentis.workflow.graph.replace' : 'agentis.workflow.graph.patch',
+        },
+      } : {}),
+      selfHealInFlight: deps.engine.isSelfHealInFlight(input.wf.id),
+      compass: compassForWorkflow({ workflowId: input.wf.id, graph: input.graph, settings: { buildLoop } }),
+    };
+  };
+
   registry.registerMany([
     {
       definition: {
@@ -383,9 +528,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.workflow.patch',
         family: 'build',
         description:
-          'Replace a workflow graph ATOMICALLY — pass workflowId + the COMPLETE graph, OR runId + patch to EVOLVE a LIVE run you are executing inside (add steps you discovered are missing). ' +
-          'The live-run form goes through the contract transaction (green ratchet + authority): it commits, or returns named regressions to fix and re-propose — it never corrupts the run. ' +
-          'This is NOT a partial editor for at-rest workflows: for a SCOPED edit use agentis.build_workflow with workflowId + patchDraft instead — it validates, repairs, re-lays-out, and re-enriches, so you never have to resend the whole graph.',
+          'DEPRECATED compatibility alias. Stored workflowId + complete graph routes to agentis.workflow.graph.replace; runId + patch routes to agentis.run.graph.evolve. ' +
+          'For a true field-level stored edit use agentis.workflow.graph.patch. New callers should use the explicit tools so replacement, stored patching, and live evolution cannot be confused.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -393,6 +537,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             runId: { type: 'string' },
             patch: { type: 'object' },
             graph: { type: 'object' },
+            baseHash: { type: 'string', description: 'Optional SHA-256 graph hash from the last inspection.' },
+            baseUpdatedAt: { type: 'string', description: 'Optional updatedAt token from the last inspection.' },
             confirmIntentChange: {
               type: 'boolean',
               description: 'Acknowledge a DELIBERATE capability change — required when the replacement graph drops load-bearing work (agent workers / fetch steps / integrations / persistence).',
@@ -417,72 +563,188 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             patch: args.patch as WorkflowGraphPatch,
             actorId: (ctx as { agentId?: string }).agentId,
           });
-          return { runId: run.id, ...result };
+          return { runId: run.id, ...result, deprecation: { tool: 'agentis.workflow.patch', replacement: 'agentis.run.graph.evolve' } };
         }
 
         if (!args.workflowId || !args.graph) {
           throw new AgentisError(
             'VALIDATION_FAILED',
-            'workflow.patch replaces the WHOLE graph: pass workflowId + the complete graph (or runId + patch for a live run). ' +
-            'For a SCOPED edit — add/update/remove a few nodes or edges — call agentis.build_workflow with workflowId + patchDraft ' +
-            '(addNodes / updateNodes / removeNodeIds / addEdges / removeEdgeIds) instead; Agentis validates, repairs, re-lays-out, and re-enriches the result.',
+            'workflow.patch is deprecated. Use agentis.workflow.graph.replace with workflowId + complete graph, ' +
+            'agentis.workflow.graph.patch with workflowId + field-level operations, or agentis.run.graph.evolve with runId + patch for a live run.',
           );
         }
-        const wf = deps.db
-          .select()
-          .from(schema.workflows)
-          .where(eq(schema.workflows.id, String(args.workflowId)))
-          .get();
-        if (!wf || wf.workspaceId !== ctx.workspaceId) {
-          throw new Error(`workflow ${args.workflowId} not found`);
-        }
-        // PAVED-ROAD P0 (one door): a whole-graph replacement passes the SAME
-        // critical gates as build_workflow — this handler used to save raw,
-        // making every contract organ optional for whoever picked this tool.
-        const priorGraph = wf.graph as WorkflowGraph;
+        const wf = loadStoredWorkflow(args.workflowId, ctx.workspaceId);
         const graph = layoutBuiltWorkflowGraph(args.graph as WorkflowGraph, { existingWorkflow: false });
-        validateWorkflowGraph(graph);
-        const priorIntent = (wf.settings as { intentManifest?: IntentManifest } | null)?.intentManifest ?? null;
-        const violations = checkIntentIntegrity(graph, priorIntent);
-        const approvalBypass = violations.filter((v) => v.code === 'AUTO_APPROVAL_BYPASS');
-        if (approvalBypass.length > 0) {
-          throw new AgentisError('WORKFLOW_DRAFT_INVALID',
-            `Rejected (approval integrity): ${approvalBypass.map((v) => v.message).slice(0, 2).join(' | ')}`);
-        }
-        const capabilityRemoved = violations.filter((v) => v.code === 'CAPABILITY_REMOVED');
-        if (capabilityRemoved.length > 0 && args.confirmIntentChange !== true) {
-          throw new AgentisError('WORKFLOW_DRAFT_INVALID',
-            `Rejected (this replacement hollows out the workflow): ${capabilityRemoved.map((v) => v.message).slice(0, 2).join(' | ')} `
-            + 'If this intent change is deliberate, retry with confirmIntentChange: true.');
-        }
-        const introduced = introducedRegressions(priorGraph, graph);
-        if (introduced.length > 0) {
-          throw new AgentisError('WORKFLOW_DRAFT_INVALID',
-            `This replacement would REGRESS the workflow (green ratchet): it introduces ${introduced.length} critical issue(s) the prior graph did not have — `
-            + `${introduced.slice(0, 3).join(' | ')}. The workflow was NOT changed; fix the graph and retry.`);
-        }
-        deps.db
-          .update(schema.workflows)
-          .set({
-            graph,
-            settings: {
-              ...((wf.settings as Record<string, unknown>) ?? {}),
-              intentManifest: deriveIntentManifest(graph, wf.description ?? wf.title),
-            },
-            updatedAt: new Date().toISOString(),
-          })
-          .where(eq(schema.workflows.id, wf.id))
-          .run();
-        const buildLoop = stampBuildLoop(deps.db, wf.id, {
-          graphHash: graphContentHash(graph),
-          validatedAt: new Date().toISOString(),
+        validateStoredMutation(wf, graph, args.confirmIntentChange === true);
+        return commitStoredMutation({
+          wf, graph,
+          diff: diffWorkflowGraphs(wf.graph as WorkflowGraph, graph),
+          baseHash: args.baseHash,
+          baseUpdatedAt: args.baseUpdatedAt,
+          operation: 'replace',
+          deprecatedAlias: true,
+          actorId: ctx.agentId ?? ctx.userId,
         });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.graph.replace',
+        family: 'build',
+        description:
+          'Atomically replace a STORED workflow with a complete graph. This is intentionally whole-graph; use agentis.workflow.graph.patch for field-level edits. ' +
+          'Pass baseHash or baseUpdatedAt from inspection to reject stale writes. Returns a structured graph diff and before/after revision hashes.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' }, graph: { type: 'object', description: 'Complete replacement WorkflowGraph.' },
+            baseHash: { type: 'string' }, baseUpdatedAt: { type: 'string' }, dryRun: { type: 'boolean' }, confirmIntentChange: { type: 'boolean' },
+          },
+          required: ['workflowId', 'graph'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = loadStoredWorkflow(args.workflowId, ctx.workspaceId);
+        const graph = layoutBuiltWorkflowGraph(args.graph as WorkflowGraph, { existingWorkflow: false });
+        validateStoredMutation(wf, graph, args.confirmIntentChange === true);
+        return commitStoredMutation({
+          wf, graph,
+          diff: diffWorkflowGraphs(wf.graph as WorkflowGraph, graph),
+          baseHash: args.baseHash, baseUpdatedAt: args.baseUpdatedAt,
+          dryRun: args.dryRun === true, operation: 'replace',
+          actorId: ctx.agentId ?? ctx.userId,
+        });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.graph.patch',
+        family: 'build',
+        description:
+          'Atomically patch selected fields or structure of a STORED workflow without restating complete nodes or the graph. ' +
+          'Supported operations: add_node, patch_node, remove_node, add_edge, patch_edge, remove_edge, patch_viewport. Object patches merge recursively; omitted fields are preserved. ' +
+          'Pass baseHash or baseUpdatedAt from inspection to reject stale writes. Returns exact changed paths and before/after revision hashes.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' }, operations: { type: 'array', items: { type: 'object' } },
+            baseHash: { type: 'string' }, baseUpdatedAt: { type: 'string' }, dryRun: { type: 'boolean' }, confirmIntentChange: { type: 'boolean' },
+          },
+          required: ['workflowId', 'operations'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = loadStoredWorkflow(args.workflowId, ctx.workspaceId);
+        let mutation: ReturnType<typeof applyWorkflowGraphOperations>;
+        try {
+          mutation = applyWorkflowGraphOperations(wf.graph as WorkflowGraph, args.operations);
+        } catch (error) {
+          if (error instanceof WorkflowGraphMutationError) throw new AgentisError('WORKFLOW_DRAFT_INVALID', error.message);
+          throw error;
+        }
+        validateStoredMutation(wf, mutation.graph, args.confirmIntentChange === true);
+        return commitStoredMutation({
+          wf, graph: mutation.graph, diff: mutation.diff,
+          baseHash: args.baseHash, baseUpdatedAt: args.baseUpdatedAt,
+          dryRun: args.dryRun === true, operation: 'patch',
+          actorId: ctx.agentId ?? ctx.userId,
+        });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.graph.revisions',
+        family: 'inspect',
+        description:
+          'List the bounded durable revision history for a stored workflow. Graph snapshots are retained server-side; the response exposes hashes and metadata so callers can choose an explicit rollback target.',
+        inputSchema: {
+          type: 'object', properties: { workflowId: { type: 'string' } }, required: ['workflowId'],
+        },
+        mutating: false,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = loadStoredWorkflow(args.workflowId, ctx.workspaceId);
+        const currentHash = hashWorkflowGraph(wf.graph as WorkflowGraph);
         return {
           workflowId: wf.id,
-          patched: true,
-          selfHealInFlight: deps.engine.isSelfHealInFlight(wf.id),
-          compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { buildLoop } }),
+          current: { hash: currentHash, updatedAt: wf.updatedAt },
+          revisions: readGraphRevisionHistory(wf.settings).map(({ graph: _graph, ...revision }) => revision),
         };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.graph.rollback',
+        family: 'build',
+        description:
+          'Restore a stored workflow to a previously recorded graph revision. Requires the current baseHash and confirm:true for commit, validates the restored graph, writes atomically, and records the graph being replaced so rollback is itself reversible.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' },
+            targetHash: { type: 'string' },
+            baseHash: { type: 'string', description: 'Required current graph hash; stale rollback requests are rejected.' },
+            dryRun: { type: 'boolean' },
+            confirm: { type: 'boolean', description: 'Must be true to commit. Omit for a validated preview.' },
+          },
+          required: ['workflowId', 'targetHash', 'baseHash'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const wf = loadStoredWorkflow(args.workflowId, ctx.workspaceId);
+        const targetHash = String(args.targetHash ?? '');
+        const currentHash = hashWorkflowGraph(wf.graph as WorkflowGraph);
+        if (String(args.baseHash ?? '') !== currentHash) {
+          throw new AgentisError('GRAPH_REVISION_CONFLICT',
+            `Workflow changed since rollback inspection: expected ${String(args.baseHash ?? '')}, current hash is ${currentHash}. Inspect revisions again.`);
+        }
+        const target = readGraphRevisionHistory(wf.settings).find((revision) => revision.hash === targetHash);
+        if (!target) {
+          throw new AgentisError('RESOURCE_NOT_FOUND',
+            `Workflow revision ${targetHash} is not available in the bounded history. List revisions and choose a retained hash.`);
+        }
+        validateWorkflowGraph(target.graph);
+        const diff = diffWorkflowGraphs(wf.graph as WorkflowGraph, target.graph);
+        const dryRun = args.dryRun === true || args.confirm !== true;
+        return commitStoredMutation({
+          wf,
+          graph: target.graph,
+          diff,
+          baseHash: currentHash,
+          dryRun,
+          operation: 'rollback',
+          actorId: ctx.agentId ?? ctx.userId,
+        });
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.run.graph.evolve',
+        family: 'run',
+        description:
+          'Evolve the graph of a LIVE workflow run through the runtime contract transaction. This never edits the stored workflow. ' +
+          'The evolution either commits under green-ratchet and authority checks, or returns named regressions.',
+        inputSchema: {
+          type: 'object', properties: { runId: { type: 'string' }, patch: { type: 'object' } }, required: ['runId', 'patch'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const run = deps.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, String(args.runId))).get();
+        if (!run || run.workspaceId !== ctx.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', `run ${String(args.runId)} not found`);
+        const result = await deps.engine.evolveGraph({
+          runId: run.id, patch: args.patch as WorkflowGraphPatch, actorId: (ctx as { agentId?: string }).agentId,
+        });
+        return { runId: run.id, ...result };
       },
     },
     {
@@ -593,6 +855,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             description: { type: 'string' },
             title: { type: 'string' },
             workflowId: { type: 'string' },
+            appId: { type: 'string', description: 'Existing App that should own a newly created workflow. Omit to create the historical App-of-one wrapper.' },
             newWorkflow: { type: 'boolean' },
             graphDraft: {
               type: 'object',
@@ -600,7 +863,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             },
             patchDraft: {
               type: 'object',
-              description: 'Agent-authored patch object for editing the target workflow: addNodes/updateNodes/removeNodeIds/addEdges/removeEdgeIds.',
+              description: 'Legacy agent-authored patch object for editing the target workflow. updateNodes entries may contain only id plus changed fields; omitted node/config fields are preserved. Prefer agentis.workflow.graph.patch for explicit operations and revision checks.',
             },
             confirmIntentChange: {
               type: 'boolean',
@@ -646,6 +909,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             description,
             title: args.title ? String(args.title) : undefined,
             workflowId: targetWorkflowId,
+            appId: args.appId ? String(args.appId) : undefined,
             graphDraft: args.graphDraft,
             patchDraft: args.patchDraft,
             confirmIntentChange: args.confirmIntentChange === true,
@@ -1429,6 +1693,8 @@ export interface CreateWorkflowArgs {
   description: string;
   title?: string;
   workflowId?: string | null;
+  /** Existing App that should own a newly created workflow. Omit for App-of-one. */
+  appId?: string;
   /** Agent-authored graph draft. Agentis validates, repairs, enriches, and saves it. */
   graphDraft?: unknown;
   /** Agent-authored edit patch for the target workflow. */
@@ -1478,6 +1744,8 @@ function introducedRegressions(prior: WorkflowGraph, next: WorkflowGraph): strin
 
 export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args: CreateWorkflowArgs) {
   const description = args.description.trim();
+  const appStore = new AppStore(deps.db);
+  if (args.appId) appStore.get(args.workspaceId, args.appId); // ownership validation before model spend
   // Resolve the target workflow. An explicit id (or the conversation latch, which
   // the chat handler resolves before calling us) wins. Otherwise, GUARD against
   // duplicate creation: the SAME request can reach this core twice via different
@@ -1488,7 +1756,10 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // text → distinct key → never wrongly merged.)
   let existingWorkflowId = args.workflowId ?? null;
   let deduplicatedRequest = false;
-  const recentSameRequestId = recentDuplicateWorkflowId(deps, args.workspaceId, description);
+  const recentCandidateId = recentDuplicateWorkflowId(deps, args.workspaceId, description);
+  const recentSameRequestId = recentCandidateId && args.appId
+    ? (appStore.appIdForWorkflow(args.workspaceId, recentCandidateId) === args.appId ? recentCandidateId : null)
+    : recentCandidateId;
   if (!existingWorkflowId) {
     if (recentSameRequestId) {
       existingWorkflowId = recentSameRequestId;
@@ -1510,6 +1781,10 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     : null;
   if (existingWorkflowId && (!existingWorkflow || existingWorkflow.workspaceId !== args.workspaceId)) {
     throw new Error(`workflow ${existingWorkflowId} not found`);
+  }
+  if (existingWorkflow && args.appId && existingWorkflow.appId && existingWorkflow.appId !== args.appId) {
+    throw new AgentisError('RESOURCE_CONFLICT',
+      `workflow ${existingWorkflow.id} already belongs to App ${existingWorkflow.appId}; refusing to move it implicitly to App ${args.appId}`);
   }
   const title = String(args.title ?? existingWorkflow?.title ?? titleFromDescription(description));
   const persistedDescription = existingWorkflow?.description ?? description;
@@ -1893,6 +2168,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       title,
       description: persistedDescription,
       graph: initialGraph,
+      contentHash: hashWorkflowGraph(initialGraph),
       settings: { intentManifest },
       concurrencyOverflow: 'queue',
       createdAt: now,
@@ -1906,10 +2182,16 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   // workflow keeps its current owner (which may be null for legacy rows). The
   // resolved `appId` rides the build result + CANVAS_BUILD_COMPLETE event so the
   // chat opens the App, never the raw workflow canvas.
-  const appStore = new AppStore(deps.db);
   let appId: string | null = null;
   if (existingWorkflow) {
     appId = appStore.appIdForWorkflow(args.workspaceId, workflowId);
+    if (!appId && args.appId) {
+      appStore.adoptWorkflow(args.workspaceId, args.appId, workflowId);
+      appId = args.appId;
+    }
+  } else if (args.appId) {
+    appStore.adoptWorkflow(args.workspaceId, args.appId, workflowId);
+    appId = args.appId;
   } else {
     const wrap = appStore.create(
       args.workspaceId,
@@ -2005,6 +2287,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
         title,
         description: persistedDescription,
         graph,
+        contentHash: hashWorkflowGraph(graph),
         settings: { ...((existingWorkflow?.settings as Record<string, unknown>) ?? {}), intentManifest },
         updatedAt: new Date().toISOString(),
       })
@@ -3479,74 +3762,8 @@ function parseAgentGraphDraft(value: unknown): WorkflowGraph {
   };
 }
 
-type WorkflowMutationPatchPayload = {
-  addNodes?: unknown;
-  updateNodes?: unknown;
-  removeNodeIds?: unknown;
-  addEdges?: unknown;
-  removeEdgeIds?: unknown;
-};
-
 function applyWorkflowMutationPatch(base: WorkflowGraph, value: unknown): WorkflowGraph {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('the model did not return a workflow patch object');
-  }
-  const patch = value as WorkflowMutationPatchPayload;
-  const addNodes = arrayOfObjects(patch.addNodes) as unknown as WorkflowGraph['nodes'];
-  const updateNodes = arrayOfObjects(patch.updateNodes) as unknown as WorkflowGraph['nodes'];
-  const removeNodeIds = arrayOfStrings(patch.removeNodeIds);
-  const addEdges = arrayOfObjects(patch.addEdges) as unknown as WorkflowGraph['edges'];
-  const removeEdgeIds = arrayOfStrings(patch.removeEdgeIds);
-  const baseNodeIds = new Set(base.nodes.map((node) => node.id));
-  const baseEdgeIds = new Set(base.edges.map((edge) => edge.id));
-
-  for (const node of updateNodes) {
-    if (!node.id || !baseNodeIds.has(node.id)) {
-      throw new Error(`updateNodes references unknown node "${node.id ?? ''}"`);
-    }
-  }
-  for (const node of addNodes) {
-    if (!node.id || baseNodeIds.has(node.id)) {
-      throw new Error(`addNodes must use a new node id (received "${node.id ?? ''}")`);
-    }
-  }
-  for (const id of removeNodeIds) {
-    if (!baseNodeIds.has(id)) throw new Error(`removeNodeIds references unknown node "${id}"`);
-  }
-  for (const id of removeEdgeIds) {
-    if (!baseEdgeIds.has(id)) throw new Error(`removeEdgeIds references unknown edge "${id}"`);
-  }
-
-  const removedNodes = new Set(removeNodeIds);
-  const updates = new Map(updateNodes.map((node) => [node.id, node]));
-  const nodes = base.nodes
-    .filter((node) => !removedNodes.has(node.id))
-    .map((node) => updates.get(node.id) ?? node)
-    .concat(addNodes);
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const removedEdges = new Set(removeEdgeIds);
-  const edges = base.edges
-    .filter((edge) => !removedEdges.has(edge.id))
-    .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
-    .concat(addEdges);
-
-  return { ...base, nodes, edges };
-}
-
-function arrayOfObjects(value: unknown): Record<string, unknown>[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
-    throw new Error('workflow patch object lists must be arrays');
-  }
-  return value as Record<string, unknown>[];
-}
-
-function arrayOfStrings(value: unknown): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new Error('workflow patch id lists must be string arrays');
-  }
-  return value;
+  return applyLegacyWorkflowPatchDraft(base, value);
 }
 
 function assertMutationPreservesGraph(
@@ -3663,7 +3880,7 @@ async function synthesizeWithLlm(
     mutation
       ? `\nTHIS IS AN IN-PLACE EDIT OF "${mutation.title}", NOT A NEW WORKFLOW.\n`
         + 'Return {"patch":{"addNodes":[],"updateNodes":[],"removeNodeIds":[],"addEdges":[],"removeEdgeIds":[]}}. '
-        + 'Each updateNodes entry is the complete revised node with the SAME id. Preserve every unrelated node, edge, trigger, credential reference, schedule, state step, and output. '
+        + 'Each updateNodes entry needs the existing id plus ONLY the fields that change; omitted fields and nested config values are preserved. Preserve every unrelated node, edge, trigger, credential reference, schedule, state step, and output. '
         + 'Use removals only when the request requires them. Never replace the workflow with a smaller generic example.\n'
         + `CURRENT WORKFLOW GRAPH:\n${JSON.stringify(mutation.graph)}`
       : '',

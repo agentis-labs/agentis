@@ -21,12 +21,14 @@ import type {
   NormalizedAgentEvent,
   NormalizedTask,
   RuntimeContext,
+  RuntimeCapabilityDeclaration,
 } from '@agentis/core';
 import { CONSTANTS } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
 import { linkAbortSignal } from './abort.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 
 export interface HttpAdapterOptions {
   agentId: string;
@@ -35,6 +37,8 @@ export interface HttpAdapterOptions {
   healthUrl?: string;
   chatUrl?: string;
   supportsTools?: boolean;
+  /** Explicit powers implemented by the remote runtime behind this contract. */
+  capabilityManifest?: RuntimeCapabilityDeclaration[];
   model?: string;
   method?: 'POST' | 'GET' | 'PUT' | 'PATCH';
   headers?: Record<string, string>;
@@ -99,6 +103,12 @@ export class HttpAdapter implements AgentAdapter {
       memory: {
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        ...(interactiveChat ? ['interaction.chat' as const] : []),
+        ...(interactiveChat && this.opts.supportsTools === true ? ['interaction.tool-calling' as const] : []),
+        'execution.long-running',
+        'memory.inject',
+      ], { additional: this.opts.capabilityManifest }),
       ...(!interactiveChat
         ? { limitations: ['Interactive chat is off because this HTTP agent has no chat endpoint. Set `chatUrl` (or `baseUrl` + `chatPath`) in its adapter config to enable it; until then it can only run workflow tasks.'] }
         : this.opts.supportsTools !== true

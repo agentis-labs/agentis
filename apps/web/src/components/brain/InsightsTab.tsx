@@ -33,7 +33,7 @@ interface HealthSnapshot {
  * (e.g. an App-owned workflow's episodes are scoped to the App, not the
  * workflow or the agent that ran it).
  */
-export function InsightsTab({ onOpenConfig, scopeId, episodeWorkflowId, episodeAgentId }: { onOpenConfig?: () => void; scopeId?: string; episodeWorkflowId?: string; episodeAgentId?: string }) {
+export function InsightsTab({ onOpenConfig, scopeId, scopeNoun = 'workflow', episodeWorkflowId, episodeAgentId }: { onOpenConfig?: () => void; scopeId?: string; scopeNoun?: string; episodeWorkflowId?: string; episodeAgentId?: string }) {
   const [snapshot, setSnapshot] = useState<HealthSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
@@ -101,18 +101,20 @@ export function InsightsTab({ onOpenConfig, scopeId, episodeWorkflowId, episodeA
 
         <InsightSection
           eyebrow="Memory"
-          title="Workspace recall"
+          title={isScoped ? 'Recall' : 'Workspace recall'}
           description={isScoped
-            ? 'Facts, rules, preferences, patterns, and lessons available to this workflow.'
+            ? `Facts, rules, preferences, patterns, and lessons available to this ${scopeNoun}.`
             : 'Facts, rules, preferences, patterns, and lessons available to every agent.'}
         >
-          <WorkspaceMemoryTab scopeId={scopeId} />
+          <WorkspaceMemoryTab scopeId={scopeId} scopeNoun={scopeNoun} />
         </InsightSection>
 
         <InsightSection
           eyebrow="Episodes"
           title="Promoted learning"
-          description={isEpisodeScoped ? "Lessons distilled from this scope's outcomes." : 'Lessons distilled automatically from workflow outcomes.'}
+          description={isEpisodeScoped
+            ? `What this ${scopeNoun} has learned from its own runs — what it proved, and what it failed at.`
+            : 'Lessons distilled automatically from workflow outcomes.'}
         >
           <EpisodesTab
             scopeId={episodeWorkflowId || episodeAgentId ? undefined : scopeId}

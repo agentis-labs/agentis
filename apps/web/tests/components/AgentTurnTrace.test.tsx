@@ -86,4 +86,44 @@ describe('AgentTurnTrace', () => {
 
     expect(screen.getByText('Failed')).toBeInTheDocument();
   });
+
+  it('downgrades a mid-turn error to a softer tone once the agent moves past it, but keeps the last error alarming', () => {
+    render(
+      <AgentTurnTrace
+        streaming={false}
+        turn={{ startedAt: new Date().toISOString(), status: 'completed', durationMs: 2000 }}
+        activities={[
+          activity(1, { status: 'error', label: 'Failed agentis.build_workflow' }),
+          activity(2, { status: 'success', label: 'Used agentis.workflow.patch' }),
+        ]}
+      />,
+    );
+
+    // The turn as a whole succeeded — the summary pill must not read "Failed".
+    expect(screen.getByText('Done')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show work' }));
+    const recovered = screen.getByText('Failed agentis.build_workflow');
+    expect(recovered.className).toContain('text-warn');
+    expect(recovered.className).not.toContain('text-danger');
+  });
+
+  it('keeps the alarming treatment when the LAST step is the one that errored', () => {
+    render(
+      <AgentTurnTrace
+        streaming={false}
+        failed
+        turn={{ startedAt: new Date().toISOString(), status: 'failed' }}
+        activities={[
+          activity(1, { status: 'success', label: 'Used agentis.capability.load' }),
+          activity(2, { status: 'error', label: 'Failed agentis.build_workflow' }),
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show work' }));
+    const stillFailed = screen.getByText('Failed agentis.build_workflow');
+    expect(stillFailed.className).toContain('text-danger');
+    expect(stillFailed.className).not.toContain('text-warn');
+  });
 });

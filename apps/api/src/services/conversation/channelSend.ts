@@ -12,7 +12,7 @@
  */
 import type { ChannelBridge } from './channelBridge.js';
 import type { ConnectionGrantService } from '../connectionGrants.js';
-import type { ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
+import type { ChannelDeliveryReceipt, ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
@@ -28,11 +28,13 @@ export interface ChannelSendArgs {
   /** Calling agent — gates §3.3 authority. Null/undefined = deterministic/system caller (allowed). */
   agentId?: string | null;
   attachments?: OutboundAttachmentRef[];
+  /** Stable run+node key for durable at-most-once workflow delivery. */
+  idempotencyKey?: string;
 }
 
 export type ChannelSendResult =
-  | { sent: true; connectionId: string; kind: string; to: string; targetSource: string; status: string; attachments: number }
-  | { sent: false; errorCode: string; error: string; remediation?: string; candidates?: unknown[]; connection?: unknown };
+  | { sent: true; verified: true; connectionId: string; kind: string; to: string; targetSource: string; status: string; attachments: number; providerMessageId: string; deliveryStatus: ChannelDeliveryReceipt['status']; acceptedAt: string; receipt: ChannelDeliveryReceipt }
+  | { sent: false; verified?: false; errorCode: string; error: string; remediation?: string; candidates?: unknown[]; connection?: unknown; receipt?: ChannelDeliveryReceipt };
 
 /** What the flow needs from the bridge — structural so tests can fake it. */
 export interface ChannelSendDeps {
@@ -128,8 +130,39 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
     };
   }
 
-  await deps.channels.deliverToConnection({ connectionId: candidate.id, chatId, body, ...(attachments.length ? { attachments } : {}) });
-  return { sent: true, connectionId: candidate.id, kind: candidate.kind, to: chatId, targetSource: resolved.source, status: candidate.status, attachments: attachments.length };
+  const receipt = await deps.channels.deliverToConnection({
+    connectionId: candidate.id,
+    chatId,
+    body,
+    ...(attachments.length ? { attachments } : {}),
+    ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
+  });
+  const providerMessageId = receipt?.providerMessageId?.trim() ?? '';
+  if (!providerMessageId) {
+    return {
+      sent: false,
+      verified: false,
+      errorCode: 'CHANNEL_DELIVERY_UNVERIFIED',
+      error: `${candidate.kind} transport returned without provider-issued message proof. The delivery outcome is unknown and must not advance downstream state.`,
+      remediation: 'Inspect the channel/provider before retrying; an unverified attempt may still have reached the recipient.',
+      connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
+      ...(receipt ? { receipt } : {}),
+    };
+  }
+  return {
+    sent: true,
+    verified: true,
+    connectionId: candidate.id,
+    kind: candidate.kind,
+    to: receipt.recipient ?? chatId,
+    targetSource: resolved.source,
+    status: candidate.status,
+    attachments: attachments.length,
+    providerMessageId,
+    deliveryStatus: receipt.status,
+    acceptedAt: receipt.acceptedAt,
+    receipt,
+  };
 }
 
 /** The port the workflow engine consumes for the `channel` node. */

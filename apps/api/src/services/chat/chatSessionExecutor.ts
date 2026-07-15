@@ -16,6 +16,7 @@ import type { OrchestratorModelRouter } from '../orchestrator/orchestratorModelR
 import type { ModelRoutingDecision } from '../modelRoutingPolicy.js';
 import { recordToolCall, recordTurn } from './chatMetrics.js';
 import { toolActivityLabel } from '../../adapters/runtimeProgress.js';
+import { withBudget } from '../util/withBudget.js';
 import type { Logger } from '../../logger.js';
 import type { EventBus } from '../../event-bus.js';
 import type { AdapterManager } from '../../adapters/AdapterManager.js';
@@ -585,25 +586,40 @@ export class ChatSessionExecutor {
               });
               // Carry the atom count so the turn can SHOW the recall happening
               // ("Recalled N memories") — an invisible mind reads as a dead one.
-              return { block: brain.block || null, atoms: brain.atomIds.length };
+              // `relevant` excludes Tier-0 backfill (a weak-threshold quota
+              // filler) — the count an operator sees should mean "N memories
+              // that actually cleared relevance", not "N padded up to the
+              // limit to look full".
+              return { block: brain.block || null, atoms: brain.atomIds.length, relevant: brain.relevantCount };
             } catch (err) {
               logger?.warn?.('chat.brain_context.failed', { agentId: ctx.agentId, err: (err as Error).message });
               return null;
             }
           }, CONTEXT_BUILDER_BUDGET_MS, null, () => logger?.warn?.('chat.brain_context.budget_exceeded', { agentId: ctx.agentId }))
-        : Promise.resolve<{ block: string | null; atoms: number } | null>(null),
+        : Promise.resolve<{ block: string | null; atoms: number; relevant: number } | null>(null),
     ]);
 
     // §B3 — prefer the unified brain context; fall back to the legacy newest-8
     // slice only when SharedIntelligence is not wired.
     // BRAIN-BLUEPRINT-10X §visibility — surface the recall like a desktop harness
     // does ("Recalled N memories"): the operator finally SEES the mind engage.
-    if (brainContext && brainContext.atoms > 0) {
+    if (brainContext && brainContext.relevant > 0) {
       yield this.#activity(
         ctx,
         'context',
-        `Recalled ${brainContext.atoms} ${brainContext.atoms === 1 ? 'memory' : 'memories'}`,
+        `Recalled ${brainContext.relevant} ${brainContext.relevant === 1 ? 'memory' : 'memories'}`,
         'Relevant Brain memories were injected into this turn\'s context.',
+        'memory-recall',
+      );
+    } else if (brainContext && brainContext.atoms > 0) {
+      // Nothing cleared the relevance floor — what's injected is Tier-0
+      // background filler, not a genuine match. Say so honestly rather than
+      // reporting a count that implies a stronger signal than there is.
+      yield this.#activity(
+        ctx,
+        'context',
+        `Loaded ${brainContext.atoms} background ${brainContext.atoms === 1 ? 'memory' : 'memories'}`,
+        'No memory cleared the relevance bar for this task; background context was included as a fallback.',
         'memory-recall',
       );
     }
@@ -1686,30 +1702,6 @@ function buildNarrationDelta(
  */
 const CONTEXT_BUILDER_BUDGET_MS = 1200;
 
-/**
- * Resolve `factory()` but never wait longer than `ms` and never reject: on
- * timeout (and on any rejection) resolve with `fallback`. Used to time-box the
- * best-effort context retrievers so one slow dependency can't stall a chat turn.
- */
-function withBudget<T>(factory: () => Promise<T>, ms: number, fallback: T, onTimeout?: () => void): Promise<T> {
-  return new Promise<T>((resolve) => {
-    let settled = false;
-    const finish = (value: T) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(value);
-    };
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      onTimeout?.();
-      resolve(fallback);
-    }, ms);
-    timer.unref?.();
-    factory().then(finish, () => finish(fallback));
-  });
-}
 
 /**
  * Whether a message carries enough of a query signal to justify a knowledge-base

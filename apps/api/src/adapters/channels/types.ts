@@ -71,6 +71,24 @@ export interface OutboundAttachmentRef {
   kind?: 'image' | 'file';
 }
 
+/**
+ * Provider-issued proof that an outbound message was accepted by the channel.
+ * A resolved socket/HTTP write without `providerMessageId` is not a delivery.
+ */
+export interface ChannelDeliveryReceipt {
+  provider: ChannelKind;
+  providerMessageId: string;
+  /** `accepted` is provider acknowledgement; delivered/read require a later provider receipt. */
+  status: 'accepted' | 'delivered' | 'read' | 'queued';
+  acceptedAt: string;
+  recipient?: string;
+  /** Multi-attachment sends may produce more than one provider message. */
+  providerMessageIds?: string[];
+  /** True when Agentis reused a durable receipt instead of contacting the provider again. */
+  deduplicated?: boolean;
+  idempotencyKey?: string;
+}
+
 export interface ChannelAdapter {
   readonly kind: ChannelKind;
 
@@ -88,7 +106,7 @@ export interface ChannelAdapter {
     body: string;
     settings?: Record<string, unknown>;
     attachments?: OutboundAttachment[];
-  }): Promise<void>;
+  }): Promise<ChannelDeliveryReceipt>;
 
   /**
    * Validate channel credentials without sending a user-visible message.

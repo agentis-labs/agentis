@@ -25,7 +25,7 @@ vi.mock('../../src/components/brain/BrainStage', () => ({
 
 describe('<BrainView />', () => {
   beforeEach(() => {
-    mocks.api.mockImplementation(async (path: string) => {
+    const respond = async (path: string) => {
       if (path === '/v1/brain') {
         return {
           scope: 'workspace',
@@ -85,8 +85,13 @@ describe('<BrainView />', () => {
       if (path === '/v1/workspace/intelligence') {
         return { embeddingProviderType: 'local', degraded: false, migration: null };
       }
+      if (path === '/v1/grounding/graph') {
+        // Optional overlays may be slow; the atom map must render without them.
+        return new Promise(() => {});
+      }
       throw new Error(`Unexpected request: ${path}`);
-    });
+    };
+    mocks.api.mockImplementation(respond);
   });
 
   it('renders indexed document atoms even when composed knowledge layers are empty', async () => {
@@ -98,7 +103,6 @@ describe('<BrainView />', () => {
 
     await waitFor(() => expect(screen.getByTestId('brain-stage')).toHaveTextContent('product-notes.txt'));
     expect(screen.queryByText('The workspace brain is empty.')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Search the brain' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Knowledge/ })).toBeInTheDocument();
     expect(screen.queryByText('1 knowledge - 0 memories - 0 links')).not.toBeInTheDocument();
   });

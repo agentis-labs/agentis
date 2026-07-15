@@ -73,7 +73,20 @@ describe('WorkflowEngine — channel node', () => {
     const port: ChannelSendPort = {
       async send(args) {
         calls.push({ kind: args.kind, body: args.body, to: args.to });
-        return { sent: true, connectionId: 'wa1', kind: 'whatsapp', to: '+5511', targetSource: 'default', status: 'active', attachments: 0 } satisfies ChannelSendResult;
+        return {
+          sent: true,
+          verified: true,
+          connectionId: 'wa1',
+          kind: 'whatsapp',
+          to: '+5511',
+          targetSource: 'default',
+          status: 'active',
+          attachments: 0,
+          providerMessageId: 'wamid.generic-1',
+          deliveryStatus: 'accepted',
+          acceptedAt: '2026-07-14T00:00:00.000Z',
+          receipt: { provider: 'whatsapp', providerMessageId: 'wamid.generic-1', status: 'accepted', acceptedAt: '2026-07-14T00:00:00.000Z', recipient: '+5511' },
+        } satisfies ChannelSendResult;
       },
     };
     const { status, output } = await runChannel(port);
@@ -83,6 +96,8 @@ describe('WorkflowEngine — channel node', () => {
     expect(calls[0]!.body).toBe('Oi Ada'); // {{nodes.C.name}} resolved
     expect((output.delivery as { sent: boolean }).sent).toBe(true);
     expect((output.delivery as { connectionId: string }).connectionId).toBe('wa1');
+    expect((output.delivery as { verified: boolean }).verified).toBe(true);
+    expect((output.delivery as { providerMessageId: string }).providerMessageId).toBe('wamid.generic-1');
   });
 
   it('FAILS the node when the send does not go through (no hollow success)', async () => {

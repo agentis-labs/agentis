@@ -36,7 +36,11 @@ function fakeTransport() {
     requiresNoToken: (kind) => kind === 'whatsapp',
     onCreated: (conn) => { created.push(conn.id); },
     status: () => ({ status: 'open' }),
-    send: async (connectionId, chatId, body) => { sent.push({ connectionId, chatId, body }); },
+    send: async (connectionId, chatId, body) => {
+      sent.push({ connectionId, chatId, body });
+      const kind = chatId.includes('@s.whatsapp.net') ? 'whatsapp' : chatId === '987' ? 'telegram' : 'discord';
+      return { provider: kind, providerMessageId: `provider-${sent.length}`, status: 'accepted', acceptedAt: '2026-07-14T00:00:00.000Z', recipient: chatId } as const;
+    },
     setTyping: async (connectionId, chatId, on) => { typing.push({ connectionId, chatId, on }); },
     stop: async (connectionId) => { stopped.push(connectionId); },
   };
@@ -98,8 +102,9 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
       agentId, kind: 'whatsapp', name: 'WA',
     });
 
-    await bridge.deliverToConnection({ connectionId: connection.id, chatId: '1234567@s.whatsapp.net', body: 'pong' });
+    const receipt = await bridge.deliverToConnection({ connectionId: connection.id, chatId: '1234567@s.whatsapp.net', body: 'pong' });
     expect(sent).toEqual([{ connectionId: connection.id, chatId: '1234567@s.whatsapp.net', body: 'pong' }]);
+    expect(receipt.providerMessageId).toBe('provider-1');
 
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect(row.status).toBe('active'); // markActive after a successful send
@@ -117,6 +122,64 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
 
     await bridge.deliverToConnection({ connectionId: connection.id, chatId: '+1 (234) 567-8901', body: 'pong' });
     expect(sent).toEqual([{ connectionId: connection.id, chatId: '12345678901@s.whatsapp.net', body: 'pong' }]);
+  });
+
+  it('reuses a durable outbound receipt instead of resending the same workflow delivery', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport, sent } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA',
+    });
+    const request = {
+      connectionId: connection.id,
+      chatId: '1234567@s.whatsapp.net',
+      body: 'generic notification',
+      idempotencyKey: 'run-1:notify-node',
+    };
+
+    const first = await bridge.deliverToConnection(request);
+    const replay = await bridge.deliverToConnection(request);
+
+    expect(sent).toHaveLength(1);
+    expect(first.providerMessageId).toBe('provider-1');
+    expect(replay.providerMessageId).toBe('provider-1');
+    expect(replay.deduplicated).toBe(true);
+  });
+
+  it('does not blindly resend an outbound attempt whose provider outcome is uncertain', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    let providerAttempts = 0;
+    transport.send = async () => {
+      providerAttempts += 1;
+      throw new Error('provider connection closed before a receipt was returned');
+    };
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA',
+    });
+    const request = {
+      connectionId: connection.id,
+      chatId: '1234567@s.whatsapp.net',
+      body: 'generic notification',
+      idempotencyKey: 'run-2:notify-node',
+    };
+
+    await expect(bridge.deliverToConnection(request)).rejects.toThrow(/before a receipt/);
+    await expect(bridge.deliverToConnection(request)).rejects.toThrow(/status uncertain/);
+
+    expect(providerAttempts).toBe(1);
+    const journal = ctx.db.select()
+      .from(schema.channelOutboundDeliveries)
+      .where(eq(schema.channelOutboundDeliveries.idempotencyKey, request.idempotencyKey))
+      .get();
+    expect(journal?.status).toBe('uncertain');
+    expect(journal?.providerMessageId).toBeNull();
   });
 
   it('marks open WhatsApp QR healthy without requiring a default recipient', async () => {

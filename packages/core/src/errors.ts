@@ -24,6 +24,7 @@ export type AgentisErrorCode =
   | 'WORKFLOW_STOPPED'
   // Adapters
   | 'ADAPTER_UNAVAILABLE'
+  | 'ADAPTER_CAPABILITY_MISMATCH'
   | 'ADAPTER_TIMEOUT'
   | 'ADAPTER_REJECTED'
   // Extensions
@@ -168,6 +169,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'PACKAGE_SLUG_CONFLICT':
       return 409;
     case 'VALIDATION_FAILED':
+    case 'ADAPTER_CAPABILITY_MISMATCH':
     case 'WORKFLOW_GRAPH_INVALID':
     case 'WORKFLOW_DRAFT_INVALID':
     case 'WORKFLOW_DRAFT_REQUIRED':

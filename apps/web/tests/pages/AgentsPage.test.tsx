@@ -62,7 +62,6 @@ describe('<AgentsPage />', () => {
     await waitFor(() => {
       expect(screen.getByText(/No agents yet/i)).toBeInTheDocument();
     });
-    expect(screen.getByText(/0 agents/i)).toBeInTheDocument();
   });
 
   it('defaults to the hierarchy canvas and keeps the table fallback', async () => {
@@ -96,13 +95,13 @@ describe('<AgentsPage />', () => {
       </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByText('Hermes')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /^All$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /All domains/i })).toBeInTheDocument();
     expect(screen.queryByText(/Fleet map/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/^Managers$/i)).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /Table view/i }));
+    await userEvent.click(screen.getByRole('button', { name: /View options/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^List$/i }));
     expect(screen.getByText(/(HTTP|No harness)/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 agent/i)).toBeInTheDocument();
   });
 
   it('opens the agent quick-detail panel when a fleet card is clicked', async () => {
@@ -164,7 +163,6 @@ describe('<AgentsPage />', () => {
 
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /Open agent$/i })).toBeInTheDocument();
-    expect(screen.getByText(/Runtime model/i)).toBeInTheDocument();
     expect(screen.getByText(/Live status/i)).toBeInTheDocument();
   });
 
@@ -201,7 +199,7 @@ describe('<AgentsPage />', () => {
     );
 
     await waitFor(() => expect(screen.getByText('Hermes')).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /Reset layout/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Tidy layout/i }));
 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledWith(
@@ -308,9 +306,6 @@ describe('<AgentsPage />', () => {
     );
     await waitFor(() => expect(screen.getByText(/No agents yet/i)).toBeInTheDocument());
     await userEvent.click(screen.getAllByRole('button', { name: /Add agent/i })[0]!);
-    expect(screen.getByRole('menuitem', { name: /Import existing agent from this machine/i })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: /Import agent package from this machine/i })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('menuitem', { name: /Create new agent/i }));
     expect(screen.getByRole('heading', { name: /Commission agent/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Commission agent/i })).toBeInTheDocument();
     expect(screen.getByText(/Name it, give it a runtime/i)).toBeInTheDocument();
@@ -341,6 +336,5 @@ describe('<AgentsPage />', () => {
 
     await waitFor(() => expect(screen.getByTestId('agent-brain-panel')).toHaveTextContent('agent:a1'));
     expect(screen.getByTestId('agent-brain-panel')).toHaveTextContent('view:skills');
-    expect(screen.getByText(/Individual agent brains/i)).toBeInTheDocument();
   });
 });

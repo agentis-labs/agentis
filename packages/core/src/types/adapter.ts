@@ -225,6 +225,70 @@ export type AgentAffordance = typeof AGENT_AFFORDANCES[number];
 
 export interface AgentRequirements extends Partial<Record<AgentAffordance, boolean>> {}
 
+/**
+ * Stable, namespaced powers a runtime can actually provide. Built-ins cover the
+ * execution environment Agentis understands; adapters and extensions may add
+ * their own namespaced ids without changing this contract.
+ */
+export const BUILTIN_RUNTIME_CAPABILITIES = [
+  'interaction.chat',
+  'interaction.tool-calling',
+  'execution.file-system',
+  'execution.terminal',
+  'execution.browser',
+  'execution.computer-use',
+  'execution.network',
+  'execution.long-running',
+  'execution.pausable',
+  'workspace.codebase-index',
+  'protocol.native-mcp',
+  'memory.inject',
+  'memory.ingest',
+] as const;
+
+export type BuiltinRuntimeCapability = typeof BUILTIN_RUNTIME_CAPABILITIES[number];
+/** Namespaced custom capabilities make the contract extensible for OSS adapters. */
+export type RuntimeCapabilityId = BuiltinRuntimeCapability | `${string}.${string}`;
+
+export interface RuntimeCapabilityDeclaration {
+  id: RuntimeCapabilityId;
+  available: boolean;
+  /** Whether the adapter asserted this directly or Agentis projected legacy fields. */
+  source: 'advertised' | 'legacy_projection';
+  version?: string;
+  limits?: Record<string, string | number | boolean>;
+  description?: string;
+}
+
+/** Machine-readable supply contract returned for every registered runtime. */
+export interface RuntimeCapabilityManifest {
+  schemaVersion: 1;
+  adapterType: string;
+  capabilities: RuntimeCapabilityDeclaration[];
+  limitations: string[];
+}
+
+/**
+ * Hard environmental requirements for a task. Every `allOf` item is required;
+ * each nested `anyOf` group requires at least one available member.
+ */
+export interface RuntimeCapabilityRequirements {
+  allOf?: RuntimeCapabilityId[];
+  anyOf?: RuntimeCapabilityId[][];
+  /** Operator-facing reason retained in mismatch diagnostics. */
+  reason?: string;
+}
+
+export interface RuntimeCompatibilityResult {
+  compatible: boolean;
+  required: RuntimeCapabilityId[];
+  available: RuntimeCapabilityId[];
+  missing: RuntimeCapabilityId[];
+  unsatisfiedAnyOf: RuntimeCapabilityId[][];
+  limitations: string[];
+  reason?: string;
+}
+
 export interface AdapterCapabilities {
   /** Can this runtime participate in the interactive chat loop? */
   interactiveChat: boolean;
@@ -260,6 +324,12 @@ export interface AdapterCapabilities {
     injectable?: boolean;
     ingestible?: boolean;
   };
+  /**
+   * Optional native capability declarations. Agentis merges these over the
+   * legacy booleans above, allowing third-party adapters to advertise new,
+   * namespaced powers without a core release.
+   */
+  capabilityManifest?: RuntimeCapabilityDeclaration[];
 }
 
 export type AgentAdapterConfig =
@@ -374,6 +444,8 @@ export interface HttpAdapterConfig {
   chatPath?: string;
   chatUrl?: string;
   supportsTools?: boolean;
+  /** Explicit powers implemented by the remote runtime behind this contract. */
+  capabilityManifest?: RuntimeCapabilityDeclaration[];
   model?: string;
   method?: 'POST' | 'GET' | 'PUT' | 'PATCH';
   headers?: Record<string, string>;
@@ -421,6 +493,8 @@ export interface NormalizedTask {
   inputData: Record<string, unknown>;
   scratchpadSnapshot: Record<string, unknown>;
   capabilityTags: string[];
+  /** Hard runtime powers checked again by AdapterManager immediately before dispatch. */
+  runtimeRequirements?: RuntimeCapabilityRequirements;
   timeoutMs: number;
   callbackUrl?: string;
   

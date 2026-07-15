@@ -27,6 +27,7 @@ import { REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { tokens } from '../../lib/api';
 import { displayLabel } from '../../lib/prettyRef';
+import { ErrorBoundary } from '../shared/ErrorBoundary';
 import { appsApi, type AppConversation, type AppConversationMessage } from '../../lib/appsApi';
 import { pathsEqual, pathKey } from './viewTree';
 import { CHART_PALETTE, ThemeProvider, accentColor, resolveTheme, useTheme, type ResolvedTheme } from './theme';
@@ -372,7 +373,17 @@ export function useActionInvoker() {
         return;
       }
 
-      const result = await client.actions.invoke(action, args);
+      let result: unknown;
+      try {
+        result = await client.actions.invoke(action, args);
+      } catch (err) {
+        // A failed action used to do NOTHING visible — the button looked dead.
+        // Announce the failure so the shell can surface it (see AppRuntime), then
+        // re-throw so callers that revert optimistic state still run.
+        const message = err instanceof Error ? err.message : String(err);
+        window.dispatchEvent(new CustomEvent('agentis:app-action-error', { detail: { action, message } }));
+        throw err;
+      }
       // Run feedback loop: a workflow action that started a run announces it, so
       // the shell can surface a live "run started" chip → ops drawer deep link.
       if (isRecord(result) && typeof (result as { runId?: unknown }).runId === 'string') {
@@ -466,7 +477,14 @@ export function ViewRenderer({
       ),
     };
     const renderer = getBlock(node.type);
-    return renderer ? renderer(node, ctx) : <UnknownBlock node={node} />;
+    // A single misconfigured block (e.g. a Kanban bound to a bad shape) must not
+    // crash the whole surface — contain its render failure to a compact inline
+    // error so the rest of the app keeps working.
+    return (
+      <ErrorBoundary compact label={`${node.type} block failed`}>
+        {renderer ? renderer(node, ctx) : <UnknownBlock node={node} />}
+      </ErrorBoundary>
+    );
   }
 }
 

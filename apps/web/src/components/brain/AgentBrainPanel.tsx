@@ -36,6 +36,7 @@ export function AgentBrainPanel({
   onSelectedAgentIdChange,
   view,
   onViewChange,
+  importUpdates: providedImportUpdates,
   topRightSlot,
 }: {
   agents?: AgentRow[];
@@ -43,6 +44,7 @@ export function AgentBrainPanel({
   onSelectedAgentIdChange?: (id: string) => void;
   view?: AgentBrainView;
   onViewChange?: (view: AgentBrainView) => void;
+  importUpdates?: ImportUpdate[] | null;
   /** Shared surface controls (Fleet/Brain + Add agent) floated on the map. */
   topRightSlot?: ReactNode;
 } = {}) {
@@ -127,10 +129,26 @@ export function AgentBrainPanel({
     selectAgent(agents.find((agent) => subjectTier(agent.role) === 'orchestrator')?.id || agents[0]?.id || '');
   }, [agentId, agents, selectAgent]);
 
-  useEffect(() => { void loadMemory(agentId).catch(() => {}); void loadSkillCount(agentId); void loadImports(); }, [agentId, loadMemory, loadSkillCount, loadImports]);
-
   const current = useMemo(() => agents.find((a) => a.id === agentId) ?? null, [agents, agentId]);
   const pending = useMemo(() => imports.find((u) => u.agentId === agentId) ?? null, [imports, agentId]);
+
+  useEffect(() => {
+    void loadMemory(agentId).catch(() => {});
+    void loadSkillCount(agentId);
+  }, [agentId, loadMemory, loadSkillCount]);
+
+  useEffect(() => {
+    if (providedImportUpdates) {
+      setImports(providedImportUpdates);
+      return;
+    }
+    if (!current?.importOrigin) {
+      setImports([]);
+      return;
+    }
+    const timer = window.setTimeout(() => { void loadImports(); }, 800);
+    return () => window.clearTimeout(timer);
+  }, [current?.importOrigin, loadImports, providedImportUpdates]);
 
   async function pullUpdates() {
     if (!current?.importOrigin || pulling) return;
@@ -475,6 +493,5 @@ function BrainViewTabs({
     </div>
   );
 }
-
 
 

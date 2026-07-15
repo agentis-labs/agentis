@@ -41,7 +41,7 @@ import type { EventBus } from '../../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from '../agent/agentWorkProgress.js';
 
 export interface ChannelTurnDeliver {
-  (args: { connectionId: string; chatId: string; body: string }): Promise<void>;
+  (args: { connectionId: string; chatId: string; body: string }): Promise<unknown>;
 }
 
 export interface ChannelTurnDispatcherDeps {

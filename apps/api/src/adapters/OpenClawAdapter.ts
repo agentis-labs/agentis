@@ -39,6 +39,7 @@ import {
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 import { runtimeProgressActivity } from './runtimeProgress.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 
 const DEFAULT_OPENCLAW_STARTUP_TIMEOUT_MS = 60_000;
 const MAX_OPENCLAW_STARTUP_TIMEOUT_MS = 180_000;
@@ -130,6 +131,15 @@ export class OpenClawAdapter implements AgentAdapter {
       memory: {
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat',
+        'execution.terminal',
+        'execution.browser',
+        'execution.computer-use',
+        'execution.long-running',
+        'execution.pausable',
+        'memory.inject',
+      ]),
       limitations: [
         'OpenClaw runs tools inside the gateway agent. Agentis streams its ACP activity instead of re-running those tools locally.',
       ],

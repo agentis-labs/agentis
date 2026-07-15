@@ -40,6 +40,7 @@ import { rtSubscribe, useRealtime } from '../../lib/realtime';
 import { REALTIME_ACTIVITY_EVENTS, describeRealtimeActivity, type RealtimeActivity } from '../../lib/realtimeActivity';
 import { refreshWorkspaceSnapshot } from '../../lib/workspaceData';
 import { Button, IconButton } from '../shared/Button';
+import { ErrorBoundary } from '../shared/ErrorBoundary';
 import { Skeleton, SkeletonText } from '../shared/Skeleton';
 import { StatusBadge } from '../shared/StatusBadge';
 import { useToast } from '../shared/Toast';
@@ -66,7 +67,7 @@ interface RunDetail {
     id: string;
     workflowId: string;
     workflowName?: string;
-    status: 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting';
+    status: 'running' | 'completed' | 'completed_with_issues' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting';
     blockedReason?: string;
     startedAt: string;
     finishedAt?: string;
@@ -164,7 +165,12 @@ export function RunModalProvider({ children }: { children: React.ReactNode }) {
   return (
     <>
       {children}
-      {modal.open && createPortal(<RunModal key={modal.openedAt} />, document.body)}
+      {modal.open && createPortal(
+        <ErrorBoundary resetKey={modal.openedAt} label="This run couldn't be displayed">
+          <RunModal key={modal.openedAt} />
+        </ErrorBoundary>,
+        document.body,
+      )}
     </>
   );
 }
@@ -1108,6 +1114,9 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function StatusIcon({ status }: { status: string }) {
   if (/fail|error/i.test(status)) return <AlertTriangle size={15} className="text-danger" />;
+  // "completed_with_issues" contains "complete" but is NOT a clean success —
+  // flag it amber so it doesn't read as a green tick in the run list.
+  if (/issue|attention|partial|hollow/i.test(status)) return <AlertTriangle size={15} className="text-warn" />;
   if (/complete|success/i.test(status)) return <CheckCircle2 size={15} className="text-accent" />;
   return <Clock size={15} className="text-text-muted" />;
 }

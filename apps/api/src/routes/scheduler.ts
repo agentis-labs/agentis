@@ -27,7 +27,7 @@ const schedulePatchSchema = z.object({
 const subscriptionCreateSchema = z.object({
   sourceWorkflowId: z.string().uuid(),
   targetWorkflowId: z.string().uuid(),
-  eventType: z.enum(['run.completed', 'run.failed', 'node.completed', 'node.failed']),
+  eventType: z.enum(['run.completed', 'run.accomplished', 'run.failed', 'node.completed', 'node.failed']),
   sourceNodeId: z.string().min(1).optional(),
   filterExpression: z.string().max(2000).optional(),
   inputMapping: z.record(z.string(), z.string()).default({}),
@@ -136,6 +136,37 @@ export function buildSchedulerRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     return c.json({ ok: true });
   });
 
+  app.get('/deliveries', (c) => {
+    const ws = getWorkspace(c);
+    const rows = deps.db.select().from(schema.workflowEventDeliveries)
+      .where(eq(schema.workflowEventDeliveries.workspaceId, ws.workspaceId))
+      .all()
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return c.json({ deliveries: rows });
+  });
+
+  /**
+   * Release a dead delivery for the durable worker. Delivered rows are never
+   * replayed into a second target run: their stable queue idempotency key is an
+   * immutable proof that the orchestration transition already happened.
+   */
+  app.post('/deliveries/:id/retry', (c) => {
+    const ws = getWorkspace(c);
+    const delivery = assertDelivery(deps.db, ws.workspaceId, c.req.param('id'));
+    if (delivery.status === 'delivered' || delivery.status === 'skipped') {
+      return c.json({ ok: true, status: delivery.status, replayed: false, targetRunId: delivery.targetRunId });
+    }
+    if (delivery.status === 'processing') {
+      return c.json({ ok: false, status: delivery.status, reason: 'delivery_is_leased' }, 409);
+    }
+    const now = new Date().toISOString();
+    deps.db.update(schema.workflowEventDeliveries).set({
+      status: 'pending', availableAt: now, leaseOwner: null, leaseExpiresAt: null,
+      lastError: null, updatedAt: now,
+    }).where(eq(schema.workflowEventDeliveries.id, delivery.id)).run();
+    return c.json({ ok: true, status: 'pending', replayed: true });
+  });
+
   app.get('/queue', (c) => {
     const ws = getWorkspace(c);
     const rows = deps.db
@@ -198,4 +229,13 @@ function assertQueueItem(db: AgentisSqliteDb, workspaceId: string, queueItemId: 
   const item = db.select().from(schema.workflowRunQueue).where(and(eq(schema.workflowRunQueue.id, queueItemId), eq(schema.workflowRunQueue.workspaceId, workspaceId))).get();
   if (!item) throw new AgentisError('RESOURCE_NOT_FOUND', 'Queue item not found');
   return item;
+}
+
+function assertDelivery(db: AgentisSqliteDb, workspaceId: string, deliveryId: string) {
+  const delivery = db.select().from(schema.workflowEventDeliveries).where(and(
+    eq(schema.workflowEventDeliveries.id, deliveryId),
+    eq(schema.workflowEventDeliveries.workspaceId, workspaceId),
+  )).get();
+  if (!delivery) throw new AgentisError('RESOURCE_NOT_FOUND', 'Event delivery not found');
+  return delivery;
 }

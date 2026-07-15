@@ -564,6 +564,57 @@ describe('WorkflowEngine — interrupted run recovery', () => {
     expect(summary.failed).toBe(1);
     expect(loadRun(runId).status).toBe('FAILED');
   });
+
+  // Orphan sweep: a RUNNING run with nothing in flight and nothing queued can
+  // never progress — it must be reconciled to a truthful terminal instead of
+  // showing "running" forever in the pipeline.
+  it('reconciles an orphaned RUNNING run (no active work) to FAILED when nodes are unfinished', async () => {
+    const wfId = seedWorkflow({
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'X', type: 'transform', title: 'Work', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ done: true })', isOutput: true } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }],
+    });
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, status: 'RUNNING',
+      runState: {
+        runId, workflowId: wfId, status: 'RUNNING', readyQueue: [], waitingInputs: {},
+        nodeStates: { T: { nodeId: 'T', status: 'COMPLETED' }, X: { nodeId: 'X', status: 'PENDING' } },
+        activeExecutions: {}, completedNodeIds: ['T'], failedNodeIds: [], skippedNodeIds: [], graphRevision: 1, replanCount: 0, lastLedgerSequence: 0,
+      },
+    }).run();
+    const summary = await engine.recoverInterruptedRuns();
+    expect(summary.failed).toBe(1);
+    expect(loadRun(runId).status).toBe('FAILED');
+  });
+
+  it('reconciles an orphaned RUNNING run to COMPLETED when every node already reached a terminal', async () => {
+    const wfId = seedWorkflow({
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'X', type: 'transform', title: 'Work', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ done: true })', isOutput: true } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }],
+    });
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, status: 'RUNNING',
+      runState: {
+        runId, workflowId: wfId, status: 'RUNNING', readyQueue: [], waitingInputs: {},
+        nodeStates: { T: { nodeId: 'T', status: 'COMPLETED' }, X: { nodeId: 'X', status: 'COMPLETED' } },
+        activeExecutions: {}, completedNodeIds: ['T', 'X'], failedNodeIds: [], skippedNodeIds: [], graphRevision: 1, replanCount: 0, lastLedgerSequence: 0,
+      },
+    }).run();
+    const summary = await engine.recoverInterruptedRuns();
+    expect(summary.resumed).toBe(1);
+    expect(loadRun(runId).status).toBe('COMPLETED');
+  });
 });
 
 describe('WorkflowEngine — skip propagation (NP, Proposal 3)', () => {

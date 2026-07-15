@@ -4,7 +4,7 @@
  * dependsOn, so the returned checklist is executable top-to-bottom.
  */
 import { describe, expect, it } from 'vitest';
-import { orderByDependsOn } from '../../src/services/agentisToolHandlers/appPlan.js';
+import { buildChecklist, orderByDependsOn } from '../../src/services/agentisToolHandlers/appPlan.js';
 
 const wf = (key: string, dependsOn: string[] = []) => ({ key, title: key, purpose: key, dependsOn });
 
@@ -24,5 +24,44 @@ describe('orderByDependsOn', () => {
   it('does not hang on a dependency cycle (emits every node once)', () => {
     const order = orderByDependsOn([wf('x', ['y']), wf('y', ['x'])]).map((w) => w.key).sort();
     expect(order).toEqual(['x', 'y']);
+  });
+});
+
+describe('buildChecklist', () => {
+  it('keeps every workflow build inside the planned App and compiles dependencies', () => {
+    const checklist = buildChecklist('app-1', {
+      intent: 'ingest and publish',
+      workflows: [wf('ingest'), wf('publish', ['ingest'])],
+      conversation: false,
+      collections: [],
+      cast: [],
+    });
+    const builds = checklist.filter((step) => step.tool === 'agentis.build_workflow');
+    expect(builds).toHaveLength(2);
+    expect(builds.every((step) => step.args.appId === 'app-1')).toBe(true);
+    const compile = checklist.find((step) => step.id === 'compile_workflow_rules');
+    expect(compile?.args).toMatchObject({
+      appId: 'app-1',
+      workflows: [
+        { workflowId: '${workflows.ingest.workflowId}', dependsOn: [] },
+        { workflowId: '${workflows.publish.workflowId}', dependsOn: ['${workflows.ingest.workflowId}'] },
+      ],
+    });
+    expect(checklist.at(-1)).toMatchObject({ id: 'verify_app', tool: 'agentis.app.doctor', args: { appId: 'app-1' } });
+  });
+
+  it('installs success contracts before compiling workflow rules', () => {
+    const checklist = buildChecklist('app-1', {
+      intent: 'perform verified work',
+      workflows: [{
+        ...wf('work'),
+        success: { objective: 'artifact exists', acceptance: [{ id: 'exists', claim: 'artifact exists', verify: 'expr', expr: 'output.ok == true' }] },
+      }],
+      conversation: false,
+      collections: [],
+      cast: [],
+    });
+    expect(checklist.map((step) => step.id)).toEqual(['build_work', 'scope_work', 'compile_workflow_rules', 'verify_app']);
+    expect(checklist[1]?.args.workflowId).toBe('${workflows.work.workflowId}');
   });
 });

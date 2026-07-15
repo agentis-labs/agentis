@@ -15,7 +15,7 @@ protected by a per-runtime `CircuitBreaker`. Every task is a `NormalizedTask`.
 
 | Adapter | Runtime | Notes |
 |---------|---------|-------|
-| `ClaudeCodeAdapter` | Claude Code CLI | native MCP |
+| `ClaudeCodeAdapter` | Claude Code CLI | marker tools; native MCP when a server is mounted |
 | `CodexAdapter` | OpenAI Codex CLI | optional native browser/computer-use |
 | `CursorAdapter` | Cursor | semantic code index |
 | `AntigravityAdapter` | Google Antigravity (agy) | native MCP; reads transcript for output |
@@ -42,9 +42,11 @@ An affordance is a native power a runtime advertises (`packages/core/src/types/a
 
 A runtime's **supply** is computed two ways (`ralAffordances.ts`):
 - `configuredAffordances(adapterType, config)` — what it provides right now, given its stored
-  config (e.g. `claude_code` → `fileSystem, terminal, nativeMcp`).
-- `potentialAffordances(adapterType)` — the ceiling it *could* provide with a config change
-  (only Codex has a latent affordance: native browser/computer-use via its `browser` opt-in).
+  config (e.g. `claude_code` always provides filesystem/terminal access and provides native MCP
+  only when an MCP server is mounted).
+- `potentialAffordances(adapterType)` — the ceiling it *could* provide with a config change.
+  Codex has latent browser/computer-use; Codex, Claude Code, and Hermes Agent can gain native MCP
+  by mounting an Agentis MCP server.
 
 ## Requirement matching
 
@@ -65,6 +67,26 @@ requiring native browser control on an agent.
 
 MCP servers can also *grant* an affordance when tagged (e.g. a desktop server granting
 `computerUse`), bridged in `services/mcp/mcpToolBridge.ts`.
+
+### Dispatch-bound capability contract
+
+Affordances are projected into a versioned `RuntimeCapabilityManifest`
+(`packages/core/src/runtimeCapabilities.ts`). Tasks may declare `allOf` and `anyOf`
+requirements, including namespaced third-party capabilities. `AdapterManager` evaluates the
+manifest immediately before dispatch, before acquiring execution capacity. An incompatible
+task fails with `ADAPTER_CAPABILITY_MISMATCH`, structured missing-capability evidence, and a
+repair instruction; it is never sent to a runtime and allowed to fabricate work it cannot do.
+
+The agent HTTP surface exposes the effective manifest, and workflow agent/swarm nodes propagate
+their requirements to this final boundary. Tasks without explicit requirements retain backward
+compatibility.
+
+Every built-in adapter publishes a complete adapter-authored manifest: unavailable built-ins are
+declared explicitly instead of guessed from the transport. Browser/computer-use and native MCP
+claims therefore follow the live adapter configuration. Custom HTTP runtimes can persist a
+validated `capabilityManifest`, including namespaced capabilities such as `vendor.video-render`;
+anything they omit remains unavailable. Legacy projection remains only as the compatibility path
+for third-party adapters that have not adopted native declarations yet.
 
 ## Model routing
 

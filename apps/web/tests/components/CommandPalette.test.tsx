@@ -34,7 +34,7 @@ describe('<CommandPalette />', () => {
         <CommandPalette />
       </MemoryRouter>,
     );
-    expect(screen.queryByPlaceholderText(/Search workflows/i)).toBeNull();
+    expect(screen.queryByPlaceholderText(/Search apps, agents, workflows/i)).toBeNull();
   });
 
   it('opens on Ctrl+K and renders the search input', async () => {
@@ -45,7 +45,7 @@ describe('<CommandPalette />', () => {
     );
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/Search workflows/i)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/Search apps, agents, workflows/i)).toBeInTheDocument();
     });
   });
 
@@ -73,7 +73,7 @@ describe('<CommandPalette />', () => {
       </MemoryRouter>,
     );
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-    const input = await screen.findByPlaceholderText(/Search workflows/i);
+    const input = await screen.findByPlaceholderText(/Search apps, agents, workflows/i);
     await userEvent.type(input, 'refund');
     await waitFor(() => {
       expect(screen.getByText('Refund flow')).toBeInTheDocument();
@@ -90,7 +90,7 @@ describe('<CommandPalette />', () => {
       </MemoryRouter>,
     );
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-    const input = await screen.findByPlaceholderText(/Search workflows/i);
+    const input = await screen.findByPlaceholderText(/Search apps, agents, workflows/i);
     await userEvent.type(input, 'r');
     await new Promise((resolve) => setTimeout(resolve, 220));
     expect(fetchMock).not.toHaveBeenCalled();
@@ -103,10 +103,10 @@ describe('<CommandPalette />', () => {
       </MemoryRouter>,
     );
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-    await screen.findByPlaceholderText(/Search workflows/i);
+    await screen.findByPlaceholderText(/Search apps, agents, workflows/i);
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => {
-      expect(screen.queryByPlaceholderText(/Search workflows/i)).toBeNull();
+      expect(screen.queryByPlaceholderText(/Search apps, agents, workflows/i)).toBeNull();
     });
   });
 });

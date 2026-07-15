@@ -66,6 +66,24 @@ describe('validateWorkflowGraph', () => {
     expect(() => validateWorkflowGraph(g)).toThrow(AgentisError);
   });
 
+  it('rejects equivalent channel sends fanned out from the same decision', () => {
+    const sendConfig = { kind: 'channel', channelKind: 'whatsapp', connectionId: 'connection-1', to: '{{input.recipient}}', body: 'Your report is ready' } as const;
+    const g = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'gate', type: 'transform', title: 'Gate', position: { x: 0, y: 0 }, config: { kind: 'transform', expression: '({ approved: true })' } },
+        { id: 'send-primary', type: 'channel', title: 'Send', position: { x: 1, y: 0 }, config: sendConfig },
+        { id: 'send-repair', type: 'channel', title: 'Send retry path', position: { x: 1, y: 1 }, config: { ...sendConfig } },
+      ],
+      edges: [
+        { id: 'e1', source: 'gate', target: 'send-primary', condition: "nodes['gate'].approved == true" },
+        { id: 'e2', source: 'gate', target: 'send-repair', condition: "nodes['gate'].approved == true" },
+      ],
+    } as unknown as WorkflowGraph;
+    expect(() => validateWorkflowGraph(g)).toThrow(/duplicate channel deliveries/i);
+  });
+
   it('rejects edges referencing missing nodes', () => {
     const g = graph(
       [{ id: 'a' }],

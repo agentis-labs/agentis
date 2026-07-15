@@ -16,6 +16,7 @@ import { BrandMark } from './components/shared/BrandMark';
 import { RunModalProvider } from './components/runs/RunModalProvider';
 import { ApprovalModalProvider } from './components/shared/ApprovalModalProvider';
 import { ConfirmProvider } from './components/shared/ConfirmDialog';
+import { ErrorBoundary } from './components/shared/ErrorBoundary';
 import { ToastProvider } from './components/shared/Toast';
 import { openRunModal } from './lib/runModal';
 import { tokens, workspace as wsStore, ambient as ambientStore, api, logout } from './lib/api';
@@ -183,12 +184,14 @@ export function App() {
 
   if (location.pathname.startsWith('/public/apps/')) {
     return (
-      <Suspense fallback={<RouteFallback />}>
-        <Routes>
-          <Route path="/public/apps/:token" element={<PublicAppSurfacePage />} />
-          <Route path="*" element={<Navigate to="/public/apps/invalid" replace />} />
-        </Routes>
-      </Suspense>
+      <ErrorBoundary resetKey={location.pathname} label="This app couldn't be displayed">
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
+            <Route path="/public/apps/:token" element={<PublicAppSurfacePage />} />
+            <Route path="*" element={<Navigate to="/public/apps/invalid" replace />} />
+          </Routes>
+        </Suspense>
+      </ErrorBoundary>
     );
   }
 
@@ -236,6 +239,7 @@ export function App() {
             setWsReady(false);
           }}
         >
+          <ErrorBoundary resetKey={location.pathname}>
           <Suspense fallback={<RouteFallback />}>
             <Routes>
               <Route path="/" element={<Navigate to="/home" replace />} />
@@ -282,6 +286,7 @@ export function App() {
               <Route path="*" element={<Navigate to="/home" replace />} />
             </Routes>
           </Suspense>
+          </ErrorBoundary>
           <CommandPalette />
           <SettingsModal />
           </Shell>

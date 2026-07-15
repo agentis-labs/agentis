@@ -14,8 +14,10 @@
  * scorecard, which grows as real categories are added.
  */
 
+import type { AgentisToolContext } from '@agentis/core';
 import type { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import type { BrainAskService } from '../../src/services/brain/brainAskService.js';
+import type { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 
 export type EvalCategory =
   | 'single_hop'
@@ -89,6 +91,93 @@ export const BRAIN_EVAL_CASES: EvalCase[] = [
     unanswerable: true,
   },
 ];
+
+/**
+ * A "recovery" case: the upfront `buildDispatchContext` pass is expected to
+ * MISS (a query worded nothing like the seeded fact), and the agent's own
+ * `agentis.brain.search` mid-task tool — not just a raw service call — is
+ * expected to recover the answer with a reformulated query. This measures
+ * the thing §C8's original cases never did: whether an agent's second look
+ * actually finds what its first look missed.
+ */
+export interface RecoveryEvalCase {
+  id: string;
+  facts: string[];
+  /** Deliberately mismatched — should make the upfront dispatch context abstain. */
+  initialQuery: string;
+  /** Reformulated/broader terms — should recover the fact via agentis.brain.search. */
+  retryQuery: string;
+  /** Lowercased substring the recovered search result MUST contain. */
+  expectContains: string;
+}
+
+export const BRAIN_RECOVERY_CASES: RecoveryEvalCase[] = [
+  {
+    id: 'rec-1',
+    facts: ['The on-call escalation path for payment failures is to page the platform-reliability team via PagerDuty.'],
+    // Long and topically unrelated on purpose: with a bag-of-words test embedder,
+    // a SHORT query is disproportionately vulnerable to a single incidental hash
+    // collision inflating cosine score — spreading the query over many unrelated
+    // tokens keeps any stray collision's contribution well below the relevance floor.
+    initialQuery: 'Please write a short poem about autumn leaves falling gently in a quiet park during a late October afternoon.',
+    retryQuery: 'payment failure escalation on-call',
+    expectContains: 'platform-reliability',
+  },
+];
+
+export interface RecoveryCaseResult {
+  id: string;
+  /** Did the upfront pass correctly find nothing (the setup this case needs)? */
+  initialAbstained: boolean;
+  /** Did the mid-task tool call recover the fact the upfront pass missed? */
+  recovered: boolean;
+}
+
+export interface RecoveryScorecard {
+  results: RecoveryCaseResult[];
+  /** Of cases where the upfront pass correctly abstained, how many recovered via retry. */
+  recoveryRate: number;
+}
+
+/**
+ * Run the recovery suite against the REAL registered `agentis.brain.search`
+ * tool (registry + handler + deps) — not a raw `searchAtoms` call — so this
+ * actually exercises the path an agent takes mid-task, not just retrieval
+ * quality in isolation (that's what `runBrainEval` already covers).
+ */
+export async function runRecoveryEval(args: {
+  cases: RecoveryEvalCase[];
+  seed: (facts: string[]) => Promise<string> | string;
+  brain: SharedIntelligenceService;
+  registry: AgentisToolRegistry;
+  toolCtx: (workspaceId: string) => AgentisToolContext;
+}): Promise<RecoveryScorecard> {
+  const results: RecoveryCaseResult[] = [];
+  for (const c of args.cases) {
+    const workspaceId = await args.seed(c.facts);
+    const initial = await args.brain.buildDispatchContext({ workspaceId, taskDescription: c.initialQuery, limit: 6 });
+    // `atomIds` alone isn't a reliable abstention signal — Tier-0 backfill can
+    // pad the quota with weak-threshold filler even when nothing is really
+    // relevant (see `relevantCount`, which excludes it).
+    const initialAbstained = initial.relevantCount === 0;
+
+    const retry = await args.registry.execute(
+      { id: `recovery-${c.id}`, toolId: 'agentis.brain.search', arguments: { query: c.retryQuery } },
+      args.toolCtx(workspaceId),
+    );
+    const output = retry.ok ? (retry.output as { results?: Array<{ title: string; snippet: string }> } | undefined) : undefined;
+    const recovered = Boolean(
+      output?.results?.some((r) => `${r.title} ${r.snippet}`.toLowerCase().includes(c.expectContains.toLowerCase())),
+    );
+    results.push({ id: c.id, initialAbstained, recovered });
+  }
+  const eligible = results.filter((r) => r.initialAbstained);
+  const recoveredCount = eligible.filter((r) => r.recovered).length;
+  return {
+    results,
+    recoveryRate: eligible.length > 0 ? Number((recoveredCount / eligible.length).toFixed(3)) : 1,
+  };
+}
 
 export interface CategoryScore { total: number; correct: number; accuracy: number }
 export interface BrainEvalScorecard {

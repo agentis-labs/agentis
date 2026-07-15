@@ -53,6 +53,13 @@ export interface ConversationRuntimeDeps {
     system: string;
     user: string;
   }): Promise<T | null>;
+  /**
+   * Relevance-based Brain recall for a `send_agent` compose call, scoped to the
+   * App. Optional — omitted (or a slow/failed lookup) degrades to today's
+   * facts-only prompt, never blocks a send. Without this, scripted conversations
+   * only ever see raw recent history, not the workspace's actual memory.
+   */
+  buildBrainContext?(ctx: ConversationContext, taskDescription: string): Promise<string | null>;
   /** Trigger a heavy workflow; the stage rests until its completion event. */
   startRun(args: {
     ctx: ConversationContext;
@@ -84,8 +91,6 @@ export interface AdvanceResult {
 }
 
 const HISTORY_CAP = 30;
-const COMPLETED_STATUSES = new Set(['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION']);
-
 export class ConversationRuntime {
   constructor(private readonly deps: ConversationRuntimeDeps) {}
 
@@ -151,7 +156,12 @@ export class ConversationRuntime {
   }
 
   /** A `run_workflow` stage's run finished — advance per `onComplete`. */
-  async onWorkflowComplete(ctx: ConversationContext, runId: string, status: string): Promise<AdvanceResult> {
+  async onWorkflowComplete(
+    ctx: ConversationContext,
+    runId: string,
+    status: string,
+    effective?: { canAdvanceOnSuccess: boolean; reason?: string },
+  ): Promise<AdvanceResult> {
     const script = await this.deps.loadScript(ctx);
     if (!script) return { handled: false, reason: 'no_script' };
     const contact = await this.deps.contacts.findByAwaitingRun(ctx, script, runId);
@@ -159,9 +169,13 @@ export class ConversationRuntime {
     contact.awaitingRunId = null;
     const stage = this.stage(script, contact.stage);
     // Only advance on success; on failure, clear the wait and rest (operator can intervene).
-    if (!COMPLETED_STATUSES.has(status)) {
+    // Callers wired to the workflow control plane pass the authoritative
+    // outcome. The fallback preserves only legacy clean COMPLETED behavior;
+    // contract violations never advance a conversation.
+    const successful = effective?.canAdvanceOnSuccess ?? status === 'COMPLETED';
+    if (!successful) {
       await this.deps.contacts.save(ctx, script, contact);
-      return { handled: true, stage: contact.stage, reason: `run_${status}` };
+      return { handled: true, stage: contact.stage, reason: effective?.reason ?? `run_${status}` };
     }
     if (!stage?.onComplete) {
       await this.deps.contacts.save(ctx, script, contact);
@@ -247,9 +261,16 @@ export class ConversationRuntime {
       'You compose ONE short, human message for a chat conversation. Write in the SAME language the contact is using '
       + '(match the language of their recent messages; if there are none, follow the instruction\'s language). '
       + 'No greeting boilerplate unless asked, no markdown, no emoji spam, no signature. Return JSON: { "message": string }.';
+    // Relevance-based Brain recall (not just raw recent history) — the same
+    // "buffet, not soup" retrieval the main chat surface already gets. Best
+    // effort: a missing dep or a failed/slow lookup just omits the block.
+    const brainBlock = this.deps.buildBrainContext
+      ? await this.deps.buildBrainContext(ctx, entry.brief).catch(() => null)
+      : null;
     const user =
       `Instruction: ${entry.brief}\n\n`
       + `Contact facts: ${JSON.stringify(contact.facts ?? {})}\n`
+      + (brainBlock ? `Brain memory:\n${brainBlock}\n\n` : '')
       + `Recent conversation: ${JSON.stringify((contact.history ?? []).slice(-8))}`;
     const out = await this.deps.completeJson<{ message?: unknown }>({ ctx, system, user });
     const message = typeof out?.message === 'string' ? out.message.trim() : '';

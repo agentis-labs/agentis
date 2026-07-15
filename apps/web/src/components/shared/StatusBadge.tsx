@@ -28,6 +28,8 @@ const KNOWN: Record<string, StatusTone> = {
   pending: 'warn',
   waiting: 'warn',
   partial: 'warn',
+  // Completed, but the output was off-spec / not verified — needs attention.
+  completed_with_issues: 'warn',
   retrying: 'warn',
   warning: 'warn',
   warn: 'warn',
@@ -52,6 +54,12 @@ const KNOWN: Record<string, StatusTone> = {
 const PULSE_STATES = new Set([
   'running', 'live', 'active', 'pending', 'waiting', 'connecting', 'retrying', 'setting_up',
 ]);
+
+/** Friendly display text for statuses whose raw slug reads badly when capitalized. */
+const STATUS_LABELS: Record<string, string> = {
+  completed_with_issues: 'Needs attention',
+  setting_up: 'Setting up',
+};
 
 export interface StatusBadgeProps {
   status?: string | null;
@@ -90,7 +98,7 @@ export function StatusBadge({
   status, tone, label, dot = true, pulse, size = 'md', className,
 }: StatusBadgeProps) {
   const t = tone ?? statusTone(status);
-  const text = label ?? status ?? 'unknown';
+  const text = label ?? (status ? STATUS_LABELS[status.toLowerCase()] ?? status : 'unknown');
   const shouldPulse = pulse ?? (typeof status === 'string' && PULSE_STATES.has(status.toLowerCase()));
   return (
     <span

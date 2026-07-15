@@ -25,6 +25,13 @@ const planWorkflowSchema = z.object({
   dependsOn: z.array(z.string()).default([]),
   /** How it wakes: manual | schedule | webhook | listener | conversation. */
   trigger: z.string().optional(),
+  /** Persisted definition of done installed after authoring. */
+  success: z.object({
+    objective: z.string().min(1),
+    acceptance: z.array(z.record(z.unknown())).min(1),
+    sufficiency: z.array(z.record(z.unknown())).optional(),
+    constraints: z.record(z.unknown()).optional(),
+  }).optional(),
 });
 
 const appPlanSchema = z.object({
@@ -42,13 +49,36 @@ const appPlanSchema = z.object({
       quietHours: z.object({ start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(23) }).optional(),
     })
     .optional(),
+}).superRefine((plan, ctx) => {
+  const keys = new Set<string>();
+  for (const [index, workflow] of plan.workflows.entries()) {
+    if (keys.has(workflow.key)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workflows', index, 'key'], message: `duplicate workflow key: ${workflow.key}` });
+    }
+    keys.add(workflow.key);
+  }
+  const graph = new Map(plan.workflows.map((workflow) => [workflow.key, workflow.dependsOn]));
+  for (const [index, workflow] of plan.workflows.entries()) {
+    for (const dependency of workflow.dependsOn) {
+      if (dependency === workflow.key) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workflows', index, 'dependsOn'], message: `${workflow.key} cannot depend on itself` });
+      } else if (!graph.has(dependency)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workflows', index, 'dependsOn'], message: `unknown workflow dependency: ${dependency}` });
+      }
+    }
+  }
+  const cycle = firstKeyCycle(graph);
+  if (cycle) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workflows'], message: `workflow dependency cycle: ${cycle.join(' -> ')}` });
 });
 
 interface ChecklistStep {
   step: number;
+  id: string;
   tool: string;
   args: Record<string, unknown>;
   why: string;
+  dependsOnSteps?: string[];
+  capture?: Record<string, string>;
 }
 
 export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -74,7 +104,7 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
             intent: { type: 'string', description: 'What this App is for, in one or two sentences.' },
             workflows: {
               type: 'array',
-              description: 'The distinct automation subroutines. Each: { key, title, purpose, dependsOn?: [keys], trigger? }.',
+              description: 'Distinct automation subroutines. Each: { key, title, purpose, dependsOn?: [keys], trigger?, success?: { objective, acceptance[], sufficiency?, constraints? } }. Keys must be unique and dependencies acyclic.',
               items: { type: 'object' },
             },
             conversation: { type: 'boolean', description: 'True when the App runs a per-contact outreach script (→ agentis.conversation.define).' },
@@ -140,35 +170,86 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
 
 function ensureApp(stores: ReturnType<typeof buildAppStores>, args: z.infer<typeof appPlanSchema>, ctx: AgentisToolContext): string {
   const appId = (args.appId && args.appId.trim()) || ctx.appId;
-  if (appId) return appId;
+  if (appId) {
+    stores.store.get(ctx.workspaceId, appId);
+    return appId;
+  }
   if (!args.name?.trim()) throw new AgentisError('VALIDATION_FAILED', 'app.plan needs an appId or a name to create the App');
   const app = stores.store.create(ctx.workspaceId, ctx.userId, { name: args.name.trim(), description: args.intent.slice(0, 400) });
   return app.id;
 }
 
 /** Ordered next calls: dependency-respecting workflow builds, then the script + collections. */
-function buildChecklist(appId: string, args: z.infer<typeof appPlanSchema>): ChecklistStep[] {
+export function buildChecklist(appId: string, args: z.infer<typeof appPlanSchema>): ChecklistStep[] {
   const steps: ChecklistStep[] = [];
   let n = 1;
   for (const wf of orderByDependsOn(args.workflows)) {
+    const buildId = `build_${wf.key}`;
     steps.push({
       step: n++,
+      id: buildId,
       tool: 'agentis.build_workflow',
-      args: { description: `${wf.title}: ${wf.purpose}`, newWorkflow: true },
+      args: {
+        appId,
+        title: wf.title,
+        description: `${wf.title}: ${wf.purpose}${wf.trigger ? ` Trigger: ${wf.trigger}.` : ''}`,
+        newWorkflow: true,
+      },
+      capture: { workflowId: `workflows.${wf.key}.workflowId`, appId: 'appId' },
       why: `Author the "${wf.key}" part${wf.dependsOn.length ? ` (runs after: ${wf.dependsOn.join(', ')})` : ''}, then SWIFT-verify it (dry_run → debug → verdict) before the next.`,
+    });
+    if (wf.success) {
+      steps.push({
+        step: n++,
+        id: `scope_${wf.key}`,
+        tool: 'agentis.workflow.scope',
+        args: { workflowId: `\${workflows.${wf.key}.workflowId}`, spec: wf.success },
+        why: `Install the definition of done for "${wf.key}" so completion alone cannot advance the App.`,
+        dependsOnSteps: [buildId],
+      });
+    }
+  }
+  if (args.workflows.length > 0) {
+    steps.push({
+      step: n++,
+      id: 'compile_workflow_rules',
+      tool: 'agentis.workflow.chain',
+      args: {
+        appId,
+        workflows: args.workflows.map((wf, order) => ({
+          workflowId: `\${workflows.${wf.key}.workflowId}`,
+          order,
+          purpose: wf.purpose,
+          dependsOn: wf.dependsOn.map((key) => `\${workflows.${key}.workflowId}`),
+          chainOn: 'success',
+          enabled: true,
+        })),
+      },
+      why: 'Compile blueprint keys into persisted dependency rules. Display order without dependsOn is not executable orchestration.',
+      dependsOnSteps: args.workflows.map((wf) => `build_${wf.key}`),
     });
   }
   for (const col of args.collections) {
-    steps.push({ step: n++, tool: 'agentis.data.define_collection', args: { appId, name: col.name }, why: col.purpose ?? `Datastore collection "${col.name}".` });
+    steps.push({ step: n++, id: `collection_${col.name}`, tool: 'agentis.data.define_collection', args: { appId, name: col.name }, why: col.purpose ?? `Datastore collection "${col.name}".` });
   }
   if (args.conversation) {
     steps.push({
       step: n++,
+      id: 'define_conversation',
       tool: 'agentis.conversation.define',
       args: { appId },
       why: 'Install the per-contact outreach script (deterministic greeting → agent pitch → classify → run_workflow → terminal stop) — the platform primitive for await-reply, token-free where scripted. Do NOT hand-roll this with an agent loop.',
     });
   }
+  const prerequisites = steps.map((step) => step.id);
+  steps.push({
+    step: n++,
+    id: 'verify_app',
+    tool: 'agentis.app.doctor',
+    args: { appId },
+    why: 'Verify workflows, rules, triggers, contracts, connections, data, and surfaces before reporting the App as working.',
+    dependsOnSteps: prerequisites,
+  });
   return steps;
 }
 
@@ -185,4 +266,32 @@ export function orderByDependsOn(workflows: z.infer<typeof planWorkflowSchema>[]
     done.add(pick.key);
   }
   return out;
+}
+
+function firstKeyCycle(graph: Map<string, string[]>): string[] | null {
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const visit = (key: string): string[] | null => {
+    if (visiting.has(key)) {
+      const start = stack.indexOf(key);
+      return [...stack.slice(start), key];
+    }
+    if (visited.has(key)) return null;
+    visiting.add(key);
+    stack.push(key);
+    for (const dependency of graph.get(key) ?? []) {
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    visiting.delete(key);
+    visited.add(key);
+    return null;
+  };
+  for (const key of graph.keys()) {
+    const cycle = visit(key);
+    if (cycle) return cycle;
+  }
+  return null;
 }

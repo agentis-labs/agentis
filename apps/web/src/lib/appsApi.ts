@@ -48,6 +48,53 @@ export interface AppTeam {
   members: AppTeamMember[];
 }
 
+export interface AppDoctorFinding {
+  id: string;
+  code: string;
+  severity: 'critical' | 'error' | 'warning' | 'info';
+  layer: 'binding' | 'activation' | 'outcome' | 'event' | 'state' | 'connection' | 'surface';
+  summary: string;
+  evidence: Record<string, unknown>;
+  remediation: { operation: string; description: string; args?: Record<string, unknown> };
+}
+
+export interface AppDoctorReport {
+  appId: string;
+  generatedAt: string;
+  health: 'healthy' | 'degraded' | 'broken';
+  readyForUnattended: boolean;
+  summary: { critical: number; error: number; warning: number; info: number; workflows: number; executableRules: number };
+  topology: { roots: string[]; dependencyEdges: number; activeEventSubscriptions: number; activeTriggers: number; conversationTransitions: number };
+  findings: AppDoctorFinding[];
+}
+
+export interface AppOrchestrationRule {
+  id: string;
+  sourceWorkflowId: string;
+  targetWorkflowId: string;
+  eventType: string;
+  sourceNodeId: string | null;
+  filterExpression: string | null;
+  inputMapping: Record<string, string>;
+  coalescePolicy: string;
+  catchupPolicy: string;
+  enabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AppOrchestrationRuleInput {
+  sourceWorkflowId: string;
+  targetWorkflowId: string;
+  eventType: 'run.completed' | 'run.accomplished' | 'run.failed' | 'node.completed' | 'node.failed';
+  sourceNodeId?: string | null;
+  filterExpression?: string | null;
+  inputMapping?: Record<string, string>;
+  coalescePolicy?: 'always_enqueue' | 'coalesce_pending' | 'latest_only';
+  catchupPolicy?: string;
+  enabled?: boolean;
+}
+
 /** A live App conversation (Phase 1 — the real channel thread, not a datastore row). */
 export interface AppConversation {
   id: string;
@@ -72,23 +119,6 @@ export interface AppConversationMessage {
 
 interface Wrapped<T> {
   data: T;
-}
-
-/** A graded lesson the App's owner agent deposited (Phase M2 visibility). */
-export interface LearnedLesson {
-  id: string;
-  title: string | null;
-  summary: string | null;
-  outcome: string | null;
-  createdAt: string;
-}
-
-/** An ability that graduated out of the App agent's accumulated lessons. */
-/** "What this agent learned" — recent graded lessons. */
-export interface AppLearnings {
-  appId: string;
-  ownerAgentId: string | null;
-  lessons: LearnedLesson[];
 }
 
 export type AppUpdatePayload = Partial<{
@@ -203,10 +233,22 @@ export const appsApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }).then((r) => r.data),
-  /** "What this agent learned" (Phase M2): recent graded lessons + graduated abilities. */
-  learnings: (id: string) => api<Wrapped<AppLearnings>>(`/v1/apps/${id}/learnings`).then((r) => r.data),
   /** Workflow control plane (E0): the App's workflows with purpose/order/trigger/last-run. */
   listWorkflows: (id: string) => api<Wrapped<AppWorkflowSummary[]>>(`/v1/apps/${id}/workflows`).then((r) => r.data),
+  doctor: (id: string) => api<Wrapped<AppDoctorReport>>(`/v1/apps/${id}/doctor`).then((r) => r.data),
+  orchestrationRules: (id: string) => api<Wrapped<AppOrchestrationRule[]>>(`/v1/apps/${id}/orchestration-rules`).then((r) => r.data),
+  createOrchestrationRule: (id: string, body: AppOrchestrationRuleInput) =>
+    api<Wrapped<AppOrchestrationRule>>(`/v1/apps/${id}/orchestration-rules`, {
+      method: 'POST', body: JSON.stringify(body),
+    }).then((r) => r.data),
+  updateOrchestrationRule: (id: string, ruleId: string, body: Partial<AppOrchestrationRuleInput>) =>
+    api<Wrapped<AppOrchestrationRule>>(`/v1/apps/${id}/orchestration-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'PATCH', body: JSON.stringify(body),
+    }).then((r) => r.data),
+  deleteOrchestrationRule: (id: string, ruleId: string) =>
+    api<Wrapped<{ ok: true }>>(`/v1/apps/${id}/orchestration-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'DELETE',
+    }).then((r) => r.data),
   /** Start one of the App's workflows; returns the new run id (202). */
   runAppWorkflow: (id: string, workflowId: string) =>
     api<Wrapped<{ runId: string }>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/run`, { method: 'POST' }).then((r) => r.data),

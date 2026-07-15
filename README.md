@@ -151,6 +151,12 @@ See [`.env.example`](./.env.example) for the complete set.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `AGENTIS_DATA_DIR` | `./.agentis` | SQLite DB, secrets, agent homes, backups. |
+| `AGENTIS_ARCHIVE_DIR` | `$AGENTIS_DATA_DIR/archives` | Lossless gzip archives for aged run state and telemetry. |
+| `AGENTIS_STORAGE_FULL_RUN_DAYS` | `7` | Days to retain full terminal run state in the hot database. |
+| `AGENTIS_STORAGE_LEDGER_DAYS` | `30` | Days to retain terminal-run ledger events hot before archiving. |
+| `AGENTIS_STORAGE_OBSERVABILITY_DAYS` | `14` | Days to retain observability events hot before archiving. |
+| `AGENTIS_STORAGE_MAX_HOT_DB_MB` | `2048` | Hot SQLite budget; pressure mode shortens hot retention without deleting archives. |
+| `AGENTIS_STORAGE_MIN_FREE_MB` | `2048` | Free-space reserve that activates pressure mode. |
 | `AGENTIS_ASSETS_DIR` | `{DATA_DIR}/assets` | Content-addressed blob store, deduped by SHA-256. |
 | `AGENTIS_HTTP_PORT` | `3737` | API and dashboard port. |
 | `AGENTIS_HTTP_HOST` | `127.0.0.1` | Bind host. |

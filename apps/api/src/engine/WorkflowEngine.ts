@@ -88,6 +88,7 @@ import {
   describeAgentRequirements,
   hasAgentRequirements,
   requiredAffordanceKeys,
+  runtimeRequirementsFromAgentRequirements,
   affordanceLabel,
   type AgentAffordance,
   specialistForRole,
@@ -148,6 +149,7 @@ import type { SpecialistProfileService } from '../services/specialist/specialist
 import type { SpecialistRuntimeService } from '../services/specialist/specialistRuntimeService.js';
 import type { AuditTrailService } from '../services/auditTrail.js';
 import type { InstinctEngine } from '../services/instinctEngine.js';
+import type { RunSettledInput } from '../services/app/appLearning.js';
 import type { AgentToolRuntime } from '../services/agent/agentToolRuntime.js';
 import { AgentToolLoop, type StructuredLlm } from '../services/agent/agentToolLoop.js';
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
@@ -255,6 +257,14 @@ export interface EngineDeps {
   audit?: AuditTrailService;
   /** Self-improvement: analyzes failed runs for repeat patterns (§7.2). */
   instincts?: InstinctEngine;
+  /**
+   * Deposits every terminal run's graded outcome as a durable atom in the brain
+   * scope that OWNS the run (the App, else the workflow). Without this the only
+   * writer into those scopes is run-output mining, which stages everything as
+   * `unconsolidated` — hidden from the graph — and only fires on agent nodes, so a
+   * deterministic App could run forever and its Brain map would stay empty.
+   */
+  appBrain?: { onRunSettled(input: RunSettledInput): Promise<unknown> };
   /** SWIFT-T: fired when a hardened workflow regresses (production verdict not
    *  accomplished) — bootstrap wires this to pause unattended triggers. */
   onWorkflowDemoted?: (args: { workspaceId: string; workflowId: string; runId: string; verdict: RunVerdict }) => void;
@@ -709,6 +719,36 @@ export class WorkflowEngine {
           .where(eq(schema.workflowRuns.id, run.id))
           .run();
         failed += 1;
+        continue;
+      }
+      // Orphan sweep: a RUNNING run with nothing in flight (no active executions,
+      // no pending gate approval) AND nothing queued to advance it cannot make
+      // progress on its own — the worker that was driving it is gone (crash /
+      // restart between ticks / a Stop that never transitioned). Left alone it
+      // shows as "running" forever in the pipeline. Reconcile it to a truthful
+      // terminal state: COMPLETED only if every node already reached a terminal,
+      // otherwise FAILED so the operator can retry. WAITING runs are excluded —
+      // they may legitimately be parked on a reply/session and are handled below.
+      if (run.status === 'RUNNING' && activeExecs.length === 0 && approvalRows.length === 0
+        && (state.readyQueue?.length ?? 0) === 0) {
+        const allTerminal = Object.values(state.nodeStates).every(
+          (node) => !node || node.status === 'COMPLETED' || node.status === 'FAILED' || node.status === 'SKIPPED',
+        );
+        const terminal: WorkflowRunStatus = allTerminal ? 'COMPLETED' : 'FAILED';
+        if (!allTerminal) markOpenNodesSkipped(state, 'Run was interrupted and could not be resumed');
+        state.status = terminal;
+        const now = new Date().toISOString();
+        this.deps.db
+          .update(schema.workflowRuns)
+          .set({ status: terminal, runState: state as unknown as object, completedAt: now, updatedAt: now })
+          .where(eq(schema.workflowRuns.id, run.id))
+          .run();
+        const event = terminal === 'COMPLETED' ? REALTIME_EVENTS.RUN_COMPLETED : REALTIME_EVENTS.RUN_FAILED;
+        const payload = { runId: run.id, status: terminal, workflowId: run.workflowId, workspaceId: run.workspaceId };
+        this.deps.bus.publish(REALTIME_ROOMS.run(run.id), event, payload);
+        this.deps.bus.publish(REALTIME_ROOMS.workspace(run.workspaceId), event, payload);
+        this.deps.logger.info('engine.run_orphan_reconciled', { runId: run.id, terminal });
+        if (terminal === 'FAILED') failed += 1; else resumed += 1;
         continue;
       }
       try {
@@ -1320,14 +1360,20 @@ export class WorkflowEngine {
     for (const item of pending) {
       const initialState = item.initialState as unknown as WorkflowRunState | null;
       const graph = item.graphSnapshot as unknown as WorkflowGraph | null;
-      this.deps.db
+      const claimed = this.deps.db
         .update(schema.workflowRunQueue)
         .set({
           status: initialState && graph ? 'dequeued' : 'dropped',
           updatedAt: new Date().toISOString(),
         })
-        .where(eq(schema.workflowRunQueue.id, item.id))
+        .where(and(
+          eq(schema.workflowRunQueue.id, item.id),
+          eq(schema.workflowRunQueue.status, 'pending'),
+        ))
         .run();
+      // Another scheduler/engine instance won the claim. Starting the same
+      // durable run twice would duplicate every non-idempotent node side effect.
+      if (claimed.changes === 0) continue;
       if (!initialState || !graph) continue;
       await this.startRun({
         workspaceId: item.workspaceId,
@@ -2453,7 +2499,30 @@ export class WorkflowEngine {
         return;
       }
       case 'channel': {
-        const result = await this.#executors.executeChannelSend(ctx, node, resolvedConfig as ChannelSendNodeConfig);
+        const result = await this.#executors.executeChannelSend(
+          ctx,
+          node,
+          resolvedConfig as ChannelSendNodeConfig,
+          item.idempotencyKey ?? nodeIdempotencyKey(ctx.runId, node.id, 0),
+        );
+        const key = (resolvedConfig as ChannelSendNodeConfig).outputKey ?? 'delivery';
+        const delivery = result[key] as Record<string, unknown> | undefined;
+        const providerMessageId = typeof delivery?.providerMessageId === 'string' ? delivery.providerMessageId : '';
+        if (!providerMessageId) {
+          throw new AgentisError('INTEGRATION_OPERATION_FAILED', 'channel node completed without provider-issued delivery proof');
+        }
+        const provenDelivery = delivery!;
+        ctx.state.nodeStates[node.id]!.deliveryReceipt = {
+          integrationId: `channel:${String(provenDelivery.kind ?? 'unknown')}`,
+          operationId: 'send',
+          providerMessageId,
+          deliveryStatus: provenDelivery.status as 'accepted' | 'delivered' | 'read' | 'queued',
+          verified: provenDelivery.verified === true,
+          ...(typeof provenDelivery.to === 'string' ? { recipient: provenDelivery.to } : {}),
+          contentType: 'text',
+          content: '[outbound message redacted]',
+          capturedAt: new Date().toISOString(),
+        };
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -3416,6 +3485,10 @@ export class WorkflowEngine {
         inputData,
         scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
         capabilityTags: config.capabilityTags,
+        runtimeRequirements: runtimeRequirementsFromAgentRequirements(
+          config.requires,
+          `Workflow node ${node.id} (${node.title})`,
+        ),
         timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
         preferredModel,
         // Run-scoped cancellation: Stop aborts this so the in-flight model call ends.
@@ -4535,6 +4608,59 @@ export class WorkflowEngine {
     }
   }
 
+  /**
+   * Project a terminal run into the shape the App/workflow learning loop consumes:
+   * what it was, how it ended, what it failed at, and how the verdict engine graded
+   * it. Reads only run state the engine already holds — no extra queries on the
+   * terminal path beyond the workflow title.
+   */
+  #runSettledInput(ctx: RunningContext, status: WorkflowRunStatus, verdict: RunVerdict | null): RunSettledInput {
+    const failures: Array<{ nodeId: string; nodeTitle: string; error: string }> = [];
+    for (const nodeId of ctx.state.failedNodeIds) {
+      const nodeState = ctx.state.nodeStates[nodeId];
+      if (!nodeState?.error) continue;
+      failures.push({
+        nodeId,
+        nodeTitle: ctx.graph.nodes.find((n) => n.id === nodeId)?.title ?? nodeId,
+        error: nodeState.error,
+      });
+    }
+    let title = ctx.workflowId;
+    try {
+      title = this.deps.db
+        .select({ title: schema.workflows.title })
+        .from(schema.workflows)
+        .where(eq(schema.workflows.id, ctx.workflowId))
+        .get()?.title ?? ctx.workflowId;
+    } catch { /* title is cosmetic — never fail a terminal transition for it */ }
+
+    return {
+      workspaceId: ctx.workspaceId,
+      workflowId: ctx.workflowId,
+      workflowTitle: title,
+      runId: ctx.runId,
+      status,
+      verdict: verdict
+        ? {
+            outcome: verdict.outcome,
+            deficiencies: verdict.deficiencies.map((d) => ({ claim: d.claim, detail: d.detail })),
+          }
+        : null,
+      failures,
+      agentId: this.#primaryRunAgentId(ctx),
+    };
+  }
+
+  /** The agent that did the most work in this run — attribution for its lessons. */
+  #primaryRunAgentId(ctx: RunningContext): string | null {
+    for (const nodeId of [...ctx.state.completedNodeIds].reverse()) {
+      const node = ctx.graph.nodes.find((n) => n.id === nodeId);
+      const agentId = (node?.config as { agentId?: unknown } | undefined)?.agentId;
+      if (typeof agentId === 'string' && agentId) return agentId;
+    }
+    return null;
+  }
+
   #enqueueSuccessfulBrainCapture(
     ctx: RunningContext,
     nodeId: string,
@@ -4828,6 +4954,10 @@ export class WorkflowEngine {
           inputData: { item, index, prompt: swarm.config.prompt },
           scratchpadSnapshot: this.deps.scratchpad.snapshotOf(ctx.runId),
           capabilityTags: swarm.config.capabilityTags,
+          runtimeRequirements: runtimeRequirementsFromAgentRequirements(
+            swarm.config.requires,
+            `Swarm node ${node.id} (${node.title})`,
+          ),
           timeoutMs: CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS,
           // Run-scoped cancellation so Stop aborts in-flight swarm subtasks
           // instead of letting them run (and bill) to completion.
@@ -5353,6 +5483,7 @@ export class WorkflowEngine {
           agentId: null,
           verdict: verdict.passed ? 'pass' : 'fail',
           evaluatorConfidence: verdict.score,
+          responseText: typeof target === 'string' ? target : JSON.stringify(target),
         });
       } catch (err) {
         this.deps.logger.warn('engine.evaluator_brain_feedback.failed', { runId: ctx.runId, err: (err as Error).message });
@@ -7327,6 +7458,12 @@ export class WorkflowEngine {
           userId: ctx.userId,
         });
       }
+      // The run's graded outcome becomes durable memory in the scope that owns it
+      // (the App, else the workflow) — this is what fills an App's Brain. A debug
+      // run proves nothing about the App, so it never forms memory.
+      if (this.deps.appBrain && !this.#debugRuns.has(ctx.runId)) {
+        void this.deps.appBrain.onRunSettled(this.#runSettledInput(ctx, status, runVerdict));
+      }
       // PAVED-ROAD P1 — close the build loop on the workflow row: a debug run
       // stamps debugRun evidence, a production run stamps productionRun, both
       // keyed to the current graph hash so a later edit stales them. This is
@@ -7475,6 +7612,15 @@ export class WorkflowEngine {
     this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), eventName, runStatusPayload);
     this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), eventName, runStatusPayload);
     this.#appendActivityTail(ctx.runId, eventName, runStatusPayload);
+    // Business progression gets its own strong event. `run.completed` remains
+    // an execution-lifecycle signal for compatibility; rules that mean "the
+    // objective was achieved" subscribe to this verdict-backed event instead.
+    if (status === 'COMPLETED' && runVerdict?.outcome === 'accomplished') {
+      const accomplishedPayload = { ...runStatusPayload, verdict: runVerdict.outcome };
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.RUN_ACCOMPLISHED, accomplishedPayload);
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.RUN_ACCOMPLISHED, accomplishedPayload);
+      this.#appendActivityTail(ctx.runId, REALTIME_EVENTS.RUN_ACCOMPLISHED, accomplishedPayload);
+    }
   }
 
   /**
@@ -8155,6 +8301,10 @@ function isSelfHealTerminalError(error: string): boolean {
 const WORKFLOW_AGENT_TOOL_BLOCKLIST = new Set<string>([
   'agentis.build_workflow',
   'agentis.workflow.patch',
+  'agentis.workflow.graph.replace',
+  'agentis.workflow.graph.patch',
+  'agentis.workflow.graph.rollback',
+  'agentis.run.graph.evolve',
   'agentis.workflow.run',
   // deliver builds + runs + repairs a whole workflow — an agent INSIDE a
   // workflow must never recursively deliver new apps (runaway). The top-level

@@ -9,7 +9,16 @@
 
 import { Hono } from 'hono';
 import { and, eq, inArray } from 'drizzle-orm';
-import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS, configuredAffordances, potentialAffordances, type AdapterCapabilities } from '@agentis/core';
+import {
+  AgentisError,
+  CONSTANTS,
+  REALTIME_EVENTS,
+  REALTIME_ROOMS,
+  configuredAffordances,
+  potentialAffordances,
+  type AdapterCapabilities,
+  type RuntimeCapabilityManifest,
+} from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -608,9 +617,10 @@ function extractImportOrigin(config: unknown): { adapterType: string; externalId
 function presentAgent<T extends { id: string; status: string; lastHeartbeatAt?: string | null; isPaused?: boolean | null }>(
   agent: T,
   adapters: AdapterManager,
-): T & { adapterCapabilities?: AdapterCapabilities | null } {
+): T & { adapterCapabilities?: AdapterCapabilities | null; runtimeCapabilityManifest?: RuntimeCapabilityManifest | null } {
   const status = derivedAgentStatus(agent, adapters);
   const adapterCapabilities = adapters.capabilities(agent.id);
+  const runtimeCapabilities = adapters.capabilityManifest(agent.id);
   // Supply view: what this agent's runtime advertises by configuration (and could
   // advertise if enabled), independent of whether it is connected right now. Lets
   // the canvas/readiness distinguish "offline but capable" and "can be enabled"
@@ -625,10 +635,11 @@ function presentAgent<T extends { id: string; status: string; lastHeartbeatAt?: 
     ...agent,
     status,
     ...(adapterCapabilities ? { adapterCapabilities } : {}),
+    ...(runtimeCapabilities ? { runtimeCapabilityManifest: runtimeCapabilities } : {}),
     configuredAffordances: configured,
     potentialAffordances: potential,
     ...(status === 'offline' ? { currentTaskId: null } : {}),
-  } as T & { adapterCapabilities?: AdapterCapabilities | null };
+  } as T & { adapterCapabilities?: AdapterCapabilities | null; runtimeCapabilityManifest?: RuntimeCapabilityManifest | null };
 }
 
 function derivedAgentStatus(

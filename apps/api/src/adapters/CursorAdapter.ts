@@ -27,6 +27,7 @@ import {
 } from './cliChatRuntime.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 
 export interface CursorAdapterOptions {
   agentId: string;
@@ -91,6 +92,19 @@ export class CursorAdapter implements AgentAdapter {
         ingestible: true,
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat',
+        'interaction.tool-calling',
+        'execution.file-system',
+        'execution.terminal',
+        'execution.long-running',
+        'execution.pausable',
+        'workspace.codebase-index',
+        'memory.inject',
+        'memory.ingest',
+      ], {
+        limits: { 'execution.long-running': { maxConcurrent: 1 } },
+      }),
     };
   }
 

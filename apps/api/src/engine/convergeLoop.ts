@@ -661,6 +661,7 @@ export class ConvergeLoopController {
         agentId: null,
         verdict: verdict.passed ? 'pass' : 'fail',
         evaluatorConfidence: verdict.score,
+        responseText: typeof target === 'string' ? target : JSON.stringify(target),
       });
     } catch {
       /* best-effort brain feedback */

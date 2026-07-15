@@ -24,6 +24,7 @@ import type { ScratchpadService } from '../services/scratchpad.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { failedNodeCount, firstFailedNodeId, isFailedNodeId } from '../services/run/runStateFailures.js';
+import type { ColdArchiveStore } from '../services/storage/coldArchiveStore.js';
 
 export function buildRunRoutes(deps: {
   db: AgentisSqliteDb;
@@ -32,6 +33,7 @@ export function buildRunRoutes(deps: {
   ledger: LedgerService;
   scratchpad: ScratchpadService;
   bus: EventBus;
+  archiveStore?: ColdArchiveStore;
 }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
@@ -105,7 +107,7 @@ export function buildRunRoutes(deps: {
       .limit(limit)
       .all();
     const history = rows.map((run) => {
-      const state = run.runState as WorkflowRunState;
+      const state = (deps.archiveStore?.hydrateRunState(run.runState) ?? run.runState) as WorkflowRunState;
       const graph = resolveRunGraph(run, workflow ?? undefined);
       const node = buildRunNodes(graph, state).find((n) => n.nodeId === nodeId) ?? null;
       return {
@@ -140,7 +142,10 @@ export function buildRunRoutes(deps: {
       : null;
     const agentsById = loadAgentMap(deps.db, ws.workspaceId, collectRunAgentIds([run]));
     const tokenUsage = loadRunTokenUsage(deps.db, ws.workspaceId, run.id);
-    return c.json({ run: presentRunDetail(run, workflow ?? null, agentsById, tokenUsage) });
+    const hydrated = deps.archiveStore
+      ? { ...run, runState: deps.archiveStore.hydrateRunState(run.runState) as object }
+      : run;
+    return c.json({ run: presentRunDetail(hydrated, workflow ?? null, agentsById, tokenUsage) });
   });
 
   app.post('/:id/cancel', async (c) => {
@@ -581,7 +586,9 @@ function collectRunAgents(
   return [...ids].map((id) => ({ id, name: agentsById.get(id)?.name ?? id }));
 }
 
-function mapRunSummaryStatus(run: WorkflowRunRow, state: WorkflowRunState): 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting' {
+type UiRunStatus = 'running' | 'completed' | 'completed_with_issues' | 'failed' | 'pending' | 'cancelled' | 'paused' | 'waiting';
+
+function mapRunSummaryStatus(run: WorkflowRunRow, state: WorkflowRunState): UiRunStatus {
   if (run.status === 'PAUSED') return 'paused';
   const blockedNode = Object.values(state.nodeStates ?? {}).find((node) => node.status === 'WAITING' && node.blockedReason);
   if (blockedNode) return 'paused';
@@ -589,11 +596,15 @@ function mapRunSummaryStatus(run: WorkflowRunRow, state: WorkflowRunState): 'run
   return mapRunStatus(run.status);
 }
 
-function mapRunStatus(status: string): 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' | 'paused' {
+function mapRunStatus(status: string): Exclude<UiRunStatus, 'waiting'> {
   switch (status) {
     case 'COMPLETED':
-    case 'COMPLETED_WITH_CONTRACT_VIOLATION':
       return 'completed';
+    // A contract violation means the run finished but its output was off-spec —
+    // NOT a clean success. Surface it as its own "needs attention" state instead
+    // of a green completed, so "completed ≠ accomplished" is visible in the list.
+    case 'COMPLETED_WITH_CONTRACT_VIOLATION':
+      return 'completed_with_issues';
     case 'COMPLETED_WITH_ERRORS':
     case 'FAILED':
       return 'failed';

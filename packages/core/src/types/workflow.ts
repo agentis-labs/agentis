@@ -1444,6 +1444,10 @@ export interface WorkflowNodeContractDeviation {
 export interface IntegrationDeliveryReceipt {
   integrationId: string;
   operationId: string;
+  /** Provider-issued proof for channel/message delivery operations. */
+  providerMessageId?: string;
+  deliveryStatus?: 'accepted' | 'delivered' | 'read' | 'queued';
+  verified?: boolean;
   recipient?: string;
   subject?: string;
   contentType: 'html' | 'markdown' | 'text';

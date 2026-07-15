@@ -22,7 +22,7 @@ import { registerBlock } from './registry';
 import { EmptyState, PanelShell, SkeletonRows, useActionInvoker, useBoundRows, useRuntime } from '../ViewRenderer';
 import { toneFillClass, toneFromStatus, toneSoftClass } from '../styleIntent';
 import { seriesColor } from '../theme';
-import { displayLabel } from '../../../lib/prettyRef';
+import { displayLabel, isIdLike } from '../../../lib/prettyRef';
 
 type Row = Record<string, unknown>;
 
@@ -40,12 +40,52 @@ function fieldText(row: Row, key: string | undefined, fallbacks: string[] = []):
 }
 
 /**
- * The card title for a record — the chosen field, unless it is empty or is
- * itself an identifier (agents sometimes store a UUID as the name), in which
- * case it collapses to a clean `#ref` on the row id. Never renders a raw UUID.
+ * Common human-name field slugs an agent might use for a record's display name,
+ * beyond the generic title/name. Kept broad on purpose — a board card should
+ * show the store/brand/person, not a `#id`, regardless of the exact column name.
  */
-function recordTitle(row: Row, key: string | undefined, fallbacks: string[], empty: string): string {
-  return displayLabel(fieldText(row, key, fallbacks), rowId(row), empty);
+const NAME_FALLBACK_FIELDS = [
+  'title', 'name', 'subject', 'label', 'display_name', 'displayName',
+  'full_name', 'fullName', 'brand_name', 'brandName', 'store_name', 'storeName',
+  'company_name', 'companyName', 'brand', 'store', 'company', 'headline', 'summary',
+];
+
+/** A field is name-ish if its key reads like a human label rather than an id/meta field. */
+const NAME_KEY_RE = /(^|_)(title|name|label|subject|brand|store|company|headline|display|full)($|_)/i;
+
+/**
+ * Last-resort title: scan the row for the first readable string value — one whose
+ * key looks like a name and whose value isn't id-like/overly long — so a card
+ * shows something meaningful even when no declared title field matches. Skips the
+ * grouping/stage field so a Kanban card doesn't just echo its own column.
+ */
+function scanForTitle(row: Row, skipKeys: Array<string | undefined>): string {
+  const skip = new Set(skipKeys.filter(Boolean).map((k) => String(k).toLowerCase()));
+  skip.add('id');
+  let firstReadable = '';
+  for (const [key, value] of Object.entries(row)) {
+    if (skip.has(key.toLowerCase())) continue;
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    const text = String(value).trim();
+    if (!text || text.length > 80 || isIdLike(text)) continue;
+    if (NAME_KEY_RE.test(key)) return text; // strongest signal — a name-ish column
+    if (!firstReadable) firstReadable = text; // remember the first plausible value
+  }
+  return firstReadable;
+}
+
+/**
+ * The card title for a record — the chosen field (plus a broad fallback list),
+ * unless it is empty or is itself an identifier (agents sometimes store a UUID as
+ * the name). Falls back to scanning the row for a readable name-ish field, and
+ * only then to a clean `#ref`. Never renders a raw UUID.
+ */
+function recordTitle(row: Row, key: string | undefined, fallbacks: string[], empty: string, skipKeys: Array<string | undefined> = []): string {
+  const direct = fieldText(row, key, [...fallbacks, ...NAME_FALLBACK_FIELDS]);
+  if (direct && !isIdLike(direct)) return direct;
+  const scanned = scanForTitle(row, [key, ...fallbacks, ...skipKeys]);
+  if (scanned) return scanned;
+  return displayLabel(direct, rowId(row), empty);
 }
 
 function humanize(key: string): string {
@@ -136,7 +176,13 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                 </div>
               ) : cards.map((row) => {
                 const id = rowId(row);
-                const title = recordTitle(row, node.titleField, ['title', 'name', 'subject', 'label'], 'Untitled');
+                const title = recordTitle(
+                  row,
+                  node.titleField,
+                  ['title', 'name', 'subject', 'label'],
+                  'Untitled',
+                  [node.groupBy, node.subtitleField, node.badgeField, node.valueField],
+                );
                 const subtitle = fieldText(row, node.subtitleField);
                 const badge = fieldText(row, node.badgeField);
                 const value = node.valueField != null ? row[node.valueField] : undefined;
@@ -278,7 +324,7 @@ function RecordMasterView({ node }: { node: Extract<ViewNode, { type: 'RecordMas
           ) : filtered.map((row) => {
             const id = rowId(row);
             const active = selected != null && rowId(selected) === id;
-            const title = recordTitle(row, node.titleField, ['name', 'title', 'subject', 'label', 'email'], 'Untitled');
+            const title = recordTitle(row, node.titleField, ['name', 'title', 'subject', 'label', 'email'], 'Untitled', [node.subtitleField, node.statusField]);
             const subtitle = fieldText(row, node.subtitleField, ['email', 'company', 'phone']);
             const status = node.statusField ? fieldText(row, node.statusField) : '';
             return (

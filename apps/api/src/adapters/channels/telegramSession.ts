@@ -9,6 +9,7 @@
  */
 
 import type { Logger } from '../../logger.js';
+import type { ChannelDeliveryReceipt } from './types.js';
 
 export type TelegramSessionStatus = 'idle' | 'starting' | 'open' | 'closed' | 'error';
 
@@ -103,9 +104,12 @@ export class TelegramSession {
     this.#setStatus('closed');
   }
 
-  async sendText(chatId: string, text: string): Promise<void> {
+  async sendText(chatId: string, text: string): Promise<ChannelDeliveryReceipt> {
     if (!this.#bot) throw new Error(`telegram session ${this.opts.connectionId} is not started`);
-    await this.#bot.api.sendMessage(chatId, text);
+    const sent = await this.#bot.api.sendMessage(chatId, text);
+    const providerMessageId = sent?.message_id == null ? '' : String(sent.message_id);
+    if (!providerMessageId) throw new Error('telegram provider accepted no message id; outbound delivery is unverified');
+    return { provider: 'telegram', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
   }
 
   /** Show the "typing…" chat action (auto-expires ~5s; best-effort). */

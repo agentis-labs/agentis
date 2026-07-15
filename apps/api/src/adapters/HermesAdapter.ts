@@ -30,6 +30,7 @@ import type { Logger } from '../logger.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 import { assertSafeUrl } from '../services/safeUrl.js';
 import { linkAbortSignal } from './abort.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 
 export type OpenAiCompatibleAdapterType = 'local_llm';
 
@@ -94,6 +95,11 @@ export class HermesAdapter implements AgentAdapter {
       memory: {
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat',
+        'interaction.tool-calling',
+        'memory.inject',
+      ]),
     };
   }
 

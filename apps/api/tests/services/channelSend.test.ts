@@ -6,11 +6,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { resolveAndSend, type ChannelSendDeps } from '../../src/services/conversation/channelSend.js';
+import type { ChannelDeliveryReceipt } from '../../src/adapters/channels/types.js';
 
 type Conn = { id: string; kind: string; name: string; status: string; agentId?: string | null; defaultChatId?: string | null; targetAliases?: unknown; isDefault?: boolean; health: { status: string } };
 
-function fakeDeps(connections: Conn[], opts: { deliver?: () => Promise<void>; destChatId?: string | null; authorize?: (a: unknown) => { ok: boolean; reason?: string } } = {}): { deps: ChannelSendDeps; deliver: ReturnType<typeof vi.fn> } {
-  const deliver = vi.fn(opts.deliver ?? (async () => {}));
+function fakeDeps(connections: Conn[], opts: { deliver?: () => Promise<ChannelDeliveryReceipt | undefined>; destChatId?: string | null; authorize?: (a: unknown) => { ok: boolean; reason?: string } } = {}): { deps: ChannelSendDeps; deliver: ReturnType<typeof vi.fn> } {
+  const deliver = vi.fn(opts.deliver ?? (async () => ({ provider: 'whatsapp', providerMessageId: 'wamid.test-1', status: 'accepted', acceptedAt: '2026-07-14T00:00:00.000Z', recipient: 'chat-1' } as const)));
   const deps = {
     channels: {
       list: () => connections as never,
@@ -35,8 +36,20 @@ describe('resolveAndSend', () => {
     const { deps, deliver } = fakeDeps([wa()]);
     const res = await resolveAndSend(deps, { workspaceId: 'w', kind: 'whatsapp', body: 'Oi', to: '+5511888' });
     expect(res.sent).toBe(true);
-    if (res.sent) { expect(res.connectionId).toBe('wa1'); expect(res.kind).toBe('whatsapp'); }
+    if (res.sent) {
+      expect(res.connectionId).toBe('wa1');
+      expect(res.kind).toBe('whatsapp');
+      expect(res.verified).toBe(true);
+      expect(res.providerMessageId).toBe('wamid.test-1');
+    }
     expect(deliver).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when a transport resolves without provider-issued proof', async () => {
+    const { deps } = fakeDeps([wa()], { deliver: async () => undefined });
+    const res = await resolveAndSend(deps, { workspaceId: 'w', kind: 'whatsapp', body: 'hello', to: '+5511888' });
+    expect(res.sent).toBe(false);
+    if (!res.sent) expect(res.errorCode).toBe('CHANNEL_DELIVERY_UNVERIFIED');
   });
 
   it('fails (no send) when no connection of the kind exists — the exact "workflow claims a send with no connection" case', async () => {

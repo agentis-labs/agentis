@@ -90,7 +90,6 @@ describe('<AgentBrainPanel />', () => {
       if (path === '/v1/memory/episodes?agentId=agent-1&limit=200') return { episodes: [] };
       if (path === '/v1/skills?scopeId=agent-1&includeWorkspace=false') return { skills: Array.from({ length: 16 }, (_, index) => ({ id: `skill-${index}` })) };
       if (path === '/v1/brain/scopes/agent-1/visibility') return { surfacedInWorkspace: true };
-      if (path === '/v1/harness/import/updates') return { updates: [] };
       throw new Error(`Unexpected request: ${path}`);
     });
 
@@ -99,11 +98,13 @@ describe('<AgentBrainPanel />', () => {
         <AgentBrainPanel
           agents={[{ id: 'agent-1', name: 'Hermes', role: 'worker', importOrigin: { adapterType: 'hermes_agent', externalId: 'hermes:local' } }]}
           selectedAgentId="agent-1"
+          importUpdates={[]}
         />
       </MemoryRouter>,
     );
 
     await waitFor(() => expect(screen.getByText('0 memories pulled')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText('16 skills pushed')).toBeInTheDocument());
+    expect(mocks.api).not.toHaveBeenCalledWith('/v1/harness/import/updates');
   });
 });

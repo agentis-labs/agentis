@@ -11,7 +11,7 @@
  */
 
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
 
 const DISCORD_API = 'https://discord.com/api/v10';
 
@@ -47,7 +47,7 @@ export class DiscordChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<void> {
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<ChannelDeliveryReceipt> {
     const url = `${DISCORD_API}/channels/${encodeURIComponent(args.chatId)}/messages`;
     const attachments = args.attachments ?? [];
     const init: RequestInit = attachments.length > 0
@@ -70,6 +70,10 @@ export class DiscordChannelAdapter implements ChannelAdapter {
         `discord sendMessage failed: ${res.status} ${text.slice(0, 200)}${hint}`,
       );
     }
+    const json = await res.json().catch(() => ({})) as { id?: string };
+    const providerMessageId = json.id?.trim() ?? '';
+    if (!providerMessageId) throw new AgentisError('CHANNEL_SEND_FAILED', 'discord returned no provider message id; delivery is unverified');
+    return { provider: 'discord', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: args.chatId };
   }
 
   /** Build a multipart body: `payload_json` (content + attachment descriptors) + one part per file. */

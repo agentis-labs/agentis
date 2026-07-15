@@ -68,6 +68,8 @@ export const REALTIME_EVENTS = {
   RUN_PAUSED: 'run.paused',
   RUN_CANCELLED: 'run.cancelled',
   RUN_COMPLETED: 'run.completed',
+  /** Definition-of-done checks passed against the world (stronger than completion). */
+  RUN_ACCOMPLISHED: 'run.accomplished',
   RUN_FAILED: 'run.failed',
   RUN_RECOVERED: 'run.recovered',
   RUN_QUEUED: 'run.queued',

@@ -91,6 +91,16 @@ type ConversationRouteDeps = {
   viewportStore?: ViewportStore;
   bus: EventBus;
   memoryCapture?: {
+    captureImmediateCorrection?(args: {
+      workspaceId: string;
+      conversationId: string;
+      userId: string;
+      agentId: string;
+      userDisplayName?: string | null;
+      userMessage: string;
+      activeWorkflowId?: string | null;
+      activeNodeId?: string | null;
+    }): string | null;
     captureTurn(args: {
       workspaceId: string;
       conversationId: string;
@@ -100,6 +110,8 @@ type ConversationRouteDeps = {
       userMessage: string;
       assistantMessage?: string | null;
       finishReason?: string | null;
+      activeWorkflowId?: string | null;
+      activeNodeId?: string | null;
     }): Promise<{
       peerUpdateJobIds: string[];
       promotedSessionMoments: number;
@@ -477,6 +489,13 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       messageId,
       body: body.text,
       metadata: { clientTurnId },
+    });
+    captureImmediateConversationCorrection(deps, ws, {
+      agentId,
+      conversationId: conversation.id,
+      userMessage: body.text,
+      useViewportContext: body.useViewportContext,
+      viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
     });
     if (c.req.header('accept')?.includes('text/event-stream')) {
       return streamConversationTurnReply(c, deps, ws, {
@@ -932,6 +951,8 @@ async function runConversationTurn(
       userMessage: args.userMessage,
       assistantMessage: finalText.trim() || null,
       finishReason,
+      activeWorkflowId: viewportWorkflowId,
+      activeNodeId: activeViewport?.selection?.ids?.[0] ?? null,
     });
     // BRAIN-BLUEPRINT-10X §visibility — the STORE half of the legible mind (the
     // recall half is the executor's "Recalled N memories"). `signals` counts the
@@ -1016,6 +1037,16 @@ async function sendConversationMessage(
     conversation.permissionMode = body.permissionMode;
   }
 
+  // Explicit corrections are durable before the agent begins work (and even
+  // when this message must wait behind another active turn).
+  captureImmediateConversationCorrection(deps, ws, {
+    agentId,
+    conversationId: conversation.id,
+    userMessage: body.body,
+    useViewportContext: body.useViewportContext,
+    viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
+  });
+
   // Queue-then-auto-continue: a turn is already streaming for this
   // conversation (chat, channel dispatcher, or another tab). Rather than race
   // a second live turn, durably queue this send — `streamConversationTurnReply`
@@ -1055,6 +1086,32 @@ async function sendConversationMessage(
     await relayOpenClaw(deps, reg.adapter, conversation.mirroredSessionId ?? undefined, body.body, agentId);
   }
   return c.json({ message, conversationId: conversation.id, agentId });
+}
+
+function captureImmediateConversationCorrection(
+  deps: ConversationRouteDeps,
+  ws: ReturnType<typeof getWorkspace>,
+  args: {
+    agentId: string;
+    conversationId: string;
+    userMessage: string;
+    useViewportContext: boolean;
+    viewportOverride?: ViewportContext | null;
+  },
+): void {
+  const activeViewport = args.useViewportContext
+    ? args.viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
+    : args.viewportOverride ?? null;
+  deps.memoryCapture?.captureImmediateCorrection?.({
+    workspaceId: ws.workspaceId,
+    conversationId: args.conversationId,
+    userId: ws.user.id,
+    agentId: args.agentId,
+    userDisplayName: ws.user.displayName,
+    userMessage: args.userMessage,
+    activeWorkflowId: workflowIdFromViewport(activeViewport),
+    activeNodeId: activeViewport?.selection?.ids?.[0] ?? null,
+  });
 }
 
 async function confirmConversationAction(

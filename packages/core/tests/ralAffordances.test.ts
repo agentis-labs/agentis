@@ -63,8 +63,25 @@ describe('RAL supply view (configured / potential affordances)', () => {
     expect(configuredAffordances('openclaw', null)).toEqual({ browser: true, computerUse: true, terminal: true });
   });
 
+  it('advertises native MCP only when the stored runtime config mounts it', () => {
+    expect(configuredAffordances('claude_code', null)).toEqual({ fileSystem: true, terminal: true });
+    expect(configuredAffordances('claude_code', { mcpServers: [{ url: 'http://agentis.test/mcp' }] })).toEqual({
+      fileSystem: true,
+      terminal: true,
+      nativeMcp: true,
+    });
+    expect(configuredAffordances('hermes_agent', {
+      chatTransport: 'cli',
+      mcpServers: [{ url: 'http://agentis.test/mcp' }],
+    }).nativeMcp).toBeUndefined();
+    expect(configuredAffordances('antigravity', null)).toEqual({ fileSystem: true, terminal: true });
+  });
+
   it('exposes Codex native browser as a latent (enablable) power but not for fixed runtimes', () => {
     expect(potentialAffordances('codex').browser).toBe(true);
+    expect(potentialAffordances('codex').nativeMcp).toBe(true);
+    expect(potentialAffordances('claude_code').nativeMcp).toBe(true);
+    expect(potentialAffordances('hermes_agent').nativeMcp).toBe(true);
     expect(potentialAffordances('claude_code').browser).toBeUndefined();
     expect(potentialAffordances('cursor').browser).toBeUndefined();
     expect(potentialAffordances('http')).toEqual({});

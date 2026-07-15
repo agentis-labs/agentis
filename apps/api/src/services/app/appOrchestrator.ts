@@ -9,7 +9,9 @@
  *     enabled sibling whose `dependsOn` includes W is queued — through the same
  *     `queueWorkflowRun` seam as every other start (never a forked path).
  *     `chainOn` on the *dependent* decides eligibility: `success` (default) fires
- *     only after a clean COMPLETED; `always` fires on any terminal settle.
+ *     after clean COMPLETED for legacy workflows, and only after an ACCOMPLISHED
+ *     world verdict when the upstream carries a definition-of-done spec;
+ *     `always` fires on any terminal settle for explicit finally/failure paths.
  *  2. **Schedules** — `binding.schedule.cron` fires on the SchedulerService sweep
  *     seam. Graph-authored triggers stay authoritative where present; this is the
  *     App-level "run this at…" layer for workflows without their own trigger.
@@ -36,11 +38,11 @@ import type { Logger } from '../../logger.js';
 import type { WorkflowEngine } from '../../engine/WorkflowEngine.js';
 import { queueWorkflowRun, type SchedulerDeps } from '../scheduler.js';
 import { nextCronFire } from '../cronNextFire.js';
+import { readWorkflowSpec } from '../workflow/workflowSpec.js';
+import { evaluateRunOutcome } from '../workflow/runOutcome.js';
 
 /** Statuses that mean "a run is still in flight" (concurrency guard). */
 const ACTIVE_RUN_STATUSES = ['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED'] as const;
-/** Terminal statuses that count as a clean success for `chainOn: 'success'`. */
-const CLEAN_STATUS = 'COMPLETED';
 /** Cap on app-chain lineage depth — a dependsOn cycle terminates here. */
 const APP_CHAIN_MAX_DEPTH = 16;
 
@@ -64,6 +66,7 @@ interface WorkflowBindingRow {
   userId: string;
   appId: string | null;
   title: string;
+  settings?: unknown;
   binding: AppWorkflowBinding;
 }
 
@@ -114,7 +117,7 @@ export class AppOrchestratorService {
     const run = this.deps.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get();
     if (!run?.workflowId) return { fired: 0 };
     const source = this.deps.db
-      .select({ id: schema.workflows.id, appId: schema.workflows.appId, workspaceId: schema.workflows.workspaceId })
+      .select({ id: schema.workflows.id, appId: schema.workflows.appId, workspaceId: schema.workflows.workspaceId, settings: schema.workflows.settings })
       .from(schema.workflows)
       .where(eq(schema.workflows.id, run.workflowId))
       .get();
@@ -126,7 +129,12 @@ export class AppOrchestratorService {
       return { fired: 0 };
     }
 
-    const clean = run.status === CLEAN_STATUS;
+    const sourceHasDefinitionOfDone = Boolean(readWorkflowSpec(source.settings));
+    const outcome = evaluateRunOutcome({
+      status: run.status,
+      runState: run.runState,
+      hasDefinitionOfDone: sourceHasDefinitionOfDone,
+    });
     const siblings = this.appWorkflows(source.workspaceId, source.appId);
     let fired = 0;
     for (const sibling of siblings) {
@@ -134,7 +142,17 @@ export class AppOrchestratorService {
       if (sibling.binding.enabled === false) continue;
       if (!(sibling.binding.dependsOn ?? []).includes(source.id)) continue;
       const chainOn = sibling.binding.chainOn ?? 'success';
-      if (chainOn === 'success' && !clean) continue;
+      if (chainOn === 'success' && !outcome.canAdvanceOnSuccess) {
+        this.deps.logger.info('app_orchestrator.chain_blocked_outcome', {
+          appId: source.appId,
+          from: source.id,
+          to: sibling.id,
+          runId,
+          status: run.status,
+          verdict: outcome.verdict ?? outcome.reason,
+        });
+        continue;
+      }
       if (this.skipForConcurrency(sibling)) continue;
       try {
         const queued = await queueWorkflowRun(this.schedulerDeps(), {
@@ -149,6 +167,7 @@ export class AppOrchestratorService {
             upstreamWorkflowId: source.id,
             upstreamRunId: runId,
             upstreamStatus: run.status,
+            upstreamOutcome: outcome.verdict ?? outcome.reason,
           },
           reason: 'app_chain',
           parentRunId: runId,

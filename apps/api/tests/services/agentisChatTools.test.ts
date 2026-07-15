@@ -76,8 +76,15 @@ function seedSkill(overrides: Partial<typeof schema.extensions.$inferInsert> = {
 class StubTelegramAdapter implements ChannelAdapter {
   readonly kind = 'telegram' as const;
   readonly sent: Array<{ chatId: string; body: string }> = [];
-  async send(args: { chatId: string; body: string }): Promise<void> {
+  async send(args: { chatId: string; body: string }) {
     this.sent.push({ chatId: args.chatId, body: args.body });
+    return {
+      provider: 'telegram' as const,
+      providerMessageId: `telegram-test-${this.sent.length}`,
+      status: 'accepted' as const,
+      acceptedAt: new Date().toISOString(),
+      recipient: args.chatId,
+    };
   }
   verify(): boolean { return true; }
   parseInbound(): ParsedInboundMessage | null { return null; }
@@ -88,7 +95,16 @@ function stubPersistentTransport(sent: Array<{ connectionId: string; chatId: str
     handles: (conn) => conn.kind === 'whatsapp',
     requiresNoToken: (kind) => kind === 'whatsapp',
     status: () => ({ status: 'open' }),
-    send: async (connectionId, chatId, body) => { sent.push({ connectionId, chatId, body }); },
+    send: async (connectionId, chatId, body) => {
+      sent.push({ connectionId, chatId, body });
+      return {
+        provider: 'whatsapp' as const,
+        providerMessageId: `whatsapp-test-${sent.length}`,
+        status: 'accepted' as const,
+        acceptedAt: new Date().toISOString(),
+        recipient: chatId,
+      };
+    },
   };
 }
 

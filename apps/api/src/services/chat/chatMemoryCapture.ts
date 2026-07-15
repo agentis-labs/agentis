@@ -60,6 +60,28 @@ export interface CaptureChatTurnResult {
 export class ChatMemoryCaptureService {
   constructor(private readonly deps: ChatMemoryCaptureDeps) {}
 
+  /**
+   * Persist an explicit operator correction as soon as the inbound message is
+   * accepted. Conversation routes call this before starting the agent turn;
+   * captureTurn calls it again as a safe fallback for non-web chat surfaces.
+   */
+  captureImmediateCorrection(
+    args: Omit<CaptureChatTurnArgs, 'assistantMessage' | 'finishReason'>,
+  ): string | null {
+    const correction = extractImmediateAgentCorrection(args.userMessage, displayName(args));
+    if (!correction) return null;
+    try {
+      return this.#writeAgentCorrection(args, correction);
+    } catch (err) {
+      this.deps.logger.warn('chat.memory_capture.immediate_correction_failed', {
+        workspaceId: args.workspaceId,
+        conversationId: args.conversationId,
+        message: (err as Error).message,
+      });
+      return null;
+    }
+  }
+
   async captureTurn(args: CaptureChatTurnArgs): Promise<CaptureChatTurnResult> {
     const result: CaptureChatTurnResult = {
       peerUpdateJobIds: [],
@@ -71,6 +93,12 @@ export class ChatMemoryCaptureService {
 
     const userMessage = args.userMessage.trim();
     if (!userMessage) return result;
+
+    // The web route normally performs this write before dispatch. Keeping it
+    // here makes channel adapters and older callers equally safe.
+    const immediateCorrection = extractImmediateAgentCorrection(userMessage, displayName(args));
+    const immediateMemoryId = immediateCorrection ? this.captureImmediateCorrection(args) : null;
+    if (immediateMemoryId) result.workspaceMemoryIds.push(immediateMemoryId);
 
     try {
       result.peerUpdateJobIds.push(...this.#enqueuePeerUpdates(args));
@@ -101,6 +129,9 @@ export class ChatMemoryCaptureService {
       // reconciled against existing memory (ADD/UPDATE/NOOP), so restating a rule
       // UPDATEs it instead of writing a duplicate, and durable even without a model.
       const operatorCandidates = extractOperatorCandidates(userMessage);
+      // A direct correction to this specialist is agent-scoped and governing.
+      // It was already written synchronously above; the formation queue still
+      // reconciles/refines the wording and prevents long-term noise.
       // BRAIN-BLUEPRINT-10X — the AGENT's own discoveries form memory too, not just
       // operator statements. A work turn whose answer carries a learning shape
       // ("root cause was…", "turns out…", "for future runs…") goes through the SAME
@@ -120,7 +151,9 @@ export class ChatMemoryCaptureService {
               agentId: args.agentId,
               // Operator statements belong to the workspace mind (all agents recall
               // them); the judge may still scope a memory to the agent.
-              scopeId: operatorCandidates.length > 0 ? null : args.agentId,
+              // Corrections aimed at this specialist stay in its own mind. Other
+              // operator facts/preferences remain workspace-shared as before.
+              scopeId: immediateCorrection ? args.agentId : operatorCandidates.length > 0 ? null : args.agentId,
               memoryPolicy: 'form',
               originSurface: operatorCandidates.length > 0 ? 'operator_chat' : 'agent_chat_learning',
               operatorText: userMessage,
@@ -262,6 +295,36 @@ export class ChatMemoryCaptureService {
     });
   }
 
+  #writeAgentCorrection(args: CaptureChatTurnArgs, signal: OperatorMemorySignal): string | null {
+    const memory = this.deps.memory;
+    if (!memory) return null;
+    const existing = memory.list({ workspaceId: args.workspaceId, scopeId: args.agentId, limit: 200 })
+      .find((row) => row.tags.includes('operator_correction') && memoriesOverlap(row.content, signal.content));
+    if (existing) return existing.id;
+    const appliesTo = [args.activeWorkflowId, args.activeNodeId].filter((v): v is string => Boolean(v));
+    return memory.write({
+      workspaceId: args.workspaceId,
+      scopeId: args.agentId,
+      kind: 'rule',
+      source: 'operator',
+      title: signal.title,
+      content: signal.content,
+      trust: 0.98,
+      importance: 0.98,
+      appliesTo,
+      tags: ['chat', 'operator_correction', 'immediate', 'pacer:procedural', ...(appliesTo.length > 0 ? ['scope:workflow'] : [])],
+      provenance: {
+        source: 'chat_memory_capture',
+        conversationId: args.conversationId,
+        agentId: args.agentId,
+        userId: args.userId,
+        userDisplayName: displayName(args),
+        originSurface: 'operator_chat',
+        captureMode: 'immediate_governing_correction',
+      },
+    });
+  }
+
   #workspaceMemoryExists(workspaceId: string, scopeId: string | null, content: string): boolean {
     // §B4 — read through the unified MemoryStore facade (one substrate).
     const memory = this.deps.memory;
@@ -271,6 +334,31 @@ export class ChatMemoryCaptureService {
     return rows.some((row) => normalizeKey(row.content) === key || normalizeKey(row.title) === key);
   }
 
+}
+
+function extractImmediateAgentCorrection(message: string, actorLabel: string): OperatorMemorySignal | null {
+  const text = cleanSignal(message);
+  if (!text || looksSensitive(text) || isQuestion(text)) return null;
+  const binding = /\b(do not|don'?t|never|must not|stop|keep|preserve|leave)\b/i.test(text);
+  const correction = /\b(again|one more time|next time|correction|you (?:changed|removed|deleted|replaced|overwrote|broke)|simply (?:changed|removed|deleted)|from now on|going forward)\b/i.test(text);
+  if (!binding || !correction) return null;
+  return {
+    kind: 'rule',
+    title: `${actorLabel} correction: ${truncate(text, 80)}`,
+    content: text.slice(0, 500),
+    confidence: 0.98,
+    importance: 0.98,
+    tags: ['chat', 'operator_correction', 'rule'],
+  };
+}
+
+function memoriesOverlap(left: string, right: string): boolean {
+  const leftTokens = new Set(normalizeKey(left).split(' ').filter((token) => token.length > 2));
+  const rightTokens = new Set(normalizeKey(right).split(' ').filter((token) => token.length > 2));
+  if (leftTokens.size === 0 || rightTokens.size === 0) return false;
+  let shared = 0;
+  for (const token of leftTokens) if (rightTokens.has(token)) shared += 1;
+  return shared / Math.min(leftTokens.size, rightTokens.size) >= 0.72;
 }
 
 function extractOperatorSignals(message: string, actorLabel: string): OperatorMemorySignal[] {

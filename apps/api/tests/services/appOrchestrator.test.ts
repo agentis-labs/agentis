@@ -51,7 +51,7 @@ function seedApp(): string {
   return id;
 }
 
-function seedWorkflow(appId: string | null, title: string, binding?: Partial<AppWorkflowBinding>) {
+function seedWorkflow(appId: string | null, title: string, binding?: Partial<AppWorkflowBinding>, withSpec = false) {
   const id = randomUUID();
   ctx.db.insert(schema.workflows).values({
     id,
@@ -61,12 +61,15 @@ function seedWorkflow(appId: string | null, title: string, binding?: Partial<App
     appId,
     title,
     graph: trivialGraph(),
-    settings: binding ? { appBinding: { dependsOn: [], ...binding } } : {},
+    settings: {
+      ...(binding ? { appBinding: { dependsOn: [], ...binding } } : {}),
+      ...(withSpec ? { spec: { version: 1, objective: `Accomplish ${title}`, acceptance: [{ id: 'done', claim: 'Goal achieved', verify: 'expr', expr: 'output.ok == true' }], createdAt: '2026-07-14T00:00:00.000Z' } } : {}),
+    },
   }).run();
   return id;
 }
 
-function seedRun(workflowId: string, status: string, parentRunId?: string | null) {
+function seedRun(workflowId: string, status: string, parentRunId?: string | null, outcome?: 'accomplished' | 'partial' | 'hollow' | 'failed_checks') {
   const id = randomUUID();
   ctx.db.insert(schema.workflowRuns).values({
     id,
@@ -75,7 +78,7 @@ function seedRun(workflowId: string, status: string, parentRunId?: string | null
     workflowId,
     userId: ctx.user.id,
     status,
-    runState: { runId: id, workflowId, status, nodeStates: {}, completedNodeIds: [] },
+    runState: { runId: id, workflowId, status, nodeStates: {}, completedNodeIds: [], ...(outcome ? { verdict: { outcome } } : {}) },
     replanCount: 0,
     ...(parentRunId ? { parentRunId } : {}),
   }).run();
@@ -119,6 +122,30 @@ describe('AppOrchestratorService — dependsOn chains', () => {
     expect(queuedFor(onSuccess)).toHaveLength(0);
     expect(queuedFor(always)).toHaveLength(1);
     expect(queuedFor(disabled)).toHaveLength(0);
+  });
+
+  it('does not advance a scoped app chain until the upstream goal is accomplished', async () => {
+    const appId = seedApp();
+    const source = seedWorkflow(appId, 'Research source', undefined, true);
+    const dependent = seedWorkflow(appId, 'Publish result', { dependsOn: [source] });
+
+    const deficientRun = seedRun(source, 'COMPLETED', null, 'failed_checks');
+    expect((await orchestrator().handleRunSettled(deficientRun)).fired).toBe(0);
+    expect(queuedFor(dependent)).toHaveLength(0);
+
+    const accomplishedRun = seedRun(source, 'COMPLETED', null, 'accomplished');
+    expect((await orchestrator().handleRunSettled(accomplishedRun)).fired).toBe(1);
+    expect(queuedFor(dependent)).toHaveLength(1);
+  });
+
+  it('fails closed for a scoped workflow whose verdict is missing', async () => {
+    const appId = seedApp();
+    const source = seedWorkflow(appId, 'Generate report', undefined, true);
+    const dependent = seedWorkflow(appId, 'Notify stakeholders', { dependsOn: [source] });
+    const runId = seedRun(source, 'COMPLETED');
+
+    expect((await orchestrator().handleRunSettled(runId)).fired).toBe(0);
+    expect(queuedFor(dependent)).toHaveLength(0);
   });
 
   it('skips an exclusive dependent that already has an active run', async () => {

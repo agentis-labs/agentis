@@ -468,6 +468,34 @@ export function validateWorkflowGraph(
     }
   }
 
+  // A single decision must never fan out into two equivalent outbound channel
+  // sends under the same condition. Distinct nodes have distinct run-level
+  // idempotency keys, so the engine would execute both and contact the recipient
+  // twice. This is a structural error in every domain (notifications, outreach,
+  // incident paging, study reminders, etc.), not a workflow-specific warning.
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const outboundBySource = new Map<string, Map<string, string>>();
+  for (const edge of graph.edges) {
+    const target = nodeById.get(edge.target);
+    if (target?.config.kind !== 'channel') continue;
+    const condition = (edge.condition ?? '').replace(/\s+/gu, ' ').trim();
+    const signature = JSON.stringify({
+      condition,
+      channelKind: target.config.channelKind ?? null,
+      connectionId: target.config.connectionId ?? null,
+      to: target.config.to ?? null,
+      body: target.config.body ?? null,
+    });
+    const seen = outboundBySource.get(edge.source) ?? new Map<string, string>();
+    const priorTarget = seen.get(signature);
+    if (priorTarget && priorTarget !== edge.target) {
+      fail(`Node ${edge.source} fans out to duplicate channel deliveries ${priorTarget} and ${edge.target} under the same condition. Keep one send path or make the branches mutually exclusive.`);
+    } else {
+      seen.set(signature, edge.target);
+    }
+    outboundBySource.set(edge.source, seen);
+  }
+
   const phaseIds = new Set<string>();
   const phaseByNode = new Map<string, string>();
   for (const phase of graph.phases ?? []) {

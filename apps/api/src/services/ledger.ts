@@ -19,6 +19,7 @@ import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
+import type { ColdArchiveStore } from './storage/coldArchiveStore.js';
 
 export interface LedgerAppendArgs {
   workspaceId: string;
@@ -47,6 +48,7 @@ export class LedgerService {
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly bus: EventBus,
+    private readonly archive?: ColdArchiveStore,
   ) {}
 
   async append(args: LedgerAppendArgs): Promise<LedgerEvent> {
@@ -94,15 +96,24 @@ export class LedgerService {
   }): Promise<LedgerEvent[]> {
     const limit = Math.min(Math.max(args.limit ?? 200, 1), 1000);
     const after = args.afterSequence ?? -1;
-    const rows = this.db
+    const hotRows = this.db
       .select()
       .from(schema.ledgerEvents)
       .where(and(eq(schema.ledgerEvents.runId, args.runId), gt(schema.ledgerEvents.sequenceNumber, after)))
       .orderBy(asc(schema.ledgerEvents.sequenceNumber))
       .limit(limit)
       .all();
-    return rows
-      .map((r) => ({
+    const archivedRows = this.archive?.readLedgerEvents(
+      String((hotRows[0] as { workspaceId?: string } | undefined)?.workspaceId ?? this.#workspaceIdForRun(args.runId) ?? ''),
+      args.runId,
+    ) ?? [];
+    const rows = new Map<string, LedgerEvent>();
+    for (const r of archivedRows) {
+      if (typeof r.id !== 'string' || Number(r.sequenceNumber) <= after) continue;
+      rows.set(r.id, archiveLedgerEvent(r));
+    }
+    for (const r of hotRows) {
+      rows.set(r.id, {
         id: r.id,
         runId: r.runId,
         sequenceNumber: r.sequenceNumber,
@@ -111,7 +122,14 @@ export class LedgerService {
         taskId: r.taskId,
         payload: r.payload as Record<string, unknown>,
         createdAt: r.createdAt,
-      }));
+      });
+    }
+    return [...rows.values()].sort((a, b) => a.sequenceNumber - b.sequenceNumber).slice(0, limit);
+  }
+
+  #workspaceIdForRun(runId: string): string | null {
+    return this.db.select({ workspaceId: schema.workflowRuns.workspaceId }).from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId)).get()?.workspaceId ?? null;
   }
 
   async #nextSeq(runId: string): Promise<number> {
@@ -130,4 +148,17 @@ export class LedgerService {
     this.#seqCache.set(runId, next);
     return next;
   }
+}
+
+function archiveLedgerEvent(row: Record<string, unknown>): LedgerEvent {
+  return {
+    id: String(row.id),
+    runId: String(row.runId),
+    sequenceNumber: Number(row.sequenceNumber),
+    eventType: String(row.eventType),
+    nodeId: typeof row.nodeId === 'string' ? row.nodeId : null,
+    taskId: typeof row.taskId === 'string' ? row.taskId : null,
+    payload: row.payload && typeof row.payload === 'object' ? row.payload as Record<string, unknown> : {},
+    createdAt: String(row.createdAt),
+  };
 }

@@ -176,6 +176,7 @@ export function UnifiedBrainPage() {
               onOpenConfig={() => setConfigDrawerOpen(true)}
               search={mapSearch}
               onSearchChange={setMapSearch}
+              intelligence={intelligence}
             />
             <div className="pointer-events-none absolute left-3 top-3 z-30">
               <div className="pointer-events-auto">{controlsCluster}</div>

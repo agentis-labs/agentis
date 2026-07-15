@@ -361,7 +361,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           'Wire the App-level RUN ORDER and DEPENDENCIES between workflows — the "runs after" chaining the App Orchestrator executes. ' +
           'CRITICAL DISTINCTION: `order` is ONLY a display/tie-break sort number — it does NOT make workflows run one-after-another. To actually chain them (B waits for A), you MUST set `dependsOn`. ' +
           'To make workflows run in SEQUENCE (the usual intent of "put them in order" / "run them one after another"), pass `sequence`: an ordered list of workflow IDs — this sets BOTH order AND the dependsOn chain (each depends on the previous) in one call. That is what shows up as ticked "runs after" boxes. ' +
-          'Use `workflows` instead (or as well) for fine-grained per-workflow control: dependsOn (workflow IDs that must finish first), chainOn ("success" default | "always"), concurrency ("parallel" | "exclusive" = skip an orchestrated start while a run is still active), enabled, purpose, order. ' +
+          'Use `workflows` instead (or as well) for fine-grained per-workflow control: dependsOn (workflow IDs that must finish first), chainOn ("success" default = ACCOMPLISHED verdict when the upstream has a spec; "always" = explicit finally/failure handling), concurrency ("parallel" | "exclusive" = skip an orchestrated start while a run is still active), enabled, purpose, order. ' +
           'Omitted fields are preserved. Rejects self-dependencies and cycles.',
         inputSchema: {
           type: 'object',
@@ -372,7 +372,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
               items: { type: 'string' },
               description: 'Ordered workflow IDs to run one-after-another. Sets order AND wires dependsOn as a linear chain (2nd runs after 1st, 3rd after 2nd, …). The simplest way to fulfill "run these in order".',
             },
-            chainOn: { type: 'string', enum: ['success', 'always'], description: 'Applied to every link when using `sequence` (default "success").' },
+            chainOn: { type: 'string', enum: ['success', 'always'], description: 'Applied to every link when using `sequence`. "success" requires an ACCOMPLISHED verdict when the upstream has a definition-of-done spec; "always" is for explicit finally/failure handling.' },
             workflows: {
               type: 'array',
               description: 'Per-workflow bindings for fine control. Each: { workflowId, order?, dependsOn?: [workflowId], chainOn?: "success"|"always", concurrency?: "parallel"|"exclusive", enabled?, purpose? }.',

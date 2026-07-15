@@ -285,7 +285,7 @@ export class NodeExecutorController {
    * hollow success (the exact gap that let "deterministic first contact" workflows
    * claim a send that never happened).
    */
-  async executeChannelSend(ctx: RunningContext, node: WorkflowNode, config: ChannelSendNodeConfig): Promise<Record<string, unknown>> {
+  async executeChannelSend(ctx: RunningContext, node: WorkflowNode, config: ChannelSendNodeConfig, idempotencyKey?: string): Promise<Record<string, unknown>> {
     if (!this.host.deps.channelSend) {
       throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'channel node present but no channel bridge is configured — connect a channel in Settings → Channels');
     }
@@ -320,6 +320,7 @@ export class NodeExecutorController {
         ...(config.connectionId ? { connectionId: config.connectionId } : {}),
         ...(to ? { to } : {}),
         ...(attachments.length ? { attachments } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
         // Deterministic/system caller — the node runs with the workflow's authority,
         // not a specific agent's, so §3.3 grants don't gate it (the operator author
         // put the node there deliberately).
@@ -329,7 +330,25 @@ export class NodeExecutorController {
         throw new AgentisError('INTEGRATION_OPERATION_FAILED', `channel send failed: ${result.error}${result.errorCode ? ` [${result.errorCode}]` : ''}`);
       }
       const key = config.outputKey ?? 'delivery';
-      return { [key]: { sent: true, connectionId: result.connectionId, kind: result.kind, to: result.to, targetSource: result.targetSource, deliveredAt: new Date().toISOString() } };
+      return {
+        [key]: {
+          sent: true,
+          verified: true,
+          connectionId: result.connectionId,
+          kind: result.kind,
+          to: result.to,
+          targetSource: result.targetSource,
+          status: result.deliveryStatus,
+          acceptedAt: result.acceptedAt,
+          providerMessageId: result.providerMessageId,
+          provider_message_id: result.providerMessageId,
+          // Compatibility aliases for existing workflow expressions. Unlike the
+          // old fabricated deliveredAt timestamp, every alias is provider-issued.
+          messageId: result.providerMessageId,
+          id: result.providerMessageId,
+          receipt: result.receipt,
+        },
+      };
     } finally {
       delete ctx.state.activeExecutions[node.id];
     }

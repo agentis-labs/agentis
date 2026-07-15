@@ -16,13 +16,21 @@
  * specific adapter implementation.
  */
 
-import { AgentisError } from '@agentis/core';
+import {
+  AgentisError,
+  describeRuntimeCapabilityMismatch,
+  evaluateRuntimeCompatibility,
+  runtimeCapabilityManifest,
+} from '@agentis/core';
 import type {
   AgentAdapter,
   AdapterCapabilities,
   AdapterType,
   NormalizedAgentEvent,
   NormalizedTask,
+  RuntimeCapabilityManifest,
+  RuntimeCapabilityRequirements,
+  RuntimeCompatibilityResult,
   ToolManifestEntry,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
@@ -139,6 +147,22 @@ export class AdapterManager {
     return reg?.adapter.capabilities?.() ?? null;
   }
 
+  /** Versioned, machine-readable powers exposed by the registered runtime. */
+  capabilityManifest(agentId: string): RuntimeCapabilityManifest | null {
+    const reg = this.#adapters.get(agentId);
+    if (!reg) return null;
+    return runtimeCapabilityManifest(reg.adapterType, reg.adapter.capabilities?.());
+  }
+
+  /** Side-effect-free compatibility check for routing, inspection, and preflight. */
+  compatibility(
+    agentId: string,
+    requirements: RuntimeCapabilityRequirements,
+  ): RuntimeCompatibilityResult | null {
+    const manifest = this.capabilityManifest(agentId);
+    return manifest ? evaluateRuntimeCompatibility(manifest, requirements) : null;
+  }
+
   /**
    * The agent adapter's configured working directory, if it spawns local
    * processes. The engine uses this as the BASE from which it derives an
@@ -155,6 +179,28 @@ export class AdapterManager {
       throw new AgentisError(
         'ADAPTER_UNAVAILABLE',
         `No adapter registered for agent ${agentId}.`,
+      );
+    }
+    const manifest = runtimeCapabilityManifest(reg.adapterType, reg.adapter.capabilities?.());
+    const compatibility = evaluateRuntimeCompatibility(manifest, task.runtimeRequirements);
+    if (!compatibility.compatible) {
+      const diagnosis = describeRuntimeCapabilityMismatch(compatibility);
+      throw new AgentisError(
+        'ADAPTER_CAPABILITY_MISMATCH',
+        `Runtime ${reg.adapterType} for agent ${agentId} cannot execute task ${task.taskId}: ${diagnosis}.`,
+        {
+          remediation: 'Choose a compatible agent/runtime or enable the missing runtime capabilities, then retry the task.',
+          details: {
+            agentId,
+            adapterType: reg.adapterType,
+            taskId: task.taskId,
+            phase: 'pre_dispatch',
+            dispatchAttempted: false,
+            requirements: task.runtimeRequirements ?? {},
+            manifest,
+            compatibility,
+          },
+        },
       );
     }
     // Inject the platform tool-awareness manifest unless the caller already set

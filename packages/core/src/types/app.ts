@@ -179,7 +179,11 @@ export const appWorkflowBindingSchema = z.object({
     .optional(),
   /** `exclusive` = skip an orchestrated start while a run of this workflow is still active. */
   concurrency: z.enum(['parallel', 'exclusive']).optional(),
-  /** When dependents fire: after upstream success only (default) or on any settle. */
+  /**
+   * When dependents fire. `success` means clean completion for legacy unscoped
+   * workflows and an ACCOMPLISHED world verdict whenever the upstream has a spec.
+   * `always` is explicit failure/finally handling after any terminal settle.
+   */
   chainOn: z.enum(['success', 'always']).optional(),
 });
 export type AppWorkflowBinding = z.infer<typeof appWorkflowBindingSchema>;
@@ -200,7 +204,15 @@ export interface AppWorkflowSummary {
   /** Derived from the trigger node: manual | cron | webhook | persistent_listener | … */
   triggerKind: string | null;
   /** Most recent run, if any. */
-  lastRun: { id: string; status: string; at: string } | null;
+  lastRun: {
+    id: string;
+    status: string;
+    at: string;
+    /** World-verification result; absent for legacy unscoped runs. */
+    outcome?: 'accomplished' | 'partial' | 'hollow' | 'failed_checks' | null;
+    verified?: boolean;
+    accomplished?: boolean;
+  } | null;
   /** A run currently executing (running/waiting), if any — the live pulse. */
   activeRun: { id: string; status: string; startedAt: string } | null;
   /** App-level schedule rule (binding.schedule). */

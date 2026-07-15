@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
 
 const SLACK_API = 'https://slack.com/api';
 
@@ -34,12 +34,11 @@ export class SlackChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<void> {
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<ChannelDeliveryReceipt> {
     const [channel, threadTs] = args.chatId.split(':thread:');
     const attachments = args.attachments ?? [];
     if (attachments.length > 0) {
-      await this.#uploadFiles(args.token, channel!, threadTs, args.body, attachments);
-      return;
+      return this.#uploadFiles(args.token, channel!, threadTs, args.body, attachments);
     }
     const res = await this.fetchImpl(`${SLACK_API}/chat.postMessage`, {
       method: 'POST',
@@ -49,10 +48,13 @@ export class SlackChannelAdapter implements ChannelAdapter {
       },
       body: JSON.stringify({ channel, text: args.body, ...(threadTs ? { thread_ts: threadTs } : {}) }),
     });
-    const json = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; error?: string; ts?: string };
     if (!res.ok || json.ok === false) {
       throw new AgentisError('CHANNEL_SEND_FAILED', `slack sendMessage failed: ${this.#explain(json.error ?? res.statusText)}`);
     }
+    const providerMessageId = json.ts?.trim() ?? '';
+    if (!providerMessageId) throw new AgentisError('CHANNEL_SEND_FAILED', 'slack returned no provider message id; delivery is unverified');
+    return { provider: 'slack', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: channel };
   }
 
   /**
@@ -60,7 +62,7 @@ export class SlackChannelAdapter implements ChannelAdapter {
    * the deprecated `files.upload`): getUploadURLExternal → PUT bytes →
    * completeUploadExternal. The body rides along as `initial_comment`.
    */
-  async #uploadFiles(token: string, channel: string, threadTs: string | undefined, body: string, attachments: OutboundAttachment[]): Promise<void> {
+  async #uploadFiles(token: string, channel: string, threadTs: string | undefined, body: string, attachments: OutboundAttachment[]): Promise<ChannelDeliveryReceipt> {
     const completed: Array<{ id: string; title: string }> = [];
     for (const attachment of attachments) {
       const params = new URLSearchParams({ filename: attachment.filename, length: String(attachment.data.length) });
@@ -95,6 +97,16 @@ export class SlackChannelAdapter implements ChannelAdapter {
     if (!completeRes.ok || completeJson.ok === false) {
       throw new AgentisError('CHANNEL_SEND_FAILED', `slack completeUploadExternal failed: ${this.#explain(completeJson.error ?? completeRes.statusText)}`);
     }
+    const providerMessageId = completed[0]?.id?.trim() ?? '';
+    if (!providerMessageId) throw new AgentisError('CHANNEL_SEND_FAILED', 'slack returned no provider file/message id; delivery is unverified');
+    return {
+      provider: 'slack',
+      providerMessageId,
+      providerMessageIds: completed.map((file) => file.id),
+      status: 'accepted',
+      acceptedAt: new Date().toISOString(),
+      recipient: channel,
+    };
   }
 
   #explain(error: string): string {

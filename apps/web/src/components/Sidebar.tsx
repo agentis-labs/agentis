@@ -29,13 +29,14 @@ import { BrandMark } from './shared/BrandMark';
 interface NavItem {
   to: string;
   label: string;
+  title?: string;
   icon: LucideIcon;
   badge?: 'liveAgents';
 }
 
 const NAV: NavItem[] = [
   { to: '/home', label: 'Home', icon: HomeIcon },
-  { to: '/apps', label: 'Agentic Apps', icon: AppsIcon },
+  { to: '/apps', label: 'Agentic Apps', title: 'Apps', icon: AppsIcon },
   { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
   { to: '/brain', label: 'Brain', icon: BrainIcon },
   { to: '/assets', label: 'Assets', icon: AssetsIcon },
@@ -111,7 +112,7 @@ function SidebarLink({
     <li>
       <NavLink
         to={item.to}
-        title={item.label}
+        title={item.title ?? item.label}
         className={({ isActive }) =>
           clsx(
             'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',

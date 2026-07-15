@@ -45,9 +45,9 @@ describe('<McpConnectionsPanel />', () => {
     await waitFor(() => expect(screen.getByText('External MCP servers')).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: /add mcp server/i }));
-    fireEvent.change(screen.getByPlaceholderText('context7'), { target: { value: 'gh' } });
-    fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/rpc'), { target: { value: 'https://gh/rpc' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'gh' } });
+    fireEvent.change(screen.getByLabelText('URL'), { target: { value: 'https://gh/rpc' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Mount server' }));
 
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path.includes('/v1/mcp-servers'))).toBe(true));
   });

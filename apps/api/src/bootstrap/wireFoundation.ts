@@ -60,6 +60,7 @@ import { loadTelemetry, type Telemetry } from '../telemetry/index.js';
 import { buildAppStores } from '@agentis/app';
 import { schema } from '@agentis/db/sqlite';
 import { and, eq } from 'drizzle-orm';
+import { ColdArchiveStore } from '../services/storage/coldArchiveStore.js';
 
 /** Build an OAuth client config only when both id + secret are present. */
 function oauthClient(clientId?: string, clientSecret?: string): { clientId: string; clientSecret: string } | undefined {
@@ -96,6 +97,7 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   const secrets = await loadOrCreateSecrets(env);
   const db = await openDatabase(env);
   if (!db.sqlite) throw new Error('SQLite handle missing — only embedded mode is supported in V1');
+  if (!db.sqliteRaw) throw new Error('Raw SQLite handle missing - only embedded mode is supported in V1');
   const sqlite = db.sqlite;
 
   const bus = createInProcessEventBus();
@@ -119,10 +121,11 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // "Connect with X", distinct from the fixed-provider oauthService above.
   const mcpOAuthService = new McpOAuthService();
   const auth = new AuthService(secrets);
-  const ledger = new LedgerService(sqlite, bus);
+  const archiveStore = new ColdArchiveStore(env.AGENTIS_ARCHIVE_DIR);
+  const ledger = new LedgerService(sqlite, bus, archiveStore);
   const scratchpad = new ScratchpadService(bus, logger, sqlite);
   const activity = new ActivityFeedService(sqlite, bus);
-  const observability = new ObservabilityService(sqlite, bus, logger);
+  const observability = new ObservabilityService(sqlite, bus, logger, archiveStore);
   observability.startLegacyBridge();
   const approvals = new ApprovalInboxService(sqlite, bus);
   const extensionKv = new ExtensionKvStore(sqlite);
@@ -264,6 +267,7 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     oauthService,
     mcpOAuthService,
     auth,
+    archiveStore,
     ledger,
     scratchpad,
     activity,

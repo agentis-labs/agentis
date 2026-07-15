@@ -186,3 +186,46 @@ describe('ConversationRuntime', () => {
     expect(h.contacts.get('+5511999')?.awaitingRunId).toBeNull();
   });
 });
+
+describe('ConversationRuntime — Brain memory recall in #compose', () => {
+  function harnessCapturingPrompts(overrides: Partial<ConversationRuntimeDeps> = {}) {
+    const capturedUsers: string[] = [];
+    const base = harness();
+    const deps: ConversationRuntimeDeps = {
+      ...base.deps,
+      completeJson: async ({ system, user }) => {
+        capturedUsers.push(user);
+        if (/classif/i.test(system)) return { label: 'positive' } as never;
+        return { message: 'composed' } as never;
+      },
+      ...overrides,
+    };
+    return { runtime: new ConversationRuntime(deps), capturedUsers };
+  }
+
+  it('includes the Brain memory block in the composed prompt when buildBrainContext is provided', async () => {
+    const { runtime, capturedUsers } = harnessCapturingPrompts({
+      buildBrainContext: async () => 'Remember: this contact prefers WhatsApp over email.',
+    });
+    await runtime.enroll(CTX, '+5511999', 'conn1');
+    await runtime.onInbound(CTX, '+5511999', 'oi!'); // → pitch (a send_agent compose call)
+    expect(capturedUsers.some((u) => u.includes('Brain memory:') && u.includes('prefers WhatsApp over email'))).toBe(true);
+  });
+
+  it('omits the Brain memory block entirely when buildBrainContext is not wired', async () => {
+    const { runtime, capturedUsers } = harnessCapturingPrompts();
+    await runtime.enroll(CTX, '+5511999', 'conn1');
+    await runtime.onInbound(CTX, '+5511999', 'oi!');
+    expect(capturedUsers.length).toBeGreaterThan(0);
+    expect(capturedUsers.every((u) => !u.includes('Brain memory:'))).toBe(true);
+  });
+
+  it('a failing buildBrainContext degrades to no memory block instead of throwing', async () => {
+    const { runtime, capturedUsers } = harnessCapturingPrompts({
+      buildBrainContext: async () => { throw new Error('brain lookup boom'); },
+    });
+    await expect(runtime.enroll(CTX, '+5511999', 'conn1')).resolves.toBeDefined();
+    await expect(runtime.onInbound(CTX, '+5511999', 'oi!')).resolves.toBeDefined();
+    expect(capturedUsers.every((u) => !u.includes('Brain memory:'))).toBe(true);
+  });
+});

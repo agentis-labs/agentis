@@ -12,6 +12,7 @@ import type { MemoryRecordRowData, MemoryKind } from './types';
 
 export function WorkspaceMemoryTab({
   scopeId,
+  scopeNoun = 'workflow',
   showTitle = true,
   maxHeightClassName = 'max-h-[560px]',
   submitLabel,
@@ -19,9 +20,11 @@ export function WorkspaceMemoryTab({
   emptyBody,
 }: {
   scopeId?: string;
+  /** What the scope IS, for the default copy — an App is not a "workflow". */
+  scopeNoun?: string;
   showTitle?: boolean;
   maxHeightClassName?: string;
-  /** Overrides the default "Save to workflow/workspace memory" copy. */
+  /** Overrides the default "Save to <scope>/workspace memory" copy. */
   submitLabel?: string;
   placeholder?: string;
   emptyBody?: string;
@@ -96,8 +99,8 @@ export function WorkspaceMemoryTab({
   return (
     <div className="space-y-4">
       <MemoryWriteForm
-        submitLabel={submitLabel ?? (isScoped ? 'Save to workflow memory' : 'Save to workspace memory')}
-        placeholder={placeholder ?? (isScoped ? 'What should this workflow always remember?' : undefined)}
+        submitLabel={submitLabel ?? (isScoped ? `Save to ${scopeNoun} memory` : 'Save to workspace memory')}
+        placeholder={placeholder ?? (isScoped ? `What should this ${scopeNoun} always remember?` : undefined)}
         onSubmit={saveMemory}
         showTitle={showTitle}
       />

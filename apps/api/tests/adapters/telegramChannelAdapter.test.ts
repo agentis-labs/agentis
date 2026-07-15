@@ -90,7 +90,7 @@ describe('TelegramChannelAdapter', () => {
       const calls: Array<{ url: string; init: RequestInit }> = [];
       a.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
         calls.push({ url: String(url), init: init ?? {} });
-        return new Response('{"ok":true}', { status: 200 });
+        return new Response('{"ok":true,"result":{"message_id":42}}', { status: 200 });
       }) as typeof fetch;
       await a.send({ token: 'bot123', chatId: '999', body: 'hello' });
       expect(calls).toHaveLength(1);

@@ -30,6 +30,7 @@ describe('REALTIME_EVENTS', () => {
     expect(REALTIME_EVENTS.RUN_CREATED).toBe('run.created');
     expect(REALTIME_EVENTS.RUN_RUNNING).toBe('run.running');
     expect(REALTIME_EVENTS.RUN_COMPLETED).toBe('run.completed');
+    expect(REALTIME_EVENTS.RUN_ACCOMPLISHED).toBe('run.accomplished');
     expect(REALTIME_EVENTS.RUN_FAILED).toBe('run.failed');
     expect(REALTIME_EVENTS.NODE_STARTED).toBe('node.started');
     expect(REALTIME_EVENTS.APPROVAL_REQUESTED).toBe('approval.requested');

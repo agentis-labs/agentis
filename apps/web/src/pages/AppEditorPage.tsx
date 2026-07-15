@@ -76,6 +76,7 @@ import { SurfaceBuilder } from '../components/apps/SurfaceBuilder';
 import { WorkflowCanvasPage, WorkflowBrainTab } from './WorkflowCanvasPage';
 import { SegmentedControl, type SegmentDef } from '../components/shared/SegmentedControl';
 import { useConfirm } from '../components/shared/ConfirmDialog';
+import { ErrorBoundary } from '../components/shared/ErrorBoundary';
 
 type AppFacet = 'interface' | 'workflow' | 'data' | 'brain';
 
@@ -589,7 +590,10 @@ export function AppEditorPage() {
         </div>
       </div>
 
-      {/* Facet body — each fills the remaining height. */}
+      {/* Facet body — each fills the remaining height. A render error in one
+          facet (e.g. a malformed surface) is caught here so the app header +
+          facet tabs stay usable and switching tabs recovers. */}
+      <ErrorBoundary resetKey={facet} label="This view hit an error">
       <div className="min-h-0 flex-1 overflow-hidden">
         {facet === 'workflow' && (
           <WorkflowFacet
@@ -633,6 +637,7 @@ export function AppEditorPage() {
         {facet === 'data' && <DataFacet collections={collections} appId={id} />}
         {facet === 'brain' && <BrainFacet app={app} />}
       </div>
+      </ErrorBoundary>
       <AppEngineModal
         open={engineOpen}
         app={app}

@@ -215,6 +215,10 @@ function ProviderCard({
   const qrConnId = qr?.connectionId;
   const linked = qr?.status === 'open';
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Edge-triggered toast guard: a failed link can sit at logged_out/error for a
+  // while before the operator clicks Relink, and the poll ticks every second —
+  // without this, that one failure re-toasts every tick ("3 stacked toasts").
+  const lastQrStatusRef = useRef<string | null>(null);
 
   useEffect(() => {
     setLastHealth(null);
@@ -225,6 +229,7 @@ function ProviderCard({
   useEffect(() => {
     if (!qrConnId || linked) {
       if (pollRef.current) clearInterval(pollRef.current);
+      lastQrStatusRef.current = null;
       return;
     }
     pollRef.current = setInterval(() => {
@@ -238,10 +243,16 @@ function ProviderCard({
             toast.success(`${provider.label} transport open`);
             setQr(null);
             setConnecting(false);
+            lastQrStatusRef.current = null;
             await onChanged();
           } else if (state.status === 'logged_out' || state.status === 'error') {
-            toast.error(`${provider.label} login failed`, 'Generate a new QR and relink the device.');
+            // Edge-triggered — only the tick that TRANSITIONS into the failure
+            // toasts, not every tick the poll happens to observe it.
+            if (lastQrStatusRef.current !== state.status) {
+              toast.error(`${provider.label} login failed`, 'Generate a new QR and relink the device.');
+            }
           }
+          lastQrStatusRef.current = state.status;
         } catch {
           /* transient polling failure */
         }

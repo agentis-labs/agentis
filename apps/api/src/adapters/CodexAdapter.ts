@@ -39,6 +39,7 @@ import {
   type CliChatPart,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 15_000;
@@ -120,10 +121,12 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   capabilities(): AdapterCapabilities {
+    const mcpNative = this.#mcpNative();
+    const browser = this.#browser();
     return {
       interactiveChat: true,
       toolCalling: true,
-      toolForwarding: this.#mcpNative() ? 'mcp_native' : 'marker_protocol',
+      toolForwarding: mcpNative ? 'mcp_native' : 'marker_protocol',
       execution: {
         longRunning: true,
         pausable: false,
@@ -133,14 +136,19 @@ export class CodexAdapter implements AgentAdapter {
       affordances: {
         fileSystem: true,
         terminal: true,
-        // The native browser/computer-use is only available when the operator
-        // opts the agent into loading the Codex browser config (see `browser`).
-        ...(this.#browser() ? { browser: true, computerUse: true } : {}),
+        ...(browser ? { browser: true, computerUse: true } : {}),
+        ...(mcpNative ? { nativeMcp: true } : {}),
       },
       memory: {
         ingestible: true,
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat', 'interaction.tool-calling', 'execution.file-system', 'execution.terminal', 'execution.long-running',
+        ...(browser ? ['execution.browser' as const, 'execution.computer-use' as const] : []),
+        ...(mcpNative ? ['protocol.native-mcp' as const] : []),
+        'memory.inject', 'memory.ingest',
+      ], { limits: { 'execution.long-running': { maxConcurrent: 1 } } }),
     };
   }
 

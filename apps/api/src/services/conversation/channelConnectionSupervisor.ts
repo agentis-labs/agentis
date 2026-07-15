@@ -35,7 +35,8 @@ import { WhatsAppSession } from '../../adapters/channels/whatsappSession.js';
 import { TelegramSession } from '../../adapters/channels/telegramSession.js';
 import { resolveTelegramTransport } from '../../adapters/channels/telegram.js';
 import { DiscordSession } from '../../adapters/channels/discordSession.js';
-import { useVaultAuthState } from '../../adapters/channels/whatsappVaultAuthState.js';
+import { useVaultAuthState, clearVaultAuthState } from '../../adapters/channels/whatsappVaultAuthState.js';
+import type { ChannelDeliveryReceipt } from '../../adapters/channels/types.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
 
@@ -166,6 +167,14 @@ export class ChannelConnectionSupervisor {
   /** Start (or reuse) a WhatsApp login and return the current QR/status. */
   async startLogin(connectionId: string): Promise<LoginState> {
     const session = this.ensureSession(connectionId);
+    // A definitive logged_out/error means the previously registered creds are
+    // dead (device unlinked phone-side, or the session errored out). Reusing
+    // them makes baileys silently retry the dead session instead of emitting a
+    // fresh QR — "Relink QR" would spin forever. Clear them first so the next
+    // connect attempt pairs from scratch and actually issues a new QR.
+    if (session instanceof WhatsAppSession && (session.status === 'logged_out' || session.status === 'error')) {
+      clearVaultAuthState({ db: this.deps.db, connectionId });
+    }
     await session.start();
     return this.loginState(connectionId);
   }
@@ -191,10 +200,10 @@ export class ChannelConnectionSupervisor {
   }
 
   /** Deliver an outbound message over the live session. */
-  async send(connectionId: string, chatId: string, body: string): Promise<void> {
+  async send(connectionId: string, chatId: string, body: string): Promise<ChannelDeliveryReceipt> {
     const session = this.#sessions.get(connectionId);
     if (!session) throw new Error(`no live session for connection ${connectionId}`);
-    await session.sendText(chatId, body);
+    return session.sendText(chatId, body);
   }
 
   async stop(connectionId: string): Promise<void> {

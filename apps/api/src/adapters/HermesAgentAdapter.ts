@@ -28,6 +28,7 @@ import {
   runCliChatTurn,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 import { runtimeProgressActivity } from './runtimeProgress.js';
 
 const DEFAULT_HERMES_STARTUP_TIMEOUT_MS = 120_000;
@@ -157,10 +158,13 @@ export class HermesAgentAdapter implements AgentAdapter {
 
   capabilities(): AdapterCapabilities {
     const acp = this.#chatTransport() !== 'cli';
+    const mcpNative = acp && (this.opts.mcpServers?.length ?? 0) > 0;
     return {
       interactiveChat: true,
-      toolCalling: true,
-      toolForwarding: acp ? 'mcp_native' : 'marker_protocol',
+      // ACP owns its tool loop. It can reach Agentis tools only when an Agentis
+      // MCP server is actually mounted; ACP transport alone is not MCP access.
+      toolCalling: !acp || mcpNative,
+      toolForwarding: mcpNative ? 'mcp_native' : acp ? 'session_event' : 'marker_protocol',
       ...(!acp ? {
         limitations: [
           'Using the stable Hermes CLI chat transport. Set chatTransport to acp or auto to use the experimental ACP stream.',
@@ -175,11 +179,25 @@ export class HermesAgentAdapter implements AgentAdapter {
       affordances: {
         fileSystem: true,
         terminal: true,
+        ...(mcpNative ? { nativeMcp: true } : {}),
       },
       memory: {
         ingestible: true,
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat',
+        ...(!acp || mcpNative ? ['interaction.tool-calling' as const] : []),
+        'execution.file-system',
+        'execution.terminal',
+        'execution.long-running',
+        'execution.pausable',
+        ...(mcpNative ? ['protocol.native-mcp' as const] : []),
+        'memory.inject',
+        'memory.ingest',
+      ], {
+        limits: { 'execution.long-running': { maxConcurrent: 1 } },
+      }),
     };
   }
 

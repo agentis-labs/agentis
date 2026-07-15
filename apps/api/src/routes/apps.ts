@@ -36,7 +36,7 @@ import {
   type AppWorkflowBinding,
   type AppWorkflowSummary,
 } from '@agentis/core';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowGraph, AgentTool } from '@agentis/core';
@@ -64,6 +64,17 @@ import type { OutboundPolicyService } from '../services/outboundPolicy.js';
 import type { AppOrchestratorService } from '../services/app/appOrchestrator.js';
 import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
 import { WorkflowTriggerDeploymentService } from '../services/workflow/workflowTriggerDeployment.js';
+import { collectAppDoctorSnapshot } from '../services/app/appDoctorSnapshot.js';
+import { validateAppConformance } from '../services/app/appDoctor.js';
+import { readWorkflowSpec } from '../services/workflow/workflowSpec.js';
+import { evaluateRunOutcome } from '../services/workflow/runOutcome.js';
+import { repairAppConformance } from '../services/app/appDoctorRepair.js';
+import {
+  deleteOrchestrationRule,
+  listOrchestrationRules,
+  orchestrationRuleInputSchema,
+  upsertOrchestrationRule,
+} from '../services/workflow/orchestrationRuleService.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -80,7 +91,7 @@ export interface AppRoutesDeps {
   /** Append + realtime-publish operator messages into a live thread (Phase 2 takeover). */
   conversations?: ConversationStore;
   /** Deliver an operator's reply out to the origin channel (Phase 2 takeover). */
-  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string }): Promise<void> };
+  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string }): Promise<unknown> };
   /** App relationship pipeline — list/update contacts (Phase 3). */
   contacts?: AppContactService;
   /** Multi-party threads (G1) — list/add/remove conversation participants + warm handoff. */
@@ -135,6 +146,11 @@ const contactPatchSchema = z.object({
 const presenceHeartbeatSchema = z.object({
   conversationId: z.string().trim().min(1).max(255).nullable().optional(),
 });
+const doctorRepairRequestSchema = z.object({
+  findingIds: z.array(z.string().min(1)).optional(),
+  confirm: z.boolean().default(false),
+});
+const orchestrationRulePatchSchema = orchestrationRuleInputSchema.partial();
 const contactOutcomeSchema = z.object({
   outcome: z.enum(['won', 'lost', 'abandoned']),
   note: z.string().trim().max(2000).nullable().optional(),
@@ -446,6 +462,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       const lastRun = deps.db.select({
         id: schema.workflowRuns.id,
         status: schema.workflowRuns.status,
+        runState: schema.workflowRuns.runState,
         startedAt: schema.workflowRuns.startedAt,
         createdAt: schema.workflowRuns.createdAt,
       }).from(schema.workflowRuns)
@@ -463,6 +480,11 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
           inArray(schema.workflowRuns.status, ['RUNNING', 'WAITING', 'PAUSED']),
         ))
         .orderBy(desc(schema.workflowRuns.createdAt)).limit(1).get();
+      const lastOutcome = lastRun ? evaluateRunOutcome({
+        status: lastRun.status,
+        runState: lastRun.runState,
+        hasDefinitionOfDone: Boolean(readWorkflowSpec(row.settings)),
+      }) : null;
       return {
         id: row.id,
         title: row.title,
@@ -471,7 +493,14 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         enabled: binding.enabled ?? true,
         dependsOn: binding.dependsOn ?? [],
         triggerKind: triggerKindOf(row.graph as WorkflowGraph),
-        lastRun: lastRun ? { id: lastRun.id, status: lastRun.status, at: lastRun.startedAt ?? lastRun.createdAt } : null,
+        lastRun: lastRun ? {
+          id: lastRun.id,
+          status: lastRun.status,
+          at: lastRun.startedAt ?? lastRun.createdAt,
+          outcome: lastOutcome?.verdict ?? null,
+          verified: lastOutcome?.verified ?? false,
+          accomplished: lastOutcome?.accomplished ?? false,
+        } : null,
         activeRun: activeRun ? { id: activeRun.id, status: activeRun.status, startedAt: activeRun.startedAt ?? activeRun.createdAt } : null,
         schedule: binding.schedule ? { cron: binding.schedule.cron, enabled: binding.schedule.enabled } : null,
         nextRunAt: deps.orchestrator?.nextScheduledFire(row.id) ?? null,
@@ -490,6 +519,70 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       };
     }).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
     return c.json({ data: summaries });
+  });
+
+  /** Truthful orchestration health: persisted runtime layers, never UI inference. */
+  app.get('/:id/doctor', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    return c.json({ data: validateAppConformance(collectAppDoctorSnapshot(deps.db, ws.workspaceId, appId)) });
+  });
+
+  app.post('/:id/doctor/repair', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const parsed = doctorRepairRequestSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid Doctor repair request');
+    return c.json({
+      data: repairAppConformance(deps.db, ws.workspaceId, appId, {
+        dryRun: parsed.data.confirm !== true,
+        findingIds: parsed.data.findingIds,
+      }),
+    });
+  });
+
+  /** Executable event rules whose source or target belongs to this App. */
+  app.get('/:id/orchestration-rules', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    return c.json({ data: listOrchestrationRules(deps.db, ws.workspaceId, appId) });
+  });
+
+  app.post('/:id/orchestration-rules', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const parsed = orchestrationRuleInputSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid orchestration rule');
+    return c.json({ data: upsertOrchestrationRule(deps.db, ws.workspaceId, parsed.data, { appId }) }, 201);
+  });
+
+  app.patch('/:id/orchestration-rules/:ruleId', async (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const ruleId = c.req.param('ruleId');
+    if (!listOrchestrationRules(deps.db, ws.workspaceId, appId).some((rule) => rule.id === ruleId)) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', `workflow event rule not found in App: ${ruleId}`);
+    }
+    const parsed = orchestrationRulePatchSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid orchestration rule patch');
+    return c.json({ data: upsertOrchestrationRule(deps.db, ws.workspaceId, parsed.data, { id: ruleId, appId }) });
+  });
+
+  app.delete('/:id/orchestration-rules/:ruleId', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const ruleId = c.req.param('ruleId');
+    if (!listOrchestrationRules(deps.db, ws.workspaceId, appId).some((rule) => rule.id === ruleId)) {
+      throw new AgentisError('RESOURCE_NOT_FOUND', `workflow event rule not found in App: ${ruleId}`);
+    }
+    deleteOrchestrationRule(deps.db, ws.workspaceId, ruleId);
+    return c.json({ data: { ok: true } });
   });
 
   // ── App-level always-on lifecycle (Go Live) ─────────────────────────────────
@@ -1106,20 +1199,19 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     return c.json({ data: result });
   });
 
-  // Phase M2 visibility — "what this agent learned": recent graded lessons +
-  // graduated abilities for this App.
-  app.get('/:id/learnings', (c) => {
-    const ws = getWorkspace(c);
-    const appId = c.req.param('id');
-    store.get(ws.workspaceId, appId);
-    if (!deps.learning) return c.json({ data: { appId, ownerAgentId: null, lessons: [], abilities: [] } });
-    return c.json({ data: deps.learning.recentLearnings(ws.workspaceId, appId) });
-  });
-
   // ── Conversation rehearsal (Phase 5 · G8) ───────────────────
   // Drive a synthetic customer through a scenario against the resident agent and
   // score the run BEFORE it talks to real money. Sandboxed — no real channel send,
   // the live thread is untouched. Deterministic when the scenario is scripted.
+  /** Recent durable lessons formed by this App's real outcomes. */
+  app.get('/:id/learnings', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    if (!deps.learning) return c.json({ data: { appId, ownerAgentId: null, lessons: [] } });
+    return c.json({ data: deps.learning.recentLearnings(ws.workspaceId, appId) });
+  });
+
   app.post('/:id/simulate', async (c) => {
     const ws = getWorkspace(c);
     const user = c.get('user');

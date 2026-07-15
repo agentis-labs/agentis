@@ -19,8 +19,10 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { BrainGraph } from '@agentis/core';
+import { AgentisError, type BrainGraph } from '@agentis/core';
 import type { EpisodicMemoryStore } from '../episodicMemoryStore.js';
+import { isRejectable } from '../brain/brainFormation.js';
+import { EMBED_HIGH_SIMILARITY, bestLexical, type EpisodeVector } from '../util/brainDedup.js';
 
 export interface AgentMemoryEntry {
   id: string;
@@ -51,10 +53,31 @@ export class AgentMemoryService {
     private readonly episodes: EpisodicMemoryStore,
   ) {}
 
-  /** Record one memory for an agent. Returns the stored entry. */
+  /**
+   * Record one memory for an agent. Returns the stored entry.
+   *
+   * §Mem0-teardown-followup — this is an agent's OWN explicit "remember this"
+   * write, the one Brain surface that previously had neither a garbage gate
+   * nor a dedup check (App Brain's `commitDurableAtom` at least had dedup;
+   * chat-mined memory has both via the Formation Judge). A raw tool call is
+   * exactly the kind of unreviewed text `isRejectable` exists to catch, and
+   * lexical dedup against this agent's own recent notes prevents the same
+   * fact — including a re-surfaced hallucination — from being written again
+   * every time it comes back up.
+   */
   append(args: AppendAgentMemoryArgs): AgentMemoryEntry {
     const section = (args.section ?? 'Notes').trim() || 'Notes';
     const content = args.content.trim();
+    if (isRejectable(content)) {
+      throw new AgentisError('VALIDATION_FAILED', 'This does not look like a durable memory (a URL, a table row, or bare process narration) — rephrase it as a standalone fact worth remembering.');
+    }
+    const existing: EpisodeVector[] = this.list(args.agentId, args.workspaceId, 200)
+      .map((e) => ({ id: e.id, vec: null, text: `${e.section}\n${e.content}` }));
+    const dupe = bestLexical(existing, `${section}\n${content}`);
+    if (dupe && dupe.score >= EMBED_HIGH_SIMILARITY) {
+      const row = this.#rows(args.agentId, args.workspaceId, 200).find((r) => r.id === dupe.entry.id);
+      if (row) return toEntry(row, args.agentId, args.workspaceId);
+    }
     const episode = this.episodes.write({
       workspaceId: args.workspaceId,
       scopeId: args.agentId,

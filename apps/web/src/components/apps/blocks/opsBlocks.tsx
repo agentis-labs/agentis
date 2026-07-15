@@ -22,13 +22,14 @@ import {
 } from 'lucide-react';
 import type { AppWorkflowSummary } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { appsApi } from '../../../lib/appsApi';
+import { appsApi, type AppDoctorReport, type AppOrchestrationRule } from '../../../lib/appsApi';
 import { opsApi, isActiveRunStatus, type ApprovalRequest, type RunSummary } from '../../../lib/opsApi';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../../lib/realtime';
 import { useRunActivity } from '../../../lib/useRunActivity';
 import type { RealtimeActivity } from '../../../lib/realtimeActivity';
 import { ApprovalPreviewCard, ApprovalReviewModal, type ApprovalReview } from '../../shared/ApprovalReviewModal';
 import { registerBlock } from './registry';
+import { OrchestrationRuleControlPlane } from './OrchestrationRuleEditor';
 import { EmptyState, PanelShell, SkeletonRows, relativeTime, useRuntime } from '../ViewRenderer';
 
 // ── shared: live app workflows ────────────────────────────────
@@ -149,12 +150,16 @@ export function useAppRuns(workflowIds: Set<string>, limit: number): { runs: Run
 
 // ── shared: presentation ──────────────────────────────────────
 
-function runTone(status: string): { chip: string; dot: string; label: string } {
+function runTone(status: string, outcome?: string | null, verified?: boolean): { chip: string; dot: string; label: string } {
   const s = status.toUpperCase();
   if (s === 'RUNNING') return { chip: 'bg-success-soft text-success', dot: 'bg-success s-pulse text-success', label: 'running' };
   if (s === 'WAITING' || s === 'PAUSED') return { chip: 'bg-warn-soft text-warn', dot: 'bg-warn', label: s.toLowerCase() };
   if (s === 'CREATED' || s === 'PLANNING' || s === 'QUEUED') return { chip: 'bg-warn-soft text-warn', dot: 'bg-warn', label: s.toLowerCase() };
-  if (s === 'COMPLETED') return { chip: 'bg-success-soft text-success', dot: 'bg-success', label: 'completed' };
+  if (s === 'COMPLETED' && verified && outcome !== 'accomplished') {
+    return { chip: 'bg-danger-soft text-danger', dot: 'bg-danger', label: `not accomplished · ${outcome ?? 'missing verdict'}` };
+  }
+  if (s === 'COMPLETED' && outcome === 'accomplished') return { chip: 'bg-success-soft text-success', dot: 'bg-success', label: 'accomplished' };
+  if (s === 'COMPLETED') return { chip: 'bg-warn-soft text-warn', dot: 'bg-warn', label: 'completed · unverified' };
   if (s === 'CANCELLED') return { chip: 'bg-surface-2 text-text-muted', dot: 'bg-text-disabled', label: 'cancelled' };
   return { chip: 'bg-danger-soft text-danger', dot: 'bg-danger', label: s.toLowerCase().replace(/_/g, ' ') };
 }
@@ -212,20 +217,44 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
   const [openRules, setOpenRules] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [doctor, setDoctor] = useState<AppDoctorReport | null>(null);
+  const [eventRules, setEventRules] = useState<AppOrchestrationRule[]>([]);
+  const orchestrationRevision = JSON.stringify((workflows ?? []).map((workflow) => ({
+    id: workflow.id,
+    enabled: workflow.enabled,
+    dependsOn: workflow.dependsOn,
+    triggerKind: workflow.triggerKind,
+    deployment: workflow.deployment?.status ?? null,
+  })));
+
+  const refreshOrchestration = useCallback(async () => {
+    const [report, rules] = await Promise.all([appsApi.doctor(appId), appsApi.orchestrationRules(appId)]);
+    setDoctor(report ?? null);
+    setEventRules(Array.isArray(rules) ? rules : []);
+  }, [appId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([appsApi.doctor(appId), appsApi.orchestrationRules(appId)])
+      .then(([report, rules]) => {
+        if (cancelled) return;
+        setDoctor(report ?? null);
+        setEventRules(Array.isArray(rules) ? rules : []);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDoctor(null);
+          setEventRules([]);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [appId, orchestrationRevision]);
 
   const run = useCallback(async (wfId: string) => {
     setBusy(wfId);
     setActionError(null);
     try { await appsApi.runAppWorkflow(appId, wfId); await reload(); }
     catch (e) { setActionError(e instanceof Error ? e.message : 'Could not start the workflow'); }
-    finally { setBusy(null); }
-  }, [appId, reload]);
-
-  const runAll = useCallback(async () => {
-    setBusy('__all');
-    setActionError(null);
-    try { await appsApi.runAllAppWorkflows(appId); await reload(); }
-    catch (e) { setActionError(e instanceof Error ? e.message : 'Could not start the pipeline'); }
     finally { setBusy(null); }
   }, [appId, reload]);
 
@@ -286,6 +315,11 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
     const h = w.deployment?.health as { eventCount?: number } | undefined;
     return sum + Number(h?.eventCount ?? 0);
   }, 0);
+  const doctorTone = doctor?.health === 'healthy'
+    ? 'bg-success-soft text-success border-success/30'
+    : doctor?.health === 'broken'
+      ? 'bg-danger-soft text-danger border-danger/30'
+      : 'bg-warn-soft text-warn border-warn/30';
 
   useEffect(() => {
     if (activeWfs.length > 0 || actionError || openRules) setExpanded(true);
@@ -339,14 +373,15 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
               </button>
             )
           ) : null}
-          <button
-            type="button"
-            onClick={() => void runAll()}
-            disabled={busy !== null}
-            className="inline-flex h-7 items-center gap-1.5 rounded-full bg-accent px-3 text-[12px] font-semibold text-on-accent transition-opacity hover:opacity-90 disabled:opacity-50"
-          >
-            {busy === '__all' ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Run pipeline
-          </button>
+          {doctor ? (
+            <span
+              className={clsx('inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold', doctorTone)}
+              title={doctor.readyForUnattended ? 'All required orchestration layers are executable' : `${doctor.summary.critical + doctor.summary.error} blocking findings`}
+            >
+              {doctor.health === 'healthy' ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}
+              {doctor.readyForUnattended ? 'Verified ready' : `${doctor.summary.critical + doctor.summary.error} blockers`}
+            </span>
+          ) : null}
         </div>
       ) : undefined}
     >
@@ -355,10 +390,17 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
           <AlertTriangle size={12} /> {actionError}
         </div>
       ) : null}
+      <OrchestrationRuleControlPlane
+        appId={appId}
+        workflows={loadedWorkflows}
+        rules={eventRules}
+        doctor={doctor}
+        onChanged={refreshOrchestration}
+      />
       <div className="flex flex-col">
         {workflows.map((wf, i) => {
           const live = wf.activeRun && isActiveRunStatus(wf.activeRun.status) ? runTone(wf.activeRun.status) : null;
-          const last = wf.lastRun ? runTone(wf.lastRun.status) : null;
+          const last = wf.lastRun ? runTone(wf.lastRun.status, wf.lastRun.outcome, wf.lastRun.verified) : null;
           const rulesOpen = openRules === wf.id;
           return (
             <div key={wf.id} className={clsx(i > 0 && 'border-t border-line')}>
@@ -370,6 +412,10 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
                     {live ? (
                       <span className={clsx('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium', live.chip)}>
                         <span className={clsx('h-1.5 w-1.5 rounded-full', live.dot)} /> {live.label}
+                      </span>
+                    ) : last ? (
+                      <span className={clsx('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium', last.chip)}>
+                        <span className={clsx('h-1.5 w-1.5 rounded-full', last.dot)} /> {last.label}
                       </span>
                     ) : null}
                     {wf.deployment ? (

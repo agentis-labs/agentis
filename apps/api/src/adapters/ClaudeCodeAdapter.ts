@@ -42,6 +42,7 @@ import {
 } from './cliChatRuntime.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
+import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 
 export interface ClaudeCodeAdapterOptions {
   agentId: string;
@@ -132,22 +133,41 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   capabilities(): AdapterCapabilities {
+    const mcpNative = this.#mcpNative();
     return {
       interactiveChat: true,
       toolCalling: true,
-      toolForwarding: this.#mcpNative() ? 'mcp_native' : 'marker_protocol',
+      toolForwarding: mcpNative ? 'mcp_native' : 'marker_protocol',
       // Claude Code is a filesystem/terminal-native CLI that speaks MCP directly;
       // surfacing these affordances lets the engine route capability-tagged work
       // to it (parity with the Codex/Hermes adapters).
       affordances: {
         fileSystem: true,
         terminal: true,
-        nativeMcp: true,
+        ...(mcpNative ? { nativeMcp: true } : {}),
+      },
+      execution: {
+        longRunning: true,
+        pausable: false,
+        sandbox: 'process',
+        maxConcurrent: 1,
       },
       memory: {
         ingestible: true,
         injectable: true,
       },
+      capabilityManifest: nativeRuntimeCapabilities([
+        'interaction.chat',
+        'interaction.tool-calling',
+        'execution.file-system',
+        'execution.terminal',
+        'execution.long-running',
+        ...(mcpNative ? ['protocol.native-mcp' as const] : []),
+        'memory.inject',
+        'memory.ingest',
+      ], {
+        limits: { 'execution.long-running': { maxConcurrent: 1 } },
+      }),
     };
   }
 

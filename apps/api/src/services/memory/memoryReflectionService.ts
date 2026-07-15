@@ -410,7 +410,7 @@ export class MemoryReflectionService {
       .filter((r) => DURABLE_TYPES.has(r.type) && !parseTags(r.tags).includes('plane:workspace_memory'));
     const items = rows.map((r) => {
       const text = `${r.title} ${r.summary}`;
-      return { id: r.id, sig: new Set(tokenize(text).slice(0, 24)), polarity: directivePolarity(text) };
+      return { id: r.id, sig: directiveTopicSignature(text), polarity: directivePolarity(text) };
     });
     let flagged = 0;
     const seen = new Set<string>();
@@ -447,7 +447,7 @@ export class MemoryReflectionService {
  * prefer/ensure), −1 = prohibition (never/avoid/do not/don't/stop), 0 = none or
  * mixed (ambiguous). Two same-topic rules with opposite polarity contradict.
  */
-function directivePolarity(text: string): -1 | 0 | 1 {
+export function directivePolarity(text: string): -1 | 0 | 1 {
   const lower = text.toLowerCase();
   // Prohibitions first (so "do not"/"must not" aren't double-counted as positive).
   const neg = (lower.match(/\b(never|avoid|do not|don't|dont|must not|should not|stop|disallow|forbid)\b/g) ?? []).length;
@@ -460,7 +460,21 @@ function directivePolarity(text: string): -1 | 0 | 1 {
   return 0;
 }
 
-function jaccard(a: Set<string>, b: Set<string>): number {
+/**
+ * Topic signature for comparing directives after polarity has been classified.
+ * Modal/prohibition tokens describe whether a rule permits or forbids an action;
+ * retaining them in the topic signature makes opposite rules look artificially
+ * unrelated (for example, "always escalate" versus "do not escalate").
+ */
+export function directiveTopicSignature(text: string): Set<string> {
+  const polarityTokens = new Set([
+    'always', 'never', 'avoid', 'not', 'dont', 'must', 'should', 'ensure',
+    'require', 'prefer', 'stop', 'disallow', 'forbid',
+  ]);
+  return new Set(tokenize(text).filter((token) => !polarityTokens.has(token)).slice(0, 24));
+}
+
+export function jaccard(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
   let inter = 0;
   for (const x of a) if (b.has(x)) inter += 1;

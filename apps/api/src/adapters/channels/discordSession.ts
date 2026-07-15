@@ -12,6 +12,7 @@
  */
 
 import type { Logger } from '../../logger.js';
+import type { ChannelDeliveryReceipt } from './types.js';
 
 export type DiscordSessionStatus = 'idle' | 'starting' | 'open' | 'closed' | 'error';
 
@@ -66,10 +67,13 @@ export class DiscordSession {
     this.#setStatus('closed');
   }
 
-  async sendText(channelId: string, text: string): Promise<void> {
+  async sendText(channelId: string, text: string): Promise<ChannelDeliveryReceipt> {
     const channel = await this.#resolveSendable(channelId);
     if (!channel) throw new Error(`discord channel ${channelId} is not sendable`);
-    await channel.send(text);
+    const sent = await channel.send(text) as unknown as { id?: string };
+    const providerMessageId = typeof sent?.id === 'string' ? sent.id.trim() : '';
+    if (!providerMessageId) throw new Error('discord provider accepted no message id; outbound delivery is unverified');
+    return { provider: 'discord', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: channelId };
   }
 
   async setTyping(channelId: string, on: boolean): Promise<void> {

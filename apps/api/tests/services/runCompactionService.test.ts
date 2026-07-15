@@ -8,9 +8,13 @@
  */
 import { describe, it, expect } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { RunCompactionService } from '../../src/services/run/runCompactionService.js';
+import { ColdArchiveStore } from '../../src/services/storage/coldArchiveStore.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
 
 function isoDaysAgo(days: number): string {
@@ -62,7 +66,9 @@ describe('RunCompactionService', () => {
         completedAt: isoDaysAgo(1),
       }).run();
 
-      const compaction = new RunCompactionService({ db: ctx.db, logger: ctx.logger, keepFullStateDays: 30 });
+      const archiveDir = mkdtempSync(join(tmpdir(), 'agentis-archive-'));
+      const archiveStore = new ColdArchiveStore(archiveDir);
+      const compaction = new RunCompactionService({ db: ctx.db, logger: ctx.logger, archiveStore, keepFullStateDays: 30 });
       const summary = await compaction.compact();
       expect(summary.compactedRunStates).toBe(1);
 
@@ -72,12 +78,14 @@ describe('RunCompactionService', () => {
       expect(oldState.completedNodeIds).toEqual(['n1']);
       // Heavy node payload is gone after compaction.
       expect(JSON.stringify(oldState)).not.toContain('payloadpayload');
+      expect(JSON.stringify(await archiveStore.hydrateRunState(oldState))).toContain('payload');
 
       const recentAfter = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, recentRunId)).get()!;
       const recentState = recentAfter.runState as Record<string, unknown>;
       expect(recentState._compacted).toBeUndefined();
       // Recent state still has the full nodeStates blob.
       expect(JSON.stringify(recentState)).toContain('payload');
+      rmSync(archiveDir, { recursive: true, force: true });
     } finally {
       ctx.close();
     }
@@ -112,7 +120,8 @@ describe('RunCompactionService', () => {
         updatedAt: isoDaysAgo(60), // old enough by age, but not terminal
       }).run();
 
-      const compaction = new RunCompactionService({ db: ctx.db, logger: ctx.logger, keepFullStateDays: 30 });
+      const archiveStore = new ColdArchiveStore(mkdtempSync(join(tmpdir(), 'agentis-archive-')));
+      const compaction = new RunCompactionService({ db: ctx.db, logger: ctx.logger, archiveStore, keepFullStateDays: 30 });
       const summary = await compaction.compact();
       expect(summary.compactedRunStates).toBe(0);
 
@@ -139,7 +148,8 @@ describe('RunCompactionService', () => {
         completedAt: isoDaysAgo(60),
       }).run();
 
-      const compaction = new RunCompactionService({ db: ctx.db, logger: ctx.logger, keepFullStateDays: 30 });
+      const archiveStore = new ColdArchiveStore(mkdtempSync(join(tmpdir(), 'agentis-archive-')));
+      const compaction = new RunCompactionService({ db: ctx.db, logger: ctx.logger, archiveStore, keepFullStateDays: 30 });
       const summary = await compaction.compact();
       expect(summary.compactedRunStates).toBe(0);
     } finally {

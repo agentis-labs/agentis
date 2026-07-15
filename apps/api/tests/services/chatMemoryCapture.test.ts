@@ -184,6 +184,62 @@ describe('ChatMemoryCaptureService', () => {
     expect(operatorMemories()).toHaveLength(2);
   });
 
+  it('persists an explicit specialist correction immediately as an agent-scoped governing rule', async () => {
+    const agentId = seedAgent();
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const conversation = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+    });
+    const { service } = buildCaptureStack();
+    const userMessage = "please one more time, DO NOT CHANGE THE CHAIN CONFIG THAT YOU HAVE DONE, you simply removed it, and now pipeline doesn't run at a time";
+
+    const turnArgs = {
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      userId: ctx.user.id,
+      agentId,
+      userDisplayName: ctx.user.displayName,
+      userMessage,
+    };
+
+    // This is the inbound-route call: the rule exists before an assistant turn.
+    const immediateId = service.captureImmediateCorrection(turnArgs);
+    expect(immediateId).toBeTruthy();
+    const immediate = ctx.db.select().from(schema.memoryEpisodes)
+      .where(eq(schema.memoryEpisodes.id, immediateId!)).get();
+    expect(immediate?.governing).toBe(true);
+
+    const result = await service.captureTurn({
+      ...turnArgs,
+      assistantMessage: 'I restored the chain configuration.',
+      finishReason: 'stop',
+    });
+
+    expect(result.workspaceMemoryIds).toHaveLength(1);
+    expect(result.workspaceMemoryIds[0]).toBe(immediateId);
+    const correction = ctx.db.select().from(schema.memoryEpisodes)
+      .where(eq(schema.memoryEpisodes.id, result.workspaceMemoryIds[0]!)).get();
+    expect(correction).toMatchObject({
+      workspaceId: ctx.workspace.id,
+      scopeId: agentId,
+      source: 'operator_write',
+      governing: true,
+      status: 'active',
+    });
+    expect(correction?.summary).toContain('DO NOT CHANGE THE CHAIN CONFIG');
+    expect(correction?.tags).toEqual(expect.arrayContaining(['operator_correction', 'immediate']));
+    expect(ctx.db.select().from(schema.memoryEpisodes)
+      .where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => (row.tags as string[]).includes('operator_correction'))).toHaveLength(1);
+
+    const promotion = ctx.db.select().from(schema.cognitivePromotionQueue)
+      .where(eq(schema.cognitivePromotionQueue.itemType, 'atom_promotion')).get();
+    expect(promotion?.payload).toMatchObject({ scopeId: agentId, originSurface: 'operator_chat' });
+  });
+
   it('does not capture a question as a preference', async () => {
     const agentId = seedAgent();
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });

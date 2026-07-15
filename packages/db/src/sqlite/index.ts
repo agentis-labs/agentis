@@ -1,12 +1,13 @@
 ﻿import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import * as schema from './schema.js';
 import { EMBEDDED_INIT_SQL } from './embedded-sql.js';
 import { runSqliteMigrations } from '../migrate.js';
 
 export type AgentisSqliteDb = BetterSQLite3Database<typeof schema>;
+export type AgentisSqliteRaw = Database.Database;
 
 export interface SqliteOpenOptions {
   /** Filesystem path to the database file. Will be created if missing. */
@@ -30,7 +31,12 @@ export interface SqliteOpenOptions {
  */
 export function openSqlite(options: SqliteOpenOptions): { db: AgentisSqliteDb; sqlite: Database.Database } {
   mkdirSync(dirname(options.path), { recursive: true });
+  const isNewDatabase = !existsSync(options.path);
   const sqlite = new Database(options.path);
+  // Incremental auto-vacuum must be selected before the first table exists.
+  // It lets lifecycle maintenance return archived hot pages to the filesystem
+  // in bounded chunks instead of requiring a second full-size VACUUM copy.
+  if (isNewDatabase) sqlite.pragma('auto_vacuum = INCREMENTAL');
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('foreign_keys = ON');
   sqlite.pragma('busy_timeout = 5000');
@@ -486,9 +492,19 @@ CREATE INDEX IF NOT EXISTS idx_session_messages ON agent_session_messages(sessio
 `);
 
   sqlite.exec(`
+CREATE VIEW IF NOT EXISTS ledger_events_search_content AS
+SELECT rowid, event_type, trim(
+  coalesce(json_extract(payload, '$.content'), '') || ' ' ||
+  coalesce(json_extract(payload, '$.output'), '') || ' ' ||
+  coalesce(json_extract(payload, '$.summary'), '') || ' ' ||
+  coalesce(json_extract(payload, '$.error'), '') || ' ' ||
+  coalesce(payload, '')
+) AS payload_text FROM ledger_events;
 CREATE VIRTUAL TABLE IF NOT EXISTS ledger_events_fts USING fts5(
   event_type,
-  payload_text
+  payload_text,
+  content='ledger_events_search_content',
+  content_rowid='rowid'
 );
 CREATE TRIGGER IF NOT EXISTS ledger_events_fts_insert AFTER INSERT ON ledger_events BEGIN
   INSERT INTO ledger_events_fts(rowid, event_type, payload_text)
@@ -505,7 +521,17 @@ CREATE TRIGGER IF NOT EXISTS ledger_events_fts_insert AFTER INSERT ON ledger_eve
   );
 END;
 CREATE TRIGGER IF NOT EXISTS ledger_events_fts_delete AFTER DELETE ON ledger_events BEGIN
-  DELETE FROM ledger_events_fts WHERE rowid = old.rowid;
+  INSERT INTO ledger_events_fts(ledger_events_fts, rowid, event_type, payload_text)
+  VALUES (
+    'delete', old.rowid, old.event_type,
+    trim(
+      coalesce(json_extract(old.payload, '$.content'), '') || ' ' ||
+      coalesce(json_extract(old.payload, '$.output'), '') || ' ' ||
+      coalesce(json_extract(old.payload, '$.summary'), '') || ' ' ||
+      coalesce(json_extract(old.payload, '$.error'), '') || ' ' ||
+      coalesce(old.payload, '')
+    )
+  );
 END;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(

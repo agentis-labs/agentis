@@ -32,6 +32,10 @@ import type { WorkflowRunState } from '@agentis/core';
 import type { ChannelBridge } from './channelBridge.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';
 import type { AppLearningService } from '../app/appLearning.js';
+import type { SharedIntelligenceService } from '../sharedIntelligence.js';
+import { withBudget } from '../util/withBudget.js';
+import { readWorkflowSpec } from '../workflow/workflowSpec.js';
+import { evaluateRunOutcome } from '../workflow/runOutcome.js';
 import {
   ConversationRuntime,
   type ConversationContext,
@@ -63,8 +67,14 @@ export interface ConversationServiceDeps {
   resolveCompleter: (workspaceId: string, task: string) => StructuredCompleter | undefined;
   /** App Brain learning — a terminal stage's deal outcome deposits a graded lesson. */
   learning?: Pick<AppLearningService, 'recordConversationOutcome'>;
+  /** Relevance-based Brain recall for `send_agent` compose calls, scoped to the App. */
+  sharedIntelligence?: Pick<SharedIntelligenceService, 'buildDispatchContext'>;
   logger?: { warn(msg: string, meta?: unknown): void; info?(msg: string, meta?: unknown): void };
 }
+
+/** Per-compose time budget (ms) for the Brain recall — a slow/failed lookup
+ * degrades to no memory block rather than stalling a scripted send. */
+const BRAIN_CONTEXT_BUDGET_MS = 1200;
 
 /** Inbound payload from the channel dispatcher (a subset of ChannelTurnInput). */
 export interface ConversationInbound {
@@ -95,6 +105,9 @@ export class ConversationService {
       send: (args) => this.#send(args),
       completeJson: (args) => this.#completeJson(args),
       startRun: (args) => this.#startWorkflow(args),
+      ...(deps.sharedIntelligence
+        ? { buildBrainContext: (ctx, taskDescription) => this.#buildBrainContext(ctx, taskDescription) }
+        : {}),
       ...(deps.learning
         ? {
             recordOutcome: (a) =>
@@ -144,13 +157,13 @@ export class ConversationService {
   async onRunComplete(payload: { runId: string; status: string; workflowId?: string; workspaceId: string }): Promise<void> {
     if (!payload.workflowId) return;
     const wf = this.deps.db
-      .select({ appId: schema.workflows.appId })
+      .select({ appId: schema.workflows.appId, settings: schema.workflows.settings })
       .from(schema.workflows)
       .where(eq(schema.workflows.id, payload.workflowId))
       .get();
     if (!wf?.appId) return; // not an App workflow → not a conversation build
     const run = this.deps.db
-      .select({ userId: schema.workflowRuns.userId, ambientId: schema.workflowRuns.ambientId })
+      .select({ userId: schema.workflowRuns.userId, ambientId: schema.workflowRuns.ambientId, runState: schema.workflowRuns.runState })
       .from(schema.workflowRuns)
       .where(eq(schema.workflowRuns.id, payload.runId))
       .get();
@@ -161,7 +174,12 @@ export class ConversationService {
       ambientId: run?.ambientId ?? null,
     };
     try {
-      await this.runtime.onWorkflowComplete(ctx, payload.runId, payload.status);
+      const outcome = evaluateRunOutcome({
+        status: payload.status,
+        runState: run?.runState,
+        hasDefinitionOfDone: Boolean(readWorkflowSpec(wf.settings)),
+      });
+      await this.runtime.onWorkflowComplete(ctx, payload.runId, payload.status, outcome);
     } catch (err) {
       this.deps.logger?.warn('conversation.run_complete_failed', { runId: payload.runId, err: (err as Error).message });
     }
@@ -213,6 +231,26 @@ export class ConversationService {
       body: args.body,
       ...(args.attachments && args.attachments.length ? { attachments: args.attachments } : {}),
     });
+  }
+
+  async #buildBrainContext(ctx: ConversationContext, taskDescription: string): Promise<string | null> {
+    const brain = this.deps.sharedIntelligence;
+    if (!brain) return null;
+    return withBudget(async () => {
+      try {
+        const result = await brain.buildDispatchContext({
+          workspaceId: ctx.workspaceId,
+          scopeId: ctx.appId,
+          taskDescription,
+          limit: 6,
+          surface: 'chat',
+        });
+        return result.block || null;
+      } catch (err) {
+        this.deps.logger?.warn('conversation.brain_context.failed', { appId: ctx.appId, err: (err as Error).message });
+        return null;
+      }
+    }, BRAIN_CONTEXT_BUDGET_MS, null, () => this.deps.logger?.warn?.('conversation.brain_context.budget_exceeded', { appId: ctx.appId }));
   }
 
   async #completeJson<T extends Record<string, unknown>>(args: { ctx: ConversationContext; system: string; user: string }): Promise<T | null> {

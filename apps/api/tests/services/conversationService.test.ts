@@ -117,3 +117,78 @@ describe('ConversationService (integration)', () => {
     expect(r.handled).toBe(false);
   });
 });
+
+describe('ConversationService — Brain memory wiring', () => {
+  let ctx: TestContext;
+  let appId: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    appId = randomUUID();
+    ctx.db.insert(schema.apps).values({ id: appId, workspaceId: ctx.workspace.id, slug: 'sales', name: 'Sales Desk', createdBy: ctx.user.id }).run();
+  });
+  afterEach(() => ctx.close());
+
+  const context = () => ({ workspaceId: ctx.workspace.id, appId, userId: ctx.user.id, ambientId: ctx.ambient.id });
+
+  it('calls buildDispatchContext scoped to the App and folds the block into the composed prompt', async () => {
+    const calls: Array<{ workspaceId: string; scopeId?: string | null; taskDescription: string }> = [];
+    const capturedUsers: string[] = [];
+    const service = new ConversationService({
+      db: ctx.db,
+      bus: ctx.bus,
+      engine: { startRun: async () => ({ runId: 'ignored' }) },
+      channels: {
+        deliverToConnection: async () => {},
+        resolveDestination: ({ to }) => ({ chatId: to ?? null, source: 'explicit' as const }),
+      },
+      resolveCompleter: () => ({
+        completeStructured: async ({ system, user }: { system: string; user: string }) => {
+          capturedUsers.push(user);
+          return (/classif/i.test(system) ? { label: 'positive' } : { message: 'mensagem' }) as never;
+        },
+      }),
+      sharedIntelligence: {
+        buildDispatchContext: async (args) => {
+          calls.push({ workspaceId: args.workspaceId, scopeId: args.scopeId, taskDescription: args.taskDescription });
+          return { block: 'Remember: this store prefers weekend delivery.', atomIds: ['x'], relevantCount: 1 };
+        },
+      },
+      logger: ctx.logger,
+    });
+    service.define({ workspaceId: ctx.workspace.id, appId }, SCRIPT);
+    await service.enroll(context(), '+5511988', 'conn1');
+    await service.handleInbound({ ...context(), address: '+5511988', text: 'oi' }); // → pitch (send_agent)
+
+    expect(calls).toEqual([{ workspaceId: ctx.workspace.id, scopeId: appId, taskDescription: 'pitch' }]);
+    expect(capturedUsers.some((u) => u.includes('Brain memory:') && u.includes('weekend delivery'))).toBe(true);
+  });
+
+  it('a rejected buildDispatchContext degrades to no memory block instead of failing the send', async () => {
+    const capturedUsers: string[] = [];
+    const service = new ConversationService({
+      db: ctx.db,
+      bus: ctx.bus,
+      engine: { startRun: async () => ({ runId: 'ignored' }) },
+      channels: {
+        deliverToConnection: async () => {},
+        resolveDestination: ({ to }) => ({ chatId: to ?? null, source: 'explicit' as const }),
+      },
+      resolveCompleter: () => ({
+        completeStructured: async ({ system, user }: { system: string; user: string }) => {
+          capturedUsers.push(user);
+          return (/classif/i.test(system) ? { label: 'positive' } : { message: 'mensagem' }) as never;
+        },
+      }),
+      sharedIntelligence: {
+        buildDispatchContext: async () => { throw new Error('brain boom'); },
+      },
+      logger: ctx.logger,
+    });
+    service.define({ workspaceId: ctx.workspace.id, appId }, SCRIPT);
+    await service.enroll(context(), '+5511988', 'conn1');
+    const r = await service.handleInbound({ ...context(), address: '+5511988', text: 'oi' });
+    expect(r).toMatchObject({ handled: true, stage: 'pitch', sent: true });
+    expect(capturedUsers.every((u) => !u.includes('Brain memory:'))).toBe(true);
+  });
+});

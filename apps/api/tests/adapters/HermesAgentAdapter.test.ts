@@ -38,13 +38,27 @@ describe('HermesAgentAdapter', () => {
     spawnMock.mockReset();
   });
 
-  it('defaults interactive chat to ACP-first auto transport with native Agentis tools', () => {
+  it('does not claim native Agentis tools for ACP until an MCP server is mounted', () => {
     const adapter = new HermesAgentAdapter({ agentId: 'agent-1', logger, binaryPath: 'hermes-test' });
     const caps = adapter.capabilities();
     expect(caps.interactiveChat).toBe(true);
+    expect(caps.toolCalling).toBe(false);
+    expect(caps.toolForwarding).toBe('session_event');
+    expect(caps.limitations).toBeUndefined();
+  });
+
+  it('advertises native MCP only when ACP has a mounted MCP server', () => {
+    const adapter = new HermesAgentAdapter({
+      agentId: 'agent-1',
+      logger,
+      binaryPath: 'hermes-test',
+      chatTransport: 'acp',
+      mcpServers: [{ name: 'agentis', url: 'http://127.0.0.1:3737/mcp', headers: {} }],
+    });
+    const caps = adapter.capabilities();
     expect(caps.toolCalling).toBe(true);
     expect(caps.toolForwarding).toBe('mcp_native');
-    expect(caps.limitations).toBeUndefined();
+    expect(caps.affordances?.nativeMcp).toBe(true);
   });
 
   it('keeps the one-shot CLI transport as an explicit compatibility mode', () => {
