@@ -46,6 +46,7 @@ import { TelegramChannelAdapter } from './adapters/channels/telegram.js';
 import { DiscordChannelAdapter } from './adapters/channels/discord.js';
 import { SlackChannelAdapter } from './adapters/channels/slack.js';
 import { VoiceChannelAdapter } from './adapters/channels/voice.js';
+import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt } from './adapters/channels/types.js';
 import { PartialReplayService } from './services/partialReplay.js';
 import { CommandIndex } from './services/command/commandIndex.js';
 import { KnowledgeBaseService } from './services/knowledge/knowledgeBase.js';
@@ -1201,6 +1202,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     awareness: workspaceAwareness,
     capabilityIndex,
     commandModel,
+    audit: auditTrail,
+    budget: budgetService,
   });
   const mcpHarness = McpHarnessSessionService.fromEnv(env as unknown as NodeJS.ProcessEnv, sqlite, logger);
 
@@ -1287,7 +1290,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   };
 
   // Deliver a held outbound message once the operator approves (drop on reject).
-  approvals.bindOutboundHandler(async ({ decision, payload }) => {
+  approvals.bindOutboundHandler(async ({ approvalId, decision, payload }) => {
     if (decision !== 'approve') return;
     const appId = typeof payload.appId === 'string' ? payload.appId : null;
     const conversationId = typeof payload.conversationId === 'string' ? payload.conversationId : null;
@@ -1295,18 +1298,48 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     const chatId = typeof payload.chatId === 'string' ? payload.chatId : null;
     const body = typeof payload.body === 'string' ? payload.body : null;
     if (!body || !connectionId || !chatId || !conversationId) return;
+    const workspaceId = typeof payload.workspaceId === 'string' ? payload.workspaceId : '';
+    const sessionMessageId = `outbound_approval:${approvalId}`;
+    const message = conversations.appendOutbound({
+      workspaceId,
+      conversationId,
+      operatorId: 'system',
+      sessionMessageId,
+      body,
+      deliveryStatus: 'sending',
+      metadata: { channelReply: true, outboundApproved: true, channelChatId: chatId },
+    });
+    let receipt: ChannelDeliveryReceipt | undefined;
     try {
-      await channelBridge.deliverToConnection({ connectionId, chatId, body });
-      conversations.appendOutbound({
-        workspaceId: typeof payload.workspaceId === 'string' ? payload.workspaceId : '',
+      receipt = await channelBridge.deliverToConnection({ connectionId, chatId, body, idempotencyKey: sessionMessageId });
+      if (!isAcknowledgedChannelDelivery(receipt)) {
+        conversations.updateDeliveryStatus({
+          workspaceId,
+          conversationId,
+          messageId: message.id,
+          deliveryStatus: 'sending',
+          metadata: { channelDeliveryReceipt: receipt },
+        });
+        throw new AgentisError('CHANNEL_SEND_FAILED', 'Approved outbound message is pending provider acknowledgement; it was not marked delivered.');
+      }
+      conversations.updateDeliveryStatus({
+        workspaceId,
         conversationId,
-        operatorId: 'system',
-        body,
-        deliveryStatus: 'delivered',
-        metadata: { channelReply: true, outboundApproved: true, channelChatId: chatId },
+        messageId: message.id,
+        deliveryStatus: receipt.status === 'delivered' || receipt.status === 'read' ? 'delivered' : 'sent',
+        metadata: { channelReply: true, outboundApproved: true, channelChatId: chatId, channelDeliveryReceipt: receipt },
       });
       if (appId) outboundPolicy.record(appId, 'agent');
     } catch (err) {
+      if (!receipt) {
+        conversations.updateDeliveryStatus({
+          workspaceId,
+          conversationId,
+          messageId: message.id,
+          deliveryStatus: 'failed',
+          metadata: { channelDeliveryError: (err as Error).message },
+        });
+      }
       logger.warn('outbound.approval.deliver_failed', { appId, err: (err as Error).message });
     }
   });
@@ -1406,11 +1439,19 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // bounded turn as the subject's agent (which acts through its own tools).
   const durableEntityDispatcher = new DurableEntityDispatcher(durableEntities, { logger });
   const subjectRuntime = new SubjectRuntime({
-    send: async ({ facts, text }) => {
+    send: async ({ entityId, stage, facts, text }) => {
       const connectionId = typeof facts.connectionId === 'string' ? facts.connectionId : null;
       const to = typeof facts.to === 'string' ? facts.to : (typeof facts.chatId === 'string' ? facts.chatId : null);
       if (!connectionId || !to) { logger.warn('subject.send.no_destination', { hasConn: Boolean(connectionId) }); return; }
-      await channelBridge.deliverToConnection({ connectionId, chatId: to, body: text });
+      const receipt = await channelBridge.deliverToConnection({
+        connectionId,
+        chatId: to,
+        body: text,
+        idempotencyKey: `subject:${entityId}:${stage}`,
+      });
+      if (!isAcknowledgedChannelDelivery(receipt)) {
+        throw new AgentisError('CHANNEL_SEND_FAILED', 'Subject send is pending provider acknowledgement; state must not advance.');
+      }
     },
     runAgent: async ({ entityId, workspaceId, appId, facts, instruction }) => {
       let agentId = typeof facts.agentId === 'string' ? facts.agentId : null;
@@ -1578,6 +1619,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     brainAsk,
     brainComposer,
     brainHealth,
+    brainMaintenance,
     capabilityRegistry,
     channelBridge,
     channelIdentity,
@@ -1670,7 +1712,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       groundingRuntime.start();
       runCompaction.start();
       brainQueue.start(); // ability compile pipeline + brain promotions
-      brainMaintenance.start(); // §0.2 — weekly lifecycle: stale/archive, compression, graduate/expire, reembed, reflection, disk reclamation
+      brainMaintenance.start(); // §0.2 — immediate-if-due + daily lifecycle, hygiene, compression, reflection, and reclamation
       harnessImportSync.start(); // P4: notify when imported agents accrue new memory
 
       // Warm the bundled on-device embedding model in the BACKGROUND (after the

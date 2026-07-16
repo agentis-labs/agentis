@@ -4,7 +4,7 @@
  *   GET    /                  list connections
  *   POST   /                  create connection (token encrypted via vault)
  *   DELETE /:id               remove connection
- *   POST   /:id/test          send a test message via the adapter
+ *   POST   /:id/test          run read-only credential/transport/route checks
  *   GET    /:id/webhook-info  return inbound webhook URL
  *
  * Tokens are NEVER returned in responses. The webhook secret is returned ONLY
@@ -184,7 +184,6 @@ export function buildChannelRoutes(deps: {
           workspaceId: ws.workspaceId,
           id: connection.id,
           ...(body.defaultChatId || body.defaultRecipient ? { chatId: body.defaultChatId ?? body.defaultRecipient } : {}),
-          body: `Agentis test message for ${connection.name}`,
         })
       : deps.bridge.health(ws.workspaceId, connection.id);
     const refreshed = deps.bridge.get(ws.workspaceId, connection.id);

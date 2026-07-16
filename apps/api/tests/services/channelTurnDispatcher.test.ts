@@ -22,6 +22,15 @@ import { AppStore } from '@agentis/app';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
 
+const ackReceipt = (recipient = '999') => ({
+  provider: 'telegram' as const,
+  providerMessageId: `provider-${recipient}`,
+  status: 'accepted' as const,
+  acceptedAt: '2026-07-16T00:00:00.000Z',
+  recipient,
+  providerAcknowledged: true,
+});
+
 /** A chat-capable adapter stub — only `.chat`/`.capabilities` are exercised. */
 function chatStub(reply: string): AgentAdapter {
   return {
@@ -64,7 +73,7 @@ describe('ChannelTurnDispatcher', () => {
       adapters: new AdapterManager(ctx.logger),
       conversations,
       logger: ctx.logger,
-      deliver: async (args) => { delivered.push(args); },
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
       fallbackAdapter: () => chatStub('Hello from the orchestrator.'),
     });
 
@@ -81,12 +90,41 @@ describe('ChannelTurnDispatcher', () => {
     });
 
     expect(result.replied).toBe(true);
-    expect(delivered).toEqual([{ connectionId: 'conn-1', chatId: '999', body: 'Hello from the orchestrator.' }]);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ connectionId: 'conn-1', chatId: '999', body: 'Hello from the orchestrator.' });
 
     const messages = conversations.messages(conv.id, 50);
     const agentMsg = messages.find((m) => m.authorType === 'agent');
     expect(agentMsg?.body).toBe('Hello from the orchestrator.');
     expect((agentMsg?.metadata as { channelReply?: boolean })?.channelReply).toBe(true);
+  });
+
+  it('keeps an agent reply pending when the channel has no provider acknowledgement', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async () => ({
+        provider: 'whatsapp', providerMessageId: '3EB0CLIENTONLY', status: 'queued',
+        acceptedAt: '2026-07-16T00:00:00.000Z', providerAcknowledged: false,
+      }),
+      fallbackAdapter: () => chatStub('pending reply'),
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511@s.whatsapp.net', text: 'hi',
+    });
+
+    const agentMsg = conversations.messages(conv.id, 50).find((message) => message.authorType === 'agent');
+    expect(agentMsg?.deliveryStatus).toBe('sending');
+    expect((agentMsg?.metadata as { channelDeliveryReceipt?: { providerAcknowledged?: boolean } })?.channelDeliveryReceipt?.providerAcknowledged).toBe(false);
   });
 
   it('silently drops an inbound turn from a BLOCKED sender (no reply, no agent turn)', async () => {
@@ -102,7 +140,7 @@ describe('ChannelTurnDispatcher', () => {
       conversations,
       identity,
       logger: ctx.logger,
-      deliver: async (args) => { delivered.push(args); },
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
       fallbackAdapter: () => { turnRan = true; return chatStub('should not run'); },
     });
 
@@ -129,7 +167,7 @@ describe('ChannelTurnDispatcher', () => {
       conversations,
       logger: ctx.logger,
       bus: ctx.bus,
-      deliver: async () => {},
+      deliver: async () => ackReceipt(),
       fallbackAdapter: () => chatStub('unused'),
       runTurn: async function* () {
         yield {
@@ -181,7 +219,7 @@ describe('ChannelTurnDispatcher', () => {
       adapters: new AdapterManager(ctx.logger),
       conversations,
       logger: ctx.logger,
-      deliver: async (args) => { delivered.push(args.body); },
+      deliver: async (args) => { delivered.push(args.body); return ackReceipt(args.chatId); },
       fallbackAdapter: () => chatStub('unused'),
       // A tiny throttle so the test exercises real elapsed-time gating without
       // multi-second waits (production default is PROGRESS_NARRATION_THROTTLE_MS).
@@ -234,14 +272,14 @@ describe('ChannelTurnDispatcher', () => {
     const messages = conversations.messages(conv.id, 50);
     const progressRows = messages.filter((m) => (m.metadata as { channelProgress?: boolean } | null)?.channelProgress);
     expect(progressRows.map((m) => m.body)).toEqual(['Using web_search', 'Using fetch_page']);
-    expect(progressRows.every((m) => m.authorType === 'agent' && m.deliveryStatus === 'delivered')).toBe(true);
+    expect(progressRows.every((m) => m.authorType === 'agent' && m.deliveryStatus === 'sent')).toBe(true);
 
     // …but excluded from what a later turn's history feeds back to the model —
     // synthesized narration is not something the agent actually said.
     let capturedHistory: ChatMessage[] = [];
     const dispatcher2 = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'),
       runTurn: async function* (_a, history) {
         capturedHistory = history;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
@@ -268,7 +306,7 @@ describe('ChannelTurnDispatcher', () => {
       adapters: new AdapterManager(ctx.logger),
       conversations,
       logger: ctx.logger,
-      deliver: async (args) => { delivered.push(args.body); },
+      deliver: async (args) => { delivered.push(args.body); return ackReceipt(args.chatId); },
       fallbackAdapter: () => chatStub('unused'),
       // Production-sized throttle (default) — a quick synchronous turn with
       // one tool call must never cross it, so no progress line is sent.
@@ -308,7 +346,7 @@ describe('ChannelTurnDispatcher', () => {
       conversations,
       logger: ctx.logger,
       bus: ctx.bus,
-      deliver: async (args) => { delivered.push(args.body); },
+      deliver: async (args) => { delivered.push(args.body); return ackReceipt(args.chatId); },
       fallbackAdapter: () => chatStub('unused'),
       runTurn: async function* () {
         throw new Error('insufficient_quota: out of credits');
@@ -331,7 +369,9 @@ describe('ChannelTurnDispatcher', () => {
     expect(delivered[0]).toMatch(/out of credits|quota/i);
     const messages = conversations.messages(conv.id, 50);
     const failure = messages.find((message) => message.authorType === 'agent' && /out of credits|quota/i.test(message.body));
-    expect(failure?.deliveryStatus).toBe('failed');
+    // This is a successfully transported failure notice. Delivery status reflects
+    // provider evidence, not whether the model turn itself succeeded.
+    expect(failure?.deliveryStatus).toBe('sent');
   });
 
   it('maps prior channel-inbound system messages to user role in history', async () => {
@@ -356,7 +396,7 @@ describe('ChannelTurnDispatcher', () => {
       adapters: new AdapterManager(ctx.logger),
       conversations,
       logger: ctx.logger,
-      deliver: async () => {},
+      deliver: async () => ackReceipt(),
       fallbackAdapter: () => chatStub('ok'),
       runTurn: async function* (_adapter, history) {
         captured = history;
@@ -395,7 +435,7 @@ describe('ChannelTurnDispatcher', () => {
     let captured: ChatMessage[] = [];
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'),
       runTurn: async function* (_a, history) {
         captured = history;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
@@ -425,7 +465,7 @@ describe('ChannelTurnDispatcher', () => {
       adapters: new AdapterManager(ctx.logger),
       conversations,
       logger: ctx.logger,
-      deliver: async (a) => { delivered.push(a.body); },
+      deliver: async (a) => { delivered.push(a.body); return ackReceipt(a.chatId); },
       fallbackAdapter: () => undefined,
     });
     const result = await dispatcher.dispatch({
@@ -449,7 +489,7 @@ describe('ChannelTurnDispatcher', () => {
     let turnRan = false;
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('should not run'),
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('should not run'),
       runTurn: async function* () { turnRan = true; yield { type: 'done', finishReason: 'stop' } as ChatDelta; } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
     });
 
@@ -492,7 +532,7 @@ describe('ChannelTurnDispatcher', () => {
     let capturedOptions: { systemAddendum?: string } | null = null;
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'),
       runTurn: async function* (_a, _h, _t, c, o) {
         capturedCtx = c as { appId?: string | null };
         capturedOptions = (o ?? null) as { systemAddendum?: string } | null;
@@ -539,7 +579,7 @@ describe('ChannelTurnDispatcher', () => {
     let replyText = '';
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async (a) => { delivered.push(a.body); },
+      deliver: async (a) => { delivered.push(a.body); return ackReceipt(a.chatId); },
       fallbackAdapter: () => chatStub('placeholder'),
       outboundPolicy,
       requestOutboundApproval: async (a) => { approvals.push({ body: a.body, reason: a.reason }); return true; },
@@ -605,7 +645,7 @@ describe('ChannelTurnDispatcher', () => {
 
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger, bus: ctx.bus,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'),
       runTurn: async function* () {
         yield { type: 'thinking', delta: 'weighing the discount' } as ChatDelta;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
@@ -647,7 +687,7 @@ describe('ChannelTurnDispatcher', () => {
     });
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger, bus: ctx.bus,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'),
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'),
       runTurn: async function* () {
         yield { type: 'thinking', delta: 'hmm' } as ChatDelta;
         yield { type: 'text', delta: 'ok' } as ChatDelta;
@@ -676,7 +716,7 @@ describe('ChannelTurnDispatcher', () => {
       adapters: new AdapterManager(ctx.logger),
       conversations,
       logger: ctx.logger,
-      deliver: async (a) => { delivered.push(a.body); },
+      deliver: async (a) => { delivered.push(a.body); return ackReceipt(a.chatId); },
       fallbackAdapter: () => chatStub('unused'),
       // First turn asks for confirmation.
       runTurn: async function* () {
@@ -725,7 +765,7 @@ describe('ChannelTurnDispatcher', () => {
     const turns: Array<{ text: string; history: ChatMessage[] }> = [];
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'), debounceMs: 40,
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'), debounceMs: 40,
       runTurn: async function* (_a, history, userMessage) {
         turns.push({ text: userMessage as string, history });
         yield { type: 'text', delta: 'ok' } as ChatDelta;
@@ -822,7 +862,7 @@ describe('ChannelTurnDispatcher', () => {
     const summaries = new ConversationSummaryService({ db: ctx.db, logger: ctx.logger });
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'), summaries,
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'), summaries,
       runTurn: async function* (_a, _h, _t, _c, o) {
         capturedAddendum = (o as { systemAddendum?: string } | undefined)?.systemAddendum ?? '';
         yield { type: 'text', delta: 'ok' } as ChatDelta;
@@ -863,7 +903,7 @@ describe('ChannelTurnDispatcher', () => {
     let capturedCtx: { recallScopeIds?: string[] } | null = null;
     const dispatcher = new ChannelTurnDispatcher({
       db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
-      deliver: async () => {}, fallbackAdapter: () => chatStub('ok'), contacts,
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'), contacts,
       runTurn: async function* (_a, _h, _t, c) {
         capturedCtx = c as { recallScopeIds?: string[] };
         yield { type: 'text', delta: 'ok' } as ChatDelta;

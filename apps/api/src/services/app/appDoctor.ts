@@ -192,6 +192,7 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
   }
 
   let activeTriggers = 0;
+  const eventActivationTargets = new Set<string>();
   for (const workflow of snapshot.workflows) {
     const graphTriggers = workflow.graph.nodes.filter((node) => node.type === 'trigger');
     if (graphTriggers.length === 0) {
@@ -205,6 +206,7 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
     for (const node of graphTriggers) {
       const triggerType = String(record(node.config)?.triggerType ?? 'manual');
       if (!NON_MANUAL_TRIGGER_TYPES.has(triggerType)) continue;
+      eventActivationTargets.add(workflow.id);
       const triggerId = string(record(node.config)?.triggerId);
       const deployments = workflow.triggers.filter((trigger) => !triggerId || trigger.id === triggerId);
       const active = deployments.filter((trigger) => trigger.status === 'active');
@@ -226,6 +228,9 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
           remediation: { operation: 'workflow.trigger.arm', description: 'Resolve trigger health errors and arm the trigger.', args: { workflowId: workflow.id } },
         });
       }
+    }
+    if (bindings.get(workflow.id)?.schedule?.enabled !== false && bindings.get(workflow.id)?.schedule) {
+      eventActivationTargets.add(workflow.id);
     }
 
     const spec = readWorkflowSpec(workflow.settings);
@@ -259,7 +264,10 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
     const sourceInApp = memberIds.has(subscription.sourceWorkflowId);
     const targetInApp = memberIds.has(subscription.targetWorkflowId);
     if (!sourceInApp && !targetInApp) continue;
-    if (subscription.enabled && sourceInApp && targetInApp) activeEventSubscriptions += 1;
+    if (subscription.enabled && sourceInApp && targetInApp) {
+      activeEventSubscriptions += 1;
+      eventActivationTargets.add(subscription.targetWorkflowId);
+    }
     if (subscription.enabled && /(?:run\.)?(?:completed|complete|completion)$/iu.test(subscription.eventType)) {
       add(findings, {
         code: 'OUTCOME_EVENT_USES_COMPLETION', severity: 'warning', layer: 'outcome', resourceId: subscription.id,
@@ -315,6 +323,9 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
       });
       continue;
     }
+    for (const stage of parsed.data.stages) {
+      if (stage.entry?.kind === 'run_workflow') eventActivationTargets.add(stage.entry.workflowId);
+    }
     conversationTransitions += validateConversationScript(parsed.data, candidate.recordId, snapshot, workflowById, findings);
   }
 
@@ -327,10 +338,10 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
         evidence: { workspaceConnections: snapshot.connections.length }, resources: [resource('app', snapshot.app.id, snapshot.app.name)],
         remediation: { operation: 'connection.bind_app', description: 'Bind at least one inbound channel connection to this App.', args: { appId: snapshot.app.id } },
       });
-    } else if (!appConnections.some((connection) => connection.status === 'active')) {
+    } else if (!appConnections.some((connection) => connection.status === 'active' || connection.status === 'degraded')) {
       add(findings, {
         code: 'CONNECTION_STATE_MACHINE_NO_ACTIVE_CHANNEL', severity: 'critical', layer: 'connection', resourceId: snapshot.app.id,
-        summary: 'Every channel connection bound to the App is paused or unhealthy.',
+        summary: 'Every channel connection bound to the App is paused or unavailable in all directions.',
         evidence: { connections: appConnections.map((connection) => ({ id: connection.id, status: connection.status })) },
         resources: appConnections.map((connection) => resource('connection', connection.id, connection.name)),
         remediation: { operation: 'connection.activate', description: 'Activate or repair at least one App-bound channel connection.', args: { appId: snapshot.app.id } },
@@ -340,7 +351,20 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
 
   const executableRules = executableDependencyEdges + activeEventSubscriptions + activeTriggers + conversationTransitions;
   const enabled = snapshot.workflows.filter((workflow) => bindings.get(workflow.id)?.enabled !== false);
-  const roots = enabled.filter((workflow) => (bindings.get(workflow.id)?.dependsOn ?? []).length === 0).map((workflow) => workflow.id);
+  for (const workflow of enabled) {
+    const binding = bindings.get(workflow.id)!;
+    if ((binding.dependsOn ?? []).length > 0 || binding.operatorEntrypoint !== false || eventActivationTargets.has(workflow.id)) continue;
+    add(findings, {
+      code: 'ACTIVATION_ROOT_UNREACHABLE', severity: 'error', layer: 'activation', resourceId: workflow.id,
+      summary: `Workflow “${workflow.title}” is excluded from operator runs but has no persisted event activation.`,
+      evidence: { operatorEntrypoint: false, dependsOn: [] },
+      resources: [resource('workflow', workflow.id, workflow.title)],
+      remediation: { operation: 'app.orchestration.define', description: 'Add an event subscription, conversation state entry, schedule/listener trigger, dependency, or make it an operator entrypoint.', args: { appId: snapshot.app.id, workflowId: workflow.id } },
+    });
+  }
+  const roots = enabled
+    .filter((workflow) => (bindings.get(workflow.id)?.dependsOn ?? []).length === 0 && bindings.get(workflow.id)?.operatorEntrypoint !== false)
+    .map((workflow) => workflow.id);
   const manualRoots = enabled.filter((workflow) => {
     if (!roots.includes(workflow.id)) return false;
     const triggerTypes = workflow.graph.nodes.filter((node) => node.type === 'trigger').map((node) => String(record(node.config)?.triggerType ?? 'manual'));
@@ -366,6 +390,15 @@ export function validateAppConformance(snapshot: AppDoctorSnapshot, now = new Da
         evidence: { hasOrchestrationPanel: hasPanel, orchestrationActions: orchestrationActions.map((action) => action.name) },
         resources: [resource('surface', surface.id, surface.name)],
         remediation: { operation: 'app.orchestration.define', description: 'Persist executable dependencies, subscriptions, schedules, or state transitions before presenting orchestration as configured.', args: { appId: snapshot.app.id } },
+      });
+    }
+    if (hasPanel && orchestrationActions.length > 0) {
+      add(findings, {
+        code: 'SURFACE_DUPLICATE_ORCHESTRATION_CONTROLS', severity: 'error', layer: 'surface', resourceId: surface.id,
+        summary: `Surface “${surface.name}” duplicates controls already provided by its Orchestration Panel.`,
+        evidence: { actions: orchestrationActions.map((action) => action.name) },
+        resources: [resource('surface', surface.id, surface.name)],
+        remediation: { operation: 'ui.action_schema', description: 'Remove redundant Run Pipeline/orchestration actions, or remove the panel controls when a custom input form is intentionally required.', args: { appId: snapshot.app.id, surface: surface.name } },
       });
     }
     for (const action of surface.actions.filter((action) => action.kind === 'workflow')) {

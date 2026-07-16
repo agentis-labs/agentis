@@ -20,7 +20,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import type { ChannelDeliveryReceipt } from './types.js';
+import { ChannelDeliveryRejectedError, type ChannelDeliveryReceipt, type ChannelHealthCheck } from './types.js';
 
 export type WhatsAppSessionStatus =
   | 'idle'
@@ -38,13 +38,32 @@ export interface WhatsAppInbound {
   from?: string;
 }
 
+export interface WhatsAppObservedOutbound {
+  externalId: string;
+  chatId: string;
+  body: string;
+}
+
 export interface WhatsAppSessionOptions {
   connectionId: string;
   authDir: string;
   logger: Logger;
   onInbound: (msg: WhatsAppInbound) => void;
+  /** Mirror messages sent from the primary phone or another companion. */
+  onOutboundObserved?: (msg: WhatsAppObservedOutbound) => void;
   /** Notified whenever status/QR changes (for the login UI + DB status). */
   onStateChange?: (state: { status: WhatsAppSessionStatus; qr?: string; selfId?: string }) => void;
+  /**
+   * Provider acknowledgement received after (or during) sendText. This is
+   * intentionally separate from the socket write: Baileys' returned key id is
+   * a client correlation id until WhatsApp emits a server acknowledgement.
+   */
+  onDeliveryUpdate?: (update: {
+    providerMessageId: string;
+    status: ChannelDeliveryReceipt['status'];
+    providerStatus: number;
+    recipient?: string;
+  }) => void;
   /** Optional speech-to-text for voice notes. Returns null to skip. */
   transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
   /** Optional image understanding. Returns a text description, or null to skip. */
@@ -98,6 +117,63 @@ const RECONNECT_INITIAL_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
 const RECONNECT_FACTOR = 1.8;
 const RECONNECT_MAX_ATTEMPTS = 12;
+const DELIVERY_ACK_TIMEOUT_MS = Math.max(1_000, Number(process.env.AGENTIS_WHATSAPP_ACK_TIMEOUT_MS) || 8_000);
+
+type WhatsAppDeliverySignal = {
+  status: number;
+  errorCode?: string;
+  error?: string;
+};
+
+type WhatsAppMessageUpdate = {
+  status?: unknown;
+  messageStubParameters?: unknown;
+};
+
+/** Parse both success statuses and Baileys' status=0 provider rejection. */
+export function whatsappDeliverySignal(update: WhatsAppMessageUpdate | null | undefined): WhatsAppDeliverySignal | null {
+  if (!update) return null;
+  const numeric = typeof update.status === 'number' ? update.status : Number(update.status);
+  if (!Number.isFinite(numeric)) return null;
+  if (numeric > 0) return { status: numeric };
+  const params = Array.isArray(update.messageStubParameters) ? update.messageStubParameters : [];
+  const errorCode = params[0] == null ? '' : String(params[0]).trim();
+  if (!errorCode) return null;
+  return { status: 0, errorCode, error: whatsappProviderRejectionMessage(errorCode) };
+}
+
+function whatsappProviderRejectionMessage(errorCode: string): string {
+  if (errorCode === '463') {
+    return 'WhatsApp rejected this linked-device send because a provider reach-out restriction is active (error 463).';
+  }
+  if (errorCode === '479') {
+    return 'WhatsApp rejected the message because the recipient addressing or device session is stale or invalid.';
+  }
+  return `WhatsApp rejected the message (provider error ${errorCode}).`;
+}
+
+export type WhatsAppReachoutRestrictionScope = 'companion' | 'account_or_business' | 'unknown';
+
+/** Interpret provider scope without pretending a companion restriction also blocks the primary phone. */
+export function whatsappReachoutRestrictionScope(enforcementType: unknown): WhatsAppReachoutRestrictionScope {
+  const value = typeof enforcementType === 'string' ? enforcementType.trim().toUpperCase() : '';
+  if (value.includes('COMPANION') || value === 'WEB_COMPANION_ONLY') return 'companion';
+  if (value.startsWith('BIZ_')) return 'account_or_business';
+  return 'unknown';
+}
+
+/** Baileys WebMessageInfo.Status: 2 server, 3 delivered, 4+ read/played. */
+export function whatsappDeliveryStatus(status: unknown): ChannelDeliveryReceipt['status'] {
+  const numeric = typeof status === 'number' ? status : Number(status);
+  if (!Number.isFinite(numeric) || numeric < 2) return 'queued';
+  if (numeric >= 4) return 'read';
+  if (numeric >= 3) return 'delivered';
+  return 'accepted';
+}
+
+function normalizeWhatsAppJid(jid: string): string {
+  return jid.trim().toLowerCase().replace(/:\d+@/u, '@');
+}
 
 export class WhatsAppSession {
   #status: WhatsAppSessionStatus = 'idle';
@@ -111,6 +187,11 @@ export class WhatsAppSession {
   #startPromise: Promise<void> | undefined;
   // Set during connect — downloads media for the current socket/baileys module.
   #downloadMedia: ((msg: unknown) => Promise<Buffer>) | undefined;
+  /** Latest provider acknowledgement per outbound client message id. */
+  readonly #deliverySignals = new Map<string, WhatsAppDeliverySignal>();
+  readonly #deliveryWaiters = new Map<string, Set<(signal: WhatsAppDeliverySignal) => void>>();
+  readonly #deliveryRecipients = new Map<string, string>();
+  readonly #locallySubmittedMessageIds = new Set<string>();
 
   constructor(private readonly opts: WhatsAppSessionOptions) {}
 
@@ -147,6 +228,10 @@ export class WhatsAppSession {
     try { this.#sock?.end?.(undefined); } catch { /* best-effort */ }
     this.#sock = undefined;
     this.#startPromise = undefined;
+    this.#deliverySignals.clear();
+    this.#deliveryWaiters.clear();
+    this.#deliveryRecipients.clear();
+    this.#locallySubmittedMessageIds.clear();
     this.#setStatus('closed');
   }
 
@@ -175,13 +260,210 @@ export class WhatsAppSession {
     if (!providerMessageId) {
       throw new Error('whatsapp provider accepted no message id; outbound delivery is unverified');
     }
+    this.#locallySubmittedMessageIds.add(providerMessageId);
+    if (this.#locallySubmittedMessageIds.size > 2_000) {
+      const oldest = this.#locallySubmittedMessageIds.values().next().value as string | undefined;
+      if (oldest) this.#locallySubmittedMessageIds.delete(oldest);
+    }
+    const providerRecipient = typeof sent?.key?.remoteJid === 'string' && sent.key.remoteJid
+      ? sent.key.remoteJid
+      : recipient;
+    if (normalizeWhatsAppJid(providerRecipient) !== normalizeWhatsAppJid(recipient)) {
+      throw new Error(`whatsapp provider recipient mismatch: resolved ${recipient}, submitted ${providerRecipient}`);
+    }
+    this.#deliveryRecipients.set(providerMessageId, providerRecipient);
+    const immediateStatus = typeof sent?.status === 'number' ? sent.status : 0;
+    const signal = immediateStatus >= 2
+      ? { status: immediateStatus }
+      : await this.#waitForDeliveryAck(providerMessageId, DELIVERY_ACK_TIMEOUT_MS);
+    if (signal.errorCode) {
+      let rejectionMessage = signal.error ?? whatsappProviderRejectionMessage(signal.errorCode);
+      let remediation = signal.errorCode === '463'
+        ? 'Inspect the linked-device reach-out restriction and do not retry the same companion transport until its enforcement window ends.'
+        : 'Relink the WhatsApp connection or refresh the recipient identity before one controlled retry.';
+      if (signal.errorCode === '463' && typeof this.#sock.fetchAccountReachoutTimelock === 'function') {
+        try {
+          const timelock = await this.#sock.fetchAccountReachoutTimelock();
+          const scope = whatsappReachoutRestrictionScope(timelock?.enforcementType);
+          const ends = timelock?.timeEnforcementEnds instanceof Date
+            ? timelock.timeEnforcementEnds.toISOString()
+            : undefined;
+          if (scope === 'companion') {
+            rejectionMessage = `WhatsApp rejected the Agentis linked-device send because companion outbound is restricted${timelock?.enforcementType ? ` (${timelock.enforcementType})` : ''}${ends ? ` until ${ends}` : ''}. The primary phone app may still send normally.`;
+            remediation = 'Pause outbound sends from this linked Agentis session until the companion restriction expires. A successful phone-app send does not prove the linked companion is unblocked.';
+          }
+        } catch {
+          // Preserve the provider rejection even when the diagnostic query is unavailable.
+        }
+      }
+      throw new ChannelDeliveryRejectedError(
+        'whatsapp',
+        providerMessageId,
+        signal.errorCode,
+        rejectionMessage,
+        remediation,
+      );
+    }
+    const providerStatus = signal.status;
+    const status = whatsappDeliveryStatus(providerStatus);
     return {
       provider: 'whatsapp',
       providerMessageId,
-      status: 'accepted',
+      status,
       acceptedAt: new Date().toISOString(),
-      recipient,
+      recipient: providerRecipient,
+      requestedRecipient: jid,
+      resolvedRecipient: recipient,
+      providerRecipient,
+      providerAcknowledged: status !== 'queued',
+      providerStatus,
     };
+  }
+
+  async #waitForDeliveryAck(messageId: string, timeoutMs: number): Promise<WhatsAppDeliverySignal> {
+    const known = this.#deliverySignals.get(messageId);
+    if (known && (known.status >= 2 || known.errorCode)) return known;
+    return await new Promise<WhatsAppDeliverySignal>((resolve) => {
+      let settled = false;
+      const finish = (signal: WhatsAppDeliverySignal) => {
+        if (settled || (signal.status < 2 && !signal.errorCode)) return;
+        settled = true;
+        clearTimeout(timer);
+        const waiters = this.#deliveryWaiters.get(messageId);
+        waiters?.delete(finish);
+        if (waiters?.size === 0) this.#deliveryWaiters.delete(messageId);
+        resolve(signal);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        this.#deliveryWaiters.get(messageId)?.delete(finish);
+        if (this.#deliveryWaiters.get(messageId)?.size === 0) this.#deliveryWaiters.delete(messageId);
+        resolve(this.#deliverySignals.get(messageId) ?? { status: 0 });
+      }, timeoutMs);
+      timer.unref?.();
+      const waiters = this.#deliveryWaiters.get(messageId) ?? new Set<(signal: WhatsAppDeliverySignal) => void>();
+      waiters.add(finish);
+      this.#deliveryWaiters.set(messageId, waiters);
+      const raced = this.#deliverySignals.get(messageId);
+      if (raced && (raced.status >= 2 || raced.errorCode)) finish(raced);
+    });
+  }
+
+  #recordDeliveryAck(messageId: string, status: number): void {
+    if (!messageId || !Number.isFinite(status)) return;
+    const previous = this.#deliverySignals.get(messageId);
+    if (previous?.errorCode || status <= (previous?.status ?? 0)) return;
+    const signal = { status };
+    this.#deliverySignals.set(messageId, signal);
+    for (const resolve of this.#deliveryWaiters.get(messageId) ?? []) resolve(signal);
+    if (status >= 2) {
+      try {
+        this.opts.onDeliveryUpdate?.({
+          providerMessageId: messageId,
+          status: whatsappDeliveryStatus(status),
+          providerStatus: status,
+          ...(this.#deliveryRecipients.get(messageId) ? { recipient: this.#deliveryRecipients.get(messageId) } : {}),
+        });
+      } catch (err) {
+        this.opts.logger.warn('whatsapp.delivery_update_handler_failed', {
+          connectionId: this.opts.connectionId,
+          providerMessageId: messageId,
+          err: (err as Error).message,
+        });
+      }
+    }
+    // Bound cache growth for long-lived sessions.
+    if (this.#deliverySignals.size > 2_000) {
+      const oldest = this.#deliverySignals.keys().next().value as string | undefined;
+      if (oldest) {
+        this.#deliverySignals.delete(oldest);
+        this.#deliveryRecipients.delete(oldest);
+      }
+    }
+  }
+
+  #recordDeliveryRejection(messageId: string, signal: WhatsAppDeliverySignal): void {
+    if (!messageId || !signal.errorCode) return;
+    this.#deliverySignals.set(messageId, signal);
+    for (const resolve of this.#deliveryWaiters.get(messageId) ?? []) resolve(signal);
+    this.opts.logger.warn('whatsapp.delivery_rejected', {
+      connectionId: this.opts.connectionId,
+      providerMessageId: messageId,
+      providerErrorCode: signal.errorCode,
+    });
+  }
+
+  /** Read-only provider account checks. This never sends a user-visible message. */
+  async outboundHealthCheck(): Promise<ChannelHealthCheck> {
+    const checkedAt = new Date().toISOString();
+    if (!this.#sock || this.#status !== 'open') {
+      return {
+        name: 'outbound', ok: false, code: 'whatsapp_transport_not_open',
+        message: `WhatsApp transport is ${this.#status}.`,
+        remediation: 'Relink or restart the WhatsApp connection.', checkedAt,
+      };
+    }
+    try {
+      const [timelockResult, capResult] = await Promise.allSettled([
+        this.#sock.fetchAccountReachoutTimelock?.(),
+        this.#sock.fetchNewChatMessageCap?.(),
+      ]);
+      const timelock = timelockResult.status === 'fulfilled' ? timelockResult.value : undefined;
+      const cap = capResult.status === 'fulfilled' ? capResult.value : undefined;
+      if (timelock?.isActive) {
+        const enforcementType = typeof timelock.enforcementType === 'string' ? timelock.enforcementType : undefined;
+        const scope = whatsappReachoutRestrictionScope(enforcementType);
+        const ends = timelock.timeEnforcementEnds instanceof Date
+          ? timelock.timeEnforcementEnds.toISOString()
+          : undefined;
+        const companion = scope === 'companion';
+        return {
+          name: 'outbound', ok: false,
+          code: companion ? 'whatsapp_companion_outbound_timelocked' : 'whatsapp_reachout_timelocked',
+          message: companion
+            ? `WhatsApp has restricted outbound sends from linked companion devices${enforcementType ? ` (${enforcementType})` : ''}${ends ? ` until ${ends}` : ''}. The primary phone app can remain usable and may show no warning.`
+            : `WhatsApp reports an active reach-out restriction${enforcementType ? ` (${enforcementType})` : ''}${ends ? ` until ${ends}` : ''}.`,
+          remediation: companion
+            ? 'Pause Agentis QR-session outbound until the companion restriction expires. Do not use successful primary-phone sends as evidence that this linked transport is ready.'
+            : 'Pause affected outbound automation until WhatsApp lifts the restriction; do not repeatedly retry rejected recipients.',
+          evidence: {
+            providerErrorCode: '463',
+            enforcementType: enforcementType ?? null,
+            restrictionScope: scope,
+            appliesToTransport: 'whatsapp_linked_companion',
+            primaryPhoneMayRemainUsable: companion,
+            enforcementEndsAt: ends ?? null,
+            newChatCap: cap ?? null,
+          },
+          checkedAt,
+        };
+      }
+      const total = typeof cap?.total_quota === 'number' ? cap.total_quota : undefined;
+      const used = typeof cap?.used_quota === 'number' ? cap.used_quota : undefined;
+      if (cap?.capping_status === 'CAPPED' || (total !== undefined && used !== undefined && total > 0 && used >= total)) {
+        return {
+          name: 'outbound', ok: false, code: 'whatsapp_new_chat_cap_reached',
+          message: `WhatsApp's new-chat limit is exhausted${total !== undefined && used !== undefined ? ` (${used}/${total})` : ''}. Existing chats may still work.`,
+          remediation: 'Wait for the provider quota cycle to reset or use an approved WhatsApp Business API transport.', checkedAt,
+        };
+      }
+      const quota = total !== undefined && used !== undefined ? ` New-chat usage: ${used}/${total}.` : '';
+      return {
+        name: 'outbound', ok: true,
+        code: cap?.capping_status && cap.capping_status !== 'NONE'
+          ? 'whatsapp_new_chat_limit_warning'
+          : 'whatsapp_outbound_account_ready',
+        message: `WhatsApp reports no active reach-out timelock.${quota}`,
+        checkedAt,
+      };
+    } catch (err) {
+      return {
+        name: 'outbound', ok: false, code: 'whatsapp_account_probe_failed',
+        message: `Could not inspect WhatsApp outbound account state: ${(err as Error).message}`,
+        remediation: 'Confirm the linked session is healthy, then run Channel Test again.', checkedAt,
+      };
+    }
   }
 
   /** Show/clear the "typing…" presence in a chat (best-effort). */
@@ -275,17 +557,56 @@ export class WhatsAppSession {
     sock.ev.on('messages.upsert', (event) => {
       if (event.type !== 'notify') return;
       for (const msg of event.messages) {
-        void this.#handleInbound(msg).catch((err) => {
+        void this.#handleMessage(msg).catch((err) => {
           this.opts.logger.warn('whatsapp.inbound_handler_threw', { err: (err as Error).message });
         });
+      }
+    });
+
+    // `sendMessage()` returning an id proves only local submission. These
+    // provider events are the actual server/delivery/read acknowledgement.
+    sock.ev.on('messages.update', (updates) => {
+      for (const item of updates) {
+        const id = typeof item.key?.id === 'string' ? item.key.id : '';
+        const signal = whatsappDeliverySignal(item.update as WhatsAppMessageUpdate);
+        if (!id || !signal) continue;
+        if (signal.errorCode) this.#recordDeliveryRejection(id, signal);
+        else if (signal.status > 0) this.#recordDeliveryAck(id, signal.status);
+      }
+    });
+    sock.ev.on('message-receipt.update', (updates) => {
+      for (const item of updates) {
+        const id = typeof item.key?.id === 'string' ? item.key.id : '';
+        const receipt = item.receipt as { receiptTimestamp?: unknown; readTimestamp?: unknown; playedTimestamp?: unknown };
+        const status = receipt.playedTimestamp || receipt.readTimestamp ? 4 : receipt.receiptTimestamp ? 3 : 0;
+        if (id && status > 0) this.#recordDeliveryAck(id, status);
       }
     });
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async #handleMessage(msg: any): Promise<void> {
+    const key = msg?.key;
+    if (!key) return;
+    if (key.fromMe) {
+      const externalId = typeof key.id === 'string' ? key.id.trim() : '';
+      if (!externalId || this.#locallySubmittedMessageIds.has(externalId)) return;
+      const chatId = observedWhatsAppChatJid(key);
+      if (!chatId || chatId === 'status@broadcast') return;
+      const body = extractWhatsAppText(msg.message) ?? '[Outbound WhatsApp message]';
+      // Allow the explicit Agentis send path to persist its provider id first.
+      // The supervisor performs a second durable dedupe before mirroring.
+      const timer = setTimeout(() => this.opts.onOutboundObserved?.({ externalId, chatId, body }), 750);
+      if (typeof timer === 'object' && 'unref' in timer) timer.unref();
+      return;
+    }
+    await this.#handleInbound(msg);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async #handleInbound(msg: any): Promise<void> {
     const key = msg?.key;
-    if (!key || key.fromMe) return; // ignore our own echoes
+    if (!key || key.fromMe) return;
     const remoteJid: string | undefined = key.remoteJid;
     if (!remoteJid || remoteJid === 'status@broadcast') return;
     // baileys 7.x addresses many 1:1 chats by a hidden LID (`<id>@lid`). The same
@@ -294,10 +615,7 @@ export class WhatsAppSession {
     // real number and replies thread back to the user's normal WhatsApp chat —
     // replying to the raw @lid lands in a phantom chat. Non-LID chats are
     // unchanged, and we fall back to the LID if no PN alt is present.
-    const remoteJidAlt: string | undefined = key.remoteJidAlt;
-    const chatJid = remoteJid.endsWith('@lid') && remoteJidAlt && remoteJidAlt.includes('@s.whatsapp.net')
-      ? remoteJidAlt.replace(/:\d+@/, '@')
-      : remoteJid;
+    const chatJid = observedWhatsAppChatJid(key) ?? remoteJid;
     if (chatJid !== remoteJid) {
       this.opts.logger.info('whatsapp.lid_mapped_to_pn', { connectionId: this.opts.connectionId, lid: remoteJid, repliesTo: chatJid });
     } else if (remoteJid.endsWith('@lid')) {
@@ -407,6 +725,15 @@ export class WhatsAppSession {
       ...(this.#selfId ? { selfId: this.#selfId } : {}),
     });
   }
+}
+
+function observedWhatsAppChatJid(key: { remoteJid?: unknown; remoteJidAlt?: unknown }): string | null {
+  const remoteJid = typeof key.remoteJid === 'string' ? key.remoteJid : '';
+  if (!remoteJid) return null;
+  const remoteJidAlt = typeof key.remoteJidAlt === 'string' ? key.remoteJidAlt : '';
+  return remoteJid.endsWith('@lid') && remoteJidAlt.includes('@s.whatsapp.net')
+    ? remoteJidAlt.replace(/:\d+@/u, '@')
+    : remoteJid;
 }
 
 /**

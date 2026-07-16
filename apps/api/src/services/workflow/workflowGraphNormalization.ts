@@ -1,4 +1,4 @@
-import type { HttpRequestNodeConfig, WorkflowGraph, WorkflowNode } from '@agentis/core';
+import { canonicalizeWorkflowGraphContracts, type HttpRequestNodeConfig, type WorkflowGraph, type WorkflowNode } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { repairIntegrationOperations, type OperationRepair } from '../integrationOperationRepair.js';
 import { listIntegrationManifests } from '../integrationRegistry.js';
@@ -8,7 +8,8 @@ export interface GraphShapeRepair {
     | 'filter_promoted_to_transform'
     | 'http_response_mapping_normalized'
     | 'router_branch_shape_normalized'
-    | 'router_condition_normalized';
+    | 'router_condition_normalized'
+    | 'workflow_contract_normalized';
   nodeId: string;
   message: string;
 }
@@ -23,7 +24,13 @@ export function normalizeWorkflowGraph(
   workspaceId: string,
   graph: WorkflowGraph,
 ): WorkflowGraphNormalizationResult {
-  const shapeNormalized = normalizeLegacyNodeContracts(graph);
+  const contractNormalized = canonicalizeWorkflowGraphContracts(graph);
+  const contractRepairs: GraphShapeRepair[] = contractNormalized.changed ? [{
+    kind: 'workflow_contract_normalized',
+    nodeId: '__graph__',
+    message: 'Normalized legacy JSON-Schema input/output contracts to the canonical Agentis fields DSL.',
+  }] : [];
+  const shapeNormalized = normalizeLegacyNodeContracts(contractNormalized.graph);
   const operationCatalog = Object.fromEntries(
     listIntegrationManifests(db, workspaceId).map((manifest) => [
       manifest.service.toLowerCase(),
@@ -33,7 +40,7 @@ export function normalizeWorkflowGraph(
   const operationNormalized = repairIntegrationOperations(shapeNormalized.graph, operationCatalog);
   return {
     graph: operationNormalized.graph,
-    repairs: [...shapeNormalized.repairs, ...operationNormalized.repairs],
+    repairs: [...contractRepairs, ...shapeNormalized.repairs, ...operationNormalized.repairs],
   };
 }
 

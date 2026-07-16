@@ -15,6 +15,17 @@ projections share one registry so there is no protocol drift between channels, M
 | Slack | bidirectional | threads, file upload via external-upload flow |
 | Telegram | bidirectional | webhook or polling; full inbound |
 | WhatsApp | bidirectional | Baileys (QR link); media transcription |
+
+Channel health checks are read-only: pressing **Test connection** validates credentials,
+transport, routing, inbound readiness, and runtime availability without sending a message.
+An actual outbound test is an explicit channel send.
+
+For WhatsApp QR sessions, the id returned by `sendMessage()` is initially only a client
+correlation id. Agentis records that attempt as `queued` and does not report `sent:true`
+or advance workflow state until a WhatsApp server acknowledgement arrives. Later server,
+delivery, and read receipts promote the durable journal to `accepted`, `delivered`, and
+`read`. Requested, provider-resolved, and provider-echoed recipients remain separate in
+the receipt so canonical number resolution is visible without being mistaken for proof.
 | Voice | webhook ingress | transcription in, TTS reply buffer out |
 
 Rich attachments and per-channel access control are supported; peer identity is resolved

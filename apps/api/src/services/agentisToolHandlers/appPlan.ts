@@ -25,6 +25,8 @@ const planWorkflowSchema = z.object({
   dependsOn: z.array(z.string()).default([]),
   /** How it wakes: manual | schedule | webhook | listener | conversation. */
   trigger: z.string().optional(),
+  /** Runtime activation is distinct from build order/decomposition. */
+  activation: z.enum(['after_success', 'event', 'operator']).optional(),
   /** Persisted definition of done installed after authoring. */
   success: z.object({
     objective: z.string().min(1),
@@ -92,10 +94,10 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
           '[PLAN-FIRST] Before building, DECOMPOSE a non-trivial request into an App of parts and get an ordered '
           + 'build checklist. Use this whenever the intent is multi-step, conversational, recurring, or names more than '
           + 'one job (e.g. "find leads AND message them AND build their store") — do NOT collapse it into one workflow. '
-          + 'You enumerate: the workflows (each with a purpose + dependsOn), whether it needs a per-contact conversation '
+          + 'You enumerate: the workflows (each with a purpose + build dependencies + runtime activation), whether it needs a per-contact conversation '
           + 'script, the datastore collections, the resident cast, and the outbound policy (rate/quiet-hours). It ensures '
           + 'the App, applies the policy, records the blueprint, and returns the exact next calls IN ORDER '
-          + '(build each workflow → SWIFT-verify it → define the script → …). Then execute the checklist.',
+          + '(build each workflow → free SWIFT proof → wire the senses/surface → compile the whole App → one real debug run). Then execute the checklist.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -104,7 +106,7 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
             intent: { type: 'string', description: 'What this App is for, in one or two sentences.' },
             workflows: {
               type: 'array',
-              description: 'Distinct automation subroutines. Each: { key, title, purpose, dependsOn?: [keys], trigger?, success?: { objective, acceptance[], sufficiency?, constraints? } }. Keys must be unique and dependencies acyclic.',
+              description: 'Distinct automation subroutines. Each: { key, title, purpose, dependsOn?: [keys], trigger?, activation?: "after_success"|"event"|"operator", success? }. `dependsOn` orders construction; activation decides runtime. Human replies/permissions, channel messages, webhooks, listeners, and schedules are `event`, never `after_success`.',
               items: { type: 'object' },
             },
             conversation: { type: 'boolean', description: 'True when the App runs a per-contact outreach script (→ agentis.conversation.define).' },
@@ -159,8 +161,8 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
           checklist,
           message:
             `App plan recorded (${args.workflows.length} workflow(s)${args.conversation ? ' + a conversation script' : ''}). `
-            + 'Now EXECUTE the checklist in order: build each workflow and SWIFT-verify it (dry_run → debug → verdict) '
-            + 'before moving on; then wire the senses (script/triggers). Do not collapse these into one workflow.',
+            + 'Now EXECUTE the checklist in order: build each workflow and complete its FREE proof (scope → dry_run → suite), '
+            + 'then wire the senses (script/triggers) and compile the whole App. Spend on one real debug run only after app.compile is ready. Do not collapse these into one workflow.',
           compass: { stage: 'authored' as const, summary: 'App decomposed into parts. Execute the checklist top-to-bottom.', next: checklist.slice(0, 1).map(({ tool, args: a, why }) => ({ tool, args: a, why })) },
         };
       },
@@ -216,16 +218,25 @@ export function buildChecklist(appId: string, args: z.infer<typeof appPlanSchema
       tool: 'agentis.workflow.chain',
       args: {
         appId,
-        workflows: args.workflows.map((wf, order) => ({
-          workflowId: `\${workflows.${wf.key}.workflowId}`,
-          order,
-          purpose: wf.purpose,
-          dependsOn: wf.dependsOn.map((key) => `\${workflows.${key}.workflowId}`),
-          chainOn: 'success',
-          enabled: true,
-        })),
+        workflows: args.workflows.map((wf, order) => {
+          const activation = workflowActivation(wf);
+          return {
+            workflowId: `\${workflows.${wf.key}.workflowId}`,
+            order,
+            purpose: wf.purpose,
+            // Build prerequisites are not automatically runtime progression.
+            // Event-driven work is woken by its real persisted sense/script.
+            dependsOn: activation === 'after_success'
+              ? wf.dependsOn.map((key) => `\${workflows.${key}.workflowId}`)
+              : [],
+            operatorEntrypoint: activation === 'operator'
+              || (activation === 'after_success' && wf.dependsOn.length === 0),
+            chainOn: 'success',
+            enabled: true,
+          };
+        }),
       },
-      why: 'Compile blueprint keys into persisted dependency rules. Display order without dependsOn is not executable orchestration.',
+      why: 'Compile runtime activation honestly: success-gated dependencies for direct progression, operator entrypoints for manual roots, and event-only roots that wait for their persisted channel/listener/script instead of Run Pipeline.',
       dependsOnSteps: args.workflows.map((wf) => `build_${wf.key}`),
     });
   }
@@ -244,13 +255,20 @@ export function buildChecklist(appId: string, args: z.infer<typeof appPlanSchema
   const prerequisites = steps.map((step) => step.id);
   steps.push({
     step: n++,
-    id: 'verify_app',
-    tool: 'agentis.app.doctor',
-    args: { appId },
-    why: 'Verify workflows, rules, triggers, contracts, connections, data, and surfaces before reporting the App as working.',
+    id: 'compile_app',
+    tool: 'agentis.app.compile',
+    args: { appId, target: 'debug' },
+    why: 'Compile the whole executable App — topology, activation, contracts, current-graph free tests, runtime/channels, and surfaces — before spending on one real debug run.',
     dependsOnSteps: prerequisites,
   });
   return steps;
+}
+
+function workflowActivation(workflow: z.infer<typeof planWorkflowSchema>): 'after_success' | 'event' | 'operator' {
+  if (workflow.activation) return workflow.activation;
+  const trigger = workflow.trigger?.toLowerCase() ?? '';
+  if (/conversation|reply|permission|inbound|channel|webhook|listener|schedule|cron|event/.test(trigger)) return 'event';
+  return workflow.dependsOn.length > 0 ? 'after_success' : 'operator';
 }
 
 /** Stable order that puts a workflow after everything it dependsOn (best-effort). */

@@ -81,4 +81,25 @@ describe('agentis data tool contract', () => {
     expect(res.errorMessage).toMatch(/Alpha/);
     expect(res.errorMessage).toMatch(/Beta/);
   });
+
+  it('applies a data batch atomically instead of leaving half a repair committed', async () => {
+    const appId = await makeApp('Atomic repair');
+    await exec('agentis.data.define_collection', {
+      appId,
+      name: 'items',
+      schema: { fields: [{ key: 'name', type: 'string', required: true }] },
+    });
+
+    const failed = await exec('agentis.data.batch', {
+      appId,
+      operations: [
+        { op: 'insert', collection: 'items', record: { name: 'must roll back' } },
+        { op: 'insert', collection: 'items', record: {} },
+      ],
+    });
+    expect(failed.ok).toBe(false);
+    const after = await exec('agentis.data.query', { appId, collection: 'items' });
+    expect(after.ok).toBe(true);
+    expect((after.output as { rows: unknown[] }).rows).toHaveLength(0);
+  });
 });

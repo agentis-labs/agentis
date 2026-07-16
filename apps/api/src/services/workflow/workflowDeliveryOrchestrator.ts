@@ -141,6 +141,10 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
   let iterations = 0;
   let lastVerdict: RunVerdict | undefined;
   let lastRunId: string | undefined;
+  // Preflight is deterministic for a graph + fixed delivery inputs. A repair may
+  // legitimately fix external state without changing the graph; do not recompute
+  // the exact same full-graph proof before its next real verification run.
+  const preflightByGraph = new Map<string, ReturnType<typeof preflightWorkflow>>();
   for (let i = 1; i <= maxIterations; i += 1) {
     iterations = i;
     if (Date.now() > deadline) return fail(timeline, workflowId, 'failed', `Delivery budget (${Math.round(maxWallMs / 1000)}s) exhausted after ${i - 1} attempt(s).`, { appId, runId: lastRunId, verdict: lastVerdict, iterations: i - 1 });
@@ -149,8 +153,15 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
     const graph = row.graph as WorkflowGraph;
 
     // 2a. Dry-run — deterministic, free. Catch lost/empty payloads pre-spend.
-    mark('dry_run', `Attempt ${i}: proving the data flow (deterministic)`);
-    const report = preflightWorkflow({ db: deps.db, workspaceId: ctx.workspaceId, workflowId, graph, inputs: args.inputs, mode: 'canvas' });
+    const graphHash = graphContentHash(graph);
+    let report = preflightByGraph.get(graphHash);
+    if (report) {
+      mark('dry_run_reused', `Attempt ${i}: reused unchanged deterministic data-flow proof`);
+    } else {
+      mark('dry_run', `Attempt ${i}: proving the data flow (deterministic)`);
+      report = preflightWorkflow({ db: deps.db, workspaceId: ctx.workspaceId, workflowId, graph, inputs: args.inputs, mode: 'canvas' });
+      preflightByGraph.set(graphHash, report);
+    }
     const blocking = report.issues.filter((issue) => issue.severity === 'error');
     if (blocking.length > 0) {
       if (i < maxIterations) { mark('repair', `Dry-run blocked (${blocking[0]!.message}); repairing`); await runRepair(deps, ctx, args, workflowId, args.goal ?? '', syntheticVerdict(blocking.map((b) => b.message)), i); continue; }

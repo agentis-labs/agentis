@@ -79,10 +79,7 @@ export function NotificationPanel() {
       setAcknowledgedIds(saved);
       return;
     }
-    const currentIds = new Set(items.map((item) => item.id));
-    const next = new Set([...saved].filter((id) => currentIds.has(id)));
-    setAcknowledgedIds(next);
-    writeAcknowledgedNotificationIds(workspaceId, next);
+    setAcknowledgedIds(saved);
   }, [items, workspaceId, loading]);
 
   useEffect(() => {
@@ -91,10 +88,7 @@ export function NotificationPanel() {
       setSeenIds(saved);
       return;
     }
-    const currentIds = new Set(items.map((item) => item.id));
-    const next = new Set([...saved].filter((id) => currentIds.has(id)));
-    setSeenIds(next);
-    writeSeenNotificationIds(workspaceId, next);
+    setSeenIds(saved);
   }, [items, workspaceId, loading]);
 
   const panelItems = useMemo(

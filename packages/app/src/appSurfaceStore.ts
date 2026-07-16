@@ -13,6 +13,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import {
   AgentisError,
   appPolicySchema,
+  ensureViewNodeIds,
   repairSurface,
   viewNodeSchema,
   surfaceActionSchema,
@@ -71,7 +72,7 @@ export class AppSurfaceStore {
       appId: row.appId,
       name: row.name,
       kind: row.kind as SurfaceKind,
-      view: (row.viewJson ?? null) as ViewNode | null,
+      view: row.viewJson ? ensureViewNodeIds(row.viewJson as ViewNode) : null,
       actions: (row.actionsJson ?? []) as SurfaceAction[],
       shareable: row.shareable,
       revision: row.revision,
@@ -255,6 +256,35 @@ export class AppSurfaceStore {
   }
 
   /**
+   * Remove one component by its stable semantic id. This is the safe agent path:
+   * it avoids brittle array indexes, re-validates the resulting tree, and keeps
+   * the operation revisioned/realtime just like ui_patch.
+   */
+  removeNode(workspaceId: string, appId: string, name: string, nodeId: string): AppSurface {
+    const current = this.get(workspaceId, appId, name);
+    if (!current.view) throw new AgentisError('VALIDATION_FAILED', `surface ${name} has no view`);
+    if (current.view.nodeId === nodeId) {
+      throw new AgentisError('VALIDATION_FAILED', 'the root component cannot be removed; delete the surface or render a replacement root');
+    }
+    const result = removeNodeById(current.view, nodeId);
+    if (!result.removed) throw new AgentisError('RESOURCE_NOT_FOUND', `surface component not found: ${nodeId}`);
+    const parsed = viewNodeSchema.parse(result.node);
+    const repaired = repairSurface(parsed, {
+      collections: this.collectionNames(appId),
+      ...(current.actions.length > 0 ? { actions: current.actions } : {}),
+    }).view;
+    this.requireCustomCodeAllowed(workspaceId, appId, repaired);
+    this.db
+      .update(schema.appSurfaces)
+      .set({ viewJson: repaired, revision: current.revision + 1, updatedAt: new Date().toISOString() })
+      .where(and(eq(schema.appSurfaces.appId, appId), eq(schema.appSurfaces.name, name)))
+      .run();
+    const surface = this.get(workspaceId, appId, name);
+    this.deps.emit?.({ appId, workspaceId, event: 'patch', surfaceId: surface.id, revision: surface.revision, payload: { removedNodeId: nodeId } });
+    return surface;
+  }
+
+  /**
    * ui_perform_region (Phase M3 / G12) — the agent PERFORMS a transient region
    * into a stable `AgentRegion` slot, live. The performed child is ephemeral: it
    * is broadcast over the realtime bus (SURFACE_RENDER carrying `region`) and the
@@ -412,6 +442,69 @@ function removeAtPath(root: unknown, segments: Array<string | number>): unknown 
     : { ...(root as Record<string | number, unknown>) };
   clone[head!] = removeAtPath(clone[head!], rest);
   return clone;
+}
+
+function removeNodeById(node: ViewNode, nodeId: string): { node: ViewNode; removed: boolean } {
+  if (node.type === 'Split') {
+    if (node.left.nodeId === nodeId) return { node: node.right, removed: true };
+    if (node.right.nodeId === nodeId) return { node: node.left, removed: true };
+    const left = removeNodeById(node.left, nodeId);
+    if (left.removed) return { node: { ...node, left: left.node }, removed: true };
+    const right = removeNodeById(node.right, nodeId);
+    return right.removed ? { node: { ...node, right: right.node }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'Tabs') {
+    let removed = false;
+    const tabs = node.tabs.map((tab) => ({
+      ...tab,
+      children: tab.children.flatMap((child) => {
+        if (child.nodeId === nodeId) { removed = true; return []; }
+        if (removed) return [child];
+        const result = removeNodeById(child, nodeId);
+        if (result.removed) removed = true;
+        return [result.node];
+      }),
+    }));
+    return removed ? { node: { ...node, tabs }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'Accordion') {
+    let removed = false;
+    const sections = node.sections.map((section) => ({
+      ...section,
+      children: section.children.flatMap((child) => {
+        if (child.nodeId === nodeId) { removed = true; return []; }
+        if (removed) return [child];
+        const result = removeNodeById(child, nodeId);
+        if (result.removed) removed = true;
+        return [result.node];
+      }),
+    }));
+    return removed ? { node: { ...node, sections }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'AgentRegion' && node.child) {
+    if (node.child.nodeId === nodeId) return { node: { ...node, child: undefined }, removed: true };
+    const child = removeNodeById(node.child, nodeId);
+    return child.removed ? { node: { ...node, child: child.node }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'List') {
+    if (node.item.nodeId === nodeId) {
+      throw new AgentisError('VALIDATION_FAILED', 'List.item is required; remove the List component instead');
+    }
+    const item = removeNodeById(node.item, nodeId);
+    return item.removed ? { node: { ...node, item: item.node }, removed: true } : { node, removed: false };
+  }
+  if ('children' in node && Array.isArray((node as { children?: unknown }).children)) {
+    let removed = false;
+    const children = (node as { children: ViewNode[] }).children.flatMap((child) => {
+      if (child.nodeId === nodeId) { removed = true; return []; }
+      if (removed) return [child];
+      const result = removeNodeById(child, nodeId);
+      if (result.removed) removed = true;
+      return [result.node];
+    });
+    return removed ? { node: { ...node, children } as ViewNode, removed: true } : { node, removed: false };
+  }
+  return { node, removed: false };
 }
 
 /** Find an `AgentRegion` slot by its region id anywhere in the tree. */

@@ -129,14 +129,14 @@ describe('PartialReplayService — four modes', () => {
     // C should be ready to fire (B's output pre-fed).
     const readyIds = out.initialState.readyQueue.map((r) => r.nodeId);
     expect(readyIds).toContain('C');
+    expect(readyIds).not.toContain('A');
     // D still waiting on C.
     expect(out.initialState.waitingInputs.D?.requiredInputs).toEqual(['C']);
   });
 
-  it('replay-failed-branch resets the entire failed lineage (failed node + all its ancestors)', () => {
-    // Linear A → B → C → D where C failed. Keep set is computed as
-    // (completed) - (ancestors-of-failed ∪ failed) = {A,B} - {A,B,C} = ∅.
-    // The trigger A re-fires from scratch.
+  it('replay-failed-branch preserves completed ancestors and resumes at the failed frontier', () => {
+    // Linear A → B → C → D where C failed. A and B are proven work and
+    // become the checkpoint; only C and its descendant D are reset.
     const graph = linearGraph();
     const { runId } = seedSource({
       graph,
@@ -149,20 +149,19 @@ describe('PartialReplayService — four modes', () => {
       mode: 'replay-failed-branch',
       userId: ctx.user.id,
     });
-    expect(out.initialState.completedNodeIds).toEqual([]);
+    expect(out.initialState.completedNodeIds.sort()).toEqual(['A', 'B']);
     expect(out.initialState.failedNodeIds).toEqual([]);
     const readyIds = out.initialState.readyQueue.map((r) => r.nodeId);
-    expect(readyIds).toContain('A');
-    expect(out.initialState.nodeStates.B?.status).toBe('PENDING');
+    expect(readyIds).toContain('C');
+    expect(readyIds).not.toContain('A');
+    expect(out.initialState.nodeStates.B?.status).toBe('COMPLETED');
     expect(out.initialState.nodeStates.C?.status).toBe('PENDING');
+    expect(out.initialState.nodeStates.D?.status).toBe('PENDING');
   });
 
   it('replay-failed-branch preserves completed siblings of the failed branch', () => {
-    // Forked graph:  A → B  ;  A → C → D (D failed).
-    // Failed lineage = {D, C, A}. Completed B is NOT an ancestor of D.
-    // Keep set = {B}. But B's only input is A, which we discarded — so B
-    // remains pre-seeded with the source's recorded outputData and stays
-    // COMPLETED in the new run.
+    // Forked graph: A → B; A → C → D (D failed). Completed work is
+    // preserved and only D, the actual failed frontier, is reset.
     const graph: WorkflowGraph = {
       version: 1,
       viewport: { x: 0, y: 0, zoom: 1 },
@@ -189,9 +188,8 @@ describe('PartialReplayService — four modes', () => {
       mode: 'replay-failed-branch',
       userId: ctx.user.id,
     });
-    expect(out.initialState.completedNodeIds).toContain('B');
-    expect(out.initialState.completedNodeIds).not.toContain('A');
-    expect(out.initialState.completedNodeIds).not.toContain('C');
+    expect(out.initialState.completedNodeIds.sort()).toEqual(['A', 'B', 'C']);
+    expect(out.initialState.readyQueue.map((item) => item.nodeId)).toContain('D');
   });
 
   it('replay-failed-branch treats handled node errors as failed lineage too', () => {
@@ -225,8 +223,57 @@ describe('PartialReplayService — four modes', () => {
       mode: 'replay-failed-branch',
       userId: ctx.user.id,
     });
-    expect(out.initialState.completedNodeIds).toEqual([]);
+    expect(out.initialState.completedNodeIds.sort()).toEqual(['A', 'B']);
     expect(out.initialState.nodeStates.C?.status).toBe('PENDING');
+    expect(out.initialState.nodeStates.D?.status).toBe('PENDING');
+    expect(out.initialState.readyQueue.map((item) => item.nodeId)).toContain('C');
+  });
+
+  it('replay-failed-branch derives a frontier from a deficient completed-run verdict', () => {
+    const graph = linearGraph();
+    const { runId } = seedSource({ graph, completedNodeIds: ['A', 'B', 'C', 'D'] });
+    const row = ctx.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId))
+      .get()!;
+    const sourceState = row.runState as WorkflowRunState & { verdict?: unknown };
+    sourceState.verdict = {
+      outcome: 'failed_checks',
+      deficiencies: [{
+        checkId: 'delivered',
+        claim: 'delivery exists',
+        detail: 'world probe did not find a delivery',
+        producingNodeIds: ['C'],
+      }],
+    };
+    ctx.db
+      .update(schema.workflowRuns)
+      .set({ runState: sourceState as unknown as object })
+      .where(eq(schema.workflowRuns.id, runId))
+      .run();
+
+    const out = svc.prepare({
+      workspaceId: ctx.workspace.id,
+      sourceRunId: runId,
+      mode: 'replay-failed-branch',
+      userId: ctx.user.id,
+    });
+
+    expect(out.initialState.completedNodeIds.sort()).toEqual(['A', 'B']);
+    expect(out.initialState.readyQueue.map((item) => item.nodeId)).toContain('C');
+    expect(out.initialState.nodeStates.D?.status).toBe('PENDING');
+  });
+
+  it('replay-failed-branch refuses an empty frontier instead of creating a stuck child run', () => {
+    const graph = linearGraph();
+    const { runId } = seedSource({ graph, completedNodeIds: ['A', 'B', 'C', 'D'] });
+    expect(() => svc.prepare({
+      workspaceId: ctx.workspace.id,
+      sourceRunId: runId,
+      mode: 'replay-failed-branch',
+      userId: ctx.user.id,
+    })).toThrow(/no failed node or verdict-producing node/);
   });
 
   it('replay-with-edited-node patches the target node config without mutating the source workflow', () => {

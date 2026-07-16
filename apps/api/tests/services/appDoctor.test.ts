@@ -47,6 +47,20 @@ describe('validateAppConformance', () => {
     ]));
   });
 
+  it('detects a duplicate custom Run Pipeline action beside the built-in control panel', () => {
+    const report = validateAppConformance(snapshot({
+      workflows: [{ id: 'a', title: 'A', graph: graph(), settings: {}, triggers: [] }],
+      surfaces: [{
+        id: 'home',
+        name: 'Home',
+        view: { type: 'OrchestrationPanel' },
+        actions: [{ name: 'run_pipeline', kind: 'workflow', target: 'a' }],
+      }],
+    }));
+
+    expect(report.findings.map((finding) => finding.code)).toContain('SURFACE_DUPLICATE_ORCHESTRATION_CONTROLS');
+  });
+
   it('requires accomplished outcomes for success chains and detects disabled upstreams', () => {
     const report = validateAppConformance(snapshot({ workflows: [
       { id: 'a', title: 'Acquire', graph: graph(), settings: { appBinding: { enabled: false } }, triggers: [] },
@@ -129,5 +143,26 @@ describe('validateAppConformance', () => {
     expect(report.summary.executableRules).toBe(1);
     expect(report.findings.map((finding) => finding.code)).not.toContain('SURFACE_ORCHESTRATION_WITHOUT_RULES');
     expect(report.findings.map((finding) => finding.code)).not.toContain('OUTCOME_CHAIN_USES_COMPLETION');
+  });
+
+  it('rejects an event-only root when no persisted event can reach it', () => {
+    const report = validateAppConformance(snapshot({ workflows: [
+      { id: 'event-worker', title: 'Reply worker', graph: graph(), settings: { appBinding: { operatorEntrypoint: false } }, triggers: [] },
+    ] }));
+
+    expect(report.topology.roots).toEqual([]);
+    expect(report.findings.map((finding) => finding.code)).toContain('ACTIVATION_ROOT_UNREACHABLE');
+  });
+
+  it('accepts an event-only root when a persisted event rule targets it', () => {
+    const report = validateAppConformance(snapshot({
+      workflows: [
+        { id: 'source', title: 'Source', graph: graph(), settings: {}, triggers: [] },
+        { id: 'event-worker', title: 'Reply worker', graph: graph(), settings: { appBinding: { operatorEntrypoint: false } }, triggers: [] },
+      ],
+      subscriptions: [{ id: 'rule', sourceWorkflowId: 'source', targetWorkflowId: 'event-worker', eventType: 'run.accomplished', enabled: true }],
+    }));
+
+    expect(report.findings.map((finding) => finding.code)).not.toContain('ACTIVATION_ROOT_UNREACHABLE');
   });
 });

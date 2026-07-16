@@ -505,6 +505,16 @@ export const workflowPhaseSchema = z.object({
   rollbackPlan: z.string().max(4000).optional(),
 });
 
+export const workflowContractSchema = z.object({
+  fields: z.array(z.object({
+    key: z.string().trim().min(1),
+    type: z.enum(['string', 'number', 'boolean', 'array', 'object', 'any']),
+    required: z.boolean().optional(),
+    description: z.string().optional(),
+    schema: z.string().optional(),
+  })).min(1),
+});
+
 // Legacy "Studio" surface schemas removed — UI surfaces now live on the Agentic
 // App (app_surfaces + AG-UI ViewNode, AGENTIC-APPS-10X §4). `.passthrough()`
 // keeps any stored graph JSON that still carries an old `surfaces` key valid.
@@ -514,6 +524,8 @@ export const workflowGraphSchema = z.object({
   nodes: z.array(workflowNodeSchema),
   edges: z.array(workflowEdgeSchema),
   viewport: z.object({ x: z.number(), y: z.number(), zoom: z.number() }),
+  inputContract: workflowContractSchema.optional(),
+  outputContract: workflowContractSchema.optional(),
   phases: z.array(workflowPhaseSchema).optional(),
 }).passthrough();
 

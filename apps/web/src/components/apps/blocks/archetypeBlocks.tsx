@@ -16,10 +16,10 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { ChevronRight, Columns3, GanttChartSquare, Search, X } from 'lucide-react';
-import type { ActionRef, Tone, ViewNode } from '@agentis/core';
+import { Archive, Check, ChevronRight, Columns3, Edit3, ExternalLink, GanttChartSquare, MoreHorizontal, MoveRight, Pause, Play, RotateCcw, Search, Trash2, X } from 'lucide-react';
+import type { RecordActionRef, RecordCondition, RecordPredicate, Tone, ViewNode } from '@agentis/core';
 import { registerBlock } from './registry';
-import { EmptyState, PanelShell, SkeletonRows, useActionInvoker, useBoundRows, useRuntime } from '../ViewRenderer';
+import { EmptyState, PanelShell, SkeletonRows, resolveActionArgs, useActionInvoker, useBoundRows, useRuntime } from '../ViewRenderer';
 import { toneFillClass, toneFromStatus, toneSoftClass } from '../styleIntent';
 import { seriesColor } from '../theme';
 import { displayLabel, isIdLike } from '../../../lib/prettyRef';
@@ -105,13 +105,147 @@ function formatValue(v: unknown): string {
 
 const DRAG_MIME = 'application/agentis-kanban-card';
 
+function valueAt(source: Row, path: string): unknown {
+  return path.split('.').filter(Boolean).reduce<unknown>((value, key) => (
+    value != null && typeof value === 'object' ? (value as Row)[key] : undefined
+  ), source);
+}
+
+function conditionValue(value: unknown, row: Row, state: Row): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const bind = value as { $row?: string; $bind?: string; $state?: string };
+  if (bind.$row) return valueAt(row, bind.$row);
+  if (bind.$bind) return valueAt(row, bind.$bind);
+  if (bind.$state) return valueAt(state, bind.$state);
+  return value;
+}
+
+function matchesCondition(condition: RecordCondition, row: Row, state: Row): boolean {
+  const actual = valueAt(row, condition.field);
+  const expected = conditionValue(condition.value, row, state);
+  const list = Array.isArray(expected) ? expected : [expected];
+  switch (condition.op) {
+    case 'neq': return actual !== expected;
+    case 'in': return list.includes(actual);
+    case 'not_in': return !list.includes(actual);
+    case 'exists': return actual !== undefined && actual !== null;
+    case 'not_exists': return actual === undefined || actual === null;
+    case 'truthy': return Boolean(actual);
+    case 'falsy': return !actual;
+    case 'contains': return Array.isArray(actual) ? actual.includes(expected) : String(actual ?? '').includes(String(expected ?? ''));
+    case 'gt': return Number(actual) > Number(expected);
+    case 'gte': return Number(actual) >= Number(expected);
+    case 'lt': return Number(actual) < Number(expected);
+    case 'lte': return Number(actual) <= Number(expected);
+    case 'eq':
+    default: return actual === expected;
+  }
+}
+
+function matchesPredicate(predicate: RecordPredicate | undefined, row: Row, state: Row): boolean {
+  if (!predicate) return true;
+  const all = predicate.all?.every((condition) => matchesCondition(condition, row, state)) ?? true;
+  const any = predicate.any?.some((condition) => matchesCondition(condition, row, state)) ?? true;
+  return all && any;
+}
+
+function visibleRecordActions(actions: RecordActionRef[] | undefined, row: Row, state: Row): RecordActionRef[] {
+  return (actions ?? []).filter((action) => matchesPredicate(action.visibleWhen, row, state));
+}
+
+function actionIcon(action: RecordActionRef) {
+  const props = { size: 14, strokeWidth: 1.8 };
+  switch (action.icon) {
+    case 'open': return <ExternalLink {...props} />;
+    case 'edit': return <Edit3 {...props} />;
+    case 'move': return <MoveRight {...props} />;
+    case 'play': return <Play {...props} />;
+    case 'pause': return <Pause {...props} />;
+    case 'retry': return <RotateCcw {...props} />;
+    case 'approve': return <Check {...props} />;
+    case 'archive': return <Archive {...props} />;
+    case 'delete': return <Trash2 {...props} />;
+    default: return <MoreHorizontal {...props} />;
+  }
+}
+
+function actionLabel(action: RecordActionRef): string {
+  return action.label ?? humanize(action.action);
+}
+
+async function confirmRecordAction(action: RecordActionRef): Promise<boolean> {
+  if (!action.confirm) return true;
+  return window.confirm(`${action.confirm.title}\n\n${action.confirm.message}`);
+}
+
+interface RecordMenuState { row: Row; x: number; y: number }
+
+function RecordContextMenu({ menu, actions, state, busy, onRun, onClose }: {
+  menu: RecordMenuState;
+  actions: RecordActionRef[];
+  state: Row;
+  busy: string | null;
+  onRun: (action: RecordActionRef, row: Row) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const close = () => onClose();
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', escape);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', escape); };
+  }, [onClose]);
+  const visible = visibleRecordActions(actions, menu.row, state);
+  const left = Math.min(menu.x, window.innerWidth - 248);
+  const top = Math.min(menu.y, window.innerHeight - Math.max(72, visible.length * 48 + 16));
+  return (
+    <div
+      role="menu"
+      aria-label="Record actions"
+      style={{ left: Math.max(8, left), top: Math.max(8, top) }}
+      className="fixed z-50 w-60 overflow-hidden rounded-card border border-line bg-surface p-1.5 shadow-floating"
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {visible.length === 0 ? <div className="px-2.5 py-3 text-[12px] text-text-muted">No actions are available in this state.</div> : visible.map((action) => {
+        const disabled = matchesPredicate(action.disabledWhen, menu.row, state);
+        return (
+          <button
+            key={action.action}
+            type="button"
+            role="menuitem"
+            disabled={disabled || busy === action.action}
+            title={disabled ? action.disabledReason : action.description}
+            onClick={() => onRun(action, menu.row)}
+            className={clsx(
+              'flex w-full items-start gap-2.5 rounded-btn px-2.5 py-2 text-left transition-colors',
+              action.tone === 'danger' ? 'text-danger hover:bg-danger/10' : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
+              'disabled:cursor-not-allowed disabled:opacity-45',
+            )}
+          >
+            <span className="mt-0.5 shrink-0">{actionIcon(action)}</span>
+            <span className="min-w-0">
+              <span className="block text-[12.5px] font-medium">{actionLabel(action)}</span>
+              {action.description || (disabled && action.disabledReason) ? <span className="mt-0.5 block text-[10.5px] leading-snug text-text-muted">{disabled ? action.disabledReason : action.description}</span> : null}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
   const { rows, loading } = useBoundRows(node.bind);
   const invoke = useActionInvoker();
   // Optimistic column overrides: recordId → column, cleared when fresh rows arrive.
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [dragOver, setDragOver] = useState<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
   const [openCard, setOpenCard] = useState<Row | null>(null);
+  const [menu, setMenu] = useState<RecordMenuState | null>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const { uiState } = useRuntime();
   const rowsRef = useRef(rows);
   useEffect(() => { rowsRef.current = rows; setOverrides({}); }, [rows]);
 
@@ -128,16 +262,34 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
   for (const row of rows) byColumn.get(columnOf(row))?.push(row);
 
   const draggable = Boolean(node.update);
+  const canMove = (row: Row, to: string): boolean => {
+    const from = columnOf(row);
+    if (from === to) return false;
+    if (!node.transitions?.length) return true;
+    return node.transitions.some((transition) => (
+      (!transition.from || transition.from.includes(from))
+      && transition.to.includes(to)
+      && matchesPredicate(transition.when, row, uiState)
+    ));
+  };
   const moveCard = async (id: string, to: string) => {
     if (!node.update || !id) return;
     const current = rowsRef.current.find((r) => rowId(r) === id);
-    if (!current || String(current[node.groupBy] ?? '') === to) return;
+    if (!current || !canMove(current, to)) return;
     setOverrides((prev) => ({ ...prev, [id]: to }));
     try {
-      await invoke(node.update.action, { ...(node.update.args ?? {}), id, patch: { [node.groupBy]: to } });
+      await invoke(node.update.action, { ...resolveActionArgs(node.update.args, { row: current, state: uiState }), id, patch: { [node.groupBy]: to } });
     } catch {
       setOverrides((prev) => { const next = { ...prev }; delete next[id]; return next; });
     }
+  };
+  const runRecordAction = async (action: RecordActionRef, row: Row) => {
+    if (matchesPredicate(action.disabledWhen, row, uiState) || !(await confirmRecordAction(action))) return;
+    setBusyAction(action.action);
+    try {
+      await invoke(action.action, { ...resolveActionArgs(action.args, { row, state: uiState }), id: rowId(row) });
+      setMenu(null);
+    } finally { setBusyAction(null); }
   };
 
   return (
@@ -152,7 +304,10 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
               's-round flex w-[276px] shrink-0 flex-col bg-canvas/40 ring-1 transition-shadow',
               dragOver === key ? 'ring-accent/60 shadow-[0_0_0_1px_var(--color-accent)]' : 'ring-line',
             )}
-            onDragOver={(e) => { if (draggable) { e.preventDefault(); setDragOver(key); } }}
+            onDragOver={(e) => {
+              const row = rows.find((candidate) => rowId(candidate) === draggingId);
+              if (draggable && row && canMove(row, key)) { e.preventDefault(); setDragOver(key); }
+            }}
             onDragLeave={() => setDragOver((cur) => (cur === key ? null : cur))}
             onDrop={(e) => {
               if (!draggable) return;
@@ -165,14 +320,14 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
             <div className="flex items-center justify-between gap-2 px-3 py-2.5">
               <span className="inline-flex min-w-0 items-center gap-2">
                 <span className={clsx('h-2 w-2 shrink-0 rounded-full', toneFillClass(tone))} />
-                <span className="truncate text-[13px] font-semibold capitalize text-text-primary">{humanize(key)}</span>
+                <span className="truncate text-[13px] font-semibold capitalize text-text-primary">{node.columnLabels?.[key] ?? humanize(key)}</span>
               </span>
               <span className={clsx('rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums', toneSoftClass(tone))}>{cards.length}</span>
             </div>
             <div className="flex min-h-[48px] flex-1 flex-col gap-2 px-2 pb-2">
               {cards.length === 0 ? (
                 <div className={clsx('rounded-btn border border-dashed px-2 py-4 text-center text-[11px] text-text-muted', dragOver === key ? 'border-accent/50 text-accent' : 'border-line/70')}>
-                  {draggable ? 'Drop here' : 'Empty'}
+                  {dragOver === key ? 'Release to move' : (node.emptyLabel ?? (draggable ? 'Drop records here' : 'No records'))}
                 </div>
               ) : cards.map((row) => {
                 const id = rowId(row);
@@ -192,9 +347,19 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                     role="button"
                     tabIndex={0}
                     draggable={draggable}
-                    onDragStart={(e) => { e.dataTransfer.setData(DRAG_MIME, id); e.dataTransfer.effectAllowed = 'move'; }}
+                    aria-grabbed={draggingId === id}
+                    onDragStart={(e) => { setDraggingId(id); e.dataTransfer.setData(DRAG_MIME, id); e.dataTransfer.effectAllowed = 'move'; }}
+                    onDragEnd={() => { setDraggingId(null); setDragOver(null); }}
                     onClick={() => setOpenCard(row)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') setOpenCard(row); }}
+                    onContextMenu={(e) => { e.preventDefault(); setMenu({ row, x: e.clientX, y: e.clientY }); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') setOpenCard(row);
+                      if (e.key === 'F10' && e.shiftKey) {
+                        e.preventDefault();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setMenu({ row, x: rect.right - 16, y: rect.top + 16 });
+                      }
+                    }}
                     className={clsx(
                       's-panel s-panel-hover px-3 py-2.5 text-[13px]',
                       draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer',
@@ -202,7 +367,21 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <span className="min-w-0 break-words font-medium text-text-primary">{title}</span>
-                      {typeof value === 'number' ? <span className="shrink-0 text-[11px] font-semibold tabular-nums text-text-secondary">{value.toLocaleString()}</span> : null}
+                      <span className="flex shrink-0 items-center gap-1">
+                        {typeof value === 'number' ? <span className="text-[11px] font-semibold tabular-nums text-text-secondary">{value.toLocaleString()}</span> : null}
+                        {(node.contextActions?.length || node.cardActions?.length) ? (
+                          <button
+                            type="button"
+                            aria-label={`Actions for ${title}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setMenu({ row, x: rect.right, y: rect.bottom + 4 });
+                            }}
+                            className="flex h-6 w-6 items-center justify-center rounded-btn text-text-muted hover:bg-surface-2 hover:text-text-primary"
+                          ><MoreHorizontal size={14} /></button>
+                        ) : null}
+                      </span>
                     </div>
                     {subtitle ? <div className="mt-1 line-clamp-2 text-[12px] text-text-muted">{subtitle}</div> : null}
                     {badge ? (
@@ -223,13 +402,24 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
           onClose={() => setOpenCard(null)}
         />
       ) : null}
+      {menu ? (
+        <RecordContextMenu
+          menu={menu}
+          actions={node.contextActions ?? node.cardActions ?? []}
+          state={uiState}
+          busy={busyAction}
+          onRun={(action, row) => { void runRecordAction(action, row); }}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
     </div>
   );
 }
 
 /** Slide-over record detail shared by Kanban cards + RecordMaster on narrow screens. */
-function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: string; actions?: ActionRef[]; onClose: () => void }) {
+function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: string; actions?: RecordActionRef[]; onClose: () => void }) {
   const invoke = useActionInvoker();
+  const { uiState } = useRuntime();
   const [busy, setBusy] = useState<string | null>(null);
   const entries = Object.entries(row).filter(([k]) => k !== 'id');
   return (
@@ -254,22 +444,27 @@ function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: strin
             ))}
           </dl>
         </div>
-        {actions && actions.length > 0 ? (
+        {visibleRecordActions(actions, row, uiState).length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-3">
-            {actions.map((a) => (
+            {visibleRecordActions(actions, row, uiState).map((a) => {
+              const disabled = matchesPredicate(a.disabledWhen, row, uiState);
+              return (
               <button
                 key={a.action}
                 type="button"
-                disabled={busy === a.action}
+                disabled={disabled || busy === a.action}
+                title={disabled ? a.disabledReason : a.description}
                 onClick={async () => {
+                  if (!(await confirmRecordAction(a))) return;
                   setBusy(a.action);
-                  try { await invoke(a.action, { ...(a.args ?? {}), id: rowId(row) }); } finally { setBusy(null); }
+                  try { await invoke(a.action, { ...resolveActionArgs(a.args, { row, state: uiState }), id: rowId(row) }); } finally { setBusy(null); }
                 }}
-                className="inline-flex h-7 items-center rounded-btn border border-line px-2.5 text-[11.5px] font-medium text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+                className={clsx('inline-flex h-7 items-center gap-1.5 rounded-btn border px-2.5 text-[11.5px] font-medium transition-colors disabled:opacity-50', a.tone === 'danger' ? 'border-danger/30 text-danger hover:bg-danger/10' : 'border-line text-text-secondary hover:bg-surface-2 hover:text-text-primary')}
               >
-                {humanize(a.action)}
+                {actionIcon(a)} {actionLabel(a)}
               </button>
-            ))}
+              );
+            })}
           </div>
         ) : null}
       </div>
@@ -359,6 +554,7 @@ function RecordMasterView({ node }: { node: Extract<ViewNode, { type: 'RecordMas
 
 function RecordPage({ node, row }: { node: Extract<ViewNode, { type: 'RecordMaster' }>; row: Row }) {
   const invoke = useActionInvoker();
+  const { uiState } = useRuntime();
   const [busy, setBusy] = useState<string | null>(null);
   const title = recordTitle(row, node.titleField, ['name', 'title', 'subject', 'label', 'email'], 'Record');
   const status = node.statusField ? fieldText(row, node.statusField) : '';
@@ -376,20 +572,25 @@ function RecordPage({ node, row }: { node: Extract<ViewNode, { type: 'RecordMast
           <div className="truncate text-[17px] font-semibold tracking-[-0.01em] text-text-primary">{title}</div>
           {status ? <span className={clsx('mt-0.5 inline-flex rounded-full px-1.5 py-px text-[10px] font-medium', toneSoftClass(toneFromStatus(status)))}>{status}</span> : null}
         </div>
-        {(node.recordActions ?? []).map((a) => (
+        {visibleRecordActions(node.recordActions, row, uiState).map((a) => {
+          const disabled = matchesPredicate(a.disabledWhen, row, uiState);
+          return (
           <button
             key={a.action}
             type="button"
-            disabled={busy === a.action}
+            disabled={disabled || busy === a.action}
+            title={disabled ? a.disabledReason : a.description}
             onClick={async () => {
+              if (!(await confirmRecordAction(a))) return;
               setBusy(a.action);
-              try { await invoke(a.action, { ...(a.args ?? {}), id: rowId(row) }); } finally { setBusy(null); }
+              try { await invoke(a.action, { ...resolveActionArgs(a.args, { row, state: uiState }), id: rowId(row) }); } finally { setBusy(null); }
             }}
-            className="inline-flex h-7 shrink-0 items-center rounded-btn border border-line px-2.5 text-[11.5px] font-medium text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
+            className={clsx('inline-flex h-7 shrink-0 items-center gap-1.5 rounded-btn border px-2.5 text-[11.5px] font-medium transition-colors disabled:opacity-50', a.tone === 'danger' ? 'border-danger/30 text-danger hover:bg-danger/10' : 'border-line text-text-secondary hover:bg-surface-2 hover:text-text-primary')}
           >
-            {humanize(a.action)}
+            {actionIcon(a)} {actionLabel(a)}
           </button>
-        ))}
+          );
+        })}
       </div>
       <div className="flex flex-col gap-4 px-4 py-3.5">
         {sections.map((section, i) => (

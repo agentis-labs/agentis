@@ -276,7 +276,7 @@ export class HermesAdapter implements AgentAdapter {
         model: this.opts.model, mode: 'json', finishReason: fr ?? null,
         sawText: Boolean(text), toolCalls: calls.length,
       });
-      yield { type: 'done', finishReason: mapFinishReason(fr) };
+      yield { type: 'done', finishReason: mapFinishReason(fr), ...chatUsageDelta(json.usage) };
       return;
     }
 
@@ -295,6 +295,7 @@ export class HermesAdapter implements AgentAdapter {
     // reasoning-only stop apart from a real empty turn.
     let sawText = false;
     let sawReasoning = false;
+    let reportedUsage: unknown;
 
     outer: while (true) {
       const { value, done } = await reader.read();
@@ -321,6 +322,7 @@ export class HermesAdapter implements AgentAdapter {
           }
 
           const choice = json.choices?.[0];
+          if (json.usage) reportedUsage = json.usage;
           const delta = choice?.delta as Record<string, unknown> | undefined;
           if (!delta) continue;
 
@@ -377,6 +379,7 @@ export class HermesAdapter implements AgentAdapter {
     yield {
       type: 'done',
       finishReason: mapFinishReason(finishReason),
+      ...chatUsageDelta(reportedUsage),
     };
   }
 
@@ -738,6 +741,24 @@ interface OpenAiCompatibleResponse {
       tool_calls?: unknown;
     };
   }>;
+}
+
+function chatUsageDelta(value: unknown): { usage?: Extract<ChatDelta, { type: 'done' }>['usage'] } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const usage = value as Record<string, unknown>;
+  const inputTokens = finiteNumber(usage.prompt_tokens, usage.input_tokens) ?? 0;
+  const outputTokens = finiteNumber(usage.completion_tokens, usage.output_tokens) ?? 0;
+  const details = usage.prompt_tokens_details && typeof usage.prompt_tokens_details === 'object'
+    ? usage.prompt_tokens_details as Record<string, unknown>
+    : {};
+  const cachedInputTokens = finiteNumber(details.cached_tokens, usage.cached_input_tokens);
+  if (inputTokens <= 0 && outputTokens <= 0 && !cachedInputTokens) return {};
+  return { usage: { inputTokens, outputTokens, ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}) } };
+}
+
+function finiteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return undefined;
 }
 
 function extractResponseText(json: OpenAiCompatibleResponse): string {

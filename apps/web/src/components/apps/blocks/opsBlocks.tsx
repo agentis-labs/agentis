@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import type { AppWorkflowSummary } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { appsApi, type AppDoctorReport, type AppOrchestrationRule } from '../../../lib/appsApi';
+import { appsApi, type AppCompileReport, type AppDoctorReport, type AppOrchestrationRule } from '../../../lib/appsApi';
 import { opsApi, isActiveRunStatus, type ApprovalRequest, type RunSummary } from '../../../lib/opsApi';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../../lib/realtime';
 import { useRunActivity } from '../../../lib/useRunActivity';
@@ -218,32 +218,37 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [doctor, setDoctor] = useState<AppDoctorReport | null>(null);
+  const [compiler, setCompiler] = useState<AppCompileReport | null>(null);
   const [eventRules, setEventRules] = useState<AppOrchestrationRule[]>([]);
   const orchestrationRevision = JSON.stringify((workflows ?? []).map((workflow) => ({
     id: workflow.id,
     enabled: workflow.enabled,
+    operatorEntrypoint: workflow.operatorEntrypoint,
     dependsOn: workflow.dependsOn,
     triggerKind: workflow.triggerKind,
     deployment: workflow.deployment?.status ?? null,
   })));
 
   const refreshOrchestration = useCallback(async () => {
-    const [report, rules] = await Promise.all([appsApi.doctor(appId), appsApi.orchestrationRules(appId)]);
+    const [report, compile, rules] = await Promise.all([appsApi.doctor(appId), appsApi.compile(appId), appsApi.orchestrationRules(appId)]);
     setDoctor(report ?? null);
+    setCompiler(compile ?? null);
     setEventRules(Array.isArray(rules) ? rules : []);
   }, [appId]);
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([appsApi.doctor(appId), appsApi.orchestrationRules(appId)])
-      .then(([report, rules]) => {
+    void Promise.all([appsApi.doctor(appId), appsApi.compile(appId), appsApi.orchestrationRules(appId)])
+      .then(([report, compile, rules]) => {
         if (cancelled) return;
         setDoctor(report ?? null);
+        setCompiler(compile ?? null);
         setEventRules(Array.isArray(rules) ? rules : []);
       })
       .catch(() => {
         if (!cancelled) {
           setDoctor(null);
+          setCompiler(null);
           setEventRules([]);
         }
       });
@@ -256,6 +261,19 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
     try { await appsApi.runAppWorkflow(appId, wfId); await reload(); }
     catch (e) { setActionError(e instanceof Error ? e.message : 'Could not start the workflow'); }
     finally { setBusy(null); }
+  }, [appId, reload]);
+
+  const runPipeline = useCallback(async () => {
+    setBusy('__pipeline');
+    setActionError(null);
+    try {
+      await appsApi.runAllAppWorkflows(appId, 'continue');
+      await reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not continue the pipeline');
+    } finally {
+      setBusy(null);
+    }
   }, [appId, reload]);
 
   const patchBinding = useCallback(async (wfId: string, patch: Record<string, unknown>) => {
@@ -306,6 +324,7 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
   const loadedWorkflows = workflows ?? [];
   const titleById = new Map(loadedWorkflows.map((w) => [w.id, w.title]));
   const activeWfs = loadedWorkflows.filter((w) => w.activeRun && isActiveRunStatus(w.activeRun.status));
+  const operatorEntrypoints = loadedWorkflows.filter((workflow) => workflow.enabled && workflow.operatorEntrypoint);
   const running = activeWfs.filter((w) => (w.activeRun?.status ?? '').toUpperCase() === 'RUNNING').length;
   const waiting = activeWfs.length - running;
   // Always-on: workflows whose graph authors an unattended trigger (schedule / webhook / listener).
@@ -315,11 +334,12 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
     const h = w.deployment?.health as { eventCount?: number } | undefined;
     return sum + Number(h?.eventCount ?? 0);
   }, 0);
-  const doctorTone = doctor?.health === 'healthy'
+  const doctorTone = compiler?.ready
     ? 'bg-success-soft text-success border-success/30'
-    : doctor?.health === 'broken'
-      ? 'bg-danger-soft text-danger border-danger/30'
-      : 'bg-warn-soft text-warn border-warn/30';
+    : compiler?.readyForExecution ? 'bg-warn-soft text-warn border-warn/30'
+      : compiler ? 'bg-danger-soft text-danger border-danger/30'
+      : doctor?.health === 'healthy' ? 'bg-success-soft text-success border-success/30'
+        : 'bg-warn-soft text-warn border-warn/30';
 
   useEffect(() => {
     if (activeWfs.length > 0 || actionError || openRules) setExpanded(true);
@@ -373,13 +393,31 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
               </button>
             )
           ) : null}
-          {doctor ? (
+          {operatorEntrypoints.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => void runPipeline()}
+              disabled={busy !== null || compiler?.readyForExecution === false}
+              title={compiler?.readyForExecution === false ? compiler.summary : 'Continue from the first unresolved verified business stage'}
+              className="inline-flex h-7 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-canvas transition-colors hover:bg-accent-hover disabled:opacity-50"
+            >
+              {busy === '__pipeline' ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+              Run Pipeline
+            </button>
+          ) : null}
+          {compiler || doctor ? (
             <span
               className={clsx('inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold', doctorTone)}
-              title={doctor.readyForUnattended ? 'All required orchestration layers are executable' : `${doctor.summary.critical + doctor.summary.error} blocking findings`}
+              title={compiler ? compiler.summary : doctor!.readyForUnattended ? 'All required orchestration layers are executable' : `${doctor!.summary.critical + doctor!.summary.error} blocking findings`}
             >
-              {doctor.health === 'healthy' ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}
-              {doctor.readyForUnattended ? 'Verified ready' : `${doctor.summary.critical + doctor.summary.error} blockers`}
+              {compiler?.ready ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}
+              {compiler
+                ? compiler.ready
+                  ? 'Production ready'
+                  : compiler.readyForExecution
+                    ? `${compiler.evidencePendingCount} proof pending`
+                    : `${compiler.executionBlockerCount} blockers`
+                : doctor!.readyForUnattended ? 'Doctor ready' : `${doctor!.summary.critical + doctor!.summary.error} blockers`}
             </span>
           ) : null}
         </div>
@@ -395,6 +433,7 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
         workflows={loadedWorkflows}
         rules={eventRules}
         doctor={doctor}
+        compiler={compiler}
         onChanged={refreshOrchestration}
       />
       <div className="flex flex-col">
@@ -432,6 +471,7 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
                         <Link2 size={10} /> after {wf.dependsOn.map((id) => titleById.get(id) ?? '?').join(', ')}
                       </span>
                     ) : null}
+                    {!wf.operatorEntrypoint && wf.dependsOn.length === 0 ? <span className="rounded-full bg-info-soft px-2 py-0.5 text-[11px] text-info">event only</span> : null}
                     {wf.concurrency === 'exclusive' ? <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary">exclusive</span> : null}
                     {wf.enabled === false ? <span className="rounded-full border border-line px-2 py-0.5 text-[11px] text-text-muted">paused</span> : null}
                   </div>
@@ -577,7 +617,7 @@ function RulesEditor({ workflow, siblings, onPatch }: {
   const label = 's-label';
 
   return (
-    <div className="mb-2.5 grid gap-3 rounded-btn border border-line bg-canvas/60 p-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="mb-2.5 grid gap-3 rounded-btn border border-line bg-canvas/60 p-3 sm:grid-cols-2 lg:grid-cols-5">
       <div className="flex flex-col gap-1">
         <span className={label}>Schedule</span>
         <select
@@ -635,6 +675,14 @@ function RulesEditor({ workflow, siblings, onPatch }: {
           <option value="success">After success only</option>
           <option value="always">On any settle</option>
         </select>
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className={label}>Run Pipeline</span>
+        <select className={select} value={workflow.operatorEntrypoint ? 'operator' : 'event'} onChange={(e) => onPatch({ operatorEntrypoint: e.target.value === 'operator' })}>
+          <option value="operator">Operator entrypoint</option>
+          <option value="event">Event only</option>
+        </select>
+        <span className="text-[10.5px] leading-tight text-text-muted">Event-only roots wait for a rule, channel, listener, or schedule.</span>
       </div>
       <div className="flex flex-col gap-1">
         <span className={label}>Concurrency</span>

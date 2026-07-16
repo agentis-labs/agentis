@@ -74,7 +74,8 @@ export interface TaskCompletionJudge {
 
 export function generatePlan(args: { conversationId?: string | null; objective: string; previous?: ChatPlan | null }): ChatPlan {
   const now = new Date().toISOString();
-  const planId = args.previous?.id ?? randomUUID();
+  const previous = args.previous && !terminalStatus(args.previous.status) ? args.previous : null;
+  const planId = previous?.id ?? randomUUID();
   const objective = args.objective.replace(/^\/plan\b/i, '').trim() || 'Define the objective before execution.';
   const resources = resourceKinds(objective);
   const nodes: PlanNode[] = [
@@ -117,9 +118,9 @@ export function generatePlan(args: { conversationId?: string | null; objective: 
   return {
     id: planId,
     conversationId: args.conversationId ?? null,
-    runIds: args.previous?.runIds ?? [],
-    sessionId: args.previous?.sessionId ?? null,
-    version: (args.previous?.version ?? 0) + 1,
+    runIds: previous?.runIds ?? [],
+    sessionId: previous?.sessionId ?? null,
+    version: (previous?.version ?? 0) + 1,
     status: nodes.some((item) => item.kind === 'decision' && !item.selectedOptionId) ? 'draft' : 'ready',
     title: titleFromObjective(objective),
     objective,
@@ -129,10 +130,10 @@ export function generatePlan(args: { conversationId?: string | null; objective: 
     viewport: { x: 0, y: 0, zoom: 0.78, semanticZoom: 'plan' },
     assumptions: ['Existing workspace resources are reused when they satisfy the objective.'],
     acceptanceCriteria: ['The visible version is the version approved for execution.'],
-    decisions: args.previous?.decisions ?? [],
-    deviations: args.previous?.deviations ?? [],
-    verification: args.previous?.verification,
-    createdAt: args.previous?.createdAt ?? now,
+    decisions: previous?.decisions ?? [],
+    deviations: previous?.deviations ?? [],
+    verification: previous?.verification,
+    createdAt: previous?.createdAt ?? now,
     updatedAt: now,
   };
 }
@@ -155,8 +156,9 @@ function withBuildSteps(plan: ChatPlan, labels: string[]): ChatPlan {
   const priorBuild = plan.nodes.filter((item) => item.stage === 'build');
   const buildNodes = labels.map((label, index) => {
     const prior = priorBuild[index];
+    const sameStep = prior?.title.trim().toLowerCase() === label.trim().toLowerCase();
     return node('action', 'build', index, label, prior?.summary ?? label, {
-      ...(prior ? { id: prior.id, status: prior.status } : {}),
+      ...(sameStep ? { id: prior.id, status: prior.status } : {}),
     });
   });
   const merged = [...nonBuild, ...buildNodes];
@@ -224,7 +226,7 @@ export class PlanService {
   }
 
   create(workspaceId: string, userId: string, conversationId: string, objective: string): ChatPlan {
-    const previous = this.latest(workspaceId, conversationId);
+    const previous = reusablePlan(this.latest(workspaceId, conversationId));
     const plan = generatePlan({ conversationId, objective, previous });
     if (!previous) {
       this.db.insert(schema.plans).values({
@@ -269,7 +271,7 @@ export class PlanService {
     acceptanceCriteria?: string[];
     assumptions?: string[];
   }): ChatPlan {
-    const previous = args.conversationId ? this.latest(args.workspaceId, args.conversationId) : null;
+    const previous = args.conversationId ? reusablePlan(this.latest(args.workspaceId, args.conversationId)) : null;
     const generated = generatePlan({ conversationId: args.conversationId ?? null, objective: args.objective, previous });
     const plan: ChatPlan = {
       ...generated,
@@ -321,7 +323,7 @@ export class PlanService {
     const labels = args.steps.map((step) => step.trim()).filter(Boolean);
     let plan = args.planId
       ? this.byId(workspaceId, args.planId)
-      : (args.conversationId ? this.latest(workspaceId, args.conversationId) : null);
+      : (args.conversationId ? reusablePlan(this.latest(workspaceId, args.conversationId)) : null);
     if (!plan) {
       plan = this.createTask({
         workspaceId,
@@ -706,6 +708,10 @@ export class PlanService {
 
 function terminalStatus(status: PlanStatus): boolean {
   return status === 'completed' || status === 'failed';
+}
+
+function reusablePlan(plan: ChatPlan | null): ChatPlan | null {
+  return plan && !terminalStatus(plan.status) ? plan : null;
 }
 
 function eventForStatus(status: PlanStatus): RealtimeEventName {

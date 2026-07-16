@@ -17,7 +17,7 @@
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   AgentisError,
@@ -42,11 +42,16 @@ import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
 import { publishAgentWorkStep, publishChatDeltaProgress } from '../services/agent/agentWorkProgress.js';
 import type { ViewportStore } from '../services/viewportStore.js';
 import type { Logger } from '../logger.js';
+import type { AuditTrailService } from '../services/auditTrail.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import type { EventBus } from '../event-bus.js';
+import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import { serializeConversationMessage, serializeQueueItem, delay, workflowIdFromViewport, serializeScopeAgent, isAdapterErrorDelta, createStreamedChatMetadata, finalizeTurnTrace, relevantTurnError, captureChatDeltaMetadata, buildPersistedChatMetadata, workflowBuildMetadataFromResult } from '../services/conversation/conversationTurnHelpers.js';
 import type { AgentRow, StreamedChatMetadata } from '../services/conversation/conversationTurnHelpers.js';
+import { collectAppDoctorSnapshot } from '../services/app/appDoctorSnapshot.js';
+import { validateAppConformance, type AppDoctorReport } from '../services/app/appDoctor.js';
+import type { ConversationTurnExperience, ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
 
 const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
@@ -90,6 +95,12 @@ type ConversationRouteDeps = {
   logger: Logger;
   viewportStore?: ViewportStore;
   bus: EventBus;
+  /** Required in production so "stop all" also terminates runs born from chat. */
+  engine?: Pick<WorkflowEngine, 'cancelRun'>;
+  /** Shared with MCP routes so Stop revokes late harness tool calls. */
+  turnLeases?: ConversationTurnLeaseRegistry;
+  /** Durable, runtime-neutral efficiency evidence for interactive turns. */
+  audit?: Pick<AuditTrailService, 'record'>;
   memoryCapture?: {
     captureImmediateCorrection?(args: {
       workspaceId: string;
@@ -112,10 +123,12 @@ type ConversationRouteDeps = {
       finishReason?: string | null;
       activeWorkflowId?: string | null;
       activeNodeId?: string | null;
+      experience?: ConversationTurnExperience | null;
     }): Promise<{
       peerUpdateJobIds: string[];
       promotedSessionMoments: number;
       workspaceMemoryIds: string[];
+      experienceJobIds: string[];
       sessionMomentId: string | null;
       /** Learnings queued through the PRIMARY formation path (judge dedupes). */
       signals: number;
@@ -141,7 +154,8 @@ type ConversationRow = typeof schema.conversations.$inferSelect;
  * the in-repo shape of `ChatSessionExecutor#pendingConfirmations` (a static
  * Map keyed by an id, cleared explicitly on completion).
  */
-const activeConversationTurns = new Set<string>();
+const activeConversationTurns = new Map<string, AbortController>();
+const hardStoppedConversations = new Set<string>();
 
 export function buildConversationRoutes(deps: ConversationRouteDeps) {
   const app = new Hono();
@@ -334,6 +348,76 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       queueId,
     });
     return c.json({ ok: true, item: serializeQueueItem(item) });
+  });
+
+  /**
+   * Hard stop is conversation-scoped: abort the server-side model turn, discard
+   * its queued follow-ups, and cancel only workflow runs created by this chat.
+   * It deliberately does not touch unrelated scheduled/app automation runs.
+   */
+  app.post('/:agentId/stop', async (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+    if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
+
+    const activeTurn = activeConversationTurns.get(conversation.id);
+    const leaseRevoked = deps.turnLeases?.revoke(ws.workspaceId, conversation.id) ?? false;
+    if (activeTurn) {
+      hardStoppedConversations.add(conversation.id);
+      if (!activeTurn.signal.aborted) activeTurn.abort(new Error('operator_stop_all'));
+    }
+    const discarded = deps.conversations.discardPendingQueue({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+    });
+
+    const activeRuns = deps.db.select({ id: schema.workflowRuns.id })
+      .from(schema.workflowRuns)
+      .where(and(
+        eq(schema.workflowRuns.workspaceId, ws.workspaceId),
+        eq(schema.workflowRuns.conversationId, conversation.id),
+        inArray(schema.workflowRuns.status, ['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']),
+      ))
+      .all();
+    const cancellations = deps.engine
+      ? await Promise.allSettled(activeRuns.map((run) => deps.engine!.cancelRun(run.id)))
+      : null;
+    const cancelledRunIds = activeRuns
+      .filter((_run, index) => cancellations?.[index]?.status === 'fulfilled')
+      .map((run) => run.id);
+    const failedRunIds = activeRuns
+      .filter((_run, index) => !cancellations || cancellations[index]?.status === 'rejected')
+      .map((run) => run.id);
+    deps.logger.info('conversations.hard_stopped', {
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+      agentId,
+      turnAborted: Boolean(activeTurn),
+      leaseRevoked,
+      discardedMessages: discarded.length,
+      cancelledRunIds,
+      failedRunIds,
+    });
+    return c.json({
+      ok: failedRunIds.length === 0,
+      conversationId: conversation.id,
+      turnAborted: Boolean(activeTurn),
+      leaseRevoked,
+      discardedMessages: discarded.length,
+      cancelledRunIds,
+      failedRunIds,
+    });
   });
 
   // Reload recovery: a tab that (re)loaded mid-queue has no way to know a
@@ -726,19 +810,36 @@ function streamConversationTurnReply(
 ) {
   const reg = deps.adapters.get(args.agentId);
   return streamSSE(c, async (stream) => {
-    activeConversationTurns.add(args.conversation.id);
+    const turnController = new AbortController();
+    const turnLease = deps.turnLeases?.issue(ws.workspaceId, args.conversation.id);
+    const abortFromClient = () => turnController.abort(c.req.raw.signal.reason);
+    if (c.req.raw.signal.aborted) abortFromClient();
+    else c.req.raw.signal.addEventListener('abort', abortFromClient, { once: true });
+    activeConversationTurns.set(args.conversation.id, turnController);
+    hardStoppedConversations.delete(args.conversation.id);
     try {
-      await runConversationTurn(stream, c, deps, ws, args, reg);
+      await runConversationTurn(stream, c, deps, ws, {
+        ...args,
+        turnSignal: turnController.signal,
+        ...(turnLease ? { turnLease } : {}),
+      }, reg);
     } finally {
-      activeConversationTurns.delete(args.conversation.id);
+      if (turnLease) deps.turnLeases?.complete(ws.workspaceId, args.conversation.id, turnLease);
+      c.req.raw.signal.removeEventListener('abort', abortFromClient);
+      if (activeConversationTurns.get(args.conversation.id) === turnController) {
+        activeConversationTurns.delete(args.conversation.id);
+      }
       // Queue-then-auto-continue: this turn just ended — if a message was
       // queued while it streamed, pop the oldest and announce it on the
       // realtime bus so the client auto-continues with a fresh turn.
       try {
-        deps.conversations.dispatchNextQueued({
-          workspaceId: ws.workspaceId,
-          conversationId: args.conversation.id,
-        });
+        const hardStopped = hardStoppedConversations.delete(args.conversation.id);
+        if (!turnController.signal.aborted && !hardStopped) {
+          deps.conversations.dispatchNextQueued({
+            workspaceId: ws.workspaceId,
+            conversationId: args.conversation.id,
+          });
+        }
       } catch (err) {
         deps.logger.warn('conversations.queue_dispatch_failed', {
           conversationId: args.conversation.id,
@@ -762,6 +863,8 @@ async function runConversationTurn(
     userMessage: string;
     useViewportContext: boolean;
     viewportOverride?: ViewportContext | null;
+    turnSignal: AbortSignal;
+    turnLease?: string;
   },
   reg: ReturnType<AdapterManager['get']>,
 ) {
@@ -829,29 +932,46 @@ async function runConversationTurn(
         permissionMode,
         maxTurns: 8,
         viewport: activeViewport,
-        signal: c.req.raw.signal,
+        signal: args.turnSignal,
+        ...(args.turnLease ? { turnLease: args.turnLease } : {}),
       };
-      for await (const delta of withChatHeartbeats(
-        ChatSessionExecutor.turn(reg.adapter, history, runtimeUserMessage, turnContext, {
-          ...(permissionMode === 'plan' ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM } : {}),
-        }),
-        { clientTurnId: args.clientTurnId, agentId: args.agentId, workflowId: viewportWorkflowId },
-      )) {
-        if (isAdapterErrorDelta(delta)) {
-          if (delta.error.startsWith('canceled:')) {
-            finishReason = 'max_turns';
-            finalText = 'Stopped by operator.';
+      const releaseLease = deps.adapters.tryAcquireInteractiveLease(args.agentId, {
+        ownerId: `conversation:${args.conversation.id}:${args.clientTurnId}`,
+        kind: 'operator_chat',
+        priority: 100,
+      });
+      if (!releaseLease) {
+        finishReason = 'error';
+        finalText = 'This agent is already handling another interactive turn. Stop that work or wait for it to finish, then retry.';
+        await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
+          type: 'text',
+          delta: finalText,
+        }, streamedMetadata);
+      } else try {
+        for await (const delta of withChatHeartbeats(
+          ChatSessionExecutor.turn(reg.adapter, history, runtimeUserMessage, turnContext, {
+            ...(permissionMode === 'plan' ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM } : {}),
+          }),
+          { clientTurnId: args.clientTurnId, agentId: args.agentId, workflowId: viewportWorkflowId },
+        )) {
+          if (isAdapterErrorDelta(delta)) {
+            if (delta.error.startsWith('canceled:')) {
+              finishReason = 'max_turns';
+              finalText = 'Stopped by operator.';
+              break;
+            }
+            adapterError = delta.error;
+            continue;
+          }
+          if (delta.type === 'done') {
+            finishReason = delta.finishReason;
             break;
           }
-          adapterError = delta.error;
-          continue;
+          await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, delta, streamedMetadata);
+          if (delta.type === 'text') finalText += delta.delta;
         }
-        if (delta.type === 'done') {
-          finishReason = delta.finishReason;
-          break;
-        }
-        await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, delta, streamedMetadata);
-        if (delta.type === 'text') finalText += delta.delta;
+      } finally {
+        releaseLease();
       }
     } else {
       const limitation = reg?.adapter?.capabilities?.().limitations?.[0];
@@ -885,7 +1005,23 @@ async function runConversationTurn(
     // architecture_canvas on a design-shaped request gets one cheap repair
     // completion so ChatPlanCanvas still renders the visual graph, not just text.
     if (permissionMode === 'plan' && finishReason !== 'error' && reg?.adapter) {
-      finalText = await repairArchitectureCanvas(reg.adapter, finalText, runtimeUserMessage, c.req.raw.signal).catch(() => finalText);
+      finalText = await repairArchitectureCanvas(reg.adapter, finalText, runtimeUserMessage, args.turnSignal).catch(() => finalText);
+    }
+
+    // A model's prose is not the release gate. When it claims that the App in
+    // the active viewport is done/ready, reconcile that claim against the live
+    // persisted control plane before the response is saved. This backstop is
+    // deliberately domain-neutral: every App uses the same Doctor contract.
+    // It prevents a polished final answer from hiding unresolved critical/error
+    // findings such as missing event rules, stale outcome specs, or unbound
+    // channels. The extra text delta also corrects already-streamed prose.
+    const completionGuard = appCompletionGuard(deps.db, ws.workspaceId, activeViewport, finalText);
+    if (completionGuard) {
+      finalText = `${finalText.trimEnd()}\n\n${completionGuard}`;
+      await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
+        type: 'text',
+        delta: `\n\n${completionGuard}`,
+      }, streamedMetadata);
     }
 
     const turnCompletedAt = new Date().toISOString();
@@ -942,6 +1078,30 @@ async function runConversationTurn(
       });
     }
 
+    let turnExperience: ConversationTurnExperience | null = null;
+    if (args.turnLease) {
+      try {
+        turnExperience = deps.turnLeases?.experience(ws.workspaceId, args.conversation.id, args.turnLease) ?? null;
+      } catch (err) {
+        // Stop/revoke deliberately invalidates the lease before the streaming
+        // loop unwinds. A cancelled turn has no trustworthy completed outcome
+        // to learn from, and cancellation must not turn into a second error.
+        if (!(err instanceof AgentisError) || err.code !== 'TURN_CANCELLED') throw err;
+      }
+    }
+    if (turnExperience) {
+      const efficiency = turnExperience.efficiency;
+      deps.audit?.record({
+        workspaceId: ws.workspaceId,
+        runId: `chat:${args.conversation.id}:${args.clientTurnId}`,
+        agentId: args.agentId,
+        action: 'chat.tool.efficiency',
+        actorType: 'agent',
+        actorId: args.agentId,
+        inputSummary: `calls=${turnExperience.toolCalls}; unique=${efficiency.uniqueObservations}; mutations=${efficiency.mutatingCalls}`,
+        outputSummary: `coalesced_reads=${efficiency.coalescedReads}; args_chars=${efficiency.argumentCharsObserved}; result_chars=${efficiency.resultCharsObserved}; repeated_result_chars=${efficiency.repeatedResultChars}`,
+      });
+    }
     const capture = await deps.memoryCapture?.captureTurn({
       workspaceId: ws.workspaceId,
       conversationId: args.conversation.id,
@@ -953,6 +1113,7 @@ async function runConversationTurn(
       finishReason,
       activeWorkflowId: viewportWorkflowId,
       activeNodeId: activeViewport?.selection?.ids?.[0] ?? null,
+      experience: turnExperience,
     });
     // BRAIN-BLUEPRINT-10X §visibility — the STORE half of the legible mind (the
     // recall half is the executor's "Recalled N memories"). `signals` counts the
@@ -962,9 +1123,9 @@ async function runConversationTurn(
     // written below), so the operator sees it in the turn itself.
     if (
       capture &&
-      (capture.signals > 0 || capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
+      (capture.signals > 0 || capture.experienceJobIds.length > 0 || capture.peerUpdateJobIds.length > 0 || capture.promotedSessionMoments > 0 || capture.workspaceMemoryIds.length > 0)
     ) {
-      const stored = Math.max(capture.signals, capture.workspaceMemoryIds.length);
+      const stored = Math.max(capture.signals, capture.workspaceMemoryIds.length) + capture.experienceJobIds.length;
       if (stored > 0) {
         const storedAt = new Date().toISOString();
         await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, createChatActivity({
@@ -1086,6 +1247,42 @@ async function sendConversationMessage(
     await relayOpenClaw(deps, reg.adapter, conversation.mirroredSessionId ?? undefined, body.body, agentId);
   }
   return c.json({ message, conversationId: conversation.id, agentId });
+}
+
+/**
+ * Return an operator-visible correction when an agent declares an App complete
+ * while its live conformance report still contains blockers.
+ */
+export function appCompletionGuard(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  viewport: ViewportContext | null,
+  finalText: string,
+): string | null {
+  if (viewport?.resourceKind !== 'app' || !viewport.resourceId || !claimsCompletion(finalText)) return null;
+  let report: AppDoctorReport;
+  try {
+    report = validateAppConformance(collectAppDoctorSnapshot(db, workspaceId, viewport.resourceId));
+  } catch {
+    return null;
+  }
+  const blockers = report.summary.critical + report.summary.error;
+  if (blockers === 0) return null;
+  const samples = report.findings
+    .filter((finding) => finding.severity === 'critical' || finding.severity === 'error')
+    .slice(0, 3)
+    .map((finding) => `${finding.code}: ${finding.summary}`)
+    .join(' | ');
+  return `Verification blocked — I cannot truthfully mark this App ready. App Doctor still reports ${blockers} blocker${blockers === 1 ? '' : 's'} (${report.summary.critical} critical, ${report.summary.error} error).${samples ? ` ${samples}` : ''}`;
+}
+
+function claimsCompletion(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  // Do not rewrite an honest negative/blocked hand-off.
+  if (/\b(?:not|isn['’]?t|cannot|can['’]?t|unable to)\s+(?:done|complete(?:d)?|fixed|ready)\b/i.test(normalized)) return false;
+  return /(?:^|\n)\s*(?:#{1,3}\s*)?(?:done|completed|fixed|ready)\b/i.test(normalized)
+    || /\b(?:i(?:'ve| have)?\s+(?:fixed|completed|finished|delivered)|the app is (?:now )?ready|ready for (?:an? )?(?:live|production|approved))\b/i.test(normalized);
 }
 
 function captureImmediateConversationCorrection(

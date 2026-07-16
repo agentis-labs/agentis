@@ -21,7 +21,7 @@
  */
 
 import { evalCondition } from '../../engine/SafeConditionParser.js';
-import type { WorkflowGraph } from '@agentis/core';
+import { workflowContractFields, type WorkflowGraph } from '@agentis/core';
 import { graphContentHash } from './workflowCompass.js';
 
 // ─── Shapes ──────────────────────────────────────────────────────────────────
@@ -101,6 +101,11 @@ function templatedOutputKeys(template: string): string[] {
   return [...template.matchAll(/\{output\.([\w.]+)\}/gu)].map((m) => m[1]!.split('.')[0]!);
 }
 
+/** Top-level canonical terminal keys referenced by an expression. */
+function expressionOutputKeys(expr: string): string[] {
+  return [...new Set([...expr.matchAll(/\boutput\.([A-Za-z_$][\w$]*)/gu)].map((match) => match[1]!))];
+}
+
 // ─── Validation (mechanical, at scope time) ─────────────────────────────────
 
 export interface SpecValidationArgs {
@@ -117,10 +122,7 @@ export function validateWorkflowSpec(spec: WorkflowSpec, args: SpecValidationArg
   if (!Array.isArray(spec.acceptance) || spec.acceptance.length === 0) {
     errors.push('acceptance is required — at least one verifiable claim ("how will we KNOW it worked?").');
   }
-  const declaredKeys = new Set(
-    ((args.graph as { outputContract?: { fields?: Array<{ key: string }> } } | undefined)?.outputContract?.fields ?? [])
-      .map((f) => f.key),
-  );
+  const declaredKeys = new Set(workflowContractFields(args.graph?.outputContract).map((field) => field.key));
   const seenIds = new Set<string>();
   for (const check of spec.acceptance ?? []) {
     const label = `acceptance "${check.id || check.claim || '?'}"`;
@@ -131,6 +133,11 @@ export function validateWorkflowSpec(spec: WorkflowSpec, args: SpecValidationArg
     switch (check.verify) {
       case 'expr':
         if (!exprParses(check.expr)) errors.push(`${label}: expr does not parse ("${check.expr}").`);
+        if (declaredKeys.size > 0) {
+          for (const key of expressionOutputKeys(check.expr ?? '')) {
+            if (!declaredKeys.has(key)) errors.push(`${label}: expr references output.${key} but the graph outputContract declares no "${key}" key.`);
+          }
+        }
         break;
       case 'http_probe':
       case 'browser_probe': {
@@ -151,6 +158,11 @@ export function validateWorkflowSpec(spec: WorkflowSpec, args: SpecValidationArg
         }
         if (!check.operation?.trim()) errors.push(`${label}: operation is required.`);
         if (!exprParses(check.expr)) errors.push(`${label}: expr does not parse ("${check.expr}").`);
+        if (declaredKeys.size > 0) {
+          for (const key of expressionOutputKeys(check.expr ?? '')) {
+            if (!declaredKeys.has(key)) errors.push(`${label}: expr references output.${key} but the graph outputContract declares no "${key}" key.`);
+          }
+        }
         break;
       }
       case 'file_probe': {
@@ -174,6 +186,10 @@ export function validateWorkflowSpec(spec: WorkflowSpec, args: SpecValidationArg
   for (const floor of spec.sufficiency ?? []) {
     if (!floor.key?.trim()) errors.push('sufficiency floor: key is required.');
     if (floor.minItems !== undefined && floor.minItems < 0) errors.push(`sufficiency "${floor.key}": minItems must be ≥ 0.`);
+    const topLevelKey = floor.key?.split('.')[0];
+    if (declaredKeys.size > 0 && topLevelKey && !declaredKeys.has(topLevelKey)) {
+      errors.push(`sufficiency "${floor.key}": graph outputContract declares no "${topLevelKey}" key.`);
+    }
   }
   for (const svc of spec.constraints?.allowedServices ?? []) {
     if (args.knownServices && !args.knownServices.includes(svc)) {

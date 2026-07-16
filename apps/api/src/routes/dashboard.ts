@@ -62,14 +62,13 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .limit(1)
       .get() ?? null;
     const failedRuns = readChromeRuns(deps.db, ws.workspaceId, FAILED_RUN_STATUSES, 5);
-    const completedRuns = readChromeRuns(deps.db, ws.workspaceId, COMPLETED_RUN_STATUSES, 5);
 
     return c.json({
       workspaceId: ws.workspaceId,
       fleet,
       approvals,
       latestActivity,
-      notifications: deriveChromeNotifications(approvals, failedRuns, completedRuns, agents),
+      notifications: deriveChromeNotifications(approvals, failedRuns, agents),
       counts: {
         liveAgents,
         activeRuns,
@@ -83,7 +82,6 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
 const LIVE_AGENT_STATUSES = new Set(['online', 'active', 'running']);
 const ACTIVE_RUN_STATUSES = ['RUNNING', 'WAITING', 'PAUSED', 'CREATED'];
 const FAILED_RUN_STATUSES = ['FAILED', 'COMPLETED_WITH_ERRORS'];
-const COMPLETED_RUN_STATUSES = ['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION'];
 
 type DashboardUser = ReturnType<typeof getUser>;
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;
@@ -306,7 +304,6 @@ function presentSelfHealIncident(state: WorkflowRunState, failedNodeId?: string)
 function deriveChromeNotifications(
   approvals: PresentedApproval[],
   failedRuns: ChromeRun[],
-  completedRuns: ChromeRun[],
   agents: ChromeAgent[],
 ) {
   const setup = [];
@@ -374,19 +371,6 @@ function deriveChromeNotifications(
       runId: run.id,
       workflowId: run.workflowId,
       failedNodeId: run.failedNodeId,
-      workflowName: run.workflowName,
-    });
-  }
-
-  for (const run of completedRuns) {
-    rest.push({
-      id: `completed-${run.id}`,
-      type: 'completion',
-      title: 'Workflow succeeded',
-      context: run.workflowName ?? 'Workflow',
-      timestamp: run.finishedAt ?? new Date().toISOString(),
-      runId: run.id,
-      workflowId: run.workflowId,
       workflowName: run.workflowName,
     });
   }

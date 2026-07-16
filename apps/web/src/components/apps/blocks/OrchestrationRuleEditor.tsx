@@ -7,6 +7,7 @@ import {
 import { REALTIME_EVENTS, type AppWorkflowSummary } from '@agentis/core';
 import {
   appsApi,
+  type AppCompileReport,
   type AppDoctorReport,
   type AppOrchestrationRule,
   type AppOrchestrationRuleInput,
@@ -87,12 +88,14 @@ export function OrchestrationRuleControlPlane({
   workflows,
   rules,
   doctor,
+  compiler,
   onChanged,
 }: {
   appId: string;
   workflows: AppWorkflowSummary[];
   rules: AppOrchestrationRule[];
   doctor: AppDoctorReport | null;
+  compiler: AppCompileReport | null;
   onChanged: () => Promise<void>;
 }) {
   const [editing, setEditing] = useState<string | 'new' | null>(null);
@@ -102,7 +105,9 @@ export function OrchestrationRuleControlPlane({
   const titleById = useMemo(() => new Map(workflows.map((workflow) => [workflow.id, workflow.title])), [workflows]);
   const enabled = rules.filter((rule) => rule.enabled);
   const successGated = enabled.filter((rule) => rule.eventType === REALTIME_EVENTS.RUN_ACCOMPLISHED);
-  const blockers = doctor ? doctor.summary.critical + doctor.summary.error : null;
+  const blockers = compiler?.executionBlockerCount ?? (doctor ? doctor.summary.critical + doctor.summary.error : null);
+  const proofPending = compiler?.evidencePendingCount ?? 0;
+  const compileReady = compiler?.readyForExecution ?? doctor?.readyForUnattended ?? false;
 
   const mutate = async (key: string, operation: () => Promise<unknown>) => {
     setBusy(key);
@@ -141,15 +146,17 @@ export function OrchestrationRuleControlPlane({
           <Metric label="dependencies" value={doctor?.topology.dependencyEdges ?? 0} />
           <Metric label="rules live" value={enabled.length} />
           <Metric label="success-gated" value={successGated.length} success />
-          {doctor ? (
+          {compiler || doctor ? (
             <span className={clsx(
               'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[10px] font-semibold uppercase tracking-[0.08em]',
-              doctor.readyForUnattended
+              compiler?.ready
                 ? 'border-success/30 bg-success-soft text-success'
+                : compileReady
+                  ? 'border-warn/30 bg-warn-soft text-warn'
                 : 'border-danger/30 bg-danger-soft text-danger',
-            )} title={doctor.readyForUnattended ? 'Doctor verified this app for unattended execution' : `${blockers} blocking Doctor findings`}>
-              {doctor.readyForUnattended ? <ShieldCheck size={12} /> : <AlertTriangle size={12} />}
-              {doctor.readyForUnattended ? 'Doctor ready' : `${blockers} blockers`}
+            )} title={compiler?.ready ? 'Compiler verified the target readiness' : compileReady ? 'Execution is allowed; target evidence is still pending' : `${blockers} blocking compile findings`}>
+              {compiler?.ready ? <ShieldCheck size={12} /> : <AlertTriangle size={12} />}
+              {compiler?.ready ? 'Target ready' : compileReady ? `${proofPending} proof pending` : `${blockers} blockers`}
             </span>
           ) : null}
           <button
@@ -258,7 +265,17 @@ export function OrchestrationRuleControlPlane({
         </div>
       )}
 
-      {doctor && !doctor.readyForUnattended && doctor.findings.some((finding) => finding.severity === 'critical' || finding.severity === 'error') ? (
+      {compiler && !compiler.readyForExecution && compiler.checks.some((finding) => finding.status === 'block') ? (
+        <div className="border-t border-danger/20 bg-danger-soft/50 px-3.5 py-2">
+          <div className="mb-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-danger">Compile blocking findings</div>
+          {compiler.checks.filter((finding) => finding.status === 'block').slice(0, 5).map((finding) => (
+            <div key={finding.id} className="flex items-start gap-2 py-0.5 text-[10px] text-danger">
+              <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+              <span><strong>{finding.layer}</strong> · {finding.summary}</span>
+            </div>
+          ))}
+        </div>
+      ) : doctor && !doctor.readyForUnattended && doctor.findings.some((finding) => finding.severity === 'critical' || finding.severity === 'error') ? (
         <div className="border-t border-danger/20 bg-danger-soft/50 px-3.5 py-2">
           <div className="mb-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-danger">Doctor blocking findings</div>
           {doctor.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'error').slice(0, 3).map((finding) => (

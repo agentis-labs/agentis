@@ -30,6 +30,7 @@ import { buildAppStores, type AppDatastore } from '@agentis/app';
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { WorkflowRunState } from '@agentis/core';
 import type { ChannelBridge } from './channelBridge.js';
+import { isAcknowledgedChannelDelivery } from '../../adapters/channels/types.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';
 import type { AppLearningService } from '../app/appLearning.js';
 import type { SharedIntelligenceService } from '../sharedIntelligence.js';
@@ -222,15 +223,19 @@ export class ConversationService {
     }
   }
 
-  async #send(args: { ctx: ConversationContext; connectionId: string; address: string; body: string; attachments?: Array<{ url?: string; artifactId?: string }> }): Promise<void> {
+  async #send(args: { ctx: ConversationContext; connectionId: string; address: string; body: string; attachments?: Array<{ url?: string; artifactId?: string }>; idempotencyKey?: string }): Promise<void> {
     const dest = this.deps.channels.resolveDestination({ connectionId: args.connectionId, to: args.address });
     const chatId = dest.chatId ?? args.address;
-    await this.deps.channels.deliverToConnection({
+    const receipt = await this.deps.channels.deliverToConnection({
       connectionId: args.connectionId,
       chatId,
       body: args.body,
       ...(args.attachments && args.attachments.length ? { attachments: args.attachments } : {}),
+      ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
     });
+    if (!isAcknowledgedChannelDelivery(receipt)) {
+      throw new Error(`channel delivery is pending provider acknowledgement (${receipt.providerMessageId || 'no id'})`);
+    }
   }
 
   async #buildBrainContext(ctx: ConversationContext, taskDescription: string): Promise<string | null> {

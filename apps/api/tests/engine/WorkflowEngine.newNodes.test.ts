@@ -615,6 +615,42 @@ describe('WorkflowEngine — interrupted run recovery', () => {
     expect(summary.resumed).toBe(1);
     expect(loadRun(runId).status).toBe('COMPLETED');
   });
+
+  it('reconciles a PAUSED run whose self-heal is terminal and has no wake source to FAILED', async () => {
+    const wfId = seedWorkflow({
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'X', type: 'transform', title: 'Work', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ done: true })', isOutput: true } },
+        { id: 'Y', type: 'transform', title: 'Never reached', position: { x: 400, y: 0 }, config: { kind: 'transform', expression: '({ done: true })' } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }, { id: 'e2', source: 'X', target: 'Y' }],
+    });
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, status: 'PAUSED',
+      runState: {
+        runId, workflowId: wfId, status: 'PAUSED', readyQueue: [], waitingInputs: {}, activeExecutions: {},
+        nodeStates: {
+          T: { nodeId: 'T', status: 'COMPLETED' },
+          X: { nodeId: 'X', status: 'FAILED', error: 'repair exhausted', blockedReason: 'Paused by operator' },
+          Y: { nodeId: 'Y', status: 'PENDING' },
+        },
+        completedNodeIds: ['T'], failedNodeIds: ['X'], skippedNodeIds: [], graphRevision: 1, replanCount: 0, lastLedgerSequence: 0,
+        selfHealIncidents: {
+          X: { incidentId: 'inc-x', nodeId: 'X', nodeTitle: 'Work', status: 'EXHAUSTED', mode: 'bypass', attempt: 3, maxAttempts: 3, outcome: 'exhausted', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+        },
+      },
+    }).run();
+
+    const summary = await engine.recoverInterruptedRuns();
+    const row = loadRun(runId);
+    expect(summary.failed).toBe(1);
+    expect(row.status).toBe('FAILED');
+    expect(row.completedAt).toBeTruthy();
+    expect((row.runState as { nodeStates: Record<string, { status: string }> }).nodeStates.Y?.status).toBe('SKIPPED');
+  });
 });
 
 describe('WorkflowEngine — skip propagation (NP, Proposal 3)', () => {

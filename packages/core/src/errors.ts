@@ -22,6 +22,7 @@ export type AgentisErrorCode =
   | 'GRAPH_REVISION_CONFLICT'
   | 'GRAPH_PATCH_INVALID'
   | 'WORKFLOW_STOPPED'
+  | 'TURN_CANCELLED'
   // Adapters
   | 'ADAPTER_UNAVAILABLE'
   | 'ADAPTER_CAPABILITY_MISMATCH'
@@ -165,6 +166,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'RESOURCE_CONFLICT':
     case 'WORKSPACE_ORCHESTRATOR_EXISTS':
     case 'WORKFLOW_RUN_INVALID_STATE':
+    case 'TURN_CANCELLED':
     case 'GRAPH_REVISION_CONFLICT':
     case 'PACKAGE_SLUG_CONFLICT':
       return 409;

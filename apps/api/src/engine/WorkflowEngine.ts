@@ -135,7 +135,7 @@ import {
 import { type IntentManifest } from '../services/intentContract.js';
 import { graphContentHash, stampBuildLoop, readBuildLoop, type BuildLoopOutcomeHealth } from '../services/workflow/workflowCompass.js';
 import { readWorkflowSpec, type WorkflowSpec } from '../services/workflow/workflowSpec.js';
-import { evaluateRunVerdict, unwrapReturnEnvelope, type RunVerdict, type VerdictProbeDeps } from '../services/workflow/workflowVerdict.js';
+import { evaluateRunVerdict, terminalOutputPaths, unwrapReturnEnvelope, type RunVerdict, type VerdictProbeDeps } from '../services/workflow/workflowVerdict.js';
 import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../services/workflow/workflowRecoveryPolicy.js';
 import { composeOperatingManual, getWorkspaceManual } from '../services/agent/agentOperatingManual.js';
 import { loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../services/agent/agentIdentity.js';
@@ -572,6 +572,83 @@ export class WorkflowEngine {
   }
 
   /**
+   * Re-evaluate a COMPLETED run against the workflow's current, graph-reconciled
+   * definition of done. This never dispatches a node, replays a graph, or repeats
+   * an outward side effect; it grades the persisted evidence surface in place.
+   * It is the safe recovery path when execution was sound but an acceptance
+   * expression or probe contract was repaired after the run settled.
+   */
+  async regradeCompletedRun(args: { workspaceId: string; runId: string }): Promise<{
+    runId: string;
+    workflowId: string;
+    previousOutcome: RunVerdict['outcome'] | null;
+    verdict: RunVerdict;
+    terminalOutputPaths: string[];
+  }> {
+    const run = this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(and(eq(schema.workflowRuns.id, args.runId), eq(schema.workflowRuns.workspaceId, args.workspaceId)))
+      .get();
+    if (!run || !run.workflowId) throw new AgentisError('WORKFLOW_RUN_NOT_FOUND', `run ${args.runId} not found`);
+    if (run.status !== 'COMPLETED') {
+      throw new AgentisError('VALIDATION_FAILED', `only a COMPLETED run can be regraded from persisted evidence; run is ${run.status}`);
+    }
+    const workflow = this.deps.db
+      .select()
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.id, run.workflowId), eq(schema.workflows.workspaceId, args.workspaceId)))
+      .get();
+    if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${run.workflowId} not found`);
+    const spec = readWorkflowSpec(workflow.settings);
+    if (!spec) throw new AgentisError('VALIDATION_FAILED', 'workflow has no definition-of-done spec to regrade');
+    const graph = (run.graphSnapshot ?? workflow.graph) as WorkflowGraph;
+    const graphHash = graphContentHash(graph);
+    if (spec.reconciledHash && spec.reconciledHash !== graphHash) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `definition-of-done is stale for this evidence (spec ${spec.reconciledHash}, run graph ${graphHash}); reconcile the spec to the run graph before regrading`,
+      );
+    }
+    const state = run.runState as WorkflowRunState & { verdict?: RunVerdict };
+    const ctx: RunningContext = {
+      runId: run.id,
+      workflowId: run.workflowId,
+      planId: null,
+      workspaceId: run.workspaceId,
+      ambientId: run.ambientId,
+      conversationId: run.conversationId,
+      userId: run.userId,
+      graph,
+      downstreamEdges: buildDownstreamEdges(graph),
+      state,
+      eventsSinceSnapshot: 0,
+      inflightDispatches: 0,
+      swarms: new Map(),
+      selfHealAttempts: hydrateSelfHealAttempts(state),
+      abortController: new AbortController(),
+    };
+    (ctx as unknown as { __swiftSpec: WorkflowSpec }).__swiftSpec = spec;
+    const previousOutcome = state.verdict?.outcome ?? null;
+    const verdict = await this.#evaluateVerdict(ctx, spec);
+    if (!verdict) throw new AgentisError('VALIDATION_FAILED', 'persisted-evidence regrade could not evaluate the verdict');
+    state.verdict = verdict;
+    this.deps.db
+      .update(schema.workflowRuns)
+      .set({ runState: state, updatedAt: new Date().toISOString() })
+      .where(eq(schema.workflowRuns.id, run.id))
+      .run();
+    const output = this.#collectVerdictSurface(ctx);
+    return {
+      runId: run.id,
+      workflowId: run.workflowId,
+      previousOutcome,
+      verdict,
+      terminalOutputPaths: terminalOutputPaths(output),
+    };
+  }
+
+  /**
    * Recover runs interrupted by a process restart.
    *
    * Called once at boot. The in-memory `#runs` map is empty after a restart,
@@ -625,10 +702,33 @@ export class WorkflowEngine {
         .where(and(eq(schema.approvalRequests.runId, run.id), eq(schema.approvalRequests.status, 'pending')))
         .all()
         .some((approval) => isGateApproval(run.id, approval)));
+    const terminalPaused = this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.status, 'PAUSED'))
+      .all()
+      .filter((run) => {
+        const state = run.runState as unknown as WorkflowRunState | null;
+        return Boolean(state && hasTerminalSelfHealFailure(state));
+      });
     let resumed = 0;
     let failed = 0;
-    for (const run of [...running, ...waitingForApproval]) {
+    for (const run of [...running, ...waitingForApproval, ...terminalPaused]) {
       const state = run.runState as unknown as WorkflowRunState | null;
+      if (run.status === 'PAUSED' && state && hasTerminalSelfHealFailure(state)) {
+        markOpenNodesSkipped(state, 'Skipped because self-healing reached a terminal blocker');
+        state.status = 'FAILED';
+        const now = new Date().toISOString();
+        this.deps.db.update(schema.workflowRuns).set({
+          status: 'FAILED', runState: state as unknown as object, completedAt: now, updatedAt: now,
+        }).where(eq(schema.workflowRuns.id, run.id)).run();
+        const payload = { runId: run.id, status: 'FAILED', workflowId: run.workflowId, workspaceId: run.workspaceId };
+        this.deps.bus.publish(REALTIME_ROOMS.run(run.id), REALTIME_EVENTS.RUN_FAILED, payload);
+        this.deps.bus.publish(REALTIME_ROOMS.workspace(run.workspaceId), REALTIME_EVENTS.RUN_FAILED, payload);
+        this.deps.logger.info('engine.run_terminal_self_heal_reconciled', { runId: run.id });
+        failed += 1;
+        continue;
+      }
       const activeExecs = state?.activeExecutions ? Object.values(state.activeExecutions) : [];
       const approvalRows = this.deps.db
         .select()
@@ -1320,6 +1420,12 @@ export class WorkflowEngine {
       return;
     }
     await this.#interruptActiveWork(ctx);
+    if (hasTerminalSelfHealFailure(ctx.state)) {
+      this.#skipBlockedNodes(ctx, 'Skipped because self-healing reached a terminal blocker');
+      await this.#transitionRunStatus(ctx, 'FAILED');
+      this.#disposeRunState(runId);
+      return;
+    }
     for (const nodeId of Object.keys(ctx.state.activeExecutions)) {
       const node = ctx.state.nodeStates[nodeId];
       if (node?.status === 'RUNNING') {
@@ -6774,7 +6880,7 @@ export class WorkflowEngine {
     }
     // An operator pause aborts the previous run-scoped signal. A resumed run is
     // a fresh execution epoch and must not inherit that cancellation.
-    if (persistedRun?.status === 'PAUSED') ctx.abortController = new AbortController();
+    if (persistedRun?.status === 'PAUSED' || persistedRun?.status === 'FAILED') ctx.abortController = new AbortController();
     let resumed = 0;
     for (const ns of Object.values(ctx.state.nodeStates)) {
       if (ns && ns.status === 'WAITING' && ns.blockedReason) {
@@ -6800,6 +6906,24 @@ export class WorkflowEngine {
         if (queued.has(ns.nodeId)) continue;
         ns.status = 'PENDING';
         delete ns.blockedReason;
+        ctx.state.readyQueue.push({
+          nodeId: ns.nodeId,
+          priority: 0,
+          insertedAt: new Date().toISOString(),
+          inputData: ns.inputData ?? {},
+        });
+        resumed += 1;
+      }
+      for (const nodeId of activeNodeIds) delete ctx.state.activeExecutions[nodeId];
+    }
+    if (resumed === 0 && persistedRun?.status === 'FAILED') {
+      const queued = new Set(ctx.state.readyQueue.map((item) => item.nodeId));
+      const activeNodeIds = new Set(Object.keys(ctx.state.activeExecutions ?? {}));
+      for (const ns of Object.values(ctx.state.nodeStates)) {
+        if (!ns || ns.status !== 'FAILED' || queued.has(ns.nodeId)) continue;
+        ns.status = 'PENDING';
+        delete ns.blockedReason;
+        delete ns.error;
         ctx.state.readyQueue.push({
           nodeId: ns.nodeId,
           priority: 0,
@@ -7060,6 +7184,7 @@ export class WorkflowEngine {
     ns.status = 'FAILED';
     ns.completedAt = new Date().toISOString();
     ns.error = error;
+    delete ns.blockedReason;
     if (!ctx.state.failedNodeIds.includes(nodeId)) ctx.state.failedNodeIds.push(nodeId);
 
     await this.deps.ledger.append({
@@ -7079,6 +7204,11 @@ export class WorkflowEngine {
     if (failedNode) this.#emitWorkStep(ctx, failedNode, 'fail', error);
     this.#audit(ctx, { nodeId, action: 'node.failed', actorType: 'system', actorId: 'engine', outputSummary: error });
     await this.#persistRun(ctx);
+    if (ctx.state.status === 'PAUSED' && hasTerminalSelfHealFailure(ctx.state)) {
+      this.#skipBlockedNodes(ctx, 'Skipped because self-healing reached a terminal blocker');
+      await this.#transitionRunStatus(ctx, 'FAILED');
+      this.#disposeRunState(ctx.runId);
+    }
   }
 
   /**
@@ -7199,8 +7329,21 @@ export class WorkflowEngine {
 
   async #pausePersistedRun(runId: string): Promise<void> {
     const run = await this.deps.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get();
-    if (!run || isTerminalRunStatus(run.status) || run.status === 'PAUSED') return;
+    if (!run || isTerminalRunStatus(run.status)) return;
     const state = run.runState as unknown as WorkflowRunState | null;
+    if (state && hasTerminalSelfHealFailure(state)) {
+      markOpenNodesSkipped(state, 'Skipped because self-healing reached a terminal blocker');
+      state.status = 'FAILED';
+      const now = new Date().toISOString();
+      await this.deps.db.update(schema.workflowRuns).set({
+        status: 'FAILED', runState: state as unknown as object, completedAt: now, updatedAt: now,
+      }).where(eq(schema.workflowRuns.id, runId));
+      const payload = { runId, status: 'FAILED', workflowId: run.workflowId, workspaceId: run.workspaceId };
+      this.deps.bus.publish(REALTIME_ROOMS.run(runId), REALTIME_EVENTS.RUN_FAILED, payload);
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(run.workspaceId), REALTIME_EVENTS.RUN_FAILED, payload);
+      return;
+    }
+    if (run.status === 'PAUSED') return;
     if (state) {
       state.status = 'PAUSED';
       for (const node of Object.values(state.nodeStates)) {
@@ -7608,7 +7751,22 @@ export class WorkflowEngine {
           : REALTIME_EVENTS.RUN_RUNNING;
     // workspaceId lets the workspace-level SSE fallback forward this run-status
     // event (its filter keys on room OR payload.workspaceId).
-    const runStatusPayload = { runId: ctx.runId, status, workflowId: ctx.workflowId, workspaceId: ctx.workspaceId };
+    const runStatusPayload = {
+      runId: ctx.runId,
+      status,
+      workflowId: ctx.workflowId,
+      workspaceId: ctx.workspaceId,
+      ...(runVerdict ? {
+        verdict: runVerdict.outcome,
+        accomplished: runVerdict.outcome === 'accomplished',
+        summary: runVerdict.outcome === 'accomplished'
+          ? 'Execution completed and the business outcome was verified.'
+          : `Execution completed mechanically, but the business outcome is ${runVerdict.outcome}.`,
+      } : status === 'COMPLETED' ? {
+        accomplished: null,
+        summary: 'Execution completed mechanically without a definition-of-done verdict.',
+      } : {}),
+    };
     this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), eventName, runStatusPayload);
     this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), eventName, runStatusPayload);
     this.#appendActivityTail(ctx.runId, eventName, runStatusPayload);
@@ -7802,22 +7960,7 @@ export class WorkflowEngine {
       for (const [nodeId, ns] of Object.entries(ctx.state.nodeStates)) {
         if (ns?.outputData && typeof ns.outputData === 'object') nodeOutputs[nodeId] = ns.outputData as Record<string, unknown>;
       }
-      // Terminal DATA surface: collectFinalOutput merged with return_output
-      // viewer envelopes unwrapped — acceptance checks target the payload.
-      const terminalNodes = ctx.graph.nodes.filter((n) => {
-        const cfg = n.config as { kind?: string; isOutput?: boolean };
-        return cfg.kind === 'return_output' || cfg.isOutput === true;
-      });
-      let verdictOutput: Record<string, unknown>;
-      if (terminalNodes.length > 0) {
-        verdictOutput = {};
-        for (const n of terminalNodes) {
-          const out = ctx.state.nodeStates[n.id]?.outputData;
-          if (out && typeof out === 'object' && !Array.isArray(out)) Object.assign(verdictOutput, unwrapReturnEnvelope(out as Record<string, unknown>));
-        }
-      } else {
-        verdictOutput = unwrapReturnEnvelope(this.#collectFinalOutput(ctx));
-      }
+      const verdictOutput = this.#collectVerdictSurface(ctx);
       const verdict = await evaluateRunVerdict({
         spec,
         graphHash: graphContentHash(ctx.graph),
@@ -7846,6 +7989,23 @@ export class WorkflowEngine {
       this.deps.logger.warn('engine.run.verdict_failed', { runId: ctx.runId, error: (err as Error).message });
       return null;
     }
+  }
+
+  /** Canonical DATA surface shared by initial grading, diagnostics, and regrade. */
+  #collectVerdictSurface(ctx: RunningContext): Record<string, unknown> {
+    const terminalNodes = ctx.graph.nodes.filter((n) => {
+      const cfg = n.config as { kind?: string; isOutput?: boolean };
+      return cfg.kind === 'return_output' || cfg.isOutput === true;
+    });
+    if (terminalNodes.length === 0) return unwrapReturnEnvelope(this.#collectFinalOutput(ctx));
+    const output: Record<string, unknown> = {};
+    for (const n of terminalNodes) {
+      const value = ctx.state.nodeStates[n.id]?.outputData;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        Object.assign(output, unwrapReturnEnvelope(value as Record<string, unknown>));
+      }
+    }
+    return output;
   }
 
   /**
@@ -8397,14 +8557,22 @@ function mergeGraphPatch(base: WorkflowGraph, patch: WorkflowGraphPatch): Workfl
   return { ...base, nodes: nextNodes, edges: nextEdges };
 }
 
-function mapInputs(
-  mapping: Record<string, string>,
+export function mapInputs(
+  mapping: Record<string, unknown>,
   inputData: Record<string, unknown>,
   scratchpad: Record<string, unknown>,
 ): Record<string, unknown> {
   if (Object.keys(mapping).length === 0) return inputData;
   const out: Record<string, unknown> = {};
   for (const [field, source] of Object.entries(mapping)) {
+    // Graph input mappings created by the visual editor may intentionally use
+    // literal values (objects, arrays, booleans, numbers, or null). Treat only
+    // strings as path expressions. Previously `source.startsWith(...)` crashed
+    // the entire run/self-heal path when a valid literal reached this boundary.
+    if (typeof source !== 'string') {
+      out[field] = source;
+      continue;
+    }
     // Convention: "scratchpad.x.y" pulls from scratchpad; "inputs.x" or just
     // "x" pulls from the upstream node output. Anything not found becomes
     // null — we never throw at the boundary because workflows often have
@@ -8517,6 +8685,13 @@ function isTerminalRunStatus(status: string): boolean {
     || status === 'COMPLETED_WITH_ERRORS'
     || status === 'FAILED'
     || status === 'CANCELLED';
+}
+
+/** A terminal healer incident plus a failed node has no durable wake source. */
+function hasTerminalSelfHealFailure(state: WorkflowRunState): boolean {
+  if ((state.failedNodeIds?.length ?? 0) === 0) return false;
+  return Object.values(state.selfHealIncidents ?? {}).some((incident) =>
+    incident?.status === 'BLOCKED' || incident?.status === 'EXHAUSTED');
 }
 
 function lookupPath(obj: unknown, path: string): unknown {

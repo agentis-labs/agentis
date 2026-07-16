@@ -31,12 +31,12 @@ import type { Logger } from '../../logger.js';
 import type { CredentialVault } from '../credentialVault.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
-import { WhatsAppSession } from '../../adapters/channels/whatsappSession.js';
+import { WhatsAppSession, type WhatsAppObservedOutbound } from '../../adapters/channels/whatsappSession.js';
 import { TelegramSession } from '../../adapters/channels/telegramSession.js';
 import { resolveTelegramTransport } from '../../adapters/channels/telegram.js';
 import { DiscordSession } from '../../adapters/channels/discordSession.js';
 import { useVaultAuthState, clearVaultAuthState } from '../../adapters/channels/whatsappVaultAuthState.js';
-import type { ChannelDeliveryReceipt } from '../../adapters/channels/types.js';
+import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, ChannelStatus } from '../../adapters/channels/types.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
 
@@ -206,6 +206,11 @@ export class ChannelConnectionSupervisor {
     return session.sendText(chatId, body);
   }
 
+  async outboundHealth(connectionId: string): Promise<ChannelHealthCheck | null> {
+    const session = this.#sessions.get(connectionId);
+    return session instanceof WhatsAppSession ? session.outboundHealthCheck() : null;
+  }
+
   async stop(connectionId: string): Promise<void> {
     const session = this.#sessions.get(connectionId);
     if (session) {
@@ -267,7 +272,9 @@ export class ChannelConnectionSupervisor {
         authDir,
         logger: this.deps.logger,
         onInbound: (msg) => this.#onInbound(connectionId, msg),
+        onOutboundObserved: (msg) => this.observeOutbound(connectionId, msg),
         onStateChange: (state) => this.#onStateChange(connectionId, state),
+        onDeliveryUpdate: (update) => this.#onDeliveryUpdate(connectionId, update),
         // Persist creds/keys vault-encrypted in the DB, not plaintext on disk.
         loadAuthState: () => useVaultAuthState({ db: this.deps.db, vault: this.deps.vault, connectionId }),
         ...(this.deps.transcribeAudio ? { transcribeAudio: this.deps.transcribeAudio } : {}),
@@ -319,6 +326,7 @@ export class ChannelConnectionSupervisor {
       agentId: inboundAgentId,
       channelConnectionId: row.id,
       channelChatId: msg.chatId,
+      appId: row.appId ?? null,
     });
     const fromTag = msg.from ? `[${msg.from}] ` : '';
     const message = this.deps.conversations.appendMirrored({
@@ -359,6 +367,7 @@ export class ChannelConnectionSupervisor {
       ambientId: row.ambientId,
       userId: row.userId,
       agentId: inboundAgentId,
+      appId: row.appId ?? null,
       conversationId: conversation.id,
       connectionId: row.id,
       kind: row.kind,
@@ -370,31 +379,230 @@ export class ChannelConnectionSupervisor {
     });
   }
 
+  /** Persist an operator send observed from the primary phone or another companion. */
+  observeOutbound(connectionId: string, msg: WhatsAppObservedOutbound): void {
+    const row = this.deps.db.select().from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId)).get();
+    if (!row) return;
+    const duplicate = this.deps.db.select({ id: schema.channelDeliveries.id })
+      .from(schema.channelDeliveries)
+      .where(eq(schema.channelDeliveries.externalId, msg.externalId)).get();
+    if (duplicate) return;
+    const agentisSubmission = this.deps.db.select({ id: schema.channelOutboundDeliveries.id })
+      .from(schema.channelOutboundDeliveries)
+      .where(and(
+        eq(schema.channelOutboundDeliveries.connectionId, connectionId),
+        eq(schema.channelOutboundDeliveries.providerMessageId, msg.externalId),
+      )).get();
+    if (agentisSubmission) return;
+
+    const agentId = row.agentId ?? this.#resolveInboundAgentId(row.workspaceId);
+    if (!agentId) return;
+    const conversation = this.deps.conversations.getOrCreateByChannel({
+      workspaceId: row.workspaceId,
+      ambientId: row.ambientId,
+      userId: row.userId,
+      agentId,
+      channelConnectionId: row.id,
+      channelChatId: msg.chatId,
+      appId: row.appId ?? null,
+    });
+    const message = this.deps.conversations.appendOutbound({
+      workspaceId: row.workspaceId,
+      conversationId: conversation.id,
+      operatorId: row.userId,
+      sessionMessageId: msg.externalId,
+      body: msg.body,
+      deliveryStatus: 'sent',
+      metadata: {
+        channel: row.kind,
+        channelConnectionId: row.id,
+        channelOutboundObserved: true,
+        source: 'external_whatsapp_client',
+        providerMessageId: msg.externalId,
+      },
+    });
+    this.deps.db.insert(schema.channelDeliveries).values({
+      id: randomUUID(),
+      connectionId: row.id,
+      workspaceId: row.workspaceId,
+      externalId: msg.externalId,
+      conversationMessageId: message.id,
+    }).run();
+    this.deps.bus.publish(REALTIME_ROOMS.workspace(row.workspaceId), REALTIME_EVENTS.CHANNEL_MESSAGE_SENT, {
+      connectionId: row.id,
+      kind: row.kind,
+      agentId,
+      chatId: msg.chatId,
+      messageId: message.id,
+      providerMessageId: msg.externalId,
+      providerAcknowledged: true,
+      observed: true,
+      source: 'external_whatsapp_client',
+    });
+  }
+
+  #onDeliveryUpdate(
+    connectionId: string,
+    update: { providerMessageId: string; status: ChannelDeliveryReceipt['status']; providerStatus: number; recipient?: string },
+  ): void {
+    const connection = this.deps.db
+      .select({
+        workspaceId: schema.channelConnections.workspaceId,
+        kind: schema.channelConnections.kind,
+        agentId: schema.channelConnections.agentId,
+      })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId))
+      .get();
+    if (!connection) return;
+    const deliveries = this.deps.db
+      .select()
+      .from(schema.channelOutboundDeliveries)
+      .where(and(
+        eq(schema.channelOutboundDeliveries.connectionId, connectionId),
+        eq(schema.channelOutboundDeliveries.providerMessageId, update.providerMessageId),
+      ))
+      .all();
+    const rank: Record<string, number> = { sending: 0, queued: 1, accepted: 2, delivered: 3, read: 4 };
+    for (const delivery of deliveries) {
+      if ((rank[update.status] ?? 0) <= (rank[delivery.status] ?? 0)) continue;
+      const previousReceipt = delivery.receipt && typeof delivery.receipt === 'object'
+        ? delivery.receipt as ChannelDeliveryReceipt
+        : null;
+      const receipt: ChannelDeliveryReceipt = {
+        ...(previousReceipt ?? {
+          provider: 'whatsapp',
+          providerMessageId: update.providerMessageId,
+          acceptedAt: new Date().toISOString(),
+        }),
+        status: update.status,
+        providerAcknowledged: true,
+        providerStatus: update.providerStatus,
+        ...(update.recipient ? { recipient: update.recipient, providerRecipient: update.recipient } : {}),
+      };
+      this.deps.db.update(schema.channelOutboundDeliveries).set({
+        status: update.status,
+        receipt,
+        error: null,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(schema.channelOutboundDeliveries.id, delivery.id)).run();
+      const conversationMessage = this.deps.db.select().from(schema.conversationMessages)
+        .where(and(
+          eq(schema.conversationMessages.workspaceId, connection.workspaceId),
+          eq(schema.conversationMessages.sessionMessageId, delivery.idempotencyKey),
+        )).get();
+      if (conversationMessage) {
+        const conversation = this.deps.db.select({ agentId: schema.conversations.agentId })
+          .from(schema.conversations).where(eq(schema.conversations.id, conversationMessage.conversationId)).get();
+        const metadata = {
+          ...(conversationMessage.metadata && typeof conversationMessage.metadata === 'object'
+            ? conversationMessage.metadata as Record<string, unknown>
+            : {}),
+          channelDeliveryReceipt: receipt,
+        };
+        const deliveryStatus = update.status === 'delivered' || update.status === 'read' ? 'delivered' : 'sent';
+        this.deps.db.update(schema.conversationMessages).set({ deliveryStatus, metadata })
+          .where(eq(schema.conversationMessages.id, conversationMessage.id)).run();
+        if (conversation) {
+          this.deps.bus.publish(
+            REALTIME_ROOMS.conversation(conversation.agentId),
+            REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+            {
+              message: { ...conversationMessage, deliveryStatus, metadata },
+              conversationId: conversationMessage.conversationId,
+              agentId: conversation.agentId,
+            },
+          );
+        }
+      }
+      const eventPayload = {
+        connectionId,
+        kind: connection.kind,
+        agentId: connection.agentId,
+        providerMessageId: update.providerMessageId,
+        status: update.status,
+        providerAcknowledged: true,
+        ...(update.recipient ? { resolvedRecipient: update.recipient } : {}),
+      };
+      this.deps.bus.publish(
+        REALTIME_ROOMS.workspace(connection.workspaceId),
+        REALTIME_EVENTS.CHANNEL_MESSAGE_STATUS,
+        eventPayload,
+      );
+      if ((rank[delivery.status] ?? 0) < 2) {
+        this.deps.bus.publish(
+          REALTIME_ROOMS.workspace(connection.workspaceId),
+          REALTIME_EVENTS.CHANNEL_MESSAGE_SENT,
+          eventPayload,
+        );
+      }
+    }
+  }
+
   #onStateChange(connectionId: string, state: { status: string; qr?: string; selfId?: string }): void {
     const now = new Date().toISOString();
     const row = this.deps.db
-      .select({ workspaceId: schema.channelConnections.workspaceId, kind: schema.channelConnections.kind, settings: schema.channelConnections.settings })
+      .select({ workspaceId: schema.channelConnections.workspaceId, kind: schema.channelConnections.kind, settings: schema.channelConnections.settings, lastError: schema.channelConnections.lastError })
       .from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, connectionId))
       .get();
     if (!row) return;
-    const dbStatus = state.status === 'open' ? 'active'
+    const dbStatus: ChannelStatus = state.status === 'open' ? 'active'
       : state.status === 'logged_out' || state.status === 'error' ? 'error'
       : row.kind === 'whatsapp' ? 'needs_action' : 'verifying';
+    const currentSettings = (row.settings ?? {}) as Record<string, unknown>;
+    const currentHealth = isChannelHealth(currentSettings.health) ? currentSettings.health : null;
+    const reconciledHealth = currentHealth ? reconcileTransportHealth(currentHealth, dbStatus, state.status, now) : null;
+    const persistedStatus = reconciledHealth?.status ?? dbStatus;
     const settings = {
-      ...((row.settings ?? {}) as Record<string, unknown>),
+      ...currentSettings,
       transportStatus: state.status,
       ...(state.selfId ? { selfId: state.selfId } : {}),
+      ...(reconciledHealth ? { health: reconciledHealth } : {}),
     };
     this.deps.db
       .update(schema.channelConnections)
-      .set({ status: dbStatus, settings, updatedAt: now, ...(state.status === 'open' ? { lastEventAt: now, lastError: null } : {}) })
+      .set({ status: persistedStatus, settings, updatedAt: now, ...(state.status === 'open' ? { lastEventAt: now, lastError: persistedStatus === 'active' ? null : row.lastError } : {}) })
       .where(eq(schema.channelConnections.id, connectionId))
       .run();
     this.deps.bus.publish(
       REALTIME_ROOMS.workspace(row.workspaceId),
       REALTIME_EVENTS.CHANNEL_CONNECTION_STATUS,
-      { connectionId, kind: row.kind, status: state.status, ...(state.qr ? { hasQr: true } : {}) },
+      { connectionId, kind: row.kind, status: persistedStatus, transportStatus: state.status, ...(state.qr ? { hasQr: true } : {}) },
     );
   }
+}
+
+function isChannelHealth(value: unknown): value is ChannelHealth {
+  return Boolean(value && typeof value === 'object' && Array.isArray((value as ChannelHealth).checks));
+}
+
+function reconcileTransportHealth(
+  health: ChannelHealth,
+  status: ChannelStatus,
+  transportStatus: string,
+  checkedAt: string,
+): ChannelHealth {
+  const transport: ChannelHealthCheck = transportStatus === 'open'
+    ? {
+        name: 'transport', ok: true, code: 'persistent_transport_open',
+        message: 'Persistent channel transport is open.', checkedAt,
+      }
+    : {
+        name: 'transport', ok: false, code: 'persistent_transport_not_open',
+        message: `Persistent channel transport is ${transportStatus}.`,
+        remediation: 'Relink or restart the live connection.', checkedAt,
+      };
+  const checks = health.checks.some((check) => check.name === 'transport')
+    ? health.checks.map((check) => check.name === 'transport' ? transport : check)
+    : [...health.checks, transport];
+  const effectiveStatus: ChannelStatus = status !== 'active'
+    ? status
+    : checks.some((check) => !check.ok && (check.name === 'credential' || check.name === 'transport'))
+      ? 'error'
+      : checks.some((check) => !check.ok)
+        ? 'degraded'
+        : 'active';
+  return { ...health, status: effectiveStatus, checks };
 }

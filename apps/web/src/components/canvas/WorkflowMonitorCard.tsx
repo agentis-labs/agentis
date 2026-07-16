@@ -117,6 +117,7 @@ export function WorkflowMonitorCard({
   const [resolving, setResolving] = useState(false);
   const [selectedApproval, setSelectedApproval] = useState<WorkspaceApproval | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [healthChecking, setHealthChecking] = useState(true);
@@ -426,6 +427,19 @@ export function WorkflowMonitorCard({
     }
   }
 
+  async function cancelRun() {
+    if (!activeRunId || cancelling) return;
+    setCancelling(true);
+    try {
+      await api(`/v1/runs/${activeRunId}/cancel`, { method: 'POST' });
+      await refreshWorkspaceSnapshot();
+    } catch (err) {
+      console.warn('[agentis] failed to cancel run from monitor', err);
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   async function retryFailedRun(fromNode: boolean) {
     if (!currentFailedRun) return;
     try {
@@ -563,6 +577,9 @@ export function WorkflowMonitorCard({
     && Boolean(activeRunId)
     && terminalKind !== 'build';
   const canResumeRun = status === 'paused' && Boolean(activeRunId) && terminalKind !== 'build';
+  const canCancelRun = (status === 'running' || status === 'waiting' || status === 'paused')
+    && Boolean(activeRunId)
+    && terminalKind !== 'build';
   return (
     <section
       data-canvas-control
@@ -628,6 +645,18 @@ export function WorkflowMonitorCard({
             <Square size={11} />
           </button>
         )}
+        {canCancelRun && activeRunId && (
+          <button
+            type="button"
+            onClick={() => void cancelRun()}
+            disabled={cancelling}
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-danger transition hover:bg-danger-soft active:scale-95 disabled:opacity-50"
+            aria-label="Cancel run permanently"
+            title="Cancel run permanently"
+          >
+            <X size={12} />
+          </button>
+        )}
         {monitorRunId && terminalKind !== 'build' && (
           <button
             type="button"
@@ -655,7 +684,7 @@ export function WorkflowMonitorCard({
           {monitorRunId && (status === 'completed' || status === 'failed') && (
             <RunVerdictBanner runId={monitorRunId} refreshKey={status} />
           )}
-          {(canResumeRun || canPauseRun || (monitorRunId && terminalKind !== 'build')) && (
+          {(canResumeRun || canPauseRun || canCancelRun || (monitorRunId && terminalKind !== 'build')) && (
             <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/10 bg-surface/55 p-2">
               <span className="min-w-0 flex-1 text-[10.5px] font-medium text-text-muted">Run controls</span>
               {canResumeRun && activeRunId && (
@@ -676,6 +705,16 @@ export function WorkflowMonitorCard({
                   className="inline-flex h-7 items-center gap-1 rounded-md bg-danger-soft px-2.5 text-[11px] font-medium text-danger transition hover:bg-danger/20 disabled:opacity-50"
                 >
                   <Square size={11} /> Pause
+                </button>
+              )}
+              {canCancelRun && activeRunId && (
+                <button
+                  type="button"
+                  onClick={() => void cancelRun()}
+                  disabled={cancelling}
+                  className="inline-flex h-7 items-center gap-1 rounded-md bg-danger px-2.5 text-[11px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+                >
+                  <X size={11} /> Cancel
                 </button>
               )}
               {monitorRunId && (

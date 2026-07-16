@@ -106,7 +106,18 @@ export type ChatDelta =
   // model that spent the budget thinking and never emitted a final answer). It
   // is surfaced distinctly so the turn loop can recover (retry with more room)
   // instead of treating a truncated turn as a clean, empty stop.
-  | { type: 'done'; finishReason: ChatFinishReason };
+  | {
+      type: 'done';
+      finishReason: ChatFinishReason;
+      /** Provider-reported model usage; estimates are explicitly marked. */
+      usage?: {
+        inputTokens: number;
+        outputTokens: number;
+        cachedInputTokens?: number;
+        costCents?: number;
+        estimated?: boolean;
+      };
+    };
 
 export type JsonSchemaObject = {
   type?: string;
@@ -117,6 +128,8 @@ export type JsonSchemaObject = {
   required?: string[];
   minimum?: number;
   maximum?: number;
+  minItems?: number;
+  maxItems?: number;
   default?: unknown;
 };
 
@@ -156,6 +169,8 @@ export interface ChatTurnContext {
    */
   recallScopeIds?: string[];
   clientTurnId?: string;
+  /** Opaque server-issued capability for MCP calls made by this exact turn. */
+  turnLease?: string;
   executionMode?: 'chat' | 'plan';
   /** Optional operation/run correlation id for direct tool turns. */
   runId?: string;

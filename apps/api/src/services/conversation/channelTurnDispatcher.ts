@@ -39,9 +39,10 @@ import type { ChatMemoryCaptureService } from '../chat/chatMemoryCapture.js';
 import type { Logger } from '../../logger.js';
 import type { EventBus } from '../../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from '../agent/agentWorkProgress.js';
+import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt } from '../../adapters/channels/types.js';
 
 export interface ChannelTurnDeliver {
-  (args: { connectionId: string; chatId: string; body: string }): Promise<unknown>;
+  (args: { connectionId: string; chatId: string; body: string; idempotencyKey?: string }): Promise<ChannelDeliveryReceipt | undefined>;
 }
 
 export interface ChannelTurnDispatcherDeps {
@@ -433,7 +434,7 @@ export class ChannelTurnDispatcher {
           description: 'Channel reply failed',
           detail: NOT_CONNECTED,
         });
-        await this.#persistAndDeliver(input, NOT_CONNECTED, { deliveryStatus: 'failed' });
+        await this.#persistAndDeliver(input, NOT_CONNECTED, { failureNotice: true });
         return { replied: false, reason: 'no_chat_adapter' };
       }
 
@@ -561,7 +562,7 @@ export class ChannelTurnDispatcher {
             description: 'Channel reply failed',
             detail: failure,
           });
-          await this.#persistAndDeliver(input, failure, { deliveryStatus: 'failed' });
+          await this.#persistAndDeliver(input, failure, { failureNotice: true });
           return { replied: true, reason: 'runtime_error' };
         }
         this.deps.logger.info('channel.turn.empty_reply', {
@@ -624,7 +625,7 @@ export class ChannelTurnDispatcher {
         description: 'Channel reply failed',
         detail: failure,
       });
-      await this.#persistAndDeliver(input, failure, { deliveryStatus: 'failed' });
+      await this.#persistAndDeliver(input, failure, { failureNotice: true });
       return { replied: true, reason: 'error_notified' };
     } finally {
       void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
@@ -802,15 +803,16 @@ export class ChannelTurnDispatcher {
   async #persistAndDeliver(
     input: ChannelTurnInput,
     body: string,
-    options: { deliveryStatus?: 'delivered' | 'failed' | 'mirrored'; progress?: boolean } = {},
+    options: { failureNotice?: boolean; progress?: boolean } = {},
   ): Promise<void> {
-    this.deps.conversations.appendMirrored({
+    const sessionMessageId = `channel_reply_${randomUUID()}`;
+    const message = this.deps.conversations.appendMirrored({
       workspaceId: input.workspaceId,
       conversationId: input.conversationId,
-      sessionMessageId: `channel_reply_${randomUUID()}`,
+      sessionMessageId,
       authorType: 'agent',
       body,
-      deliveryStatus: options.deliveryStatus ?? 'delivered',
+      deliveryStatus: 'sending',
       metadata: {
         channel: input.kind,
         channelConnectionId: input.connectionId,
@@ -818,9 +820,22 @@ export class ChannelTurnDispatcher {
         channelChatId: input.chatId,
         ...(input.threadId ? { threadId: input.threadId } : {}),
         ...(options.progress ? { channelProgress: true } : {}),
+        ...(options.failureNotice ? { channelFailureNotice: true } : {}),
       },
     });
-    await this.#safeDeliver(input, body);
+    const receipt = await this.#safeDeliver(input, body, sessionMessageId);
+    const deliveryStatus = !receipt
+      ? 'failed'
+      : isAcknowledgedChannelDelivery(receipt)
+        ? receipt.status === 'delivered' || receipt.status === 'read' ? 'delivered' : 'sent'
+        : 'sending';
+    this.deps.conversations.updateDeliveryStatus({
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      messageId: message.id,
+      deliveryStatus,
+      ...(receipt ? { metadata: { channelDeliveryReceipt: receipt } } : {}),
+    });
   }
 
   /**
@@ -1039,14 +1054,15 @@ export class ChannelTurnDispatcher {
     }
   }
 
-  async #safeDeliver(input: ChannelTurnInput, body: string): Promise<void> {
+  async #safeDeliver(input: ChannelTurnInput, body: string, idempotencyKey: string): Promise<ChannelDeliveryReceipt | null> {
     try {
-      await this.deps.deliver({ connectionId: input.connectionId, chatId: input.chatId, body });
+      return await this.deps.deliver({ connectionId: input.connectionId, chatId: input.chatId, body, idempotencyKey }) ?? null;
     } catch (err) {
       this.deps.logger.warn('channel.turn.deliver_failed', {
         connectionId: input.connectionId,
         err: (err as Error).message,
       });
+      return null;
     }
   }
 }

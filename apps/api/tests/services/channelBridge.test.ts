@@ -372,7 +372,7 @@ describe('ChannelBridge', () => {
     expect(row.lastError).toContain('boom');
   });
 
-  it('test() returns diagnostics when no chatId is available and sends when explicit', async () => {
+  it('test() returns diagnostics and never sends an external message', async () => {
     const adapter = new StubTelegramAdapter();
     const { bridge } = buildBridge(ctx, adapter);
     const agentId = seedAgent(ctx);
@@ -395,8 +395,7 @@ describe('ChannelBridge', () => {
       chatId: '111',
       body: 'ping',
     });
-    expect(adapter.sent).toHaveLength(1);
-    expect(adapter.sent[0]!.chatId).toBe('111');
+    expect(adapter.sent).toHaveLength(0);
   });
 
   it('handleInbound() emits CHANNEL_MESSAGE_RECEIVED on the bus', async () => {

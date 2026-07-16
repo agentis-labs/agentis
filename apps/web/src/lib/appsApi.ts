@@ -68,6 +68,33 @@ export interface AppDoctorReport {
   findings: AppDoctorFinding[];
 }
 
+export interface AppCompileCheck {
+  id: string;
+  layer: 'topology' | 'activation' | 'outcome' | 'runtime' | 'channel' | 'surface' | 'test';
+  status: 'pass' | 'block' | 'warn' | 'not_applicable';
+  summary: string;
+  workflowId?: string;
+  evidence?: Record<string, unknown>;
+  clearWith?: { tool: string; args: Record<string, unknown>; why: string };
+  /** False for evidence/release gates that do not deny a manual proof run. */
+  blocksExecution?: boolean;
+}
+
+export interface AppCompileReport {
+  appId: string;
+  target: 'debug' | 'production' | 'unattended';
+  generatedAt: string;
+  structuralReady: boolean;
+  executableReady: boolean;
+  ready: boolean;
+  readyForExecution: boolean;
+  executionBlockerCount: number;
+  evidencePendingCount: number;
+  counts: { pass: number; block: number; warn: number; not_applicable: number };
+  checks: AppCompileCheck[];
+  summary: string;
+}
+
 export interface AppOrchestrationRule {
   id: string;
   sourceWorkflowId: string;
@@ -236,6 +263,8 @@ export const appsApi = {
   /** Workflow control plane (E0): the App's workflows with purpose/order/trigger/last-run. */
   listWorkflows: (id: string) => api<Wrapped<AppWorkflowSummary[]>>(`/v1/apps/${id}/workflows`).then((r) => r.data),
   doctor: (id: string) => api<Wrapped<AppDoctorReport>>(`/v1/apps/${id}/doctor`).then((r) => r.data),
+  compile: (id: string, target: AppCompileReport['target'] = 'production') =>
+    api<Wrapped<AppCompileReport>>(`/v1/apps/${id}/compile?target=${encodeURIComponent(target)}`).then((r) => r.data),
   orchestrationRules: (id: string) => api<Wrapped<AppOrchestrationRule[]>>(`/v1/apps/${id}/orchestration-rules`).then((r) => r.data),
   createOrchestrationRule: (id: string, body: AppOrchestrationRuleInput) =>
     api<Wrapped<AppOrchestrationRule>>(`/v1/apps/${id}/orchestration-rules`, {
@@ -252,11 +281,11 @@ export const appsApi = {
   /** Start one of the App's workflows; returns the new run id (202). */
   runAppWorkflow: (id: string, workflowId: string) =>
     api<Wrapped<{ runId: string }>>(`/v1/apps/${id}/workflows/${encodeURIComponent(workflowId)}/run`, { method: 'POST' }).then((r) => r.data),
-  /** Start every enabled root workflow (no dependsOn) in order; chains cascade. */
-  runAllAppWorkflows: (id: string) =>
-    api<Wrapped<{ results: Array<{ workflowId: string; runId: string | null; skipped?: string }> }>>(
+  /** Continue from the first unresolved frontier; pass fresh only for an intentional root replay. */
+  runAllAppWorkflows: (id: string, mode: 'continue' | 'fresh' = 'continue', overrideAck?: string) =>
+    api<Wrapped<{ mode: 'continue' | 'fresh'; results: Array<{ workflowId: string; runId: string | null; skipped?: string; reusedRunId?: string }> }>>(
       `/v1/apps/${id}/workflows/run-all`,
-      { method: 'POST' },
+      { method: 'POST', body: JSON.stringify({ mode, ...(overrideAck ? { override: { ack: overrideAck } } : {}) }) },
     ).then((r) => r.data.results),
   /** Update an App→workflow binding (purpose/order/enabled/dependsOn). */
   updateWorkflowBinding: (id: string, workflowId: string, binding: UpdateAppWorkflowBindingInput) =>

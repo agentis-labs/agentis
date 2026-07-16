@@ -77,6 +77,7 @@ import { buildSovereigntyRoutes } from '../routes/sovereignty.js';
 import { buildSpecialistRoutes } from '../routes/specialists.js';
 import { buildStorageRoutes } from '../routes/storage.js';
 import { buildTaskRoutes } from '../routes/tasks.js';
+import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
 import { buildTerminalRoutes } from '../routes/terminal.js';
 import { buildTestHarnessRoutes } from '../routes/testHarness.js';
 import { buildToolRoutes } from '../routes/tools.js';
@@ -92,7 +93,9 @@ import { AppPresenceService } from '../services/app/appPresence.js';
 import { AppStaffingService } from '../services/app/appStaffing.js';
 import { BroadcastDispatcher } from '../services/broadcastDispatcher.js';
 import { HarnessImportSyncService } from '../services/harness/harnessImportSync.js';
+import { AgentOwnershipSyncService } from '../services/harness/agentOwnershipSync.js';
 import { McpHarnessSessionService } from '../services/mcp/mcpHarnessSession.js';
+import { ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
 import { OrchestratorModelRouter } from '../services/orchestrator/orchestratorModelRouter.js';
 import { PackagerService } from '../services/packager.js';
 import { serveStatic } from '@hono/node-server/serve-static';
@@ -108,6 +111,7 @@ import type { AppOrchestratorService } from '../services/app/appOrchestrator.js'
 import type { BrainAskService } from '../services/brain/brainAskService.js';
 import type { BrainComposer } from '../services/brain/brainComposer.js';
 import type { BrainHealthService } from '../services/brain/brainHealthService.js';
+import type { BrainMaintenanceService } from '../services/brain/brainMaintenanceService.js';
 import type { CapabilityRegistry } from '../services/capability/capabilityRegistry.js';
 import type { ChatMemoryCaptureService } from '../services/chat/chatMemoryCapture.js';
 import type { ChannelBridge } from '../services/conversation/channelBridge.js';
@@ -151,6 +155,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   brainAsk: BrainAskService;
   brainComposer: BrainComposer;
   brainHealth: BrainHealthService;
+  brainMaintenance: BrainMaintenanceService;
   capabilityRegistry: CapabilityRegistry;
   channelBridge: ChannelBridge;
   channelIdentity: ChannelIdentityService;
@@ -189,6 +194,11 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
 };
 
 export function wireRoutes(deps: WireRoutesDeps) {
+  // One capability registry is shared by chat issuance/Stop and the MCP dispatch
+  // boundary. Keeping it in the composition root prevents transport-local views
+  // of cancellation from drifting apart.
+  const conversationTurnLeases = new ConversationTurnLeaseRegistry();
+  ChatSessionExecutor.setTurnLeaseRegistry(conversationTurnLeases);
   const {
     PeerProfiles,
     Reflection,
@@ -211,6 +221,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     brainAsk,
     brainComposer,
     brainHealth,
+    brainMaintenance,
     budgetService,
     bus,
     capabilityRegistry,
@@ -333,7 +344,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   }));
   app.route('/v1/workflows', buildAnalyticsRoutes({ db: sqlite, auth }));
   app.route('/v1/workflows', buildWorkflowIoRoutes({ db: sqlite, auth }));
-  app.route('/v1/mcp', buildMcpRoutes({ db: sqlite, auth, engine, toolRegistry }));
+  app.route('/v1/mcp', buildMcpRoutes({ db: sqlite, auth, engine, toolRegistry, turnLeases: conversationTurnLeases }));
   app.route('/v1/mcp-servers', buildMcpServerRoutes({
     db: sqlite,
     auth,
@@ -427,6 +438,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     SharedIntelligence,
     knowledgeAutoLinker,
     health: brainHealth,
+    maintenance: brainMaintenance,
     Reflection,
     agentMemory: agentMemoryService,
     peerProfiles: PeerProfiles,
@@ -459,8 +471,10 @@ export function wireRoutes(deps: WireRoutesDeps) {
   appPresence.start();
   app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
-  app.route('/v1/harness', buildHarnessImportRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer }));
-  const harnessImportSync = new HarnessImportSyncService({ db: sqlite, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer }, bus, logger);
+  const ownershipSync = new AgentOwnershipSyncService(sqlite, harnessMemoryIngestion, skillService, logger);
+  const harnessImportDeps = { db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer, ownershipSync };
+  app.route('/v1/harness', buildHarnessImportRoutes(harnessImportDeps));
+  const harnessImportSync = new HarnessImportSyncService(harnessImportDeps, bus, logger, undefined, ownershipSync);
   app.route('/v1/adapters', buildHarnessRoutes({ db: sqlite, auth }));
   app.route('/v1/agents', buildTerminalRoutes({ db: sqlite, auth, conversations }));
   app.route('/v1/gateways', buildGatewayRoutes({ db: sqlite, auth, vault: credentialVault }));
@@ -485,7 +499,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     allowPrivateNetwork: mcpAllowPrivate,
   }));
   app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
-  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, memoryCapture: chatMemoryCapture }));
+  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, engine, turnLeases: conversationTurnLeases, memoryCapture: chatMemoryCapture, audit: auditTrail }));
   const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));

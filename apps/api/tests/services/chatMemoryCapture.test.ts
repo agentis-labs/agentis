@@ -270,4 +270,52 @@ describe('ChatMemoryCaptureService', () => {
       .filter((row) => (row.tags as string[]).includes('plane:workspace_memory'));
     expect(workspaceMemory).toHaveLength(0);
   });
+
+  it('learns a verified repair from tool evidence even when final prose has no learning keywords', async () => {
+    const agentId = seedAgent();
+    const { queue, service } = buildCaptureStack();
+    const result = await service.captureTurn({
+      workspaceId: ctx.workspace.id,
+      conversationId: randomUUID(),
+      userId: ctx.user.id,
+      agentId,
+      userMessage: 'repair the current application',
+      assistantMessage: 'Done.',
+      finishReason: 'stop',
+      experience: {
+        toolCalls: 3,
+        recalledAtomIds: ['recalled-memory-1'],
+        efficiency: {
+          uniqueObservations: 3,
+          coalescedReads: 0,
+          mutatingCalls: 1,
+          argumentCharsObserved: 120,
+          resultCharsObserved: 180,
+          repeatedResultChars: 0,
+        },
+        observations: [
+          { index: 1, name: 'agentis.app.compile', args: { appId: 'app-1' }, result: { counts: { block: 4 } }, ok: true, mutating: false, repeats: 1, durationMs: 4 },
+          { index: 2, name: 'agentis.data.batch', args: { operations: [{ operation: 'update' }] }, result: { ok: true }, ok: true, mutating: true, repeats: 1, durationMs: 3 },
+          { index: 3, name: 'agentis.app.verify', args: { appId: 'app-1' }, result: { compile: { counts: { block: 0 }, readyForExecution: true } }, ok: true, mutating: false, repeats: 1, durationMs: 8 },
+        ],
+      },
+    });
+
+    // App + operating agent each receive the same evidence-backed experience;
+    // exact-scope dedup/reinforcement prevents raw-log growth.
+    expect(result.experienceJobIds).toHaveLength(2);
+    for (let i = 0; i < 4; i += 1) await queue.poll();
+    const experiences = ctx.db.select().from(schema.memoryEpisodes)
+      .where(eq(schema.memoryEpisodes.workspaceId, ctx.workspace.id)).all()
+      .filter((row) => (row.tags as string[]).includes('turn_experience'));
+    expect(experiences).toHaveLength(2);
+    expect(experiences.map((row) => row.scopeId)).toEqual(expect.arrayContaining(['app-1', agentId]));
+    expect(experiences.map((row) => row.summary).join('\n')).toContain('4 → 0');
+    expect(experiences.every((row) => row.type === 'success_pattern')).toBe(true);
+    const positiveRecallEvents = ctx.db.select().from(schema.brainQualityEvents)
+      .where(eq(schema.brainQualityEvents.atomId, 'recalled-memory-1')).all()
+      .filter((row) => row.eventType === 'atom_injected');
+    expect(positiveRecallEvents).toHaveLength(1);
+    expect(positiveRecallEvents[0]?.scopeId).toBe(agentId);
+  });
 });

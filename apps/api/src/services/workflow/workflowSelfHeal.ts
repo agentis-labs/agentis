@@ -98,6 +98,8 @@ export interface SelfHealInput {
   deepPlan?: (args: DeepPlanArgs) => Promise<DeepPlanResult | null>;
   /** Ephemeral public repair liveness; never durable private reasoning. */
   onProgress?: (progress: StructuredCompletionProgress) => void;
+  /** Cancels every billable repair phase and prevents fallback retries. */
+  signal?: AbortSignal;
 }
 
 export type SelfHealResult =
@@ -112,6 +114,7 @@ export class WorkflowSelfHealService {
   constructor(private readonly logger: Logger) {}
 
   async heal(input: SelfHealInput): Promise<SelfHealResult> {
+    input.signal?.throwIfAborted();
     const missing = missingDeclaredKeys(input.rawOutput, input.intent.declaredOutputKeys);
     const diagnosis = `Node '${input.node.id}' failed: ${clip(input.error, 300)}`;
 
@@ -122,6 +125,7 @@ export class WorkflowSelfHealService {
     //    AND rearrange, and we want to reach it fast, not burn a slow single-shot.
     if (!input.deepPlan && missing.length > 0) {
       const recovered = await this.#recoverOutputKeys(input, missing);
+      input.signal?.throwIfAborted();
       if (recovered) {
         this.logger.info('selfheal.output_fixed', { workspaceId: input.workspaceId, nodeId: input.node.id, keys: missing });
         return { outcome: 'output_fixed', output: recovered, diagnosis: `Recovered declared key(s) ${missing.join(', ')} from the node's own output.` };
@@ -149,6 +153,7 @@ export class WorkflowSelfHealService {
     if (input.deepPlan) {
       this.logger.info('selfheal.deep_plan_invoked', { workspaceId: input.workspaceId, nodeId: input.node.id });
       try {
+        input.signal?.throwIfAborted();
         const deep = await input.deepPlan({
           graph: input.graph,
           node: input.node,
@@ -159,6 +164,7 @@ export class WorkflowSelfHealService {
           immutableNodeIds: input.immutableNodeIds ?? [],
           resources: input.resources,
         });
+        input.signal?.throwIfAborted();
         if (deep && Array.isArray(deep.nodes) && deep.nodes.length > 0) {
           const finalized = this.#finalizeProposal(input, { nodes: deep.nodes, edges: deep.edges, resumeNodeId: deep.resumeNodeId, grounding: deep.grounding }, diagnosis, { allowStructural: true });
           if (finalized) {
@@ -172,11 +178,14 @@ export class WorkflowSelfHealService {
           }
         }
       } catch (err) {
+        if (input.signal?.aborted) throw input.signal.reason ?? err;
         this.logger.warn('selfheal.deep_plan_failed', { workspaceId: input.workspaceId, nodeId: input.node.id, error: (err as Error).message });
       }
     }
     if (!proposal && input.completer) {
+      input.signal?.throwIfAborted();
       const finalized = await this.#proposePatch(input, diagnosis);
+      input.signal?.throwIfAborted();
       proposal = finalized ? { ...finalized, source: 'structured_fallback' } : null;
     }
 
@@ -230,6 +239,7 @@ export class WorkflowSelfHealService {
         'Return {"values":{"<field>":<value>}, "missing":["<field not present>"]}.',
       maxTokens: 600,
       maxAttempts: 2,
+      signal: input.signal,
     });
     if (!parsed || !parsed.values) return null;
     const out: Record<string, unknown> = { ...input.rawOutput };
@@ -257,6 +267,7 @@ export class WorkflowSelfHealService {
         'Return {"rootCause":"..."}.',
       maxTokens: 400,
       maxAttempts: 1,
+      signal: input.signal,
     });
     return parsed?.rootCause?.trim() || `Node '${input.node.id}' failed: ${clip(input.error, 300)}`;
   }
@@ -288,6 +299,7 @@ export class WorkflowSelfHealService {
       maxTokens: 2400,
       maxAttempts: 1,
       onProgress: input.onProgress,
+      signal: input.signal,
     });
     if (!parsed || parsed.cannotRepair || !Array.isArray(parsed.nodes) || parsed.nodes.length === 0) return null;
     return this.#finalizeProposal(input, parsed, diagnosis);
@@ -345,6 +357,7 @@ export class WorkflowSelfHealService {
         'Return {"preservesIntent":bool,"grounded":bool,"reason":"..."}.',
       maxTokens: 400,
       maxAttempts: 1,
+      signal: input.signal,
     });
     if (!parsed) return { ok: false, reason: 'judge unavailable' };
     if (parsed.preservesIntent === true && parsed.grounded === true) return { ok: true, reason: parsed.reason?.trim() || 'certified' };

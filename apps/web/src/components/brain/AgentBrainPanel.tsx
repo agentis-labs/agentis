@@ -4,7 +4,7 @@ import { RoleGlyph } from '../agents/AgentRoleGlyphs';
 import clsx from 'clsx';
 import { api, apiErrorMessage, workspace as wsStore } from '../../lib/api';
 import { harnessOf } from '../agents/harnessMeta';
-import { importAgents, checkImportUpdates, type ImportUpdate } from '../../lib/agentImport';
+import { applyAgentSync, getAgentSync, rejectAgentSync, scanAgentSync, updateAgentSyncPolicy, type AgentSyncItem, type AgentSyncState, type ImportUpdate } from '../../lib/agentImport';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { ScopedBrainMap } from './ScopedBrainMap';
@@ -57,6 +57,7 @@ export function AgentBrainPanel({
   const [episodeCount, setEpisodeCount] = useState(0);
   const [skillCount, setSkillCount] = useState(0);
   const [imports, setImports] = useState<ImportUpdate[]>([]);
+  const [sync, setSync] = useState<AgentSyncState | null>(null);
   const [pulling, setPulling] = useState(false);
   const [internalView, setInternalView] = useState<AgentBrainView>('map');
   // The orchestrator has no domain, so its subject-picker row shows the
@@ -95,8 +96,9 @@ export function AgentBrainPanel({
   }, []);
 
   const loadImports = useCallback(async () => {
-    try { setImports((await checkImportUpdates()).updates); } catch { setImports([]); }
-  }, []);
+    if (!agentId) return;
+    try { setSync(await getAgentSync(agentId)); } catch { setSync(null); }
+  }, [agentId]);
 
   const loadSkillCount = useCallback(async (id: string) => {
     if (!id) { setSkillCount(0); return; }
@@ -140,6 +142,7 @@ export function AgentBrainPanel({
   useEffect(() => {
     if (providedImportUpdates) {
       setImports(providedImportUpdates);
+      if (current?.importOrigin) void loadImports();
       return;
     }
     if (!current?.importOrigin) {
@@ -170,11 +173,15 @@ export function AgentBrainPanel({
     if (!ok) return;
     setPulling(true);
     try {
-      const result = await importAgents([{ externalId: current.importOrigin.externalId }]);
+      await scanAgentSync(agentId);
+      const staged = await getAgentSync(agentId);
+      const itemIds = staged.items.filter((item) => item.status === 'pending').map((item) => item.id);
+      const result = itemIds.length ? await applyAgentSync(agentId, itemIds) : { memories: 0, skills: 0, identities: 0, deleted: 0 };
+      const appliedCount = result.memories + result.skills + result.identities + result.deleted;
       await Promise.all([loadMemory(agentId), loadSkillCount(agentId), loadImports()]);
       toast.success(
         'Agent Brain re-synced',
-        `${result.totalAtoms} ${result.totalAtoms === 1 ? 'memory' : 'memories'} · ${result.totalAbilities} ${result.totalAbilities === 1 ? 'skill' : 'skills'}.`,
+        `${appliedCount} approved change${appliedCount === 1 ? '' : 's'} applied.`,
       );
     } catch (error) {
       toast.error('Could not re-sync agent Brain', apiErrorMessage(error));
@@ -257,6 +264,11 @@ export function AgentBrainPanel({
           pending={pending}
           pulling={pulling}
           onPull={() => void pullUpdates()}
+          sync={sync}
+          onRefresh={() => void loadImports()}
+          onPolicy={async (mode) => { await updateAgentSyncPolicy(agentId, { mode }); await loadImports(); }}
+          onApply={async (ids) => { await applyAgentSync(agentId, ids); await Promise.all([loadImports(), loadMemory(agentId), loadSkillCount(agentId)]); }}
+          onReject={async (ids) => { await rejectAgentSync(agentId, ids, 'Rejected by operator'); await loadImports(); }}
         />
       )}
       <div className="relative min-h-0 flex-1">
@@ -294,6 +306,11 @@ function ProviderBrainStrip({
   pending,
   pulling,
   onPull,
+  sync,
+  onRefresh,
+  onPolicy,
+  onApply,
+  onReject,
 }: {
   origin: ImportOrigin;
   memoryCount: number;
@@ -301,11 +318,20 @@ function ProviderBrainStrip({
   pending: ImportUpdate | null;
   pulling: boolean;
   onPull: () => void;
+  sync: AgentSyncState | null;
+  onRefresh: () => void;
+  onPolicy: (mode: 'manual_review' | 'auto_trusted' | 'disabled') => Promise<void>;
+  onApply: (ids: string[]) => Promise<void>;
+  onReject: (ids: string[]) => Promise<void>;
 }) {
   const { Icon, label } = harnessOf(origin.adapterType);
   const pendingCount = pending ? (pending.pendingMemory ?? pending.pendingNew ?? 0) + (pending.pendingSkills ?? 0) : 0;
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const staged = sync?.items.filter((item) => item.status === 'pending' || item.status === 'quarantined') ?? [];
+  const pendingIds = staged.filter((item) => item.status === 'pending').map((item) => item.id);
   return (
-    <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2/60 px-6 py-2">
+    <div className="border-b border-line bg-surface-2/60 px-6 py-2">
+    <div className="flex flex-wrap items-center gap-3">
       <div className="flex items-center gap-2 text-[12px]">
         <Icon className="h-4 w-4 text-text-secondary" aria-label={label} />
         <span className="font-medium text-text-primary">{label}</span>
@@ -319,6 +345,12 @@ function ProviderBrainStrip({
         <span className="text-[11px] text-text-muted">up to date</span>
       )}
       <div className="ml-auto">
+        <select aria-label="Continuous sync policy" value={sync?.source?.mode ?? 'manual_review'} onChange={(event) => void onPolicy(event.target.value as 'manual_review' | 'auto_trusted' | 'disabled')} className="mr-2 h-8 rounded-md border border-line bg-surface px-2 text-[11px] text-text-secondary">
+          <option value="manual_review">Review changes</option>
+          <option value="auto_trusted">Auto-sync trusted</option>
+          <option value="disabled">Disconnected</option>
+        </select>
+        <Button variant="secondary" size="sm" onClick={() => setReviewOpen((value) => !value)}>{staged.length} to review</Button>
         <Button
           variant={pendingCount > 0 ? 'primary' : 'secondary'}
           size="sm"
@@ -329,6 +361,27 @@ function ProviderBrainStrip({
           {pulling ? 'Pulling…' : pendingCount > 0 ? 'Pull updates' : 'Re-sync'}
         </Button>
       </div>
+    </div>
+    {reviewOpen && (
+      <div className="mt-2 rounded-card border border-line bg-surface p-3 text-[11px]">
+        <div className="mb-2 flex items-center gap-2 text-text-muted">
+          <span>Last scan: {sync?.source?.lastScanAt ? new Date(sync.source.lastScanAt).toLocaleString() : 'never'}</span>
+          {sync?.source?.lastError && <span className="text-danger">{sync.source.lastError}</span>}
+          <button type="button" className="ml-auto text-accent" onClick={onRefresh}>Refresh</button>
+        </div>
+        {staged.length === 0 ? <p className="text-text-muted">No staged changes.</p> : staged.map((item: AgentSyncItem) => (
+          <div key={item.id} className="flex items-center gap-2 border-t border-line py-2 first:border-0">
+            <span className="rounded-pill bg-surface-3 px-2 py-0.5 uppercase text-text-muted">{item.itemType}</span>
+            <span className="min-w-0 flex-1 truncate text-text-secondary">{item.sourcePath ?? String(item.payloadJson?.title ?? item.payloadJson?.name ?? 'External change')}</span>
+            <span className={item.status === 'quarantined' ? 'text-warning' : 'text-text-muted'}>{item.reason ?? item.status}</span>
+            {item.status === 'pending' && <button type="button" className="text-accent" onClick={() => void onApply([item.id])}>Approve</button>}
+            <button type="button" className="text-text-muted hover:text-danger" onClick={() => void onReject([item.id])}>Reject</button>
+          </div>
+        ))}
+        {pendingIds.length > 0 && <div className="mt-2 flex justify-end"><Button size="sm" variant="primary" onClick={() => void onApply(pendingIds)}>Approve all eligible</Button></div>}
+        <div className="mt-2 text-text-muted">{sync?.history?.length ?? 0} sync runs retained · Auto-sync never applies quarantined items.</div>
+      </div>
+    )}
     </div>
   );
 }
@@ -493,5 +546,3 @@ function BrainViewTabs({
     </div>
   );
 }
-
-

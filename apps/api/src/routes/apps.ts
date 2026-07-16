@@ -66,6 +66,7 @@ import type { TriggerRuntime } from '../engine/TriggerRuntime.js';
 import { WorkflowTriggerDeploymentService } from '../services/workflow/workflowTriggerDeployment.js';
 import { collectAppDoctorSnapshot } from '../services/app/appDoctorSnapshot.js';
 import { validateAppConformance } from '../services/app/appDoctor.js';
+import { compileAppReadiness } from '../services/app/appCompiler.js';
 import { readWorkflowSpec } from '../services/workflow/workflowSpec.js';
 import { evaluateRunOutcome } from '../services/workflow/runOutcome.js';
 import { repairAppConformance } from '../services/app/appDoctorRepair.js';
@@ -75,6 +76,7 @@ import {
   orchestrationRuleInputSchema,
   upsertOrchestrationRule,
 } from '../services/workflow/orchestrationRuleService.js';
+import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt } from '../adapters/channels/types.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -91,7 +93,7 @@ export interface AppRoutesDeps {
   /** Append + realtime-publish operator messages into a live thread (Phase 2 takeover). */
   conversations?: ConversationStore;
   /** Deliver an operator's reply out to the origin channel (Phase 2 takeover). */
-  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string }): Promise<unknown> };
+  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string; idempotencyKey?: string }): Promise<ChannelDeliveryReceipt> };
   /** App relationship pipeline — list/update contacts (Phase 3). */
   contacts?: AppContactService;
   /** Multi-party threads (G1) — list/add/remove conversation participants + warm handoff. */
@@ -491,6 +493,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         purpose: binding.purpose ?? (row.description?.trim() || null),
         order: binding.order ?? 0,
         enabled: binding.enabled ?? true,
+        operatorEntrypoint: binding.operatorEntrypoint ?? (binding.dependsOn ?? []).length === 0,
         dependsOn: binding.dependsOn ?? [],
         triggerKind: triggerKindOf(row.graph as WorkflowGraph),
         lastRun: lastRun ? {
@@ -527,6 +530,16 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const appId = c.req.param('id');
     store.get(ws.workspaceId, appId);
     return c.json({ data: validateAppConformance(collectAppDoctorSnapshot(deps.db, ws.workspaceId, appId)) });
+  });
+
+  /** Full pre-execution compile gate used by agents, run admission, and UI. */
+  app.get('/:id/compile', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    store.get(ws.workspaceId, appId);
+    const target = c.req.query('target');
+    const compileTarget = target === 'debug' || target === 'unattended' ? target : 'production';
+    return c.json({ data: compileAppReadiness(deps.db, ws.workspaceId, appId, compileTarget) });
   });
 
   app.post('/:id/doctor/repair', async (c) => {
@@ -659,16 +672,32 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     return c.json({ data: deployment });
   });
 
-  // Run every enabled root workflow (no dependsOn), in order; dependsOn chains
-  // cascade from the AppOrchestrator as each upstream settles.
+  // Continue from the first unresolved business frontier by default. A caller
+  // must explicitly request `fresh` to replay accomplished roots.
   app.post('/:id/workflows/run-all', async (c) => {
     const ws = getWorkspace(c);
     const user = c.get('user');
     const appId = c.req.param('id');
     if (!store.get(ws.workspaceId, appId)) throw new AgentisError('RESOURCE_NOT_FOUND', `app not found: ${appId}`);
     if (!deps.orchestrator) throw new AgentisError('INTERNAL_ERROR', 'app orchestrator is not available in this runtime');
-    const results = await deps.orchestrator.runAll(ws.workspaceId, appId, user.id);
-    return c.json({ data: { results } }, 202);
+    const body = await c.req.json().catch(() => ({})) as { mode?: unknown; override?: { ack?: unknown } };
+    const mode = body.mode === 'fresh' ? 'fresh' : 'continue';
+    const report = compileAppReadiness(deps.db, ws.workspaceId, appId, 'production');
+    const blockers = report.checks.filter((check) => check.status === 'block' && check.blocksExecution !== false);
+    const overrideAck = typeof body.override?.ack === 'string' ? body.override.ack.trim() : '';
+    if (blockers.length > 0 && !overrideAck) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `App run blocked by ${blockers.length} execution finding${blockers.length === 1 ? '' : 's'}. Resolve them or pass override.ack with an audited reason.`,
+        {
+          httpStatus: 409,
+          remediation: `Run agentis.app.compile and clear: ${blockers.slice(0, 3).map((finding) => finding.id).join(', ')}`,
+          details: { appId, structuralReady: report.structuralReady, executableReady: report.executableReady, executionBlockerCount: report.executionBlockerCount, evidencePendingCount: report.evidencePendingCount, blockers, next: report.next },
+        },
+      );
+    }
+    const results = await deps.orchestrator.runAll(ws.workspaceId, appId, user.id, mode, overrideAck || undefined);
+    return c.json({ data: { mode, results } }, 202);
   });
 
   app.post('/:id/workflows/:wid/run', async (c) => {
@@ -985,27 +1014,46 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       .get();
     if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
     const body = parsed.data.body.trim();
+    const operatorDeliveryId = `operator_reply:${conversationId}:${randomUUID()}`;
+    const outboundMessage = deps.conversations?.appendOutbound({
+      workspaceId: ws.workspaceId,
+      conversationId,
+      operatorId: user.id,
+      sessionMessageId: operatorDeliveryId,
+      body,
+      deliveryStatus: conv.channelConnectionId && conv.channelChatId && deps.channels ? 'sending' : 'failed',
+      metadata: { operatorTakeover: true, channelReply: true, ...(conv.channelChatId ? { channelChatId: conv.channelChatId } : {}) },
+    });
     let delivered = false;
+    let pending = false;
+    let receipt: ChannelDeliveryReceipt | undefined;
     if (conv.channelConnectionId && conv.channelChatId && deps.channels) {
       try {
-        await deps.channels.deliverToConnection({ connectionId: conv.channelConnectionId, chatId: conv.channelChatId, body });
-        delivered = true;
+        receipt = await deps.channels.deliverToConnection({
+          connectionId: conv.channelConnectionId,
+          chatId: conv.channelChatId,
+          body,
+          idempotencyKey: operatorDeliveryId,
+        });
+        delivered = isAcknowledgedChannelDelivery(receipt);
+        pending = !delivered;
       } catch {
         delivered = false;
       }
     }
-    deps.conversations?.appendOutbound({
-      workspaceId: ws.workspaceId,
-      conversationId,
-      operatorId: user.id,
-      body,
-      deliveryStatus: delivered ? 'delivered' : 'failed',
-      metadata: { operatorTakeover: true, channelReply: true, ...(conv.channelChatId ? { channelChatId: conv.channelChatId } : {}) },
-    });
+    if (outboundMessage) {
+      deps.conversations?.updateDeliveryStatus({
+        workspaceId: ws.workspaceId,
+        conversationId,
+        messageId: outboundMessage.id,
+        deliveryStatus: delivered ? (receipt?.status === 'delivered' || receipt?.status === 'read' ? 'delivered' : 'sent') : pending ? 'sending' : 'failed',
+        ...(receipt ? { metadata: { channelDeliveryReceipt: receipt } } : {}),
+      });
+    }
     // Operator sends are exempt from rate/quiet limits (a human action) but still
     // recorded against the App's rolling window so the counter stays honest (G7).
     if (delivered) deps.outboundPolicy?.record(appId, 'operator');
-    return c.json({ data: { conversationId, delivered } });
+    return c.json({ data: { conversationId, delivered, pending, ...(receipt ? { receipt } : {}) } });
   });
 
   // Needs-you flag (Phase 2): the operator clears (or sets) the "needs attention"

@@ -25,6 +25,7 @@ import {
   type SimulationNodeDatum,
 } from 'd3-force';
 import { graphToBrainEdges, graphToBrainNodes } from './brainGraphAdapter';
+import { brainLayerColor, brainNodeAccentColor } from './brainVisualPalette';
 
 interface StageProps {
   brain: BrainResponse;
@@ -51,6 +52,7 @@ interface SimNode extends SimulationNodeDatum {
   /** Eased render radius — lerps toward the interaction target each frame. */
   radius: number;
   color: string;
+  accentColor: string | null;
   isCore: boolean;
   x: number;
   y: number;
@@ -217,13 +219,15 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
       const baseRadius = isCore
         ? 22
         : Math.max(5, Math.min(24, 4 + Math.sqrt(d) * 3.4 + (node.weight ?? 0.4) * 7));
-      const color = dotColor(node);
+      const color = brainLayerColor(node.layer);
+      const accentColor = brainNodeAccentColor(node);
       const existing = reuse.get(node.id);
       if (existing) {
         existing.node = node;
         existing.degree = d;
         existing.baseRadius = baseRadius;
         existing.color = color;
+        existing.accentColor = accentColor;
         existing.isCore = isCore;
         nextMap.set(node.id, existing);
       } else {
@@ -231,7 +235,7 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
         const seedY = isCore ? 0 : node.y ?? (Math.random() - 0.5) * 320;
         const sn: SimNode = {
           id: node.id, node, degree: d, baseRadius, radius: baseRadius,
-          color, isCore, x: seedX, y: seedY,
+          color, accentColor, isCore, x: seedX, y: seedY,
         };
         if (isCore) { sn.fx = 0; sn.fy = 0; }
         nextMap.set(node.id, sn);
@@ -459,6 +463,16 @@ export function BrainStage({ brain, graph, selectedId, onSelect, filters, livePu
         ctx.arc(sx, sy, r - 0.5, 0, Math.PI * 2);
         ctx.strokeStyle = withAlpha(darken(n.color, 0.28), 0.7);
         ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Layer colour is the stable fill/legend contract. Tags, skills and
+      // lifecycle subtypes are secondary accents so they cannot lie about layer.
+      if (n.accentColor && n.accentColor !== n.color && r > 3) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, r + 1.5, 0, Math.PI * 2);
+        ctx.strokeStyle = withAlpha(n.accentColor, 0.9);
+        ctx.lineWidth = 1.5;
         ctx.stroke();
       }
 
@@ -762,48 +776,6 @@ function glowSprite(color: string): HTMLCanvasElement {
 
 function isFlowEdge(edge: BrainEdge): boolean {
   return edge.kind === 'feeds' || edge.kind === 'evaluates' || edge.kind === 'co_observed';
-}
-
-function getTagColor(tag: string): string {
-  let hash = 0;
-  for (let i = 0; i < tag.length; i += 1) {
-    hash = tag.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const hue = Math.abs(hash % 360);
-  return hslToHex(hue, 75, 68);
-}
-
-function hslToHex(h: number, s: number, l: number): string {
-  const lightness = l / 100;
-  const a = (s * Math.min(lightness, 1 - lightness)) / 100;
-  const f = (n: number) => {
-    const k = (n + h / 30) % 12;
-    const color = lightness - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-    return Math.round(255 * color).toString(16).padStart(2, '0');
-  };
-  return `#${f(0)}${f(8)}${f(4)}`;
-}
-
-function dotColor(node: BrainNode): string {
-  if (node.type === 'scope_owner') return '#fbbf24'; // App/Agent/Workflow owner hub
-  if (node.type === 'skill') return '#34d399';
-  if (node.type === 'example') return '#f472b6';
-  if (node.type === 'warning') return '#fb7185';
-  if (node.type === 'gap') return '#94a3b8';
-
-  const tags = node.metadata?.tags;
-  const firstTag = Array.isArray(tags) && typeof tags[0] === 'string' ? tags[0] : undefined;
-  if (firstTag) {
-    return getTagColor(firstTag);
-  }
-
-  switch (node.layer) {
-    case 'core': return '#e2e8f0';
-    case 'knowledge': return '#22d3ee';
-    case 'memory': return '#a78bfa';
-    case 'judgment': return '#f59e0b';
-    default: return '#94a3b8';
-  }
 }
 
 function atomCountLabel(graph: BrainGraph): string {

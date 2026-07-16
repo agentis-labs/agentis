@@ -239,11 +239,11 @@ function UnboundMarker({ path }: { path: string }) {
   );
 }
 
-function resolveArgs(args: Record<string, unknown> | undefined, scope: ResolveScope): Record<string, unknown> {
+export function resolveActionArgs(args: Record<string, unknown> | undefined, scope: ResolveScope): Record<string, unknown> {
   return Object.fromEntries(Object.entries(args ?? {}).map(([k, v]) => [k, resolveDeep(v, scope)]));
 }
 
-function useResolvedScope(row?: Record<string, unknown>): ResolveScope {
+export function useResolvedScope(row?: Record<string, unknown>): ResolveScope {
   const { uiState } = useRuntime();
   return useMemo(() => ({ row, state: uiState }), [row, uiState]);
 }
@@ -991,7 +991,7 @@ function ActionButton({
         if (editing) return; // inert in the builder canvas — selection is handled by the wrapper
         setBusy(true);
         try {
-          await invoke(action, resolveArgs(args, resolvedScope));
+          await invoke(action, resolveActionArgs(args, resolvedScope));
         } finally {
           setBusy(false);
         }
@@ -1345,7 +1345,7 @@ function ActionForm({ node }: { node: Extract<ViewNode, { type: 'Form' }> }) {
         if (editing) return; // inert in the builder canvas
         setBusy(true);
         try {
-          await invoke(node.submit.action, { record: values, ...resolveArgs(node.submit.args, resolvedScope) });
+          await invoke(node.submit.action, { record: values, ...resolveActionArgs(node.submit.args, resolvedScope) });
           setValues({});
         } finally {
           setBusy(false);
@@ -1986,7 +1986,7 @@ function ChatShell({ title, channel, messages, send, placeholder, sendArgs }: { 
         <Composer
           label="Send"
           placeholder={placeholder}
-          onSend={async (text) => { await invoke(send.action, { content: text, ...(sendArgs ?? {}), ...resolveArgs(send.args, resolvedScope) }); }}
+          onSend={async (text) => { await invoke(send.action, { content: text, ...(sendArgs ?? {}), ...resolveActionArgs(send.args, resolvedScope) }); }}
         />
       ) : null}
     </div>
@@ -2292,7 +2292,7 @@ function InboxThread({ bind, convId, matchField, roleField, contentField, send }
         ))}
       </div>
       {send ? (
-        <Composer label="Send" onSend={async (text) => { await invoke(send.action, { conversationId: convId, content: text, ...resolveArgs(send.args, resolvedScope) }); }} />
+        <Composer label="Send" onSend={async (text) => { await invoke(send.action, { conversationId: convId, content: text, ...resolveActionArgs(send.args, resolvedScope) }); }} />
       ) : null}
     </div>
   );
@@ -2318,7 +2318,7 @@ function MediaGenView({ node, scope }: { node: Extract<ViewNode, { type: 'MediaG
             const value = prompt.trim();
             if (!value || busy || editing) return;
             setBusy(true);
-            try { await invoke(generate.action, { prompt: value, ...resolveArgs(generate.args, scope) }); setPrompt(''); } finally { setBusy(false); }
+            try { await invoke(generate.action, { prompt: value, ...resolveActionArgs(generate.args, scope) }); setPrompt(''); } finally { setBusy(false); }
           }}
         >
           <input value={prompt} onChange={(event) => setPrompt(event.target.value)} onClick={(event) => event.stopPropagation()} placeholder={node.placeholder ?? 'Describe what to generate…'} disabled={Boolean(editing)} className="h-9 flex-1 rounded-btn border border-line bg-canvas px-3 text-[13px] text-text-primary outline-none focus:border-accent disabled:opacity-60" />

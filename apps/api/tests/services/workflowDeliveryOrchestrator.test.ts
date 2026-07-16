@@ -150,6 +150,8 @@ describe('deliverWorkflow', () => {
     expect(runs).toHaveLength(2);       // tried the full budget
     expect(result.verdict?.outcome).toBe('failed_checks');
     expect(result.message).toMatch(/Not accomplished after 2/i);
+    expect(result.timeline.filter((entry) => entry.stage === 'dry_run')).toHaveLength(1);
+    expect(result.timeline.filter((entry) => entry.stage === 'dry_run_reused')).toHaveLength(1);
   });
 
   it('UNVERIFIABLE when a run completes with no world-check (completion is not proof)', async () => {

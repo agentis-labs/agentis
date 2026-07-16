@@ -47,7 +47,7 @@ describe('buildChecklist', () => {
         { workflowId: '${workflows.publish.workflowId}', dependsOn: ['${workflows.ingest.workflowId}'] },
       ],
     });
-    expect(checklist.at(-1)).toMatchObject({ id: 'verify_app', tool: 'agentis.app.doctor', args: { appId: 'app-1' } });
+    expect(checklist.at(-1)).toMatchObject({ id: 'compile_app', tool: 'agentis.app.compile', args: { appId: 'app-1', target: 'debug' } });
   });
 
   it('installs success contracts before compiling workflow rules', () => {
@@ -61,7 +61,25 @@ describe('buildChecklist', () => {
       collections: [],
       cast: [],
     });
-    expect(checklist.map((step) => step.id)).toEqual(['build_work', 'scope_work', 'compile_workflow_rules', 'verify_app']);
+    expect(checklist.map((step) => step.id)).toEqual(['build_work', 'scope_work', 'compile_workflow_rules', 'compile_app']);
     expect(checklist[1]?.args.workflowId).toBe('${workflows.work.workflowId}');
+  });
+
+  it('keeps human/event-gated work out of success chains and operator Run Pipeline roots', () => {
+    const checklist = buildChecklist('app-1', {
+      intent: 'wait for a reply before acting',
+      workflows: [
+        wf('contact'),
+        { ...wf('reply', ['contact']), trigger: 'inbound human reply', activation: 'event' as const },
+      ],
+      conversation: true,
+      collections: [],
+      cast: [],
+    });
+    const compile = checklist.find((step) => step.id === 'compile_workflow_rules');
+    expect(compile?.args).toMatchObject({ workflows: [
+      { workflowId: '${workflows.contact.workflowId}', dependsOn: [], operatorEntrypoint: true },
+      { workflowId: '${workflows.reply.workflowId}', dependsOn: [], operatorEntrypoint: false },
+    ] });
   });
 });

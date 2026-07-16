@@ -2701,6 +2701,69 @@ CREATE INDEX IF NOT EXISTS idx_workflow_event_delivery_lease
   ON workflow_event_deliveries(status, lease_expires_at);
 `,
   },
+  {
+    version: 114,
+    name: 'durable_agent_ownership_sync',
+    sql: `
+CREATE TABLE IF NOT EXISTS agent_sync_sources (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  adapter_type TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  root_path TEXT,
+  mode TEXT NOT NULL DEFAULT 'manual_review',
+  policy_json TEXT NOT NULL DEFAULT '{}',
+  last_scan_at TEXT,
+  last_success_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sync_sources_agent ON agent_sync_sources(workspace_id, agent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sync_sources_external ON agent_sync_sources(workspace_id, adapter_type, external_id);
+
+CREATE TABLE IF NOT EXISTS agent_sync_items (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES agent_sync_sources(id) ON DELETE CASCADE,
+  item_key TEXT NOT NULL,
+  item_type TEXT NOT NULL,
+  source_path TEXT,
+  origin TEXT,
+  content_hash TEXT NOT NULL,
+  previous_hash TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  quality REAL,
+  decision_reason TEXT,
+  target_kind TEXT,
+  target_id TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  applied_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sync_items_key ON agent_sync_items(source_id, item_key);
+CREATE INDEX IF NOT EXISTS idx_agent_sync_items_status ON agent_sync_items(workspace_id, source_id, status);
+
+CREATE TABLE IF NOT EXISTS agent_sync_runs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES agent_sync_sources(id) ON DELETE CASCADE,
+  trigger TEXT NOT NULL DEFAULT 'manual',
+  mode TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'scanning',
+  detected_json TEXT NOT NULL DEFAULT '{}',
+  applied_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_sync_runs_source ON agent_sync_runs(source_id, started_at);
+`,
+  },
 ];
 
 

@@ -144,6 +144,20 @@ export class AgentisToolRegistry {
       };
     }
 
+    // Cancellation is a dispatch boundary, not a cooperative suggestion. Check
+    // before validation/permission/handler work so a stopped in-process turn can
+    // never start another mutation while its model loop is winding down.
+    if (ctx.signal?.aborted) {
+      return {
+        id: callId,
+        toolId: req.toolId,
+        ok: false,
+        errorCode: 'TURN_CANCELLED',
+        errorMessage: 'This conversation turn was stopped. The tool was not executed.',
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
     if ((ctx.executionMode === 'plan' || ctx.executionMode === 'ask') && tool.definition.mutating) {
       const ask = ctx.executionMode === 'ask';
       return {

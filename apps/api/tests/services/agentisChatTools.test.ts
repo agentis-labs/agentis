@@ -269,6 +269,43 @@ describe('agent-facing capability authoring tools', () => {
 });
 
 describe('agent-facing native channel tools', () => {
+  it('binds a channel to an App and exposes the binding in channel inventory', async () => {
+    const bridge = new ChannelBridge({
+      db: ctx.db,
+      vault: ctx.vault,
+      conversations: new ConversationStore({ db: ctx.db, bus: ctx.bus }),
+      bus: ctx.bus,
+      logger: ctx.logger,
+      adapters: { telegram: new StubTelegramAdapter() },
+    });
+    const agentId = seedAgent();
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'telegram', name: 'App channel', token: 'bot-token',
+    });
+    const appId = randomUUID();
+    ctx.db.insert(schema.apps).values({
+      id: appId, workspaceId: ctx.workspace.id, slug: `channel-${appId}`,
+      name: 'Bound App', description: '', createdBy: ctx.user.id,
+    }).run();
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    const toolDeps = deps();
+    toolDeps.channels = bridge;
+    registerChannelTools(registry, toolDeps);
+
+    const bound = await registry.execute({
+      toolId: 'agentis.connection.bind_app',
+      arguments: { connectionId: connection.id, appId },
+    }, toolContext());
+    expect(bound.ok).toBe(true);
+    expect(bound.output).toEqual(expect.objectContaining({ bound: true, connectionId: connection.id, appId }));
+
+    const listed = await registry.execute({ toolId: 'agentis.channel.list', arguments: {} }, toolContext());
+    expect(listed.output).toEqual(expect.objectContaining({
+      channels: [expect.objectContaining({ id: connection.id, appId })],
+    }));
+  });
+
   it('lists channels with health and sends to the saved default target', async () => {
     const adapter = new StubTelegramAdapter();
     const bridge = new ChannelBridge({

@@ -3,6 +3,8 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../../logger.js';
 import type { CognitivePromotionQueueWorker } from '../cognitivePromotionQueueWorker.js';
+import type { TurnExperiencePayload } from '../cognitivePromotionQueueWorker.js';
+import type { ConversationTurnExperience, TurnToolObservation } from '../conversation/conversationTurnLease.js';
 import type { MemoryStore } from '../memory/memoryStore.js';
 import type { PeerProfileService } from '../peerProfileService.js';
 import type { SessionMomentService } from '../sessionMomentService.js';
@@ -47,6 +49,8 @@ export interface CaptureChatTurnArgs {
    */
   activeWorkflowId?: string | null;
   activeNodeId?: string | null;
+  /** Compact evidence recorded at the shared tool boundary for any runtime. */
+  experience?: ConversationTurnExperience | null;
 }
 
 export interface CaptureChatTurnResult {
@@ -54,6 +58,7 @@ export interface CaptureChatTurnResult {
   sessionMomentId: string | null;
   promotedSessionMoments: number;
   workspaceMemoryIds: string[];
+  experienceJobIds: string[];
   signals: number;
 }
 
@@ -88,6 +93,7 @@ export class ChatMemoryCaptureService {
       sessionMomentId: null,
       promotedSessionMoments: 0,
       workspaceMemoryIds: [],
+      experienceJobIds: [],
       signals: 0,
     };
 
@@ -99,6 +105,30 @@ export class ChatMemoryCaptureService {
     const immediateCorrection = extractImmediateAgentCorrection(userMessage, displayName(args));
     const immediateMemoryId = immediateCorrection ? this.captureImmediateCorrection(args) : null;
     if (immediateMemoryId) result.workspaceMemoryIds.push(immediateMemoryId);
+
+    // Harness-independent experiential learning. Unlike the legacy prose regex,
+    // this is grounded in actual tool inputs/results: mutation sequence, proof
+    // calls, blocker deltas, failures, and the unresolved frontier. It therefore
+    // works for Codex, Claude, Hermes, Cursor, OpenClaw, HTTP agents, and future
+    // runtimes as long as they use the Agentis tool boundary.
+    if (this.deps.brainQueue && args.experience?.observations.length) {
+      for (const payload of this.#turnExperiencePayloads(args)) {
+        try {
+          result.experienceJobIds.push(this.deps.brainQueue.enqueue({
+            workspaceId: args.workspaceId,
+            itemType: 'turn_experience',
+            priority: payload.outcomeStatus === 'bad' ? 'high' : 'normal',
+            payload,
+          }));
+        } catch (err) {
+          this.deps.logger.warn('chat.memory_capture.experience_enqueue_failed', {
+            workspaceId: args.workspaceId,
+            conversationId: args.conversationId,
+            message: (err as Error).message,
+          });
+        }
+      }
+    }
 
     try {
       result.peerUpdateJobIds.push(...this.#enqueuePeerUpdates(args));
@@ -198,6 +228,7 @@ export class ChatMemoryCaptureService {
       result.peerUpdateJobIds.length > 0 ||
       result.sessionMomentId ||
       result.workspaceMemoryIds.length > 0 ||
+      result.experienceJobIds.length > 0 ||
       result.signals > 0
     ) {
       this.deps.logger.info('chat.memory_capture.completed', {
@@ -208,6 +239,7 @@ export class ChatMemoryCaptureService {
         sessionMoment: Boolean(result.sessionMomentId),
         formationEnqueued: Boolean(this.deps.brainQueue),
         workspaceMemories: result.workspaceMemoryIds.length,
+        experiences: result.experienceJobIds.length,
       });
     }
 
@@ -293,6 +325,58 @@ export class ChatMemoryCaptureService {
 	        originSurface: 'operator_chat',
 	      },
     });
+  }
+
+  #turnExperiencePayloads(args: CaptureChatTurnArgs): TurnExperiencePayload[] {
+    const experience = args.experience;
+    if (!experience || experience.observations.length === 0) return [];
+    const observations = experience.observations;
+    const workflowId = firstResourceId(observations, 'workflowId') ?? args.activeWorkflowId ?? null;
+    let appId = firstResourceId(observations, 'appId');
+    if (!appId && workflowId) {
+      appId = this.deps.db.select({ appId: schema.workflows.appId }).from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, args.workspaceId), eq(schema.workflows.id, workflowId)))
+        .get()?.appId ?? null;
+    }
+
+    const lesson = composeTurnExperienceLesson(args, observations, appId, workflowId);
+    if (!lesson) return [];
+    // The owned resource remembers its exact frontier; the operating agent also
+    // remembers the procedure. Scope-strict dedup makes repeats reinforce these
+    // atoms rather than append raw logs forever.
+    const scopes = Array.from(new Set([appId, workflowId, args.agentId].filter((id): id is string => Boolean(id))));
+    return scopes.map((scopeId) => ({
+      workspaceId: args.workspaceId,
+      scopeId,
+      agentId: args.agentId,
+      workflowId,
+      title: lesson.title,
+      content: lesson.content,
+      type: lesson.type,
+      outcomeStatus: lesson.outcomeStatus,
+      tags: [
+        `scope:${scopeId === args.agentId ? 'agent' : appId && scopeId === appId ? 'app' : 'workflow'}`,
+        ...(appId ? [`app:${appId}`] : []),
+        ...(workflowId ? [`workflow:${workflowId}`] : []),
+      ],
+      metadata: {
+        appId,
+        workflowId,
+        conversationId: args.conversationId,
+        toolCalls: experience.toolCalls,
+        blockerCounts: lesson.blockerCounts,
+        operationSequence: lesson.operationSequence,
+        remainingBlockers: lesson.remainingBlockers,
+        finishReason: args.finishReason ?? null,
+        efficiency: experience.efficiency,
+      },
+      // Recall feedback is a turn-level event. Carry it on the agent-scoped
+      // payload only so app/workflow copies of the same lesson cannot reinforce
+      // the recalled atoms two or three times.
+      recalledAtomIds: lesson.outcomeStatus === 'good' && scopeId === args.agentId
+        ? experience.recalledAtomIds
+        : [],
+    }));
   }
 
   #writeAgentCorrection(args: CaptureChatTurnArgs, signal: OperatorMemorySignal): string | null {
@@ -486,6 +570,161 @@ function buildSessionMomentContent(args: CaptureChatTurnArgs, signals: OperatorM
 function displayName(args: CaptureChatTurnArgs): string {
   const trimmed = args.userDisplayName?.trim();
   return trimmed || 'Operator';
+}
+
+interface TurnExperienceLesson {
+  title: string;
+  content: string;
+  type: TurnExperiencePayload['type'];
+  outcomeStatus: TurnExperiencePayload['outcomeStatus'];
+  blockerCounts: number[];
+  operationSequence: string[];
+  remainingBlockers: string[];
+}
+
+function composeTurnExperienceLesson(
+  args: CaptureChatTurnArgs,
+  observations: TurnToolObservation[],
+  appId: string | null,
+  workflowId: string | null,
+): TurnExperienceLesson | null {
+  const mutations = observations.filter((entry) => entry.mutating && entry.ok);
+  const failures = observations.filter((entry) => !entry.ok);
+  const proofs = observations.filter((entry) => /(?:verify|compile|test|dry_run|lint|doctor|inspect)/i.test(entry.name));
+  const blockerCounts = observations.flatMap((entry) => blockerCountsIn(entry.result));
+  const firstBlockers = blockerCounts[0];
+  const finalBlockers = blockerCounts.at(-1);
+  const recoveredTool = observations.some((entry, index) =>
+    !entry.ok && observations.slice(index + 1).some((later) => later.name === entry.name && later.ok),
+  );
+  const improved = firstBlockers !== undefined && finalBlockers !== undefined && finalBlockers < firstBlockers;
+  const verifiedClean = finalBlockers === 0 || proofs.some((entry) => resultLooksGreen(entry.result));
+
+  // Reading around without changing, proving, failing, or moving a frontier is
+  // ordinary working context—not a durable lesson.
+  if (mutations.length === 0 && failures.length === 0 && !improved && !verifiedClean && !recoveredTool) return null;
+
+  const operationSequence = observations.map((entry) => `${entry.name}${entry.repeats > 1 ? `×${entry.repeats}` : ''}`);
+  const remainingBlockers = finalBlockers && finalBlockers > 0
+    ? blockerLabelsIn(observations.at(-1)?.result).slice(0, 8)
+    : [];
+  const resource = appId ? `App ${appId}` : workflowId ? `Workflow ${workflowId}` : `Agent ${args.agentId}`;
+  const objective = compactSentence(args.userMessage, 220);
+  const successfulMutations = unique(mutations.map((entry) => entry.name));
+  const proofCalls = unique(proofs.filter((entry) => entry.ok).map((entry) => entry.name));
+  const failedCalls = unique(failures.map((entry) => entry.name));
+
+  let type: TurnExperiencePayload['type'] = 'decision';
+  let outcomeStatus: TurnExperiencePayload['outcomeStatus'] = 'mixed';
+  let title = `Worked frontier: ${resource}`;
+  let guidance = 'Continue from the latest verified frontier and preserve already-proven behavior.';
+  if (verifiedClean && (mutations.length > 0 || recoveredTool)) {
+    type = 'success_pattern';
+    outcomeStatus = 'good';
+    title = `Verified successful procedure: ${resource}`;
+    guidance = 'Reuse this verified operation/proof sequence as the baseline; change only the failing frontier when the context remains compatible.';
+  } else if (improved || recoveredTool) {
+    type = 'recovery';
+    outcomeStatus = finalBlockers === 0 ? 'good' : 'mixed';
+    title = firstBlockers !== undefined && finalBlockers !== undefined
+      ? `Recovered ${resource}: ${firstBlockers} → ${finalBlockers} blockers`
+      : `Recovered a failed operation: ${resource}`;
+    guidance = 'Resume at the remaining frontier; do not restart upstream work whose proof remains current.';
+  } else if (failures.length > 0 || (finalBlockers ?? 0) > 0) {
+    type = 'failure';
+    outcomeStatus = 'bad';
+    title = `Unresolved frontier: ${resource}`;
+    guidance = 'Do not report this resource as fixed. Start from the recorded remaining frontier and verify after the next repair batch.';
+  }
+
+  const frontier = firstBlockers !== undefined && finalBlockers !== undefined
+    ? `Compiler blockers moved ${firstBlockers} → ${finalBlockers}.`
+    : finalBlockers !== undefined ? `Latest compiler count: ${finalBlockers} blockers.` : '';
+  const content = [
+    `Grounded experience for ${resource}. Objective: ${objective}`,
+    frontier,
+    `Observed operation sequence: ${operationSequence.join(' → ')}.`,
+    successfulMutations.length ? `Successful state changes: ${successfulMutations.join(', ')}.` : '',
+    proofCalls.length ? `Proof operations completed: ${proofCalls.join(', ')}.` : '',
+    failedCalls.length ? `Failed operations encountered: ${failedCalls.join(', ')}.` : '',
+    remainingBlockers.length ? `Remaining blocker frontier: ${remainingBlockers.join(', ')}.` : '',
+    guidance,
+  ].filter(Boolean).join(' ');
+
+  return {
+    title: compactSentence(title, 100),
+    content: compactSentence(content, 1_400),
+    type,
+    outcomeStatus,
+    blockerCounts,
+    operationSequence,
+    remainingBlockers,
+  };
+}
+
+function firstResourceId(observations: TurnToolObservation[], key: 'appId' | 'workflowId'): string | null {
+  for (const observation of observations) {
+    const found = findStringKey(observation.args, key);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findStringKey(value: unknown, key: string, depth = 0): string | null {
+  if (!value || typeof value !== 'object' || depth > 4) return null;
+  if (!Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    if (typeof row[key] === 'string' && row[key].trim()) return row[key].trim();
+    for (const child of Object.values(row)) {
+      const found = findStringKey(child, key, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const child of value) {
+    const found = findStringKey(child, key, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function blockerCountsIn(value: unknown, depth = 0): number[] {
+  if (!value || typeof value !== 'object' || depth > 5) return [];
+  if (Array.isArray(value)) return value.flatMap((entry) => blockerCountsIn(entry, depth + 1));
+  const row = value as Record<string, unknown>;
+  const counts = row.counts && typeof row.counts === 'object' && !Array.isArray(row.counts)
+    ? row.counts as Record<string, unknown>
+    : null;
+  const own = typeof counts?.block === 'number' ? [counts.block] : [];
+  return [...own, ...Object.values(row).flatMap((entry) => blockerCountsIn(entry, depth + 1))];
+}
+
+function blockerLabelsIn(value: unknown, depth = 0): string[] {
+  if (!value || typeof value !== 'object' || depth > 5) return [];
+  if (Array.isArray(value)) return unique(value.flatMap((entry) => blockerLabelsIn(entry, depth + 1)));
+  const row = value as Record<string, unknown>;
+  const own = row.status === 'block'
+    ? [String(row.code ?? row.id ?? row.summary ?? 'blocking check')]
+    : [];
+  return unique([...own, ...Object.values(row).flatMap((entry) => blockerLabelsIn(entry, depth + 1))]);
+}
+
+function resultLooksGreen(value: unknown, depth = 0): boolean {
+  if (!value || typeof value !== 'object' || depth > 4) return false;
+  if (Array.isArray(value)) return value.some((entry) => resultLooksGreen(entry, depth + 1));
+  const row = value as Record<string, unknown>;
+  if (row.readyForExecution === true || row.operable === true || row.passed === true) return true;
+  if (row.ok === true && !('error' in row)) return true;
+  return Object.values(row).some((entry) => resultLooksGreen(entry, depth + 1));
+}
+
+function unique(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function compactSentence(value: string, max: number): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  return compact.length <= max ? compact : `${compact.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
 /**

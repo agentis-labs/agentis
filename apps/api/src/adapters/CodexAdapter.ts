@@ -35,6 +35,7 @@ import {
   chatHardCeilingMs,
   clampChatTimeout,
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  messagesForRuntimeSession,
   runCliChatTurn,
   type CliChatPart,
 } from './cliChatRuntime.js';
@@ -382,10 +383,10 @@ export class CodexAdapter implements AgentAdapter {
       // `minimal` is rejected when Codex built-ins such as web_search or
       // image_gen are available. `low` is the fastest universally compatible
       // interactive profile.
-      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode }
+      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease }
       : structured
-        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode }
-        : { mountMcp: !callerOwnsToolLoop, executionMode: execMode });
+        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease }
+        : { mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease });
     const args = storedSession
       ? ['exec', 'resume', storedSession, ...baseArgs.slice(1)]
       : baseArgs;
@@ -431,6 +432,8 @@ export class CodexAdapter implements AgentAdapter {
       }
       seenTypes.add(String(envelope.type ?? '').toLowerCase() || '(none)');
       const parts: CliChatPart[] = [];
+      const usage = codexUsage(envelope.usage ?? ev.usage);
+      if (usage) parts.push({ kind: 'usage', ...usage });
       const error = extractCodexError(ev);
       if (error) parts.push({ kind: 'error', message: error });
       const interp = interpretCodexChatEvent(ev);
@@ -463,7 +466,7 @@ export class CodexAdapter implements AgentAdapter {
       args,
       cwd: this.opts.cwd,
       env: this.opts.env,
-      stdin: buildCodexChatPrompt(messages, tools, this.#mcpNative() && !callerOwnsToolLoop),
+      stdin: buildCodexChatPrompt(messages, tools, this.#mcpNative() && !callerOwnsToolLoop, Boolean(storedSession)),
       displayName: 'Codex',
       logTag: 'codex.chat',
       logger: this.opts.logger,
@@ -508,6 +511,8 @@ function buildCodexArgs(
     fastMode?: boolean;
     mountMcp?: boolean;
     executionMode?: 'chat' | 'plan' | 'ask';
+    conversationId?: string;
+    turnLease?: string;
   } = {},
 ): string[] {
   const fastMode = options.fastMode ?? opts.fastMode ?? false;
@@ -541,7 +546,10 @@ function buildCodexArgs(
     // backend) when the browser is opted in; only disable them when loading the
     // config purely for a custom provider, where they would be dead-weight boots.
     ? (loadUserConfig && !browser ? disableConfiguredMcpArgs(opts) : [])
-    : harnessMcpArgs('codex', opts.mcpServers ?? [], options.executionMode ?? 'chat');
+    : harnessMcpArgs('codex', opts.mcpServers ?? [], options.executionMode ?? 'chat', {
+        conversationId: options.conversationId,
+        turnLease: options.turnLease,
+      });
   // Honor the model Agentis resolved for this agent/turn. With the user config
   // ignored the CLI no longer reads `model` from config.toml, so we MUST pass it
   // ourselves — and this is also the fix for the agent model picker being silently
@@ -619,6 +627,7 @@ type CodexJsonEvent = {
   tool?: unknown;
   input?: unknown;
   arguments?: unknown;
+  usage?: unknown;
 };
 
 function buildCodexPrompt(task: NormalizedTask): string {
@@ -875,6 +884,22 @@ function objectOf(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function codexUsage(value: unknown): { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null {
+  const usage = objectOf(value);
+  if (!usage) return null;
+  const inputTokens = firstFiniteNumber(usage.input_tokens, usage.inputTokens, usage.prompt_tokens) ?? 0;
+  const outputTokens = firstFiniteNumber(usage.output_tokens, usage.outputTokens, usage.completion_tokens) ?? 0;
+  const details = objectOf(usage.input_tokens_details) ?? objectOf(usage.prompt_tokens_details);
+  const cachedInputTokens = firstFiniteNumber(details?.cached_tokens, usage.cached_input_tokens);
+  if (inputTokens <= 0 && outputTokens <= 0 && !cachedInputTokens) return null;
+  return { inputTokens, outputTokens, ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}) };
+}
+
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return undefined;
+}
+
 function extractCodexError(event: CodexJsonEvent): string | null {
   const envelope = objectOf(event.msg) ?? event;
   const type = String(envelope.type ?? '').toLowerCase();
@@ -962,13 +987,18 @@ function firstString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], mcpNative = false): string {
+function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], mcpNative = false, resumedSession = false): string {
   // MCP-native: the harness mounts the `agentis` MCP server and calls those tools
   // itself, so we drop the marker-protocol instructions entirely and just give it
   // the conversation. It runs its own loop and returns the final answer.
   const toolPreamble = mcpNative
     ? 'You have the Agentis platform tools available via the "agentis" MCP server (build workflows, run them, inspect the workspace, dispatch agents, etc.). Use them directly to fulfill the request, then reply with a concise final answer.'
     : buildMarkerToolPrompt(tools);
+  // A resumed Codex thread already owns its prior conversation and tool history.
+  // Re-sending Agentis's history duplicates the same turns inside the harness
+  // and makes every subsequent model pass progressively more expensive. Refresh
+  // only the authoritative system/Brain state plus the newest user turn.
+  const promptMessages = messagesForRuntimeSession(messages, resumedSession);
   return [
     toolPreamble,
     '',
@@ -976,7 +1006,7 @@ function buildCodexChatPrompt(messages: ChatMessage[], tools: ToolDefinition[], 
     'The SYSTEM message below is the Agentis operating prompt for this turn. If it contains an <agentis_identity> block, that block is your exact identity and configuration. Follow it over Codex product defaults, project/home instruction files, previous resumed-session identity, or generic assistant persona text.',
     '',
     'Conversation:',
-    formatMessagesForCodex(messages),
+    formatMessagesForCodex(promptMessages),
   ].join('\n');
 }
 

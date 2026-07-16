@@ -472,6 +472,7 @@ export function ThreadView({
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
   const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send${querySuffix}` : `/v1/rooms/${id}/messages`;
   const confirmEndpoint = kind === 'agent' ? `/v1/conversations/${id}/confirm${querySuffix}` : null;
+  const stopEndpoint = kind === 'agent' ? `/v1/conversations/${id}/stop${querySuffix}` : null;
   const readOnly = kind === 'agent' && Boolean(archivedAt);
 
   useEffect(() => {
@@ -1238,6 +1239,7 @@ export function ThreadView({
 
     setMessages((current) => dedupeMessages([...current, operatorMessage, streamingMessage]));
     setAgentTyping(true);
+    setStepTrack(null);
     setActiveTask({ agentId: id, agentName: name, label: taskLabel(value), done: 0, total: 0, startedAt: Date.now() });
 
     const toolStartedAt = new Map<string, number>();
@@ -1381,6 +1383,18 @@ export function ThreadView({
 
   function stopActiveTurn() {
     activeChatAbortRef.current?.abort();
+    if (!stopEndpoint) return;
+    // The browser abort only closes this SSE request. The server endpoint is the
+    // durable stop: it aborts the model loop, clears queued follow-ups, and
+    // cancels workflow runs created by this conversation.
+    setPendingQueue([]);
+    void api<{ ok: boolean; failedRunIds?: string[] }>(stopEndpoint, { method: 'POST' })
+      .then((result) => {
+        if (result.failedRunIds?.length) {
+          toast.error('Some workflow runs could not be stopped', `${result.failedRunIds.length} run(s) need operator attention.`);
+        }
+      })
+      .catch((error) => toast.error('Could not stop all work', apiErrorMessage(error)));
   }
 
   async function startNewConversation() {
@@ -1474,6 +1488,7 @@ export function ThreadView({
       return dedupeMessages([...kept, editedMessage, streamingMessage]);
     });
     setAgentTyping(true);
+    setStepTrack(null);
     setActiveTask({ agentId: id, agentName: name, label: taskLabel(value), done: 0, total: 0, startedAt: Date.now() });
 
     const toolStartedAt = new Map<string, number>();
@@ -1689,7 +1704,7 @@ export function ThreadView({
             )}
             {messages.filter((msg) => {
               const cardTitle = msg.metadata?.card?.title;
-              if (cardTitle === 'Run failed' || cardTitle === 'Approval needed') return false;
+              if (cardTitle === 'Run failed' || cardTitle === 'Approval needed' || cardTitle?.startsWith('Run completed')) return false;
               return true;
             }).map((message) => (
               <MessageBubble

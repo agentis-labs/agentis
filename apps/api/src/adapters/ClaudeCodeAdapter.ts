@@ -37,6 +37,7 @@ import {
   chatHardCeilingMs,
   clampChatTimeout,
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  messagesForRuntimeSession,
   runCliChatTurn,
   type CliChatPart,
 } from './cliChatRuntime.js';
@@ -435,7 +436,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       // `executionMode` tags the descriptor so Plan mode is registry-enforced, not
       // just prompt-level, for Claude's own tool loop.
-      ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? [], options?.executionMode ?? 'chat'),
+      ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? [], options?.executionMode ?? 'chat', {
+        conversationId: options?.conversationId,
+        turnLease: options?.turnLease,
+      }),
       ...(this.opts.extraArgs ?? []),
     ];
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
@@ -474,7 +478,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       args,
       cwd: this.opts.cwd,
       env: this.opts.env,
-      stdin: buildClaudeCodeChatPrompt(messages, tools, this.#mcpNative()),
+      stdin: buildClaudeCodeChatPrompt(messagesForRuntimeSession(messages, Boolean(storedSession)), tools, this.#mcpNative()),
       displayName: 'Claude Code',
       logTag: 'claude_code.chat',
       logger: this.opts.logger,
@@ -655,7 +659,8 @@ type ClaudeChatPart =
   | { kind: 'final'; text: string }
   | { kind: 'thinking'; text: string }
   | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string }
+  | { kind: 'usage'; inputTokens: number; outputTokens: number; cachedInputTokens?: number; costCents?: number };
 
 /**
  * Split one Claude Code `stream-json` event into typed parts so each goes to the
@@ -669,8 +674,10 @@ export function interpretClaudeChatEvent(ev: { type?: string; [k: string]: unkno
   const evType = String(ev.type ?? '').toLowerCase();
   const streamError = claudeStreamError(ev);
   if (streamError) return [{ kind: 'error', message: streamError }];
+  const usage = claudeUsage(ev);
+  if (usage) parts.push({ kind: 'usage', ...usage });
   if (evType === 'stream_event') {
-    return interpretClaudeStreamEvent(objectOf(ev.event));
+    return [...parts, ...interpretClaudeStreamEvent(objectOf(ev.event))];
   }
   const message = objectOf(ev.message);
   const content = message?.content ?? ev.content;
@@ -707,6 +714,26 @@ export function interpretClaudeChatEvent(ev: { type?: string; [k: string]: unkno
   const text = extractClaudeText(ev);
   if (text) parts.push({ kind: evType === 'assistant' ? 'final' : 'text', text });
   return parts;
+}
+
+function claudeUsage(ev: { [k: string]: unknown }): { inputTokens: number; outputTokens: number; cachedInputTokens?: number; costCents?: number } | null {
+  const usage = objectOf(ev.usage) ?? objectOf(objectOf(ev.message)?.usage);
+  const inputTokens = firstFiniteNumber(usage?.input_tokens, usage?.inputTokens) ?? 0;
+  const outputTokens = firstFiniteNumber(usage?.output_tokens, usage?.outputTokens) ?? 0;
+  const cachedInputTokens = firstFiniteNumber(usage?.cache_read_input_tokens, usage?.cached_input_tokens);
+  const costUsd = firstFiniteNumber(ev.total_cost_usd, ev.cost_usd, usage?.cost_usd);
+  if (inputTokens <= 0 && outputTokens <= 0 && !cachedInputTokens && costUsd === undefined) return null;
+  return {
+    inputTokens,
+    outputTokens,
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(costUsd !== undefined ? { costCents: Math.max(0, costUsd * 100) } : {}),
+  };
+}
+
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return undefined;
 }
 
 function claudeStreamError(ev: { [k: string]: unknown }): string | null {

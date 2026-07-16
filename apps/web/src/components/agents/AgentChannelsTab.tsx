@@ -197,7 +197,7 @@ function ProviderCard({
   toast: ReturnType<typeof useToast>;
 }) {
   const [connecting, setConnecting] = useState(false);
-  const [busy, setBusy] = useState<'test' | 'disconnect' | 'save' | 'link' | 'target' | null>(null);
+  const [busy, setBusy] = useState<'health' | 'disconnect' | 'save' | 'link' | 'target' | null>(null);
   const [name, setName] = useState(`${agentName} ${provider.label}`);
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState('');
@@ -344,20 +344,19 @@ function ProviderCard({
     }
   }
 
-  async function test() {
+  async function checkHealth() {
     if (!connection) return;
-    setBusy('test');
+    setBusy('health');
     try {
-      const result = await api<{ ok: boolean; health: ChannelHealth }>(`/v1/channels/${connection.id}/test`, {
-        method: 'POST',
-        body: JSON.stringify({ body: `Hello from ${agentName}.` }),
-      });
+      // Health checks are strictly read-only. A UI diagnostic must never send a
+      // real message or convert a provider correlation id into delivery proof.
+      const result = await api<{ connection: ChannelConnection; health: ChannelHealth }>(`/v1/channels/${connection.id}/health`);
       setLastHealth(result.health);
-      if (result.ok) toast.success('Channel test passed');
+      if (result.health.status === 'active') toast.success('Channel health check passed');
       else toast.error('Channel needs action', firstProblem(result.health) ?? 'Open the check details.');
       await onChanged();
     } catch (err) {
-      toast.error('Test failed', String(err));
+      toast.error('Health check failed', String(err));
     } finally {
       setBusy(null);
     }
@@ -442,8 +441,8 @@ function ProviderCard({
           />
           <HealthDetails health={health} />
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void test()}>
-              {busy === 'test' ? <Loader2 size={12} className="animate-spin" /> : 'Test'}
+            <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void checkHealth()}>
+              {busy === 'health' ? <Loader2 size={12} className="animate-spin" /> : 'Check health'}
             </Button>
             {needsLink ? (
               <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void startQrLogin(connection.id)}>
@@ -803,6 +802,5 @@ function firstProblem(health: ChannelHealth): string | null {
   const problem = health.checks.find((check) => !check.ok);
   return problem?.remediation ?? problem?.message ?? null;
 }
-
 
 

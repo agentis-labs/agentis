@@ -22,12 +22,26 @@ export interface BrainMaintenanceResult {
   stagedGraduated: number;
   /** Unconsolidated episodic traces past their TTL that were archived (§P2). */
   stagedExpired: number;
+  /** Managed, unpinned, never-used importer residue archived by quality rules. */
+  lowQualityArchived: number;
   /** §0.2 — disk reclamation: rows/links/queue/events hard-deleted this pass. */
   reclaimed: { episodesDeleted: number; linksDeleted: number; queuePruned: number; eventsPruned: number };
   compression: ReturnType<BrainCompressionService['run']>;
 }
 
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const LOW_QUALITY_GRACE_MS = 30 * DAY_MS;
+
+export interface BrainHygieneCandidate {
+  id: string;
+  title: string;
+  summary: string;
+  source: string;
+  createdAt: string;
+  score: number;
+  recommendation: 'archive' | 'review';
+  reasons: string[];
+}
 
 /**
  * How many times a staged trace must be retrieved into a dispatch context (or be
@@ -63,9 +77,12 @@ export class BrainMaintenanceService {
 
   start(): void {
     if (this.#timer) return;
-    this.#timer = setInterval(() => this.runAll(), WEEK_MS);
+    // Run on startup when due. A weekly interval that restarted with the process
+    // could be postponed forever by ordinary dev/server restarts.
+    if (this.#maintenanceDue()) this.runAll();
+    this.#timer = setInterval(() => this.runAll(), DAY_MS);
     this.#timer.unref?.();
-    this.logger.info('brain_maintenance.started', { intervalMs: WEEK_MS });
+    this.logger.info('brain_maintenance.started', { intervalMs: DAY_MS });
   }
 
   stop(): void {
@@ -111,6 +128,7 @@ export class BrainMaintenanceService {
     // instead of forgotten.
     const stagedGraduated = this.#graduateStagedTraces(workspaceId, now);
     const stagedExpired = this.#expireStagedTraces(workspaceId, now);
+    const lowQualityArchived = this.#archiveLowQualityManaged(workspaceId, now);
     const compression = this.compression.run(workspaceId, settings);
     const linksPruned = this.#pruneLinks(workspaceId);
     // §0.2 — reclaim disk LAST, after archival/compression have marked everything
@@ -135,12 +153,98 @@ export class BrainMaintenanceService {
       sessionAtomsExpired,
       stagedGraduated,
       stagedExpired,
+      lowQualityArchived,
       reclaimed,
       compression,
     };
     this.#record(workspaceId, result);
     this.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.BRAIN_MAINTENANCE_COMPLETED, result);
     return result;
+  }
+
+  /** Preview legacy/import residue without mutating the Brain. */
+  previewHygiene(workspaceId: string, limit = 2_000): BrainHygieneCandidate[] {
+    return this.db.select({
+      id: schema.memoryEpisodes.id,
+      title: schema.memoryEpisodes.title,
+      summary: schema.memoryEpisodes.summary,
+      source: schema.memoryEpisodes.source,
+      createdAt: schema.memoryEpisodes.createdAt,
+      lastAccessedAt: schema.memoryEpisodes.lastAccessedAt,
+      pinnedAt: schema.memoryEpisodes.pinnedAt,
+      managed: schema.memoryEpisodes.managed,
+      status: schema.memoryEpisodes.status,
+    }).from(schema.memoryEpisodes)
+      .where(and(eq(schema.memoryEpisodes.workspaceId, workspaceId), eq(schema.memoryEpisodes.status, 'active')))
+      .limit(Math.max(1, Math.min(20_000, limit)))
+      .all()
+      .filter((row) => row.managed && !row.pinnedAt)
+      .map((row) => ({ row, verdict: hygieneVerdict(row) }))
+      .filter(({ verdict }) => verdict.score > 0)
+      .sort((a, b) => b.verdict.score - a.verdict.score)
+      .map(({ row, verdict }) => ({
+        id: row.id,
+        title: row.title,
+        summary: row.summary,
+        source: row.source,
+        createdAt: row.createdAt,
+        score: verdict.score,
+        recommendation: verdict.score >= 4 && !row.lastAccessedAt ? 'archive' : 'review',
+        reasons: verdict.reasons,
+      }));
+  }
+
+  /** Apply only explicit ids from a hygiene preview; safe for operator review. */
+  applyHygiene(workspaceId: string, ids: string[]): { archived: number } {
+    const allowed = new Set(this.previewHygiene(workspaceId, 20_000).map((item) => item.id));
+    const selected = [...new Set(ids)].filter((id) => allowed.has(id));
+    if (selected.length === 0) return { archived: 0 };
+    const now = new Date().toISOString();
+    let archived = 0;
+    for (const id of selected) {
+      archived += this.db.update(schema.memoryEpisodes)
+        .set({ status: 'archived', archivedAt: now, updatedAt: now })
+        .where(and(
+          eq(schema.memoryEpisodes.workspaceId, workspaceId),
+          eq(schema.memoryEpisodes.id, id),
+          eq(schema.memoryEpisodes.managed, true),
+          isNull(schema.memoryEpisodes.pinnedAt),
+        )).run().changes;
+    }
+    return { archived };
+  }
+
+  #maintenanceDue(): boolean {
+    try {
+      const latest = this.db.select({ createdAt: schema.brainQualityEvents.createdAt })
+        .from(schema.brainQualityEvents)
+        .where(eq(schema.brainQualityEvents.eventType, 'brain_maintenance_completed'))
+        .orderBy(sql`${schema.brainQualityEvents.createdAt} desc`)
+        .limit(1).get();
+      return !latest || Date.parse(latest.createdAt) < Date.now() - DAY_MS;
+    } catch {
+      return true;
+    }
+  }
+
+  #archiveLowQualityManaged(workspaceId: string, now: string): number {
+    const cutoff = Date.now() - LOW_QUALITY_GRACE_MS;
+    const candidates = this.previewHygiene(workspaceId, 20_000)
+      .filter((item) => item.recommendation === 'archive' && Date.parse(item.createdAt) < cutoff);
+    let archived = 0;
+    for (const item of candidates) {
+      archived += this.db.update(schema.memoryEpisodes)
+        .set({ status: 'archived', archivedAt: now, updatedAt: now })
+        .where(and(
+          eq(schema.memoryEpisodes.workspaceId, workspaceId),
+          eq(schema.memoryEpisodes.id, item.id),
+          eq(schema.memoryEpisodes.status, 'active'),
+          eq(schema.memoryEpisodes.managed, true),
+          isNull(schema.memoryEpisodes.pinnedAt),
+          isNull(schema.memoryEpisodes.lastAccessedAt),
+        )).run().changes;
+    }
+    return archived;
   }
 
   /**
@@ -373,9 +477,10 @@ export class BrainMaintenanceService {
         sessionAtomsExpired: result.sessionAtomsExpired,
         stagedGraduated: result.stagedGraduated,
         stagedExpired: result.stagedExpired,
+        lowQualityArchived: result.lowQualityArchived,
         reclaimed: result.reclaimed,
         compression: result.compression,
-        nextTriggerAt: new Date(Date.now() + WEEK_MS).toISOString(),
+        nextTriggerAt: new Date(Date.now() + DAY_MS).toISOString(),
       },
       createdAt: new Date().toISOString(),
     }).run();
@@ -441,4 +546,37 @@ function numSetting(value: unknown, fallback: number, min: number, max: number):
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function hygieneVerdict(row: {
+  title: string;
+  summary: string;
+  source: string;
+}): { score: number; reasons: string[] } {
+  const text = `${row.title} ${row.summary}`.trim();
+  const reasons: string[] = [];
+  let score = 0;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (row.summary.trim().length < 48 || words.length < 9) {
+    score += 2;
+    reasons.push('incomplete_fragment');
+  }
+  if (row.title.includes('…') || /[`]{1,3}[^`]*$/.test(row.summary)) {
+    score += 2;
+    reasons.push('truncated_or_unbalanced');
+  }
+  const codeMarks = (text.match(/`/g) ?? []).length;
+  if (codeMarks >= 4 && codeMarks / Math.max(1, text.length) > 0.015) {
+    score += 1;
+    reasons.push('code_heavy');
+  }
+  if (/\b(?:masterplan|implementation plan|added after user feedback|root cause|services\/[\w/-]+\.ts|§[A-Z0-9])/i.test(text)) {
+    score += 2;
+    reasons.push('internal_implementation_residue');
+  }
+  if (row.source === 'harness_ingest') {
+    score += 1;
+    reasons.push('legacy_harness_import');
+  }
+  return { score, reasons };
 }

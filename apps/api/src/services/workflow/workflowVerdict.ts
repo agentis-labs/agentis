@@ -122,6 +122,35 @@ export function unwrapReturnEnvelope(out: Record<string, unknown>): Record<strin
   return out;
 }
 
+/**
+ * Deterministic, value-free inventory of the canonical terminal surface.
+ * Acceptance rules and their repair hints must share one output model; exposing
+ * paths instead of payload values is both cheaper and safe for logs/tool output.
+ */
+export function terminalOutputPaths(output: Record<string, unknown>, limit = 80): string[] {
+  const paths: string[] = [];
+  const visit = (value: unknown, prefix: string, depth: number): void => {
+    if (paths.length >= limit || depth > 8) return;
+    if (Array.isArray(value)) {
+      if (prefix) paths.push(`${prefix}[]`);
+      if (value.length > 0) visit(value[0], `${prefix}[0]`, depth + 1);
+      return;
+    }
+    if (!value || typeof value !== 'object') {
+      if (prefix) paths.push(prefix);
+      return;
+    }
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0 && prefix) paths.push(prefix);
+    for (const [key, child] of entries) {
+      if (paths.length >= limit) break;
+      visit(child, prefix ? `${prefix}.${key}` : key, depth + 1);
+    }
+  };
+  visit(unwrapReturnEnvelope(output), 'output', 0);
+  return [...new Set(paths)];
+}
+
 /** Placeholder / advisory patterns — the "gutted node" + "run vercel deploy" pathologies. */
 const STUB_PATTERNS: RegExp[] = [
   /\blorem ipsum\b/i,
@@ -297,7 +326,8 @@ async function runCheck(check: AcceptanceCheck, args: EvaluateRunVerdictArgs): P
       case 'expr': {
         const scope = { output: args.output, trigger: args.trigger ?? {}, nodes: args.nodeOutputs ?? {}, probe: {} };
         const passed = evalCondition(check.expr, scope);
-        return { ...base, passed, evidence: `expr "${check.expr}" → ${passed} over the terminal output` };
+        const available = passed ? '' : `; available canonical paths: ${terminalOutputPaths(args.output, 24).join(', ') || '(empty output)'}`;
+        return { ...base, passed, evidence: `expr "${check.expr}" → ${passed} over the terminal output${available}` };
       }
       case 'http_probe': return await httpProbe(check, args, base);
       case 'browser_probe': return await browserProbe(check, args, base);

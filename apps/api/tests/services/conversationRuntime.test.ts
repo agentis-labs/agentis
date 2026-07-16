@@ -84,6 +84,19 @@ describe('ConversationRuntime', () => {
     expect(h.contacts.get('+5511999')).toMatchObject({ stage: 'greet', status: 'active', connectionId: 'conn1' });
   });
 
+  it('blocks the contact instead of awaiting a reply when outbound proof is missing', async () => {
+    h.deps.send = async () => { throw new Error('channel delivery is pending provider acknowledgement'); };
+    const r = await h.runtime.enroll(CTX, '+5511999', 'conn1');
+
+    expect(r).toMatchObject({ handled: true, stage: 'greet', sent: false, reason: 'CHANNEL_DELIVERY_PENDING' });
+    expect(h.contacts.get('+5511999')).toMatchObject({
+      stage: 'greet',
+      status: 'blocked',
+      blocker: { code: 'CHANNEL_DELIVERY_PENDING' },
+    });
+    await expect(h.runtime.onInbound(CTX, '+5511999', 'oi?')).resolves.toMatchObject({ handled: true, reason: 'CHANNEL_DELIVERY_PENDING' });
+  });
+
   it('a reply to the greeting advances to the agent-composed pitch (one model call)', async () => {
     await h.runtime.enroll(CTX, '+5511999', 'conn1');
     const r = await h.runtime.onInbound(CTX, '+5511999', 'oi!');

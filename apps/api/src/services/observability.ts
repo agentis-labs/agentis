@@ -312,12 +312,18 @@ export class ObservabilityService {
       };
     }
     if (event === REALTIME_EVENTS.RUN_COMPLETED) {
+      const accomplished = payload.accomplished;
       return {
         ...common,
         kind: 'run',
-        status: 'completed',
-        title: stringField(payload, 'workflowName', 'title') ?? 'Run completed',
-        summary: stringField(payload, 'summary', 'result') ?? 'Execution completed successfully.',
+        status: accomplished === false ? 'blocked' : 'completed',
+        title: stringField(payload, 'workflowName', 'title') ?? (accomplished === false ? 'Run finished — outcome not accomplished' : 'Run completed'),
+        summary: stringField(payload, 'summary', 'result')
+          ?? (accomplished === true
+            ? 'Execution completed and the business outcome was verified.'
+            : accomplished === false
+              ? `Execution completed mechanically, but the business verdict is ${stringField(payload, 'verdict') ?? 'deficient'}.`
+              : 'Execution completed without a business-outcome verdict.'),
       };
     }
     if (event === REALTIME_EVENTS.RUN_FAILED) {

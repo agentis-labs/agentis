@@ -79,6 +79,26 @@ function obj(value: unknown, name: string): Record<string, unknown> {
 
 const appIdProp = { appId: { type: 'string', description: 'Target App id. Omit to use the App currently open.' } } as const;
 
+function surfaceOutline(surface: AppSurface): Array<{ nodeId: string; type: string; path: string; collection?: string }> {
+  const nodes: Array<{ nodeId: string; type: string; path: string; collection?: string }> = [];
+  const walk = (value: unknown, path: string): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach((item, index) => walk(item, `${path}/${index}`)); return; }
+    const item = value as Record<string, unknown>;
+    if (typeof item.type === 'string' && typeof item.nodeId === 'string') {
+      const collection = item.bind && typeof item.bind === 'object' && typeof (item.bind as Record<string, unknown>).collection === 'string'
+        ? String((item.bind as Record<string, unknown>).collection)
+        : undefined;
+      nodes.push({ nodeId: item.nodeId, type: item.type, path: path || '/', ...(collection ? { collection } : {}) });
+    }
+    for (const [key, child] of Object.entries(item)) {
+      if (key !== 'style' && key !== 'args' && key !== 'bind') walk(child, `${path}/${key}`);
+    }
+  };
+  walk(surface.view, '');
+  return nodes;
+}
+
 // Advertised shapes MUST match the enforced zod (datastore.ts) — a loose schema
 // here makes the agent send the wrong shape and hit INTERNAL_TOOL_ERROR. These
 // mirror `querySortSchema` / `queryFilterSchema` exactly. (Drift is asserted in
@@ -153,6 +173,7 @@ function firstDependencyCycle(graph: Map<string, string[]>): string[] | null {
 const chainItemSchema = z.object({
   workflowId: z.string().min(1),
   order: z.number().int().min(0).optional(),
+  operatorEntrypoint: z.boolean().optional(),
   dependsOn: z.array(z.string()).optional(),
   chainOn: z.enum(['success', 'always']).optional(),
   concurrency: z.enum(['parallel', 'exclusive']).optional(),
@@ -362,6 +383,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           'CRITICAL DISTINCTION: `order` is ONLY a display/tie-break sort number — it does NOT make workflows run one-after-another. To actually chain them (B waits for A), you MUST set `dependsOn`. ' +
           'To make workflows run in SEQUENCE (the usual intent of "put them in order" / "run them one after another"), pass `sequence`: an ordered list of workflow IDs — this sets BOTH order AND the dependsOn chain (each depends on the previous) in one call. That is what shows up as ticked "runs after" boxes. ' +
           'Use `workflows` instead (or as well) for fine-grained per-workflow control: dependsOn (workflow IDs that must finish first), chainOn ("success" default = ACCOMPLISHED verdict when the upstream has a spec; "always" = explicit finally/failure handling), concurrency ("parallel" | "exclusive" = skip an orchestrated start while a run is still active), enabled, purpose, order. ' +
+          '`operatorEntrypoint:false` keeps an event/channel/schedule-driven root out of Run Pipeline while leaving it enabled for its real persisted trigger. ' +
           'Omitted fields are preserved. Rejects self-dependencies and cycles.',
         inputSchema: {
           type: 'object',
@@ -381,6 +403,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
                 properties: {
                   workflowId: { type: 'string' },
                   order: { type: 'number' },
+                  operatorEntrypoint: { type: 'boolean', description: 'False for roots started only by a channel, event rule, webhook, listener, or schedule; they stay enabled but Run Pipeline will not start them.' },
                   dependsOn: { type: 'array', items: { type: 'string' }, description: 'Workflow IDs that must run before this one (the real "runs after").' },
                   chainOn: { type: 'string', enum: ['success', 'always'] },
                   concurrency: { type: 'string', enum: ['parallel', 'exclusive'] },
@@ -616,6 +639,80 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
     },
     {
       definition: {
+        id: 'agentis.data.batch',
+        family: 'app',
+        description: 'Apply up to 200 App datastore insert/update/upsert/delete operations in one ordered tool call. Use this for migrations or repairing many records; never issue dozens of data.update calls.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            operations: {
+              type: 'array',
+              maxItems: 200,
+              items: {
+                type: 'object',
+                properties: {
+                  op: { type: 'string', enum: ['insert', 'update', 'upsert', 'delete'] },
+                  collection: { type: 'string' },
+                  id: { type: 'string' },
+                  record: { type: 'object' },
+                  patch: { type: 'object' },
+                  match: { type: 'object' },
+                },
+                required: ['op', 'collection'],
+              },
+            },
+          },
+          required: ['operations'],
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: (args, ctx) => {
+        const operations = Array.isArray(args.operations) ? args.operations : [];
+        if (operations.length === 0 || operations.length > 200) {
+          throw new AgentisError('VALIDATION_FAILED', 'operations must contain between 1 and 200 datastore mutations');
+        }
+        const appId = resolveAppId(args, ctx);
+        // One batch is one state transition. If operation 57 fails, operations
+        // 0-56 must not remain committed while the harness retries or repairs the
+        // payload; that partial-write behavior is exactly how serial agent repair
+        // loops corrupt an otherwise recoverable App.
+        const results = deps.db.transaction(() => {
+          const applied: Array<{ index: number; op: string; collection: string; id?: string }> = [];
+          for (const [index, raw] of operations.entries()) {
+            const operation = obj(raw, `operations.${index}`);
+            const op = str(operation.op, `operations.${index}.op`);
+            const collection = str(operation.collection, `operations.${index}.collection`);
+            if (op === 'insert') {
+              const record = data.insert(ctx.workspaceId, appId, collection, obj(operation.record, `operations.${index}.record`), ctx.agentId);
+              applied.push({ index, op, collection, id: record.id });
+            } else if (op === 'update') {
+              const id = str(operation.id, `operations.${index}.id`);
+              data.update(ctx.workspaceId, appId, collection, id, obj(operation.patch, `operations.${index}.patch`));
+              applied.push({ index, op, collection, id });
+            } else if (op === 'upsert') {
+              const record = data.upsert(ctx.workspaceId, appId, collection, obj(operation.match, `operations.${index}.match`), obj(operation.record, `operations.${index}.record`), ctx.agentId);
+              applied.push({ index, op, collection, id: record.id });
+            } else if (op === 'delete') {
+              const id = str(operation.id, `operations.${index}.id`);
+              data.delete(ctx.workspaceId, appId, collection, id);
+              applied.push({ index, op, collection, id });
+            } else {
+              throw new AgentisError('VALIDATION_FAILED', `operations.${index}.op must be insert, update, upsert, or delete`);
+            }
+          }
+          return applied;
+        });
+        const byOperation = results.reduce<Record<string, number>>((counts, result) => {
+          counts[result.op] = (counts[result.op] ?? 0) + 1;
+          return counts;
+        }, {});
+        return { ok: true, appId, applied: results.length, byOperation, results, summary: `Applied ${results.length} datastore mutation(s) in one tool call.` };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.data.delete',
         family: 'app',
         description: 'Delete an App collection record by id.',
@@ -692,7 +789,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           'THE way to build a powerful App interface: YOU design and author the surface as a typed ViewNode tree — a bespoke operating interface, not a generic card list. You know the domain you just built, so compose a real interface from the full grammar:\n' +
           '• Headline metrics — KPIStrip (multiple labelled values + deltas + sparks), Metric, Gauge, ProgressBar, Callout.\n' +
           '• Layout — Hero (title banner), Tabs, Accordion, Split (main + right rail, ratio), Toolbar, Stack/Row/Grid, Divider.\n' +
-          '• Data, bound to collections via { bind: { collection, query?, sort?, limit?, live? } } — DataBoard (kanban by groupBy), Table (columns + rowActions), List, StatusBoard, Timeline, Funnel, Calendar, Inbox, Chart (line/bar/area/pie).\n' +
+          '• Data, bound to collections via { bind: { collection, query?, sort?, limit?, live? } } — Kanban (real drag update + governed transitions + state-aware right-click contextActions/cardActions), RecordMaster, Table (columns + rowActions), List, StatusBoard, Timeline, Funnel, Calendar, Inbox, Chart.\n' +
           '• Agent-native — ActivityStream (your live work feed), Narrative, ConversationThread, ChatThread.\n' +
           '• Rich content — DocumentViewer, CodeViewer, MediaGallery, MapView, Image, Avatar, Badge. CodeSurface/CustomView render your own sandboxed JS/HTML for anything bespoke.\n' +
           '• Inputs — Form (fields + submit action), Button (action). Declare every button/form action first with ui.action_schema (kind: workflow | tool | data).\n' +
@@ -710,7 +807,7 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.ui.patch',
         family: 'app',
-        description: 'Mutate part of an existing surface view. ops: [{ op: "set"|"insert"|"remove", path, value?|node? }].',
+        description: 'Mutate part of an existing surface view by path. Inspect first; for deletion prefer agentis.ui.remove with a stable nodeId. ops: [{ op: "set"|"insert"|"remove", path, value?|node? }].',
         inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, ops: { type: 'array' } }, required: ['surface', 'ops'] },
         mutating: true,
         autoExecute: true,
@@ -719,6 +816,84 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const ops = z.array(uiPatchOpSchema).min(1).parse(args.ops);
         const result = surfaces.patch(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), ops);
         return { patched: true, surface: result.name, revision: result.revision };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.ui.inspect',
+        family: 'app',
+        description:
+          'Read the current persisted App interface before editing it. Compact by default: returns each surface plus a semantic node outline (stable nodeId/type/path/collection) and declared actions, avoiding the token cost of dumping the full tree. Pass surface and includeTree:true only when exact properties are needed.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            surface: { type: 'string', description: 'Optional surface name. Omit to list/outline every surface.' },
+            includeTree: { type: 'boolean', description: 'Include the complete ViewNode tree. Defaults false.' },
+          },
+        },
+        mutating: false,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const selected = typeof args.surface === 'string' && args.surface.trim()
+          ? [surfaces.get(ctx.workspaceId, appId, args.surface.trim())]
+          : surfaces.list(ctx.workspaceId, appId);
+        return {
+          appId,
+          surfaces: selected.map((surface) => ({
+            name: surface.name,
+            kind: surface.kind,
+            revision: surface.revision,
+            shareable: surface.shareable,
+            actions: surface.actions.map((action) => ({ name: action.name, kind: action.kind, target: action.target })),
+            nodes: surfaceOutline(surface),
+            ...(args.includeTree === true ? { view: surface.view } : {}),
+          })),
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.ui.remove',
+        family: 'app',
+        description:
+          'Reliably remove one UI component by stable nodeId, or delete an entire surface. Use agentis.ui.inspect first to get nodeIds. Component deletion re-validates and revisions the tree. Whole-surface deletion requires deleteSurface:true AND confirmSurfaceName exactly matching surface; it never happens accidentally.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            surface: { type: 'string' },
+            nodeId: { type: 'string', description: 'Stable semantic id returned by ui.inspect. Required for component deletion.' },
+            deleteSurface: { type: 'boolean', description: 'Delete the entire surface instead of one component.' },
+            confirmSurfaceName: { type: 'string', description: 'For whole-surface deletion, must exactly equal surface.' },
+          },
+          required: ['surface'],
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const surface = str(args.surface, 'surface');
+        if (args.deleteSurface === true) {
+          if (args.confirmSurfaceName !== surface) {
+            const current = surfaces.get(ctx.workspaceId, appId, surface);
+            return {
+              deleted: false,
+              confirmationRequired: true,
+              surface,
+              revision: current.revision,
+              nodes: surfaceOutline(current).length,
+              instruction: `call again with deleteSurface:true and confirmSurfaceName:"${surface}"`,
+            };
+          }
+          surfaces.delete(ctx.workspaceId, appId, surface);
+          return { deleted: true, surface };
+        }
+        const nodeId = str(args.nodeId, 'nodeId');
+        const result = surfaces.removeNode(ctx.workspaceId, appId, surface, nodeId);
+        return { removed: true, surface, nodeId, revision: result.revision };
       },
     },
     {

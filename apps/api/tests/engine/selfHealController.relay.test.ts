@@ -8,7 +8,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatDelta } from '@agentis/core';
-import { SelfHealController, type SelfHealHost } from '../../src/engine/selfHeal/selfHealController.js';
+import { SelfHealController, isSelfHealControlToolAllowed, type SelfHealHost } from '../../src/engine/selfHeal/selfHealController.js';
 
 function makeController(emitWorkStep: ReturnType<typeof vi.fn>): SelfHealController {
   const host = { emitWorkStep } as unknown as SelfHealHost;
@@ -62,5 +62,18 @@ describe('relaySelfHealChatDelta — activity phase mapping', () => {
     };
     controller.relaySelfHealChatDelta(ctx, node, 'agent-1', delta, clip);
     expect(emitWorkStep).toHaveBeenCalledWith(ctx, node, 'complete', expect.stringContaining('Repair finished'));
+  });
+});
+
+describe('self-heal tool budget surface', () => {
+  it('keeps universal inspection/environment tools but excludes competing run loops', () => {
+    expect(isSelfHealControlToolAllowed('agentis.workflow.inspect')).toBe(true);
+    expect(isSelfHealControlToolAllowed('agentis.extension.create')).toBe(true);
+    expect(isSelfHealControlToolAllowed('agentis.code.execute')).toBe(true);
+    expect(isSelfHealControlToolAllowed('agentis.workflow.graph.patch')).toBe(false);
+    expect(isSelfHealControlToolAllowed('agentis.workflow.dry_run')).toBe(false);
+    expect(isSelfHealControlToolAllowed('agentis.workflow.test')).toBe(false);
+    expect(isSelfHealControlToolAllowed('agentis.workflow.deliver')).toBe(false);
+    expect(isSelfHealControlToolAllowed('agentis.run.replay')).toBe(false);
   });
 });

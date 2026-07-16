@@ -56,6 +56,15 @@ describe('validateWorkflowSpec', () => {
     expect(errors.join(' ')).toMatch(/declares no "deploymentUrl" key/);
   });
 
+  it('rejects an expr that guesses a viewer envelope instead of the declared terminal data', () => {
+    const graph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], edges: [],
+      outputContract: { fields: [{ key: 'lastResult', type: 'object' }] },
+    } as unknown as WorkflowGraph;
+    const spec = baseSpec({ acceptance: [{ id: 'sent', claim: 'sent', verify: 'expr', expr: 'output.value.lastResult.status == "sent"' }] });
+    expect(validateWorkflowSpec(spec, { graph }).join(' ')).toMatch(/expr references output\.value.*declares no "value" key/);
+  });
+
   it('requires at least one acceptance claim + duplicate-id detection', () => {
     expect(validateWorkflowSpec(baseSpec({ acceptance: [] })).join(' ')).toMatch(/at least one verifiable claim/);
     const dup = baseSpec({

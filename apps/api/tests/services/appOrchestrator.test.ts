@@ -79,6 +79,7 @@ function seedRun(workflowId: string, status: string, parentRunId?: string | null
     userId: ctx.user.id,
     status,
     runState: { runId: id, workflowId, status, nodeStates: {}, completedNodeIds: [], ...(outcome ? { verdict: { outcome } } : {}) },
+    graphSnapshot: trivialGraph(),
     replanCount: 0,
     ...(parentRunId ? { parentRunId } : {}),
   }).run();
@@ -228,6 +229,65 @@ describe('AppOrchestratorService — binding schedules', () => {
     expect(orch.nextScheduledFire(bad)).toBeNull();
     const fired = await orch.sweepSchedules(new Date(Date.now() + 60 * 60_000));
     expect(fired).toBe(0);
+  });
+});
+
+describe('AppOrchestratorService — continuation semantics', () => {
+  it('never starts an event-only root from Run Pipeline', async () => {
+    const appId = seedApp();
+    const operatorRoot = seedWorkflow(appId, 'Operator root', { order: 1, operatorEntrypoint: true });
+    const eventRoot = seedWorkflow(appId, 'Inbound reply', { order: 2, operatorEntrypoint: false });
+
+    const results = await orchestrator().runAll(ctx.workspace.id, appId, ctx.user.id);
+
+    expect(results.map((result) => result.workflowId)).toEqual([operatorRoot]);
+    expect(queuedFor(operatorRoot)).toHaveLength(1);
+    expect(queuedFor(eventRoot)).toHaveLength(0);
+  });
+
+  it('does not duplicate an already-active frontier even when workflow concurrency allows parallel starts', async () => {
+    const appId = seedApp();
+    const root = seedWorkflow(appId, 'Root', { operatorEntrypoint: true, concurrency: 'parallel' });
+    const activeRun = seedRun(root, 'RUNNING');
+
+    const results = await orchestrator().runAll(ctx.workspace.id, appId, ctx.user.id);
+
+    expect(results).toEqual([{ workflowId: root, runId: null, skipped: 'active_run_in_progress', reusedRunId: activeRun }]);
+    expect(queuedFor(root)).toHaveLength(0);
+  });
+
+  it('continues at the first unresolved workflow without rerunning an accomplished root', async () => {
+    const appId = seedApp();
+    const discover = seedWorkflow(appId, 'Discover', { order: 1 }, true);
+    const contact = seedWorkflow(appId, 'Contact', { order: 2, dependsOn: [discover] }, true);
+    seedWorkflow(appId, 'Deliver', { order: 3, dependsOn: [contact] }, true);
+    const accomplished = seedRun(discover, 'COMPLETED', null, 'accomplished');
+    seedRun(contact, 'COMPLETED', null, 'failed_checks');
+
+    const results = await orchestrator().runAll(ctx.workspace.id, appId, ctx.user.id);
+
+    expect(results.find((result) => result.workflowId === discover)).toMatchObject({
+      runId: null,
+      skipped: 'current_graph_accomplished',
+      reusedRunId: accomplished,
+    });
+    expect(queuedFor(discover)).toHaveLength(0);
+    expect(queuedFor(contact)).toHaveLength(1);
+    expect(queuedFor(contact)[0]?.reason).toBe('app_run_continue');
+  });
+
+  it('only restarts roots when fresh mode is explicit', async () => {
+    const appId = seedApp();
+    const discover = seedWorkflow(appId, 'Discover', { order: 1 }, true);
+    const contact = seedWorkflow(appId, 'Contact', { order: 2, dependsOn: [discover] }, true);
+    seedRun(discover, 'COMPLETED', null, 'accomplished');
+
+    const results = await orchestrator().runAll(ctx.workspace.id, appId, ctx.user.id, 'fresh');
+
+    expect(results.map((result) => result.workflowId)).toEqual([discover]);
+    expect(queuedFor(discover)).toHaveLength(1);
+    expect(queuedFor(discover)[0]?.reason).toBe('app_run_all_fresh');
+    expect(queuedFor(contact)).toHaveLength(0);
   });
 });
 

@@ -18,6 +18,8 @@ export interface ChannelHealthCheck {
   code: string;
   message: string;
   remediation?: string;
+  /** Provider-native, non-secret diagnostic evidence for precise operator decisions. */
+  evidence?: Record<string, unknown>;
   checkedAt: string;
 }
 
@@ -82,11 +84,50 @@ export interface ChannelDeliveryReceipt {
   status: 'accepted' | 'delivered' | 'read' | 'queued';
   acceptedAt: string;
   recipient?: string;
+  /** Destination supplied by the caller before provider normalization. */
+  requestedRecipient?: string;
+  /** Destination resolved by the provider directory (for example WhatsApp PN canonicalization). */
+  resolvedRecipient?: string;
+  /** Destination echoed on the submitted provider message. Must match resolvedRecipient. */
+  providerRecipient?: string;
+  /**
+   * False when providerMessageId is only a client correlation id and no server
+   * acknowledgement has arrived yet. `sent:true` must never be derived from it.
+   */
+  providerAcknowledged?: boolean;
+  /** Provider-native numeric/status evidence used to derive `status`. */
+  providerStatus?: string | number;
   /** Multi-attachment sends may produce more than one provider message. */
   providerMessageIds?: string[];
   /** True when Agentis reused a durable receipt instead of contacting the provider again. */
   deduplicated?: boolean;
   idempotencyKey?: string;
+}
+
+/** A provider definitively rejected an outbound delivery. */
+export class ChannelDeliveryRejectedError extends Error {
+  readonly deliveryCertain = true;
+
+  constructor(
+    readonly provider: ChannelKind,
+    readonly providerMessageId: string,
+    readonly providerErrorCode: string,
+    message: string,
+    readonly remediation?: string,
+  ) {
+    super(message);
+    this.name = 'ChannelDeliveryRejectedError';
+  }
+}
+
+/** True only when the provider, not merely the local client, acknowledged the send. */
+export function isAcknowledgedChannelDelivery(receipt: ChannelDeliveryReceipt | null | undefined): boolean {
+  return Boolean(
+    receipt
+    && receipt.providerMessageId?.trim()
+    && receipt.providerAcknowledged !== false
+    && (receipt.status === 'accepted' || receipt.status === 'delivered' || receipt.status === 'read'),
+  );
 }
 
 export interface ChannelAdapter {

@@ -278,7 +278,7 @@ describe('/v1/channels/:id/grants', () => {
 });
 
 describe('POST /v1/channels/:id/test', () => {
-  it('sends a test message via the adapter', async () => {
+  it('runs read-only health checks without sending a test message', async () => {
     const agentId = seedAgent();
     const { connection } = bridge.create({
       workspaceId: ctx.workspace.id,
@@ -296,7 +296,9 @@ describe('POST /v1/channels/:id/test', () => {
       body: JSON.stringify({ body: 'ping' }),
     });
     expect(res.status).toBe(200);
-    expect(adapter.sent).toEqual([{ chatId: '999', body: 'ping' }]);
+    const body = await res.json() as { health: { checks: Array<{ code: string }> } };
+    expect(body.health.checks.some((check) => check.code === 'outbound_route_ready')).toBe(true);
+    expect(adapter.sent).toEqual([]);
   });
 
   it('returns structured diagnostics when no chatId is available', async () => {

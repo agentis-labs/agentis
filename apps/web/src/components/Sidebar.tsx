@@ -142,7 +142,7 @@ function SidebarLink({
             )}
             {badge > 0 && collapsed && (
               <span className="absolute -right-0.5 -top-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[9px] font-bold text-canvas">
-                {badge > 9 ? '9+' : badge}
+                {badge > 99 ? '99+' : badge}
               </span>
             )}
           </>

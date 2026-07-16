@@ -10,8 +10,8 @@
  * Four supported modes:
  *  - replay-from-node: copies node states for everything UPSTREAM of the
  *    target node; the target and its descendants get reset to PENDING.
- *  - replay-failed-branch: copies node states for everything not in the
- *    failed branch; failed nodes and downstream peers are reset.
+ *  - replay-failed-branch: copies successful work outside the failed
+ *    frontier; failed/deficient producer nodes and their descendants reset.
  *  - replay-with-edited-node: like replay-from-node but the target node's
  *    config is overridden with the supplied patch. Patch is applied to a
  *    deep-cloned graph; the source workflow is untouched.
@@ -37,6 +37,12 @@ import {
 } from '@agentis/core';
 import { buildInitialRunState } from '../engine/initialRunState.js';
 import { collectFailedNodeIds } from './run/runStateFailures.js';
+
+type VerdictWithProducingNodes = {
+  outcome?: string;
+  checks?: Array<{ passed?: boolean; producingNodeIds?: unknown }>;
+  deficiencies?: Array<{ producingNodeIds?: unknown }>;
+};
 
 export type ReplayMode =
   | 'replay-from-node'
@@ -122,6 +128,11 @@ export class PartialReplayService {
       if (ns && ns.status === 'COMPLETED' && newState.nodeStates[id]) {
         newState.nodeStates[id] = { ...ns };
         if (!newState.completedNodeIds.includes(id)) newState.completedNodeIds.push(id);
+        // buildInitialRunState seeds root nodes in readyQueue. A preserved root
+        // must never remain runnable or the replay silently starts from step 1
+        // even though its state says COMPLETED.
+        newState.readyQueue = newState.readyQueue.filter((item) => item.nodeId !== id);
+        delete newState.waitingInputs[id];
         // Anything fanning out from a kept node should pre-fill waiting buffers.
         for (const edge of graph.edges) {
           if (edge.source !== id) continue;
@@ -200,7 +211,8 @@ export class PartialReplayService {
   }): Set<string> {
     const keep = new Set<string>();
     const completed = new Set(args.sourceState.completedNodeIds);
-    const failed = new Set(collectFailedNodeIds(args.sourceState));
+    const graphNodeIds = new Set(args.graph.nodes.map((node) => node.id));
+    const failed = new Set(collectFailedNodeIds(args.sourceState).filter((id) => graphNodeIds.has(id)));
 
     if (args.mode === 'replay-from-node' || args.mode === 'replay-with-edited-node' || args.mode === 'replay-from-checkpoint') {
       if (!args.targetNodeId) throw new AgentisError('REPLAY_TARGET_INVALID', 'targetNodeId required');
@@ -208,13 +220,27 @@ export class PartialReplayService {
       for (const id of ancestors) if (completed.has(id)) keep.add(id);
       return keep;
     }
-    // replay-failed-branch: keep all completed nodes that are NOT ancestors of any failed node.
-    const failedAncestors = new Set<string>();
-    for (const f of failed) {
-      for (const a of collectAncestors(args.graph, f)) failedAncestors.add(a);
-      failedAncestors.add(f);
+    // replay-failed-branch: preserve healthy completed ancestors. They are the
+    // checkpoint that makes frontier replay useful. Reset only the failed (or
+    // verdict-deficient) producer nodes and everything downstream from them.
+    //
+    // The old implementation reset ancestors and preserved descendants, which
+    // inverted the frontier and caused every repair attempt to restart at the
+    // trigger/root. It also produced an empty child run when a COMPLETED run had
+    // a non-accomplished verdict but no raw FAILED node state.
+    for (const id of collectReplayFrontierNodeIds(args.sourceState, args.graph)) failed.add(id);
+    if (failed.size === 0) {
+      throw new AgentisError(
+        'REPLAY_TARGET_INVALID',
+        'run has no failed node or verdict-producing node to replay; start a fresh run explicitly',
+      );
     }
-    for (const id of completed) if (!failedAncestors.has(id)) keep.add(id);
+    const reset = new Set<string>();
+    for (const f of failed) {
+      reset.add(f);
+      for (const descendant of collectDescendants(args.graph, f)) reset.add(descendant);
+    }
+    for (const id of completed) if (!reset.has(id)) keep.add(id);
     return keep;
   }
 }
@@ -232,4 +258,45 @@ function collectAncestors(graph: WorkflowGraph, nodeId: string): Set<string> {
     }
   }
   return ancestors;
+}
+
+function collectDescendants(graph: WorkflowGraph, nodeId: string): Set<string> {
+  const descendants = new Set<string>();
+  const stack = [nodeId];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    for (const edge of graph.edges) {
+      if (edge.source === cur && !descendants.has(edge.target)) {
+        descendants.add(edge.target);
+        stack.push(edge.target);
+      }
+    }
+  }
+  return descendants;
+}
+
+/**
+ * A run may be topologically COMPLETED while its outcome verdict is partial,
+ * hollow, or failed. In that case the verdict is the only truthful failure
+ * frontier. Keep this parser deliberately tolerant so persisted runs created
+ * by older verdict versions remain replayable.
+ */
+export function collectReplayFrontierNodeIds(state: WorkflowRunState, graph: WorkflowGraph): Set<string> {
+  const result = new Set(collectFailedNodeIds(state).filter((id) => graph.nodes.some((node) => node.id === id)));
+  const verdict = (state as WorkflowRunState & { verdict?: VerdictWithProducingNodes }).verdict;
+  if (!verdict || verdict.outcome === 'accomplished') return result;
+
+  const graphNodeIds = new Set(graph.nodes.map((node) => node.id));
+  const addIds = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const id of value) if (typeof id === 'string' && graphNodeIds.has(id)) result.add(id);
+  };
+
+  for (const deficiency of verdict.deficiencies ?? []) addIds(deficiency.producingNodeIds);
+  // Forward-compatible with verdict engines that attach provenance directly
+  // to failed checks instead of (or in addition to) deficiencies.
+  for (const check of verdict.checks ?? []) {
+    if (check.passed !== true) addIds(check.producingNodeIds);
+  }
+  return result;
 }

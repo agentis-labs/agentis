@@ -15,7 +15,7 @@ import type {
   ToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import type { McpHarnessServer } from '../services/mcp/mcpHarnessSession.js';
+import { withHarnessTurnHeaders, type McpHarnessServer } from '../services/mcp/mcpHarnessSession.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { linkAbortSignal } from './abort.js';
@@ -25,6 +25,7 @@ import {
   chatHardCeilingMs,
   createChatQueue,
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  messagesForRuntimeSession,
   runCliChatTurn,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
@@ -685,7 +686,12 @@ export class HermesAgentAdapter implements AgentAdapter {
           startedAt: new Date().toISOString(),
           agentId: this.opts.agentId,
         });
-        const session = await this.#openSession(client, sessionKey, startupTimeoutMs);
+        const turnServers = withHarnessTurnHeaders(
+          this.opts.mcpServers ?? [],
+          options?.executionMode ?? 'chat',
+          { conversationId: options?.conversationId, turnLease: options?.turnLease },
+        );
+        const session = await this.#openSession(client, sessionKey, startupTimeoutMs, turnServers, Boolean(options?.turnLease));
         queue.push({
           type: 'activity',
           id: `hermes-session-${sessionKey}`,
@@ -765,7 +771,7 @@ export class HermesAgentAdapter implements AgentAdapter {
         options?.signal?.addEventListener('abort', abortHandler, { once: true });
 
         const result = await client.sessionPrompt(
-          { sessionId, prompt: [{ type: 'text', text: formatAcpPrompt(messages) }] },
+          { sessionId, prompt: [{ type: 'text', text: formatAcpPrompt(messagesForRuntimeSession(messages, session.resumed)) }] },
           (update) => {
             const delta = acpUpdateToDelta(update, turnState);
             // Lifecycle metadata (usage/command catalogs) is not model output.
@@ -962,20 +968,24 @@ export class HermesAgentAdapter implements AgentAdapter {
     client: AcpClient,
     sessionKey: string,
     startupTimeoutMs: number,
+    serverDescriptors: McpHarnessServer[] = this.opts.mcpServers ?? [],
+    forceReload = false,
   ): Promise<{
     sessionId: string;
     models?: AcpModelInfo[];
     selectedModel: string | null;
+    resumed: boolean;
   }> {
     const sessionCwd = this.opts.cwd ?? process.cwd();
-    const mcpServers = toAcpHttpMcpServers(this.opts.mcpServers ?? []);
-    if (this.#prewarmReady) await this.#prewarmReady;
+    const mcpServers = toAcpHttpMcpServers(serverDescriptors);
+    if (!forceReload && this.#prewarmReady) await this.#prewarmReady;
     const memorySession = this.#sessions.get(sessionKey);
-    if (memorySession?.processGeneration === this.#processGeneration) {
+    if (!forceReload && memorySession?.processGeneration === this.#processGeneration) {
       return {
         sessionId: memorySession.sessionId,
         models: this.#models,
         selectedModel: memorySession.selectedModel,
+        resumed: true,
       };
     }
 
@@ -1009,6 +1019,7 @@ export class HermesAgentAdapter implements AgentAdapter {
           sessionId: loaded.sessionId,
           models: loaded.models ?? this.#models,
           selectedModel: memorySession?.selectedModel ?? stored?.selectedModel ?? null,
+          resumed: true,
         };
       } catch (err) {
         this.opts.logger.warn('hermes_agent.acp.session_load_failed', {
@@ -1019,7 +1030,7 @@ export class HermesAgentAdapter implements AgentAdapter {
       }
     }
 
-    const prewarmed = this.#prewarmedSession;
+    const prewarmed = forceReload ? undefined : this.#prewarmedSession;
     if (prewarmed?.processGeneration === this.#processGeneration) {
       this.#prewarmedSession = undefined;
       const now = new Date().toISOString();
@@ -1035,6 +1046,7 @@ export class HermesAgentAdapter implements AgentAdapter {
         sessionId: prewarmed.sessionId,
         models: prewarmed.models ?? this.#models,
         selectedModel: null,
+        resumed: false,
       };
     }
 
@@ -1052,7 +1064,7 @@ export class HermesAgentAdapter implements AgentAdapter {
       updatedAt: now,
     });
     this.#persistSession(sessionKey, created.sessionId, null, 'active');
-    return { sessionId: created.sessionId, models: created.models, selectedModel: null };
+    return { sessionId: created.sessionId, models: created.models, selectedModel: null, resumed: false };
   }
 
   #persistSession(

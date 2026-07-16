@@ -145,13 +145,22 @@ export function describeRealtimeActivity(
     case REALTIME_EVENTS.RUN_CANCELLED:
       return { ...base, kind: 'run', tone: 'muted', title: 'Run cancelled', detail: 'Execution was stopped.' };
     case REALTIME_EVENTS.RUN_COMPLETED:
+      {
+        const accomplished = payload.accomplished;
       return {
         ...base,
         kind: 'run',
-        tone: 'success',
-        title: stringField(payload, ['workflowName', 'title']) ?? 'Run completed',
-        detail: stringField(payload, ['summary', 'result']) ?? 'Execution completed successfully.',
+        tone: accomplished === false ? 'danger' : accomplished === true ? 'success' : 'warn',
+        title: stringField(payload, ['workflowName', 'title'])
+          ?? (accomplished === false ? 'Run finished — outcome not accomplished' : 'Run completed'),
+        detail: stringField(payload, ['summary', 'result'])
+          ?? (accomplished === true
+            ? 'Execution completed and the business outcome was verified.'
+            : accomplished === false
+              ? `Execution completed mechanically, but the business verdict is ${stringField(payload, ['verdict']) ?? 'deficient'}.`
+              : 'Execution completed without a business-outcome verdict.'),
       };
+      }
     case REALTIME_EVENTS.RUN_FAILED:
       return {
         ...base,

@@ -1,24 +1,45 @@
 # @agentis-labs/cli
 
 [![npm](https://img.shields.io/npm/v/@agentis-labs/cli.svg)](https://www.npmjs.com/package/@agentis-labs/cli)
+[![npm downloads](https://img.shields.io/npm/dw/@agentis-labs/cli.svg)](https://www.npmjs.com/package/@agentis-labs/cli)
 [![license](https://img.shields.io/npm/l/@agentis-labs/cli.svg)](https://github.com/agentis-labs/agentis/blob/main/LICENSE)
 
-## Own the agents. Rent the models.
+## Every harness. One Brain. Zero lock-in.
 
-Agentis is the open-source, self-hosted command center for agents you own. Import the
+Agentis is the multi-harness dashboard on steroids for agents you own — self-hosted,
+open-source, running on your machine today with Claude Code, Codex, Cursor, Antigravity,
+Hermes, OpenClaw, or your own HTTP and local models underneath (a harness of our own is
+coming next). Those tools forget everything the moment the process dies, and most of them
+phone your work home to someone else's cloud while they run. Agentis doesn't. Import the
 agents you already run, give them a permanent Brain of memory and skills, swap the model
-underneath them anytime, and ship what they build as real apps, workflows, and channels
+underneath them anytime, and ship what they build as real apps, workflows, and channels —
 from your own machine.
 
-Agents should not disappear when a vendor changes, a subscription ends, or a local process
-restarts. Agentis gives them durable identity, memory, orchestration, tools, approvals,
-and a live product surface they can operate with you.
+**No token tax. No data extraction. No forgetting.**
 
 > **Status: pre-release (0.2.x).** Agentis is already usable, but APIs may still change
 > before 1.0.
 
 This package launches the whole local runtime: API, WebSocket bridge, workflow engine,
 embedded SQLite, credential vault, and bundled React dashboard.
+
+## Harnesses supported today
+
+Import the agent you already run — no rewrite, no migration — and it keeps its memory,
+tools, and workflows even if you switch harnesses later.
+
+| Harness | What it is | Runs as |
+|---------|-----------|---------|
+| **Claude Code** | Anthropic's Claude Code CLI | local CLI process |
+| **Codex** | OpenAI's Codex CLI | local CLI process |
+| **Cursor** | Cursor's agent CLI | local CLI process |
+| **Antigravity** | Google's `agy` — the Gemini-CLI successor, also runs Claude and GPT-OSS models | local CLI process |
+| **Hermes** | Hermes agent runtime | local CLI process |
+| **OpenClaw** | Bridged through OpenClaw's official ACP protocol | local ACP server |
+| **HTTP (custom / remote)** | Any agent that speaks HTTP, with HMAC-signed callbacks | webhook |
+| **Local / OpenAI-compatible** | Ollama, LM Studio, OpenRouter, and other OpenAI-compatible endpoints | local or remote API |
+
+More harnesses land as adapters, not rewrites — and a harness of our own is next.
 
 ## Install
 
@@ -28,20 +49,26 @@ agentis up
 ```
 
 Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed.
-Agentis boots at `http://127.0.0.1:3737`, creates local secrets, initializes SQLite,
-seeds the first operator user, and serves the dashboard from the same process.
+Agentis boots at `http://127.0.0.1:3737` in under 60 seconds, creates local secrets,
+initializes SQLite, seeds the first operator user, and serves the dashboard from the
+same process.
+
+**No API keys required to see it boot.** Connect your first harness whenever you're ready.
 
 On Windows, open a new PowerShell after the global install so npm's global command
 shims are picked up on `PATH`.
 
 ## Why Agentis
 
-- Permanent Brain: local semantic memory, knowledge bases, living skills, cited answers.
-- Agentic apps: typed data, generated interfaces, actions, run monitors, approvals.
-- Self-healing workflows: durable graphs, replay, checkpoints, verdicts, honest repair.
-- Runtime freedom: Claude Code, Codex, Cursor, Antigravity, Hermes, OpenClaw, local models.
-- Omni-Reach: Slack, Telegram, WhatsApp, email, webhooks, MCP, A2A, and integrations.
-- Sovereignty: SQLite, secrets, assets, logs, and memories stay under your data directory.
+- **One fabric for every runtime.** Route by capability, not vendor — never rewrite
+  your agents to switch one.
+- **A permanent Brain, not a chat transcript.** Local semantic memory, knowledge bases,
+  living skills, and cited answers that every harness reads and writes into.
+- **Apps, not conversations that evaporate.** Typed data, generated interfaces, actions,
+  run monitors, approvals.
+- **Self-healing workflows.** Durable graphs, replay, checkpoints, verdicts, honest repair.
+- **Omni-Reach.** Slack, Telegram, WhatsApp, email, webhooks, MCP, A2A, and integrations.
+- **Sovereignty.** SQLite, secrets, assets, logs, and memories stay under your data directory.
 
 ## What You Can Build
 

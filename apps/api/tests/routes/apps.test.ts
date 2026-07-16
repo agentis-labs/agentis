@@ -137,10 +137,10 @@ describe('/v1/apps live conversations (Phase 1)', () => {
       channelConnectionId: connId, channelChatId: '42', title: 'Maria', createdAt: now, updatedAt: now,
     }).run();
 
-    const delivered: Array<{ connectionId: string; chatId: string; body: string }> = [];
+    const delivered: Array<{ connectionId: string; chatId: string; body: string; idempotencyKey?: string }> = [];
     const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({
       db: ctx.db, auth: ctx.auth, conversations,
-      channels: { deliverToConnection: async (a) => { delivered.push(a); } },
+      channels: { deliverToConnection: async (a) => { delivered.push(a); return { provider: 'telegram', providerMessageId: randomUUID(), status: 'accepted', acceptedAt: new Date().toISOString(), providerAcknowledged: true }; } },
     }) }]);
 
     // Take over.
@@ -157,7 +157,9 @@ describe('/v1/apps live conversations (Phase 1)', () => {
     });
     expect(sendRes.status).toBe(200);
     expect((await sendRes.json() as { data: { delivered: boolean } }).data.delivered).toBe(true);
-    expect(delivered).toEqual([{ connectionId: connId, chatId: '42', body: 'Hi Maria, this is a human — happy to help!' }]);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ connectionId: connId, chatId: '42', body: 'Hi Maria, this is a human — happy to help!' });
+    expect(delivered[0]?.idempotencyKey).toMatch(/^operator_reply:/);
     const opMsg = conversations.messages(convId, 50).find((m) => m.authorType === 'operator');
     expect(opMsg?.body).toMatch(/happy to help/);
 
@@ -837,6 +839,14 @@ describe('App workflow control plane (E0)', () => {
     const doctor = await doctorRes.json() as { data: { appId: string; summary: { executableRules: number }; topology: { activeEventSubscriptions: number } } };
     expect(doctor.data).toMatchObject({ appId, topology: { activeEventSubscriptions: 1 } });
     expect(doctor.data.summary.executableRules).toBeGreaterThanOrEqual(1);
+
+    const compileRes = await app().request(`/v1/apps/${appId}/compile?target=production`, { headers: ctx.authHeaders });
+    expect(compileRes.status).toBe(200);
+    const compile = await compileRes.json() as { data: { appId: string; target: string; readyForExecution: boolean; executionBlockerCount: number; evidencePendingCount: number; counts: { block: number } } };
+    expect(compile.data).toMatchObject({ appId, target: 'production', readyForExecution: false });
+    expect(compile.data.executionBlockerCount).toBeGreaterThan(0);
+    expect(compile.data.evidencePendingCount).toBeGreaterThan(0);
+    expect(compile.data.counts.block).toBe(compile.data.executionBlockerCount + compile.data.evidencePendingCount);
   });
 
   it('authors, updates, and deletes executable rules and previews/applies Doctor repairs through App routes', async () => {

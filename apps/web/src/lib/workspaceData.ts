@@ -294,7 +294,6 @@ function normalizeArtifact(raw: WorkspaceArtifact): WorkspaceArtifact {
 function deriveNotifications(
   approvals: WorkspaceApproval[],
   failedRuns: WorkspaceFailedRun[],
-  completedRuns: WorkspaceCompletedRun[],
   agents: WorkspaceAgent[],
 ): WorkspaceNotification[] {
   const setup: WorkspaceNotification[] = [];
@@ -359,18 +358,6 @@ function deriveNotifications(
       runId: run.id,
       workflowId: run.workflowId,
       failedNodeId: run.failedNodeId,
-      workflowName: run.workflowName,
-    });
-  }
-  for (const run of completedRuns) {
-    rest.push({
-      id: `completed-${run.id}`,
-      type: 'completion',
-      title: 'Workflow succeeded',
-      context: run.workflowName ?? 'Workflow',
-      timestamp: run.finishedAt ?? new Date().toISOString(),
-      runId: run.id,
-      workflowId: run.workflowId,
       workflowName: run.workflowName,
     });
   }
@@ -460,7 +447,7 @@ export async function refreshWorkspaceSnapshot(): Promise<void> {
       activeWorkflows,
       fleet,
       latestActivity,
-      notifications: deriveNotifications(approvals, failedRuns, completedRuns, agents),
+      notifications: deriveNotifications(approvals, failedRuns, agents),
       counts: deriveCounts(agents, activeRuns, activeWorkflows),
       updatedAt: Date.now(),
     });

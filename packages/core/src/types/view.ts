@@ -46,6 +46,58 @@ export const actionRefSchema = z.object({
 });
 export type ActionRef = z.infer<typeof actionRefSchema>;
 
+/**
+ * A bounded predicate over the current record. Record-aware controls use this
+ * instead of embedding application-specific status logic in the renderer.
+ */
+export const recordConditionSchema = z.object({
+  field: z.string().min(1),
+  op: z.enum([
+    'eq', 'neq', 'in', 'not_in', 'exists', 'not_exists',
+    'truthy', 'falsy', 'contains', 'gt', 'gte', 'lt', 'lte',
+  ]).default('eq'),
+  value: bindableSchema.optional(),
+});
+export type RecordCondition = z.infer<typeof recordConditionSchema>;
+
+/** `all` and `any` may be combined; both groups must pass when present. */
+export const recordPredicateSchema = z.object({
+  all: z.array(recordConditionSchema).min(1).optional(),
+  any: z.array(recordConditionSchema).min(1).optional(),
+}).refine((value) => Boolean(value.all?.length || value.any?.length), {
+  message: 'A record predicate requires at least one all/any condition',
+});
+export type RecordPredicate = z.infer<typeof recordPredicateSchema>;
+
+/**
+ * A row/card action with renderer-owned presentation and availability. This is
+ * deliberately domain-neutral: any collection can expose different operations
+ * for different record states without custom code.
+ */
+export const recordActionRefSchema = actionRefSchema.extend({
+  label: z.string().min(1).optional(),
+  description: z.string().optional(),
+  icon: z.enum(['open', 'edit', 'move', 'play', 'pause', 'retry', 'approve', 'archive', 'delete', 'more']).optional(),
+  tone: z.enum(['neutral', 'accent', 'success', 'warning', 'danger', 'info']).optional(),
+  visibleWhen: recordPredicateSchema.optional(),
+  disabledWhen: recordPredicateSchema.optional(),
+  disabledReason: z.string().optional(),
+  confirm: z.object({
+    title: z.string().min(1),
+    message: z.string().min(1),
+    confirmLabel: z.string().min(1).optional(),
+  }).optional(),
+});
+export type RecordActionRef = z.infer<typeof recordActionRefSchema>;
+
+/** Allowed Kanban state transitions. Omit to allow every column transition. */
+export const kanbanTransitionSchema = z.object({
+  from: z.array(z.string()).min(1).optional(),
+  to: z.array(z.string()).min(1),
+  when: recordPredicateSchema.optional(),
+});
+export type KanbanTransition = z.infer<typeof kanbanTransitionSchema>;
+
 // ── Style intent (bounded → Design System, never raw CSS) ───
 
 /** Semantic tone — maps to the accent/success/warn/danger/info token families. */
@@ -163,7 +215,7 @@ type ViewNodeBase =
   // tiny inline trend — static points or bound to a collection
   | { type: 'Sparkline'; points?: number[]; bind?: DataBind; y?: string }
   // ── data-bound ──
-  | { type: 'Table'; bind: DataBind; columns: z.infer<typeof columnSchema>[]; rowActions?: ActionRef[] }
+  | { type: 'Table'; bind: DataBind; columns: z.infer<typeof columnSchema>[]; rowActions?: RecordActionRef[] }
   | { type: 'List'; bind: DataBind; item: ViewNode }
   | {
       type: 'Chart';
@@ -230,10 +282,10 @@ type ViewNodeBase =
   // ── Interactive archetype composites (APP-INTERFACE-10X §2.4) ──
   // A real kanban over a collection: drag a card across columns to write
   // `groupBy` back through the declared `update` data action (target "col.update").
-  | { type: 'Kanban'; bind: DataBind; groupBy: string; columns?: string[]; titleField?: string; subtitleField?: string; badgeField?: string; valueField?: string; update?: ActionRef; cardActions?: ActionRef[] }
+  | { type: 'Kanban'; bind: DataBind; groupBy: string; columns?: string[]; columnLabels?: Record<string, string>; titleField?: string; subtitleField?: string; badgeField?: string; valueField?: string; update?: ActionRef; transitions?: KanbanTransition[]; cardActions?: RecordActionRef[]; contextActions?: RecordActionRef[]; emptyLabel?: string }
   // CRM/ERP master-detail: searchable record list + full record page with field
   // sections, related child collections, and per-record actions.
-  | { type: 'RecordMaster'; bind: DataBind; titleField?: string; subtitleField?: string; statusField?: string; searchFields?: string[]; sections?: Array<{ title?: string; fields: string[] }>; related?: Array<{ collection: string; foreignKey: string; title?: string; titleField?: string }>; recordActions?: ActionRef[] }
+  | { type: 'RecordMaster'; bind: DataBind; titleField?: string; subtitleField?: string; statusField?: string; searchFields?: string[]; sections?: Array<{ title?: string; fields: string[] }>; related?: Array<{ collection: string; foreignKey: string; title?: string; titleField?: string }>; recordActions?: RecordActionRef[] }
   // Time lanes (roadmap / release plan / campaign calendar) from date fields.
   | { type: 'Roadmap'; title?: string; bind: DataBind; labelField: string; startField: string; endField?: string; laneField?: string; statusField?: string; scale?: 'weeks' | 'months' | 'quarters' }
   // Staged pipeline with counts/values + stage-to-stage conversion.
@@ -256,11 +308,11 @@ type ViewNodeBase =
   | { type: 'CodeSurface'; code: string; collections?: string[]; height?: number };
 
 /** Any node, plus optional bounded visual intent. */
-export type ViewNode = ViewNodeBase & { style?: StyleIntent };
+export type ViewNode = ViewNodeBase & { nodeId?: string; style?: StyleIntent };
 
 // Spread into every object so `style` is accepted on any node without
 // changing the discriminated-union shape the renderer switches on.
-const styled = { style: styleIntentSchema.optional() } as const;
+const styled = { nodeId: z.string().min(1).max(120).optional(), style: styleIntentSchema.optional() } as const;
 
 // IMPORTANT: a DISCRIMINATED union on `type`, not a plain `z.union`. A plain union
 // validates a malformed node against EVERY member and aggregates `unionErrors`
@@ -287,7 +339,7 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     z.object({ type: z.literal('Callout'), title: z.string().optional(), value: z.string(), ...styled }),
     z.object({ type: z.literal('ProgressBar'), value: bindableSchema, max: z.number().positive().optional(), label: z.string().optional(), ...styled }),
     z.object({ type: z.literal('Sparkline'), points: z.array(z.number()).optional(), bind: dataBindSchema.optional(), y: z.string().optional(), ...styled }),
-    z.object({ type: z.literal('Table'), bind: dataBindSchema, columns: z.array(columnSchema), rowActions: z.array(actionRefSchema).optional(), ...styled }),
+    z.object({ type: z.literal('Table'), bind: dataBindSchema, columns: z.array(columnSchema), rowActions: z.array(recordActionRefSchema).optional(), ...styled }),
     z.object({ type: z.literal('List'), bind: dataBindSchema, item: viewNodeSchema, ...styled }),
     z.object({
       type: z.literal('Chart'),
@@ -335,12 +387,16 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
       bind: dataBindSchema,
       groupBy: z.string().min(1),
       columns: z.array(z.string()).optional(),
+      columnLabels: z.record(z.string()).optional(),
       titleField: z.string().optional(),
       subtitleField: z.string().optional(),
       badgeField: z.string().optional(),
       valueField: z.string().optional(),
       update: actionRefSchema.optional(),
-      cardActions: z.array(actionRefSchema).optional(),
+      transitions: z.array(kanbanTransitionSchema).optional(),
+      cardActions: z.array(recordActionRefSchema).optional(),
+      contextActions: z.array(recordActionRefSchema).optional(),
+      emptyLabel: z.string().optional(),
       ...styled,
     }),
     z.object({
@@ -352,7 +408,7 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
       searchFields: z.array(z.string()).optional(),
       sections: z.array(z.object({ title: z.string().optional(), fields: z.array(z.string()).min(1) })).optional(),
       related: z.array(z.object({ collection: z.string().min(1), foreignKey: z.string().min(1), title: z.string().optional(), titleField: z.string().optional() })).optional(),
-      recordActions: z.array(actionRefSchema).optional(),
+      recordActions: z.array(recordActionRefSchema).optional(),
       ...styled,
     }),
     z.object({

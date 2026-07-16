@@ -1159,10 +1159,11 @@ export const channelDeliveries = sqliteTable('channel_deliveries', {
 });
 
 /**
- * Durable outbound idempotency journal. A workflow reserves its stable
- * run+node key before touching a provider and stores the provider receipt before
- * completing the node. A crash therefore reuses accepted proof or blocks an
- * uncertain in-flight attempt instead of sending twice. Migration v111.
+ * Durable outbound delivery journal. Workflow sends reserve a stable run+node
+ * key; interactive sends receive an internal attempt key. Every provider-bound
+ * attempt is therefore available for asynchronous acknowledgement correlation.
+ * A crash reuses accepted proof or blocks an uncertain in-flight attempt instead
+ * of sending twice. Migration v111.
  */
 export const channelOutboundDeliveries = sqliteTable(
   'channel_outbound_deliveries',
@@ -1174,7 +1175,7 @@ export const channelOutboundDeliveries = sqliteTable(
     chatId: text('chat_id').notNull(),
     /** SHA-256 only; message content is never duplicated into the journal. */
     bodyHash: text('body_hash').notNull(),
-    /** sending | accepted | failed | uncertain */
+    /** sending | queued | accepted | delivered | read | failed | uncertain */
     status: text('status').notNull().default('sending'),
     providerMessageId: text('provider_message_id'),
     receipt: text('receipt_json', { mode: 'json' }),
@@ -3076,6 +3077,80 @@ export const conversationMessageQueue = sqliteTable(
   (table) => ({
     byConversation: index('idx_conversation_message_queue_conversation').on(table.conversationId, table.status, table.position),
   }),
+);
+
+// Durable external-agent ownership sync (migration v114). Source policy,
+// observed revisions/items, and immutable sync runs are separate facts.
+export const agentSyncSources = sqliteTable(
+  'agent_sync_sources',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    adapterType: text('adapter_type').notNull(),
+    externalId: text('external_id').notNull(),
+    rootPath: text('root_path'),
+    /** manual_review | auto_trusted | disabled. */
+    mode: text('mode').notNull().default('manual_review'),
+    policyJson: text('policy_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    lastScanAt: text('last_scan_at'),
+    lastSuccessAt: text('last_success_at'),
+    lastError: text('last_error'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byAgent: uniqueIndex('idx_agent_sync_sources_agent').on(table.workspaceId, table.agentId),
+    byExternal: uniqueIndex('idx_agent_sync_sources_external').on(table.workspaceId, table.adapterType, table.externalId),
+  }),
+);
+
+export const agentSyncItems = sqliteTable(
+  'agent_sync_items',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    sourceId: text('source_id').notNull().references(() => agentSyncSources.id, { onDelete: 'cascade' }),
+    itemKey: text('item_key').notNull(),
+    /** memory | skill | identity. */
+    itemType: text('item_type').notNull(),
+    sourcePath: text('source_path'),
+    origin: text('origin'),
+    contentHash: text('content_hash').notNull(),
+    previousHash: text('previous_hash'),
+    /** pending | quarantined | applied | rejected | deleted | conflict. */
+    status: text('status').notNull().default('pending'),
+    quality: real('quality'),
+    decisionReason: text('decision_reason'),
+    targetKind: text('target_kind'),
+    targetId: text('target_id'),
+    payloadJson: text('payload_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    firstSeenAt: text('first_seen_at').notNull().default(isoNow() as unknown as string),
+    lastSeenAt: text('last_seen_at').notNull().default(isoNow() as unknown as string),
+    appliedAt: text('applied_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byKey: uniqueIndex('idx_agent_sync_items_key').on(table.sourceId, table.itemKey),
+    byStatus: index('idx_agent_sync_items_status').on(table.workspaceId, table.sourceId, table.status),
+  }),
+);
+
+export const agentSyncRuns = sqliteTable(
+  'agent_sync_runs',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    sourceId: text('source_id').notNull().references(() => agentSyncSources.id, { onDelete: 'cascade' }),
+    trigger: text('trigger').notNull().default('manual'),
+    mode: text('mode').notNull(),
+    status: text('status').notNull().default('scanning'),
+    detectedJson: text('detected_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    appliedJson: text('applied_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    error: text('error'),
+    startedAt: text('started_at').notNull().default(isoNow() as unknown as string),
+    completedAt: text('completed_at'),
+  },
+  (table) => ({ bySource: index('idx_agent_sync_runs_source').on(table.sourceId, table.startedAt) }),
 );
 
 

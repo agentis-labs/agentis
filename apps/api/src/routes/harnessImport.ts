@@ -23,10 +23,12 @@ import {
   checkImportUpdates,
   type HarnessImportDeps,
 } from '../services/harness/harnessAgentImport.js';
+import type { AgentOwnershipSyncService } from '../services/harness/agentOwnershipSync.js';
 
 export interface HarnessImportRoutesDeps extends HarnessImportDeps {
   db: AgentisSqliteDb;
   auth: AuthService;
+  ownershipSync?: AgentOwnershipSyncService;
 }
 
 const previewSchema = z.object({
@@ -49,6 +51,17 @@ const importSchema = z.object({
     minQuality: z.number().min(0).max(1).optional(),
   })).min(1).max(50),
 });
+const syncPolicySchema = z.object({
+  mode: z.enum(['manual_review', 'auto_trusted', 'disabled']).optional(),
+  policy: z.object({
+    memory: z.enum(['review', 'auto_quality', 'disabled']).optional(),
+    skills: z.enum(['review', 'auto_owned', 'disabled']).optional(),
+    identity: z.enum(['review', 'auto_trusted', 'disabled']).optional(),
+    deletions: z.enum(['review', 'auto', 'ignore']).optional(),
+    minAutoQuality: z.number().min(0.55).max(1).optional(),
+  }).optional(),
+});
+const syncDecisionSchema = z.object({ itemIds: z.array(z.string().min(1)).max(10_000), reason: z.string().max(500).optional() });
 
 export function buildHarnessImportRoutes(deps: HarnessImportRoutesDeps) {
   const app = new Hono();
@@ -68,6 +81,43 @@ export function buildHarnessImportRoutes(deps: HarnessImportRoutesDeps) {
     const cwd = c.req.query('cwd') || null;
     const updates = await checkImportUpdates(deps, ws.workspaceId, { cwd });
     return c.json({ updates });
+  });
+
+  app.get('/sync/:agentId', (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.ownershipSync) throw new AgentisError('RESOURCE_NOT_FOUND', 'Agent sync service not available');
+    const agentId = c.req.param('agentId');
+    return c.json({ source: deps.ownershipSync.getSource(ws.workspaceId, agentId), items: deps.ownershipSync.listItems(ws.workspaceId, agentId), history: deps.ownershipSync.history(ws.workspaceId, agentId, 20) });
+  });
+
+  app.put('/sync/:agentId/policy', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.ownershipSync) throw new AgentisError('RESOURCE_NOT_FOUND', 'Agent sync service not available');
+    const source = deps.ownershipSync.updatePolicy(ws.workspaceId, c.req.param('agentId'), syncPolicySchema.parse(await c.req.json()));
+    if (!source) throw new AgentisError('RESOURCE_NOT_FOUND', 'Imported agent sync source not found');
+    return c.json({ source });
+  });
+
+  app.post('/sync/:agentId/scan', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.ownershipSync) throw new AgentisError('RESOURCE_NOT_FOUND', 'Agent sync service not available');
+    const agentId = c.req.param('agentId');
+    const run = await deps.ownershipSync.scan(ws.workspaceId, agentId, 'manual');
+    return c.json({ run, items: deps.ownershipSync.listItems(ws.workspaceId, agentId) });
+  });
+
+  app.post('/sync/:agentId/apply', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.ownershipSync) throw new AgentisError('RESOURCE_NOT_FOUND', 'Agent sync service not available');
+    const body = syncDecisionSchema.parse(await c.req.json());
+    return c.json(await deps.ownershipSync.apply(ws.workspaceId, c.req.param('agentId'), body.itemIds));
+  });
+
+  app.post('/sync/:agentId/reject', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.ownershipSync) throw new AgentisError('RESOURCE_NOT_FOUND', 'Agent sync service not available');
+    const body = syncDecisionSchema.parse(await c.req.json());
+    return c.json(deps.ownershipSync.reject(ws.workspaceId, c.req.param('agentId'), body.itemIds, body.reason));
   });
 
   app.post('/agents/preview', async (c) => {
@@ -99,6 +149,7 @@ export function buildHarnessImportRoutes(deps: HarnessImportRoutesDeps) {
         minQuality: a.minQuality,
       })),
     });
+    deps.ownershipSync?.ensureSources(ws.workspaceId);
     return c.json(result);
   });
 

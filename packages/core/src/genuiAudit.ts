@@ -177,7 +177,7 @@ function collectReferencedActions(node: unknown, out: Set<string>): void {
   if (!node || typeof node !== 'object') return;
   const obj = node as Record<string, unknown>;
   const ref = obj as Partial<ActionRef>;
-  if (typeof ref.action === 'string' && ref.action.length > 0 && Object.keys(obj).every((k) => k === 'action' || k === 'args')) {
+  if (typeof ref.action === 'string' && ref.action.length > 0 && !('type' in obj)) {
     out.add(ref.action);
   }
   for (const value of Object.values(obj)) collectReferencedActions(value, out);
@@ -199,9 +199,28 @@ function stripDeadInteractives(node: ViewNode, declared: Set<string>, fixes: str
     fixes.push('removed undeclared row actions');
     return { ...node, rowActions: kept.length > 0 ? kept : undefined } as ViewNode;
   }
-  if (node.type === 'Kanban' && node.update && !known(node.update.action)) {
-    fixes.push(`kanban drag disabled: undeclared action "${node.update.action}"`);
-    return { ...node, update: undefined } as ViewNode;
+  if (node.type === 'Kanban') {
+    let next = node;
+    if (next.update && !known(next.update.action)) {
+      fixes.push(`kanban drag disabled: undeclared action "${next.update.action}"`);
+      next = { ...next, update: undefined };
+    }
+    if (next.cardActions?.some((a) => !known(a.action))) {
+      const kept = next.cardActions.filter((a) => known(a.action));
+      fixes.push('removed undeclared kanban card actions');
+      next = { ...next, cardActions: kept.length > 0 ? kept : undefined };
+    }
+    if (next.contextActions?.some((a) => !known(a.action))) {
+      const kept = next.contextActions.filter((a) => known(a.action));
+      fixes.push('removed undeclared kanban context actions');
+      next = { ...next, contextActions: kept.length > 0 ? kept : undefined };
+    }
+    return next;
+  }
+  if (node.type === 'RecordMaster' && node.recordActions?.some((a) => !known(a.action))) {
+    const kept = node.recordActions.filter((a) => known(a.action));
+    fixes.push('removed undeclared record actions');
+    return { ...node, recordActions: kept.length > 0 ? kept : undefined } as ViewNode;
   }
   if (node.type === 'Hero' && node.actions?.some((a) => !known(a.action))) {
     const kept = node.actions.filter((a) => known(a.action));
@@ -357,6 +376,8 @@ export function repairSurface(
   if (opts.actions) out = auditOperability(out, opts.actions, ctx.fixes);
 
   // Guarantee a root theme so the surface is always coherently styled.
+  out = ensureViewNodeIds(out);
+
   if (!out.style?.theme) {
     out = { ...out, style: { ...out.style, theme: inferTheme(out) } } as ViewNode;
     ctx.fixes.push('set root theme');
@@ -371,6 +392,30 @@ export function repairSurface(
   }
 
   return { view: out, fixes: ctx.fixes };
+}
+
+/** Persist stable semantic targets so agents can edit/delete without fragile paths. */
+export function ensureViewNodeIds(root: ViewNode): ViewNode {
+  const used = new Set<string>();
+  const claim = (node: ViewNode, path: string): string => {
+    const preferred = node.nodeId?.trim();
+    let candidate = preferred || `node.${node.type.toLowerCase()}.${path || 'root'}`;
+    let suffix = 2;
+    while (used.has(candidate)) candidate = `${preferred || `node.${node.type.toLowerCase()}.${path || 'root'}`}.${suffix++}`;
+    used.add(candidate);
+    return candidate;
+  };
+  const walk = (node: ViewNode, path: string): ViewNode => {
+    const nodeId = claim(node, path);
+    if (node.type === 'Split') return { ...node, nodeId, left: walk(node.left, `${path}.left`), right: walk(node.right, `${path}.right`) };
+    if (node.type === 'Tabs') return { ...node, nodeId, tabs: node.tabs.map((tab, ti) => ({ ...tab, children: tab.children.map((child, ci) => walk(child, `${path}.tabs.${ti}.${ci}`)) })) };
+    if (node.type === 'Accordion') return { ...node, nodeId, sections: node.sections.map((section, si) => ({ ...section, children: section.children.map((child, ci) => walk(child, `${path}.sections.${si}.${ci}`)) })) };
+    if (node.type === 'List') return { ...node, nodeId, item: walk(node.item, `${path}.item`) };
+    if (node.type === 'AgentRegion' && node.child) return { ...node, nodeId, child: walk(node.child, `${path}.child`) };
+    if (hasChildren(node)) return { ...node, nodeId, children: node.children.map((child, index) => walk(child, `${path}.${index}`)) } as ViewNode;
+    return { ...node, nodeId } as ViewNode;
+  };
+  return walk(root, 'root');
 }
 
 

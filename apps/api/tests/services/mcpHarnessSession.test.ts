@@ -112,4 +112,15 @@ describe('harnessMcpArgs', () => {
     const codex = harnessMcpArgs('codex', [server], 'ask').find((a) => a.startsWith('mcp_servers.agentis.args='));
     expect(codex).toContain('x-agentis-execution-mode: ask');
   });
+
+  it('tags each native harness invocation with its revocable conversation turn capability', () => {
+    const turn = { conversationId: 'conv_1', turnLease: 'lease_1' };
+    const claude = harnessMcpArgs('claude_code', [server], 'chat', turn);
+    const headers = JSON.parse(claude[2]!).mcpServers.agentis.headers;
+    expect(headers['x-agentis-conversation']).toBe('conv_1');
+    expect(headers['x-agentis-turn-lease']).toBe('lease_1');
+    const codex = harnessMcpArgs('codex', [server], 'chat', turn).find((a) => a.startsWith('mcp_servers.agentis.args='));
+    expect(codex).toContain('x-agentis-conversation: conv_1');
+    expect(codex).toContain('x-agentis-turn-lease: lease_1');
+  });
 });

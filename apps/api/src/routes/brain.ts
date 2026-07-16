@@ -15,6 +15,7 @@ import type { BrainComposer } from '../services/brain/brainComposer.js';
 import type { SharedIntelligenceService } from '../services/sharedIntelligence.js';
 import type { KnowledgeAutoLinker } from '../services/knowledge/knowledgeAutoLinker.js';
 import type { BrainHealthService } from '../services/brain/brainHealthService.js';
+import type { BrainMaintenanceService } from '../services/brain/brainMaintenanceService.js';
 import type { ReflectionService } from '../services/reflectionService.js';
 import type { AgentMemoryService } from '../services/agent/agentMemory.js';
 import type { PeerProfileService } from '../services/peerProfileService.js';
@@ -30,6 +31,7 @@ export interface BrainRoutesDeps {
   SharedIntelligence: SharedIntelligenceService;
   knowledgeAutoLinker: KnowledgeAutoLinker;
   health?: BrainHealthService;
+  maintenance?: BrainMaintenanceService;
   Reflection?: ReflectionService;
   /** Agent-scoped personal memory (§G11) — the per-agent Brain. */
   agentMemory?: AgentMemoryService;
@@ -108,6 +110,40 @@ export function buildBrainRoutes(deps: BrainRoutesDeps) {
     if (!deps.health) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain health service not available');
     const ws = getWorkspace(c);
     return c.json({ activity: deps.health.snapshot(ws.workspaceId, c.req.query('scopeId') ?? null).recentActivity });
+  });
+
+  app.get('/maintenance/status', (c) => {
+    const ws = getWorkspace(c);
+    const latest = deps.db.select({ createdAt: schema.brainQualityEvents.createdAt, metadata: schema.brainQualityEvents.metadata })
+      .from(schema.brainQualityEvents)
+      .where(and(
+        eq(schema.brainQualityEvents.workspaceId, ws.workspaceId),
+        eq(schema.brainQualityEvents.eventType, 'brain_maintenance_completed'),
+      ))
+      .orderBy(schema.brainQualityEvents.createdAt)
+      .all().at(-1) ?? null;
+    return c.json({ latest });
+  });
+
+  app.post('/maintenance/run', (c) => {
+    if (!deps.maintenance) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain maintenance service not available');
+    const ws = getWorkspace(c);
+    return c.json(deps.maintenance.runWorkspace(ws.workspaceId));
+  });
+
+  app.get('/hygiene/preview', (c) => {
+    if (!deps.maintenance) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain maintenance service not available');
+    const ws = getWorkspace(c);
+    const limit = numberQuery(c.req.query('limit')) ?? 2_000;
+    const candidates = deps.maintenance.previewHygiene(ws.workspaceId, limit);
+    return c.json({ candidates, recommendedArchiveIds: candidates.filter((item) => item.recommendation === 'archive').map((item) => item.id) });
+  });
+
+  app.post('/hygiene/apply', async (c) => {
+    if (!deps.maintenance) throw new AgentisError('RESOURCE_NOT_FOUND', 'Brain maintenance service not available');
+    const ws = getWorkspace(c);
+    const body = hygieneApplySchema.parse(await c.req.json().catch(() => ({})));
+    return c.json(deps.maintenance.applyHygiene(ws.workspaceId, body.ids));
   });
 
   app.post('/dream-pass', async (c) => {
@@ -357,6 +393,7 @@ const dreamPassSchema = z.object({
   phase: z.enum(['deduction', 'induction', 'both']).optional(),
   force: z.boolean().optional(),
 });
+const hygieneApplySchema = z.object({ ids: z.array(z.string().min(1)).max(20_000) });
 
 function parseKinds(raw: string | undefined) {
   const allowed = new Set(['kb_chunk', 'knowledge_chunk', 'episode', 'memory', 'pattern']);

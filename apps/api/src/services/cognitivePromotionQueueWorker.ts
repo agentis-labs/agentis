@@ -61,8 +61,23 @@ export interface AtomPromotionPayload {
   originSurface?: string | null;
 }
 
+export interface TurnExperiencePayload {
+  workspaceId: string;
+  scopeId: string;
+  agentId: string;
+  workflowId?: string | null;
+  title: string;
+  content: string;
+  type: 'success_pattern' | 'failure' | 'recovery' | 'decision' | 'distilled_lesson';
+  outcomeStatus: 'good' | 'bad' | 'mixed';
+  tags: string[];
+  metadata: Record<string, unknown>;
+  recalledAtomIds?: string[];
+}
+
 export type BrainQueueItemType =
   | 'atom_promotion'
+  | 'turn_experience'
   | 'ability_review'
   | 'peer_update'
   | 'contradiction_check'
@@ -265,6 +280,52 @@ export class CognitivePromotionQueueWorker {
           memoryPolicy: p.memoryPolicy ?? 'form',
           originSurface: (p.originSurface as never) ?? 'run_completion',
         });
+        return;
+      }
+      case 'turn_experience': {
+        const p = payload as unknown as TurnExperiencePayload;
+        if (!p.workspaceId || !p.scopeId || !p.agentId || !p.title || !p.content) return;
+        const committed = await this.SharedIntelligence.commitDurableAtom({
+          workspaceId: p.workspaceId,
+          scopeId: p.scopeId,
+          agentId: p.agentId,
+          workflowId: p.workflowId ?? null,
+          title: p.title,
+          content: p.content,
+          type: p.type,
+          source: 'system_write',
+          confidence: p.outcomeStatus === 'mixed' ? 0.72 : 0.82,
+          importance: p.outcomeStatus === 'bad' ? 0.78 : 0.72,
+          outcomeStatus: p.outcomeStatus,
+          tags: ['turn_experience', ...p.tags],
+          metadata: { ...p.metadata, evidenceSource: 'harness_tool_trace' },
+        });
+        // Positive outcome feedback closes the recall→application→result loop.
+        // Do not punish memory for a failed turn without causal attribution; a
+        // provider outage or bad live input is not evidence that recall was bad.
+        if (p.outcomeStatus === 'good' && p.recalledAtomIds?.length) {
+          const feedbackRunId = `experience:${item.id}:${p.scopeId}`;
+          for (const atomId of [...new Set(p.recalledAtomIds)].slice(0, 12)) {
+            this.SharedIntelligence.recordQualityEvent({
+              workspaceId: p.workspaceId,
+              scopeId: p.scopeId,
+              agentId: p.agentId,
+              runId: feedbackRunId,
+              eventType: 'atom_injected',
+              atomId,
+              metadata: { source: 'turn_experience', committedAtomId: committed.atomId },
+            });
+          }
+          this.SharedIntelligence.applyEvaluatorVerdict({
+            workspaceId: p.workspaceId,
+            scopeId: p.scopeId,
+            agentId: p.agentId,
+            runId: feedbackRunId,
+            verdict: 'pass',
+            evaluatorConfidence: 0.8,
+            responseText: '',
+          });
+        }
         return;
       }
       case 'ability_review': {

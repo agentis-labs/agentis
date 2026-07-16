@@ -46,6 +46,7 @@ export interface ConversationRuntimeDeps {
     address: string;
     body: string;
     attachments?: ConversationAttachment[];
+    idempotencyKey?: string;
   }): Promise<void>;
   /** One-shot SMALL-model JSON completion (compose / classify). Returns null on failure. */
   completeJson<T extends Record<string, unknown>>(args: {
@@ -133,6 +134,7 @@ export class ConversationRuntime {
     // A stopped contact is OWNED by the script but silent — it must not fall
     // through to a normal agent turn (the operator asked it to stop sending).
     if (contact.status === 'stopped') return { handled: true, stage: contact.stage, reason: 'stopped' };
+    if (contact.status === 'blocked') return { handled: true, stage: contact.stage, reason: contact.blocker?.code ?? 'blocked' };
 
     this.#recordHistory(contact, 'in', text);
     const stage = this.stage(script, contact.stage);
@@ -202,6 +204,7 @@ export class ConversationRuntime {
     const entry = stage.entry ?? { kind: 'none' as const };
     let sent = false;
     let action = entry.kind;
+    let entryFailure: Error | null = null;
 
     try {
       if (entry.kind === 'send_deterministic') {
@@ -226,10 +229,24 @@ export class ConversationRuntime {
         action = 'run_workflow';
       }
     } catch (err) {
+      entryFailure = err instanceof Error ? err : new Error(String(err));
       this.deps.logger?.warn('conversation.entry_failed', { appId: ctx.appId, stageId, err: (err as Error).message });
     }
 
+    if (entryFailure) {
+      contact.status = 'blocked';
+      contact.blocker = {
+        code: /acknowledg|pending|queued/i.test(entryFailure.message) ? 'CHANNEL_DELIVERY_PENDING' : 'STAGE_ENTRY_FAILED',
+        message: entryFailure.message,
+        at: this.now().toISOString(),
+      };
+      contact.updatedAt = this.now().toISOString();
+      await this.deps.contacts.save(ctx, script, contact);
+      return { handled: true, stage: stageId, action, sent: false, stopped: false, reason: contact.blocker.code };
+    }
+
     // Terminal stage = stop. Otherwise rest (awaiting reply or workflow).
+    delete contact.blocker;
     contact.status = stage.terminal ? 'stopped' : 'active';
     contact.updatedAt = this.now().toISOString();
     await this.deps.contacts.save(ctx, script, contact);
@@ -250,10 +267,16 @@ export class ConversationRuntime {
 
   async #send(ctx: ConversationContext, contact: ConversationContactState, body: string, attachments?: ConversationAttachment[]): Promise<void> {
     if (!contact.connectionId) {
-      this.deps.logger?.warn('conversation.no_connection', { appId: ctx.appId, address: contact.address });
-      return;
+      throw new Error(`conversation contact ${contact.address} has no channel connection`);
     }
-    await this.deps.send({ ctx, connectionId: contact.connectionId, address: contact.address, body, ...(attachments && attachments.length ? { attachments } : {}) });
+    await this.deps.send({
+      ctx,
+      connectionId: contact.connectionId,
+      address: contact.address,
+      body,
+      idempotencyKey: `conversation:${ctx.appId}:${contact.address}:${contact.stage}`,
+      ...(attachments && attachments.length ? { attachments } : {}),
+    });
   }
 
   async #compose(ctx: ConversationContext, entry: { brief: string }, contact: ConversationContactState): Promise<string | null> {

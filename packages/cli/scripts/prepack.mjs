@@ -17,12 +17,19 @@ const cliWebDist = resolve(cliDist, 'web');
 function run(cmd, args, opts = {}) {
   const display = `${cmd} ${args.join(' ')}`;
   console.log(`\n[prepack] $ ${display}`);
-  const result = spawnSync(cmd, args, {
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-    cwd: opts.cwd ?? repoRoot,
-    env: process.env,
-  });
+  const result = process.platform === 'win32'
+    ? spawnSync('cmd.exe', ['/d', '/s', '/c', cmd, ...args], {
+        stdio: 'inherit',
+        shell: false,
+        cwd: opts.cwd ?? repoRoot,
+        env: process.env,
+      })
+    : spawnSync(cmd, args, {
+        stdio: 'inherit',
+        shell: false,
+        cwd: opts.cwd ?? repoRoot,
+        env: process.env,
+      });
   if (result.status !== 0) {
     throw new Error(`[prepack] command failed (${result.status}): ${display}`);
   }

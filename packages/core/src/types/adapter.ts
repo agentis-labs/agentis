@@ -83,6 +83,10 @@ export interface ChatInvocationOptions {
    * - `chat` (or omitted) — Auto: mutations allowed.
    */
   executionMode?: 'chat' | 'plan' | 'ask';
+  /** Conversation-scoped MCP cancellation capability for this invocation. */
+  conversationId?: string;
+  /** Opaque lease paired with conversationId; late calls are rejected after Stop. */
+  turnLease?: string;
 }
 
 export type RuntimeValueSource =

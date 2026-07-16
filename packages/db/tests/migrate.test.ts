@@ -590,4 +590,18 @@ VALUES ('room-1', 'ws-1', 'user-1', 'team-1', 'team', 'Ops', 1, 'team');
       sqlite.close();
     }
   });
+  it('installs durable agent ownership sync state and audit indexes', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_sync_%'").all() as Array<{ name: string }>;
+      expect(tables.map((row) => row.name).sort()).toEqual(['agent_sync_items', 'agent_sync_runs', 'agent_sync_sources']);
+      const sourceColumns = sqlite.prepare("PRAGMA table_info('agent_sync_sources')").all() as Array<{ name: string }>;
+      expect(sourceColumns.map((column) => column.name)).toEqual(expect.arrayContaining(['mode', 'policy_json', 'last_scan_at', 'last_success_at', 'last_error']));
+      const indexes = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name LIKE 'agent_sync_%'").all() as Array<{ name: string }>;
+      expect(indexes.map((row) => row.name)).toEqual(expect.arrayContaining(['idx_agent_sync_sources_agent', 'idx_agent_sync_items_key', 'idx_agent_sync_runs_source']));
+    } finally {
+      sqlite.close();
+    }
+  });
 });

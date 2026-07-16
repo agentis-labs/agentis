@@ -67,4 +67,24 @@ describe('realtimeActivity task spine events', () => {
       detail: 'Orchestrator is inspecting the completed digest bundle.',
     });
   });
+
+  it('does not present mechanical completion as success when the business verdict failed', () => {
+    const activity = describeRealtimeActivity({
+      event: REALTIME_EVENTS.RUN_COMPLETED,
+      emittedAt: '2026-07-15T12:00:00.000Z',
+      payload: {
+        runId: 'run-deficient',
+        status: 'COMPLETED',
+        accomplished: false,
+        verdict: 'failed_checks',
+      },
+    });
+
+    expect(activity).toMatchObject({
+      kind: 'run',
+      tone: 'danger',
+      title: 'Run finished — outcome not accomplished',
+    });
+    expect(activity?.detail).toContain('failed_checks');
+  });
 });

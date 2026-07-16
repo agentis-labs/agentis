@@ -146,8 +146,10 @@ export interface ConversationContactState {
   address: string;
   /** Current stage id. */
   stage: string;
-  /** `active` = advancing; `stopped` = a terminal stage was reached. */
-  status: 'active' | 'stopped';
+  /** `active` = advancing; `blocked` = entry side effect lacks proof; `stopped` = terminal. */
+  status: 'active' | 'blocked' | 'stopped';
+  /** Durable reason an entry action could not be proven; retry uses the same idempotency key. */
+  blocker?: { code: string; message: string; at: string };
   /** Channel connection this contact is reached on. */
   connectionId?: string;
   /** Gathered personalization facts (e.g. instagram handle, brand notes). */

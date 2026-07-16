@@ -330,16 +330,17 @@ export class ConversationStore {
     workspaceId: string;
     conversationId: string;
     operatorId: string;
+    sessionMessageId?: string | null;
     body: string;
     metadata?: Record<string, unknown>;
-    deliveryStatus?: 'sent' | 'delivered' | 'failed';
+    deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed';
   }) {
     return this.#append({
       conversationId: args.conversationId,
       workspaceId: args.workspaceId,
       authorType: 'operator',
       authorId: args.operatorId,
-      sessionMessageId: null,
+      sessionMessageId: args.sessionMessageId ?? null,
       body: args.body,
       metadata: args.metadata,
       deliveryStatus: args.deliveryStatus ?? 'sent',
@@ -355,7 +356,7 @@ export class ConversationStore {
     body: string;
     authorType: 'agent' | 'system';
     metadata?: Record<string, unknown>;
-    deliveryStatus?: 'delivered' | 'failed' | 'mirrored';
+    deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
   }) {
     return this.#append({
       conversationId: args.conversationId,
@@ -368,6 +369,36 @@ export class ConversationStore {
       deliveryStatus: args.deliveryStatus ?? 'mirrored',
       eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
     });
+  }
+
+  updateDeliveryStatus(args: {
+    workspaceId: string;
+    conversationId: string;
+    messageId: string;
+    deliveryStatus: 'sending' | 'sent' | 'delivered' | 'failed';
+    metadata?: Record<string, unknown>;
+  }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const existing = this.deps.db.select().from(schema.conversationMessages)
+      .where(and(
+        eq(schema.conversationMessages.workspaceId, args.workspaceId),
+        eq(schema.conversationMessages.conversationId, args.conversationId),
+        eq(schema.conversationMessages.id, args.messageId),
+      )).get();
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `message ${args.messageId} not found`);
+    const metadata = {
+      ...(existing.metadata && typeof existing.metadata === 'object' ? existing.metadata as Record<string, unknown> : {}),
+      ...(args.metadata ?? {}),
+    };
+    this.deps.db.update(schema.conversationMessages).set({ deliveryStatus: args.deliveryStatus, metadata })
+      .where(eq(schema.conversationMessages.id, args.messageId)).run();
+    const message = { ...existing, deliveryStatus: args.deliveryStatus, metadata };
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_MESSAGE_UPDATED,
+      { message, conversationId: args.conversationId, agentId: conversation.agentId },
+    );
+    return message;
   }
 
   /** Append a platform-authored system message to an existing thread. */
@@ -467,7 +498,7 @@ export class ConversationStore {
     sessionMessageId: string | null;
     body: string;
     metadata?: Record<string, unknown>;
-    deliveryStatus: 'sent' | 'delivered' | 'failed' | 'mirrored';
+    deliveryStatus: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
     eventName: RealtimeEventName;
   }) {
     if (!args.body || args.body.length === 0) {
@@ -638,6 +669,31 @@ export class ConversationStore {
       { conversationId: args.conversationId, agentId: conversation.agentId, item: row, action: 'discarded' },
     );
     return row;
+  }
+
+  /** Discard every pending composer message when the operator stops all work. */
+  discardPendingQueue(args: { workspaceId: string; conversationId: string }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const pending = this.listQueue(args.workspaceId, args.conversationId);
+    if (pending.length === 0) return [];
+    this.deps.db
+      .update(schema.conversationMessageQueue)
+      .set({ status: 'discarded' })
+      .where(and(
+        eq(schema.conversationMessageQueue.workspaceId, args.workspaceId),
+        eq(schema.conversationMessageQueue.conversationId, args.conversationId),
+        eq(schema.conversationMessageQueue.status, 'pending'),
+      ))
+      .run();
+    const rows = pending.map((item) => ({ ...item, status: 'discarded' as const }));
+    for (const row of rows) {
+      this.deps.bus.publish(
+        REALTIME_ROOMS.conversation(conversation.agentId),
+        REALTIME_EVENTS.CONVERSATION_QUEUE_UPDATED,
+        { conversationId: args.conversationId, agentId: conversation.agentId, item: row, action: 'discarded' },
+      );
+    }
+    return rows;
   }
 
   /**

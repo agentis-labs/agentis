@@ -36,6 +36,14 @@ const MANUAL_GRAPH: WorkflowGraph = {
   edges: [],
 };
 
+const acknowledgedReceipt = () => ({
+  provider: 'whatsapp' as const,
+  providerMessageId: randomUUID(),
+  status: 'accepted' as const,
+  acceptedAt: new Date().toISOString(),
+  providerAcknowledged: true,
+});
+
 describe('ConversationService (integration)', () => {
   let ctx: TestContext;
   let appId: string;
@@ -59,7 +67,7 @@ describe('ConversationService (integration)', () => {
       bus: ctx.bus,
       engine: { startRun: async () => ({ runId: 'ignored' }) }, // the service inserts the run row itself
       channels: {
-        deliverToConnection: async (a) => { sends.push(a); },
+        deliverToConnection: async (a) => { sends.push(a); return acknowledgedReceipt(); },
         resolveDestination: ({ to }) => ({ chatId: to ?? null, source: 'explicit' as const }),
       },
       resolveCompleter: () => ({
@@ -139,7 +147,7 @@ describe('ConversationService — Brain memory wiring', () => {
       bus: ctx.bus,
       engine: { startRun: async () => ({ runId: 'ignored' }) },
       channels: {
-        deliverToConnection: async () => {},
+        deliverToConnection: async () => acknowledgedReceipt(),
         resolveDestination: ({ to }) => ({ chatId: to ?? null, source: 'explicit' as const }),
       },
       resolveCompleter: () => ({
@@ -171,7 +179,7 @@ describe('ConversationService — Brain memory wiring', () => {
       bus: ctx.bus,
       engine: { startRun: async () => ({ runId: 'ignored' }) },
       channels: {
-        deliverToConnection: async () => {},
+        deliverToConnection: async () => acknowledgedReceipt(),
         resolveDestination: ({ to }) => ({ chatId: to ?? null, source: 'explicit' as const }),
       },
       resolveCompleter: () => ({

@@ -1,4 +1,6 @@
 import { AgentisError } from '@agentis/core';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import type { ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
@@ -35,6 +37,7 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             id: connection.id,
             kind: connection.kind,
             name: connection.name,
+            appId: connection.appId,
             status: connection.status,
             mode: connection.mode,
             transport: connection.transport,
@@ -44,6 +47,55 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             lastError: connection.lastError,
           }));
         return { count: channels.length, channels };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.connection.bind_app',
+        family: 'run',
+        description: 'Bind a native channel connection to an Agentic App so inbound conversations run in that App context. Pass appId:null to unbind. Both resources must belong to this workspace.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string' },
+            appId: { type: ['string', 'null'], description: 'App id to bind, or null to clear the binding.' },
+          },
+          required: ['connectionId', 'appId'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
+        const connectionId = typeof args.connectionId === 'string' ? args.connectionId.trim() : '';
+        if (!connectionId) throw new AgentisError('VALIDATION_FAILED', 'connectionId is required');
+        const appId = args.appId === null ? null : typeof args.appId === 'string' ? args.appId.trim() : '';
+        if (appId === '') throw new AgentisError('VALIDATION_FAILED', 'appId must be a non-empty App id or null');
+
+        const connection = deps.db.select({ agentId: schema.channelConnections.agentId })
+          .from(schema.channelConnections)
+          .where(and(
+            eq(schema.channelConnections.id, connectionId),
+            eq(schema.channelConnections.workspaceId, ctx.workspaceId),
+          )).get();
+        if (!connection) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${connectionId} not found`);
+        if (ctx.agentId && deps.connectionGrants) {
+          const decision = deps.connectionGrants.authorize({
+            workspaceId: ctx.workspaceId,
+            connectionId,
+            agentId: ctx.agentId,
+            required: 'manage',
+            ownerAgentId: connection.agentId,
+          });
+          if (!decision.ok) throw new AgentisError('CONNECTION_SCOPE_MISSING', decision.reason ?? 'manage access to this connection is required');
+        }
+        const bound = deps.channels.bindApp(ctx.workspaceId, connectionId, appId);
+        return {
+          bound: appId !== null,
+          connectionId: bound.id,
+          appId: bound.appId,
+          message: appId ? `Channel is now bound to App ${appId}.` : 'Channel App binding was cleared.',
+        };
       },
     },
     {

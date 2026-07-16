@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import type { AgentAdapter, ChatDelta, WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { buildMcpRoutes } from '../../src/routes/mcp.js';
@@ -19,11 +20,13 @@ import { registerBuildTools } from '../../src/services/agentisToolHandlers/build
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
+import { ConversationTurnLeaseRegistry } from '../../src/services/conversation/conversationTurnLease.js';
 
 let ctx: TestContext;
 let engine: WorkflowEngine;
 let registry: AgentisToolRegistry;
 let adapters: AdapterManager;
+let turnLeases: ConversationTurnLeaseRegistry;
 
 beforeEach(async () => {
   ctx = await createTestContext();
@@ -42,6 +45,7 @@ beforeEach(async () => {
     adapters,
   });
   registry = new AgentisToolRegistry({ logger: ctx.logger });
+  turnLeases = new ConversationTurnLeaseRegistry();
   registerBuildTools(registry, {
     db: ctx.db,
     logger: ctx.logger,
@@ -75,7 +79,7 @@ beforeEach(async () => {
 afterEach(() => ctx.close());
 
 function app() {
-  return ctx.buildApp([{ path: '/v1/mcp', app: buildMcpRoutes({ db: ctx.db, auth: ctx.auth, engine, toolRegistry: registry }) }]);
+  return ctx.buildApp([{ path: '/v1/mcp', app: buildMcpRoutes({ db: ctx.db, auth: ctx.auth, engine, toolRegistry: registry, turnLeases }) }]);
 }
 
 function seedPublishedWorkflow(slug: string): void {
@@ -244,6 +248,52 @@ describe('/v1/mcp/rpc', () => {
     expect(JSON.parse(body.result.content[0]!.text)).toEqual({ echoed: { hello: 'world' } });
   });
 
+  it('rejects a late harness tool call before dispatch after its turn lease is revoked', async () => {
+    const conversationId = randomUUID();
+    const token = turnLeases.issue(ctx.workspace.id, conversationId);
+    const headers = {
+      'x-agentis-conversation': conversationId,
+      'x-agentis-turn-lease': token,
+    };
+    const live = await rpc(app(), 'tools/call', { name: 'agentis.echo', arguments: { live: true } }, 1, headers);
+    expect((await live.json() as { result?: unknown }).result).toBeDefined();
+
+    turnLeases.revoke(ctx.workspace.id, conversationId);
+    const late = await rpc(app(), 'tools/call', { name: 'agentis.echo', arguments: { late: true } }, 2, headers);
+    const body = await late.json() as { error?: { data?: { code?: string }; message?: string } };
+    expect(body.error?.data?.code).toBe('TURN_CANCELLED');
+    expect(body.error?.message).toMatch(/not executed|stopped|superseded/i);
+  });
+
+  it('requires conversation id and lease as one inseparable capability', async () => {
+    const late = await rpc(app(), 'tools/call', { name: 'agentis.echo', arguments: {} }, 1, {
+      'x-agentis-conversation': randomUUID(),
+    });
+    const body = await late.json() as { error?: { data?: { code?: string } } };
+    expect(body.error?.data?.code).toBe('TURN_CANCELLED');
+  });
+
+  it('coalesces an unchanged read result without restricting further tool use', async () => {
+    const conversationId = randomUUID();
+    const token = turnLeases.issue(ctx.workspace.id, conversationId);
+    const headers = {
+      'x-agentis-conversation': conversationId,
+      'x-agentis-turn-lease': token,
+    };
+    const params = { name: 'agentis.echo', arguments: { stable: true } };
+    const first = await rpc(app(), 'tools/call', params, 1, headers);
+    expect(JSON.parse(((await first.json()) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text))
+      .toEqual({ echoed: { stable: true } });
+
+    const second = await rpc(app(), 'tools/call', params, 2, headers);
+    const repeated = JSON.parse(((await second.json()) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text) as { unchanged: boolean; sameAsObservation: number };
+    expect(repeated).toMatchObject({ unchanged: true, sameAsObservation: 1 });
+
+    const third = await rpc(app(), 'tools/call', { name: 'agentis.echo', arguments: { different: true } }, 3, headers);
+    expect(JSON.parse(((await third.json()) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text))
+      .toEqual({ echoed: { different: true } });
+  });
+
   it('passes the MCP agent header into registry tool context', async () => {
     const agentId = seedAgent();
     const res = await rpc(app(), 'tools/call', { name: 'agentis.ctx', arguments: {} }, 1, { 'x-agentis-agent': agentId });
@@ -278,6 +328,28 @@ describe('/v1/mcp/rpc', () => {
     const payload = JSON.parse(body.result.content[0]!.text) as { status: string; output: Record<string, { greeting?: string }> };
     expect(payload.status).toBe('COMPLETED');
     expect(payload.output.R.greeting).toBe('hi ada');
+  });
+
+  it('links a harness-launched workflow run to its conversation for scoped Stop', async () => {
+    seedPublishedWorkflow('greeter');
+    const agentId = seedAgent();
+    const conversationId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: conversationId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+    }).run();
+    const turnLease = turnLeases.issue(ctx.workspace.id, conversationId);
+    const res = await rpc(app(), 'tools/call', { name: 'agentis__greeter', arguments: { name: 'ada' } }, 1, {
+      'x-agentis-conversation': conversationId,
+      'x-agentis-turn-lease': turnLease,
+    });
+    const body = await res.json() as { result: { content: Array<{ text: string }> } };
+    const payload = JSON.parse(body.result.content[0]!.text) as { runId: string };
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, payload.runId)).get();
+    expect(run?.conversationId).toBe(conversationId);
   });
 
   it('blocks a mutating tool in Plan mode (x-agentis-execution-mode: plan), but allows a read tool', async () => {

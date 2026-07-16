@@ -397,6 +397,39 @@ export class AgentToolRuntime {
         const result = surfaces.patch(workspaceId, appId, surface, ops);
         return { patched: true, surface, revision: result.revision };
       }
+      case 'ui_inspect': {
+        const surfaces = this.#requireSurfaces();
+        const appId = this.#requireAppId(workspaceId, context);
+        const selected = typeof args.surface === 'string' && args.surface.trim()
+          ? [surfaces.get(workspaceId, appId, args.surface.trim())]
+          : surfaces.list(workspaceId, appId);
+        return {
+          surfaces: selected.map((surface) => ({
+            name: surface.name,
+            kind: surface.kind,
+            revision: surface.revision,
+            actions: surface.actions.map((action) => ({ name: action.name, kind: action.kind, target: action.target })),
+            nodes: compactSurfaceNodes(surface.view),
+            ...(args.includeTree === true ? { view: surface.view } : {}),
+          })),
+        };
+      }
+      case 'ui_remove': {
+        const surfaces = this.#requireSurfaces();
+        const appId = this.#requireAppId(workspaceId, context);
+        const surface = requireStr(args.surface, 'surface');
+        if (args.deleteSurface === true) {
+          if (args.confirmSurfaceName !== surface) {
+            const current = surfaces.get(workspaceId, appId, surface);
+            return { deleted: false, confirmationRequired: true, surface, revision: current.revision, nodes: compactSurfaceNodes(current.view).length };
+          }
+          surfaces.delete(workspaceId, appId, surface);
+          return { deleted: true, surface };
+        }
+        const nodeId = requireStr(args.nodeId, 'nodeId');
+        const result = surfaces.removeNode(workspaceId, appId, surface, nodeId);
+        return { removed: true, surface, nodeId, revision: result.revision };
+      }
       case 'ui_action_schema': {
         const surfaces = this.#requireSurfaces();
         const appId = this.#requireAppId(workspaceId, context);
@@ -614,6 +647,26 @@ function kindFromSection(section: string): 'fact' | 'preference' | 'pattern' | '
  * when the entry should be skipped, or null when it's worth storing. Mirrors
  * the chat-capture guard so both write paths stay consistent.
  */
+function compactSurfaceNodes(view: unknown): Array<{ nodeId: string; type: string; path: string; collection?: string }> {
+  const nodes: Array<{ nodeId: string; type: string; path: string; collection?: string }> = [];
+  const walk = (value: unknown, path: string): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach((item, index) => walk(item, `${path}/${index}`)); return; }
+    const item = value as Record<string, unknown>;
+    if (typeof item.type === 'string' && typeof item.nodeId === 'string') {
+      const collection = item.bind && typeof item.bind === 'object' && typeof (item.bind as Record<string, unknown>).collection === 'string'
+        ? String((item.bind as Record<string, unknown>).collection)
+        : undefined;
+      nodes.push({ nodeId: item.nodeId, type: item.type, path: path || '/', ...(collection ? { collection } : {}) });
+    }
+    for (const [key, child] of Object.entries(item)) {
+      if (key !== 'style' && key !== 'args' && key !== 'bind') walk(child, `${path}/${key}`);
+    }
+  };
+  walk(view, '');
+  return nodes;
+}
+
 function lowValueMemoryReason(entry: string): string | null {
   const text = entry.trim();
   if (text.length < 8) return 'entry too short to be a durable memory';

@@ -52,8 +52,15 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.workflow.inspect',
         family: 'inspect',
-        description: 'Read the canonical workflow graph by id.',
-        inputSchema: { type: 'object', properties: { workflowId: { type: 'string' } }, required: ['workflowId'] },
+        description: 'Inspect a workflow. Defaults to a compact graph summary to protect context/tokens; pass detail:"graph" only when exact node configuration is required for an edit.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflowId: { type: 'string' },
+            detail: { type: 'string', enum: ['summary', 'graph'], description: 'Default summary. graph returns the complete graph and can be large.' },
+          },
+          required: ['workflowId'],
+        },
         mutating: false,
         mcpExposed: true,
       },
@@ -64,7 +71,30 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
           .where(eq(schema.workflows.id, String(args.workflowId)))
           .get();
         if (!wf || wf.workspaceId !== ctx.workspaceId) return { found: false };
-        return { found: true, id: wf.id, title: wf.title, graph: wf.graph, createdAt: wf.createdAt };
+        const graph = wf.graph as { version?: unknown; nodes?: Array<Record<string, unknown>>; edges?: unknown[]; inputContract?: unknown; outputContract?: unknown; phases?: unknown[] };
+        if (args.detail === 'graph') return { found: true, id: wf.id, title: wf.title, graph, createdAt: wf.createdAt };
+        const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+        return {
+          found: true,
+          id: wf.id,
+          title: wf.title,
+          createdAt: wf.createdAt,
+          graph: {
+            version: graph.version,
+            nodeCount: nodes.length,
+            edgeCount: Array.isArray(graph.edges) ? graph.edges.length : 0,
+            phaseCount: Array.isArray(graph.phases) ? graph.phases.length : 0,
+            inputContract: graph.inputContract ?? null,
+            outputContract: graph.outputContract ?? null,
+            nodes: nodes.map((node) => ({
+              id: node.id,
+              type: node.type,
+              title: node.title ?? (node.config && typeof node.config === 'object' ? (node.config as Record<string, unknown>).title : undefined),
+              phaseId: node.phaseId,
+            })),
+          },
+          hint: 'Request detail:"graph" only for the workflow you are about to patch.',
+        };
       },
     },
     {

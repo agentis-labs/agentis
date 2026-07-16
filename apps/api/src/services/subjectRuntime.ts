@@ -45,7 +45,7 @@ export interface SubjectActionArgs {
 
 export interface SubjectActions {
   /** Deterministic, token-free send. Resolves the destination from the subject's facts. */
-  send(args: SubjectActionArgs & { text: string }): Promise<void> | void;
+  send(args: SubjectActionArgs & { stage: string; text: string }): Promise<void> | void;
   /** Hand the step to a model (compose a message, classify a reply, trigger a build). */
   runAgent(args: SubjectActionArgs & { instruction: string }): Promise<void> | void;
 }
@@ -74,7 +74,7 @@ export class SubjectRuntime {
         return { state: { ...state, stage: stageName, facts }, consumeInboxIds, done: true };
       }
       if (stage.action === 'send') {
-        await this.actions.send({ ...base, facts, text: interpolate(stage.text, facts) });
+        await this.actions.send({ ...base, facts, stage: stageName, text: interpolate(stage.text, facts) });
         stageName = stage.next;
         continue;
       }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { REALTIME_EVENTS } from '@agentis/core';
+import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { createTestContext } from '../_helpers/createTestContext.js';
 import { ObservabilityService } from '../../src/services/observability.js';
@@ -42,6 +42,31 @@ describe('agent work progress', () => {
         correlationId: 'turn-1',
         sourceEvent: REALTIME_EVENTS.AGENT_WORK_STEP,
       });
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it('persists deficient mechanical completion as blocked rather than successful', async () => {
+    const ctx = await createTestContext();
+    try {
+      const observability = new ObservabilityService(ctx.db, ctx.bus, ctx.logger);
+      observability.startLegacyBridge();
+      ctx.bus.publish(REALTIME_ROOMS.workspace(ctx.workspace.id), REALTIME_EVENTS.RUN_COMPLETED, {
+        workspaceId: ctx.workspace.id,
+        runId: 'run-deficient',
+        status: 'COMPLETED',
+        accomplished: false,
+        verdict: 'failed_checks',
+      });
+
+      const events = observability.list({ workspaceId: ctx.workspace.id });
+      expect(events[0]).toMatchObject({
+        kind: 'run',
+        status: 'blocked',
+        sourceEvent: REALTIME_EVENTS.RUN_COMPLETED,
+      });
+      expect(events[0]?.summary).toContain('failed_checks');
     } finally {
       ctx.close();
     }

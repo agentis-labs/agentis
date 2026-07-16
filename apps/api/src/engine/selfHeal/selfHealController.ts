@@ -23,6 +23,40 @@ import { randomUUID } from 'node:crypto';
 import type { RunningContext, PendingApproval, EngineDeps, SelfHealEngineResult } from '../WorkflowEngine.js';
 import { selfHealAttemptCount, recordSelfHealAttempt, isSelfHealableNode, isRuntimeBindingFailure, capabilityGapReason, configGapReason, declaredOutputKeys, graphDiffPatch, stringValue, toolInputSchemaToChatParameters } from './selfHealHelpers.js';
 
+// A live-run repair returns a candidate graph to the engine. Letting the repair
+// agent also mutate, execute, test, harden, or replay workflows creates a second
+// competing control loop that repeats paid work and can race the engine's own
+// validate -> apply -> resume -> verify ladder.
+const SELF_HEAL_REDUNDANT_CONTROL_TOOLS = new Set([
+  'agentis.workflow.patch',
+  'agentis.workflow.graph.replace',
+  'agentis.workflow.graph.patch',
+  'agentis.workflow.graph.rollback',
+  'agentis.run.graph.evolve',
+  'agentis.workflow.cancel',
+  'agentis.workflow.delete',
+  'agentis.workflow.dry_run',
+  'agentis.workflow.test',
+  'agentis.workflow.harden',
+  'agentis.workflow.deliver',
+  'agentis.workflow.run',
+  'agentis.ephemeral.run',
+  'agentis.run.cancel',
+  'agentis.run.await',
+  'agentis.run.replay',
+  'agentis.approval.resolve',
+  'agentis.channel.send',
+]);
+
+export function isSelfHealControlToolAllowed(toolId: string): boolean {
+  return !SELF_HEAL_REDUNDANT_CONTROL_TOOLS.has(toolId);
+}
+
+function selfHealMaxToolCalls(): number {
+  const configured = Number(process.env.AGENTIS_SELF_HEAL_MAX_TOOL_CALLS);
+  return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 48;
+}
+
 export interface SelfHealHost {
   readonly deps: EngineDeps;
   readonly debugRuns: Set<string>;
@@ -234,6 +268,10 @@ export class SelfHealController {
       diagnosis: 'Orchestrator is repairing the workflow with the chat tool loop.',
     });
     await this.host.persistRun(ctx).catch(() => {});
+    const repairAbort = new AbortController();
+    const abortFromRun = () => repairAbort.abort(ctx.abortController?.signal.reason);
+    if (ctx.abortController?.signal.aborted) abortFromRun();
+    else ctx.abortController?.signal.addEventListener('abort', abortFromRun, { once: true });
     try {
       const res = await this.host.deps.selfHeal.heal({
         workspaceId: ctx.workspaceId,
@@ -249,7 +287,8 @@ export class SelfHealController {
         resources: this.#availableRepairResources(ctx),
         // FULL POWER: the orchestrator runs through the chat executor first and
         // returns a candidate graph that still passes finalize/validate/certify.
-        deepPlan: (args) => this.#orchestratorReplan(ctx, node, args),
+        deepPlan: (args) => this.#orchestratorReplan(ctx, node, args, repairAbort.signal, (reason) => repairAbort.abort(reason)),
+        signal: repairAbort.signal,
         onProgress: (progress) => {
           const detail = progress.phase === 'stalled'
             ? 'Repair runtime stalled; falling back only to the configured route.'
@@ -413,6 +452,10 @@ export class SelfHealController {
       }
       return { kind: 'none' };
     } catch (err) {
+      if (repairAbort.signal.aborted) {
+        this.host.deps.logger.info('engine.self_heal.aborted', { runId: ctx.runId, nodeId: node.id });
+        return { kind: 'none' };
+      }
       const message = (err as Error).message;
       this.host.deps.logger.warn('engine.self_heal.failed', { runId: ctx.runId, nodeId: node.id, error: message });
       await this.host.deps.ledger.append({
@@ -430,6 +473,8 @@ export class SelfHealController {
         error,
         reason: `Self-healing failed before it could produce a certified repair: ${message}`,
       });
+    } finally {
+      ctx.abortController?.signal.removeEventListener('abort', abortFromRun);
     }
   }
 
@@ -604,7 +649,14 @@ export class SelfHealController {
    * so agency never bypasses safety and it can't loop (one plan per bounded
    * attempt; on failure it falls through to honest escalation).
    */
-  async #orchestratorReplan(ctx: RunningContext, node: WorkflowNode, args: DeepPlanArgs): Promise<DeepPlanResult | null> {
+  async #orchestratorReplan(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    args: DeepPlanArgs,
+    signal: AbortSignal,
+    abortRepair: (reason?: unknown) => void,
+  ): Promise<DeepPlanResult | null> {
+    signal.throwIfAborted();
     let cfg: SelfHealConfig;
     try { cfg = getSelfHealConfig(this.host.deps.db, ctx.workspaceId); } catch { return null; }
     const prompt = (node.config as { prompt?: string }).prompt ?? '';
@@ -656,8 +708,9 @@ export class SelfHealController {
     ].join('\n');
     this.host.emitWorkStep(ctx, node, 'thinking', 'Orchestrator is replanning the workflow with full power');
 
-    const chatPlan = await this.#chatReplanLoop(ctx, node, healerId, brief, clip, autonomous);
+    const chatPlan = await this.#chatReplanLoop(ctx, node, healerId, brief, clip, autonomous, signal, abortRepair);
     if (chatPlan) return chatPlan;
+    signal.throwIfAborted();
 
     // Fallback: read-only discovery loop when no chat-capable repair agent exists.
     const llm = (this.host.deps.resolveEvaluatorRuntime?.(ctx.workspaceId, 'evaluation', { task: args.error, purpose: 'self_heal_replan' })
@@ -672,10 +725,11 @@ export class SelfHealController {
         workspaceId: ctx.workspaceId, role, task: brief, tools: discoveryTools, maxSteps: 6, workflowId: ctx.workflowId,
         ...(healerId ? { agentId: healerId } : {}),
         onStep: (step) => { if (step.phase === 'thinking' && step.thought) this.host.emitWorkStep(ctx, node, 'thinking', clip(step.thought, 200)); },
-        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+        signal,
       });
       return this.#parseReplanOutput(result.output);
     } catch (err) {
+      if (signal.aborted) throw signal.reason ?? err;
       this.host.deps.logger.warn('engine.self_heal.replan_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
       return null;
     }
@@ -689,10 +743,24 @@ export class SelfHealController {
     brief: string,
     clip: (s: string, n: number) => string,
     autonomous: boolean,
+    signal: AbortSignal,
+    abortRepair: (reason?: unknown) => void,
   ): Promise<DeepPlanResult | null> {
     if (!healerId) return null;
     const adapter = this.host.deps.adapters.get(healerId)?.adapter;
     if (!adapter?.chat || adapter.capabilities?.().interactiveChat === false) return null;
+    const releaseLease = this.host.deps.adapters.tryAcquireInteractiveLease(healerId, {
+      ownerId: `self-heal:${ctx.runId}:${node.id}`,
+      kind: 'self_heal',
+      priority: 10,
+      onPreempt: () => abortRepair(new Error('self-heal preempted by operator chat')),
+    });
+    if (!releaseLease) {
+      this.host.emitWorkStep(ctx, node, 'thinking', 'Self-healing deferred because this agent is already handling an interactive turn.');
+      abortRepair(new Error('self-heal deferred: interactive agent is busy'));
+      signal.throwIfAborted();
+      return null;
+    }
     const systemAddendum = (autonomous
       ? [
           'SELF-HEALING MODE (BYPASS / FULL AUTONOMY): you are an autonomous engineer fixing a live workflow run with root-level power.',
@@ -735,14 +803,17 @@ export class SelfHealController {
           workspaceId: ctx.workspaceId,
           ambientId: ctx.ambientId,
         },
-        ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+        signal,
       }, {
         tools: this.#selfHealChatTools(),
         maxTurns: 8,
         // High backstop, not the governor — a real repair (diagnose → author fix →
         // dry-run → verify) can take many tool steps; the old 24 clipped a
         // legitimate heal mid-way. ChatProgressMonitor still stops true loops fast.
-        maxToolCalls: 2000,
+        // A repair is narrower than an open-ended coding chat. The engine owns
+        // validation/resume/verification, so this still leaves ample room for
+        // grounded inspection + one repair while bounding worst-case spend.
+        maxToolCalls: selfHealMaxToolCalls(),
         systemAddendum,
       })) {
         if (delta.type === 'text') text += delta.delta;
@@ -750,8 +821,11 @@ export class SelfHealController {
         this.relaySelfHealChatDelta(ctx, node, healerId, delta, clip);
       }
     } catch (err) {
+      if (signal.aborted) throw signal.reason ?? err;
       this.host.deps.logger.warn('engine.self_heal.replan_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
       return null;
+    } finally {
+      releaseLease();
     }
     if (sawConfirmation) {
       this.host.emitWorkStep(ctx, node, 'thinking', 'The repair agent reached a tool confirmation; self-heal will stop instead of applying an unreviewed tool action.');
@@ -804,16 +878,8 @@ export class SelfHealController {
   #selfHealChatTools(): ToolDefinition[] | undefined {
     const registry = this.host.deps.toolRegistry;
     if (!registry) return undefined;
-    const blocked = new Set([
-      'agentis.workflow.patch',
-      'agentis.workflow.run',
-      'agentis.ephemeral.run',
-      'agentis.run.cancel',
-      'agentis.approval.resolve',
-      'agentis.channel.send',
-    ]);
     return registry.catalog().tools
-      .filter((tool) => !blocked.has(tool.id))
+      .filter((tool) => isSelfHealControlToolAllowed(tool.id))
       .map((tool) => ({
         name: tool.id,
         description: tool.longDescription ?? tool.description,

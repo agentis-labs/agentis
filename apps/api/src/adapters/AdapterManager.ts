@@ -61,6 +61,21 @@ export interface AdapterRegistration {
 
 export type ToolManifestProvider = (agentId: string, adapterType: AdapterType) => ToolManifestEntry[];
 
+export type InteractiveLeaseKind = 'operator_chat' | 'self_heal' | 'background';
+
+export interface InteractiveLeaseRequest {
+  /** Stable identity for this turn/run. Re-acquiring the same owner is idempotent. */
+  ownerId: string;
+  kind: InteractiveLeaseKind;
+  /** Higher-priority work may preempt a lower-priority owner. */
+  priority: number;
+  onPreempt?: () => void;
+}
+
+interface InteractiveLease extends InteractiveLeaseRequest {
+  generation: number;
+}
+
 export class AdapterManager {
   readonly #adapters = new Map<string, AdapterRegistration>();
   readonly #handlers = new Set<AdapterEventHandler>();
@@ -70,6 +85,13 @@ export class AdapterManager {
   readonly #processSemaphore: Semaphore;
   /** taskId → idempotent slot-release, set while a dispatched task is in flight. */
   readonly #taskReleases = new Map<string, () => void>();
+  /**
+   * One interactive model loop per agent. Without this, an operator chat and a
+   * workflow self-heal can drive the same resident runtime concurrently, racing
+   * its session and spending tokens on competing plans.
+   */
+  readonly #interactiveLeases = new Map<string, InteractiveLease>();
+  #interactiveLeaseGeneration = 0;
 
   constructor(
     private readonly logger: Logger,
@@ -145,6 +167,36 @@ export class AdapterManager {
   capabilities(agentId: string): AdapterCapabilities | null {
     const reg = this.#adapters.get(agentId);
     return reg?.adapter.capabilities?.() ?? null;
+  }
+
+  interactiveLease(agentId: string): Readonly<InteractiveLeaseRequest> | null {
+    const lease = this.#interactiveLeases.get(agentId);
+    return lease ? { ownerId: lease.ownerId, kind: lease.kind, priority: lease.priority } : null;
+  }
+
+  /**
+   * Try to exclusively own an agent's interactive runtime. Operator work can
+   * preempt lower-priority background repair; equal-priority callers serialize
+   * instead of creating a second model loop.
+   */
+  tryAcquireInteractiveLease(agentId: string, request: InteractiveLeaseRequest): (() => void) | null {
+    const current = this.#interactiveLeases.get(agentId);
+    if (current?.ownerId === request.ownerId) return () => {};
+    if (current && request.priority <= current.priority) return null;
+    if (current) {
+      try { current.onPreempt?.(); } catch (err) {
+        this.logger.warn('adapter.interactive_lease_preempt_failed', { agentId, ownerId: current.ownerId, err: (err as Error).message });
+      }
+    }
+    const generation = ++this.#interactiveLeaseGeneration;
+    this.#interactiveLeases.set(agentId, { ...request, generation });
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const active = this.#interactiveLeases.get(agentId);
+      if (active?.generation === generation) this.#interactiveLeases.delete(agentId);
+    };
   }
 
   /** Versioned, machine-readable powers exposed by the registered runtime. */

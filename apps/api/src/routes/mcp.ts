@@ -38,6 +38,8 @@ import { listMcpResources, readMcpResource } from '../services/mcp/mcpResources.
 import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWorkflow.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
+import type { ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
+import { CONVERSATION_ID_HEADER, TURN_LEASE_HEADER } from '../services/mcp/mcpHarnessSession.js';
 
 interface McpSettings { published?: boolean; slug?: string }
 
@@ -63,6 +65,8 @@ export interface McpRoutesDeps {
   engine: WorkflowEngine;
   /** Shared tool registry — the same tools chat and the engine use. */
   toolRegistry?: AgentisToolRegistry;
+  /** Revocable capabilities for tools called by interactive CLI harness turns. */
+  turnLeases?: ConversationTurnLeaseRegistry;
 }
 
 export function buildMcpRoutes(deps: McpRoutesDeps) {
@@ -179,7 +183,46 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
         case 'tools/call': {
           const params = (body.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
           if (!params.name) return c.json(rpcError(id, -32602, 'tools/call requires params.name'));
-          const result = await callMcpTool(deps, { ...ws, agentId, executionMode }, params.name, params.arguments ?? {});
+          const conversationId = c.req.header(CONVERSATION_ID_HEADER)?.trim();
+          const turnLease = c.req.header(TURN_LEASE_HEADER)?.trim();
+          if (Boolean(conversationId) !== Boolean(turnLease)) {
+            throw new AgentisError('TURN_CANCELLED', 'Incomplete conversation turn capability. The tool was not executed.');
+          }
+          let turnSignal: AbortSignal | undefined;
+          if (conversationId && turnLease) {
+            if (!deps.turnLeases) throw new AgentisError('TURN_CANCELLED', 'Conversation turn capability enforcement is unavailable. The tool was not executed.');
+            turnSignal = deps.turnLeases.assertActive(ws.workspaceId, conversationId, turnLease);
+          }
+          const startedAt = Date.now();
+          const result = await callMcpTool(
+            deps,
+            { ...ws, agentId, executionMode, ...(conversationId ? { conversationId } : {}), ...(turnSignal ? { turnSignal } : {}) },
+            params.name,
+            params.arguments ?? {},
+          );
+          if (conversationId && turnLease && deps.turnLeases) {
+            const mutating = params.name.startsWith(WORKFLOW_TOOL_PREFIX)
+              || Boolean(deps.toolRegistry?.get(params.name)?.mutating);
+            const observation = deps.turnLeases.recordToolResult({
+              workspaceId: ws.workspaceId,
+              conversationId,
+              token: turnLease,
+              name: params.name,
+              toolArgs: params.arguments ?? {},
+              result: experiencePayload(result),
+              ok: result.isError !== true,
+              mutating,
+              durationMs: Date.now() - startedAt,
+            });
+            if (observation.repeated) {
+              return c.json(rpcResult(id, textResult(JSON.stringify({
+                unchanged: true,
+                sameAsObservation: observation.observationIndex,
+                stateVersion: observation.stateVersion,
+                message: 'This read returned the same result at the same mutation frontier. Reuse the earlier observation; no payload was repeated.',
+              }))));
+            }
+          }
           return c.json(rpcResult(id, result));
         }
         default:
@@ -276,7 +319,7 @@ function toMcpDescriptor(t: McpTool) {
 /** Execute an MCP tool call → MCP `content` result shape. */
 async function callMcpTool(
   deps: McpRoutesDeps,
-  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask' },
+  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask'; conversationId?: string; turnSignal?: AbortSignal },
   name: string,
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
@@ -289,6 +332,7 @@ async function callMcpTool(
       db: deps.db, engine: deps.engine,
       workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
       workflowId: wf.id, graph: wf.graph as WorkflowGraph, inputs: args,
+      conversationId: ws.conversationId ?? null,
     });
     const ok = result.status === 'COMPLETED' || result.status === 'COMPLETED_WITH_CONTRACT_VIOLATION';
     return textResult(JSON.stringify({ runId: result.runId, status: result.status, output: result.output }), !ok);
@@ -304,12 +348,14 @@ async function callMcpTool(
       ambientId: ws.ambientId,
       ...(ws.agentId ? { agentId: ws.agentId } : {}),
       ...(ws.executionMode ? { executionMode: ws.executionMode } : {}),
+      ...(ws.conversationId ? { conversationId: ws.conversationId } : {}),
+      ...(ws.turnSignal ? { signal: ws.turnSignal } : {}),
       caller: 'mcp',
     };
     const res = await deps.toolRegistry.execute({ id: '', toolId: name, arguments: args }, ctx);
     // §F7 — hand the agent the directive: code + message + remediation + details, not a bare enum.
     return res.ok
-      ? textResult(JSON.stringify(res.output))
+      ? textResult(JSON.stringify(compactMcpOutput(res.output, args)))
       : textResult(JSON.stringify({
           error: res.errorMessage,
           code: res.errorCode,
@@ -321,8 +367,36 @@ async function callMcpTool(
   return textResult(`Unknown tool '${name}'`, true);
 }
 
+// Roughly 3k tokens: enough for a useful structured observation without making
+// every subsequent native-harness inference re-ingest a 6k-token payload. Full
+// fidelity remains explicit and resource-scoped, so this is progressive
+// disclosure rather than a capability restriction.
+const MAX_DEFAULT_MCP_OUTPUT_CHARS = 12_000;
+
+/**
+ * CLI harnesses append every MCP response to the model context. Keep the
+ * default bounded; exact full payloads remain available through an explicit
+ * detail:"full"/"graph" request on tools that support them.
+ */
+function compactMcpOutput(output: unknown, args: Record<string, unknown>): unknown {
+  const serialized = JSON.stringify(output);
+  if (serialized.length <= MAX_DEFAULT_MCP_OUTPUT_CHARS) return output;
+  if (args.detail === 'full' || args.detail === 'graph') return output;
+  return {
+    truncated: true,
+    originalChars: serialized.length,
+    preview: serialized.slice(0, MAX_DEFAULT_MCP_OUTPUT_CHARS),
+    remediation: 'Use narrower filters or request detail:"full"/"graph" for one exact resource only. Do not repeat broad full-result calls.',
+  };
+}
+
 function textResult(text: string, isError = false): { content: Array<{ type: 'text'; text: string }>; isError?: boolean } {
   return { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) };
+}
+
+function experiencePayload(result: { content: Array<{ type: 'text'; text: string }>; isError?: boolean }): unknown {
+  const text = result.content.map((entry) => entry.text).join('\n');
+  try { return JSON.parse(text) as unknown; } catch { return text; }
 }
 
 // ─── JSON-RPC helpers ───────────────────────────────────────────────────────

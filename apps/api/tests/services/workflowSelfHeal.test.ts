@@ -195,4 +195,32 @@ describe('WorkflowSelfHealService', () => {
     }));
     expect(res).toMatchObject({ outcome: 'graph_repair', tier: 'rebuild', resumeNodeId: 'qualify-v2' });
   });
+
+  it('does not start a billable repair phase after cancellation', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('operator stopped the run'));
+    let called = false;
+    const completer: StructuredCompleter = {
+      async completeStructured<T extends Record<string, unknown>>(): Promise<T | null> {
+        called = true;
+        return null;
+      },
+    };
+    await expect(svc.heal(baseInput({ completer, signal: controller.signal })))
+      .rejects.toThrow('operator stopped the run');
+    expect(called).toBe(false);
+  });
+
+  it('propagates the cancellation signal into structured fallback calls', async () => {
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+    const completer: StructuredCompleter = {
+      async completeStructured<T extends Record<string, unknown>>(args): Promise<T | null> {
+        seenSignal = args.signal;
+        return null;
+      },
+    };
+    await svc.heal(baseInput({ completer, signal: controller.signal }));
+    expect(seenSignal).toBe(controller.signal);
+  });
 });

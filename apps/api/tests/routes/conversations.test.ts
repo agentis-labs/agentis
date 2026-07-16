@@ -1,13 +1,14 @@
 /**
  * /v1/conversations — route unit tests.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { buildConversationRoutes } from '../../src/routes/conversations.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
+import { ConversationTurnLeaseRegistry } from '../../src/services/conversation/conversationTurnLease.js';
 
 let ctx: TestContext;
 let conversations: ConversationStore;
@@ -66,6 +67,75 @@ describe('GET /v1/conversations', () => {
   it('rejects without auth (401)', async () => {
     const res = await app().request('/v1/conversations');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /v1/conversations/:agentId/stop', () => {
+  it('discards queued messages and cancels only active runs spawned by that conversation', async () => {
+    const agentId = seedAgent();
+    const conversation = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+    });
+    conversations.enqueueMessage({
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      text: 'queued follow-up',
+    });
+    const scopedRunId = randomUUID();
+    const unrelatedRunId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values([
+      {
+        id: scopedRunId,
+        workspaceId: ctx.workspace.id,
+        ambientId: ctx.ambient.id,
+        userId: ctx.user.id,
+        conversationId: conversation.id,
+        status: 'RUNNING',
+        runState: {},
+      },
+      {
+        id: unrelatedRunId,
+        workspaceId: ctx.workspace.id,
+        ambientId: ctx.ambient.id,
+        userId: ctx.user.id,
+        status: 'RUNNING',
+        runState: {},
+      },
+    ]).run();
+    const cancelRun = vi.fn(async () => undefined);
+    const turnLeases = new ConversationTurnLeaseRegistry();
+    turnLeases.issue(ctx.workspace.id, conversation.id);
+    const stopApp = ctx.buildApp([{
+      path: '/v1/conversations',
+      app: buildConversationRoutes({
+        db: ctx.db,
+        auth: ctx.auth,
+        conversations,
+        adapters,
+        logger: ctx.logger,
+        bus: ctx.bus,
+        engine: { cancelRun },
+        turnLeases,
+      }),
+    }]);
+
+    const res = await stopApp.request(`/v1/conversations/${agentId}/stop?conversationId=${conversation.id}`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      discardedMessages: 1,
+      cancelledRunIds: [scopedRunId],
+      leaseRevoked: true,
+    });
+    expect(cancelRun).toHaveBeenCalledTimes(1);
+    expect(cancelRun).toHaveBeenCalledWith(scopedRunId);
+    expect(conversations.listQueue(ctx.workspace.id, conversation.id)).toEqual([]);
   });
 });
 

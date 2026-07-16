@@ -949,6 +949,22 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
       required: ['runId'],
     },
   },
+  {
+    name: 'agentis.run.regrade',
+    description:
+      'Re-evaluate a completed run from persisted evidence after repairing its acceptance/spec contract. '
+      + 'This does not execute workflow nodes or repeat external side effects; prefer it over another live run when the action succeeded but grading was wrong.',
+    parameters: {
+      type: 'object',
+      properties: {
+        runId: {
+          type: 'string',
+          description: 'The completed run whose evidence should be regraded.',
+        },
+      },
+      required: ['runId'],
+    },
+  },
 
   // ─── Builder & Planner ───────────────────────────────────────────────────
   {
@@ -1144,6 +1160,24 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
   // Names match registry ids in agentisToolHandlers/appData.ts. data_*/ui_*
   // resolve the App from `appId` or the open App surface.
   {
+    name: 'agentis.app.compile',
+    description:
+      '[APP PRE-EXECUTION GATE] Read-only compilation of the whole App before any costly/world-touching run. Defaults to compact blocker output. Apply compatible repairPlan.zeroCost items together and compile ONCE; never fix next[0] one model round at a time. Use target:"debug" before the first real debug run; target:"production" before live use; target:"unattended" before arming.',
+    parameters: {
+      type: 'object',
+      properties: {
+        appId: { type: 'string', description: 'App id; omit when an App is open.' },
+        target: { type: 'string', enum: ['debug', 'production', 'unattended'], description: 'Default debug.' },
+        detail: { type: 'string', enum: ['summary', 'full'], description: 'Default summary; full includes passing checks.' },
+      },
+    },
+  },
+  {
+    name: 'agentis.app.verify',
+    description: 'Run free dry-runs and pinned suites for every enabled workflow in an App in ONE batched call, then compile once. Use instead of repeated workflow.dry_run/test calls.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, target: { type: 'string', enum: ['debug', 'production', 'unattended'] }, dryRun: { type: 'boolean' }, suites: { type: 'boolean' } } },
+  },
+  {
     name: 'agentis.app.doctor',
     description:
       'Read-only cross-layer conformance inspection for an App. Verifies executable dependencies, triggers, event subscriptions, outcome contracts, connection bindings, conversation state references, and whether orchestration shown in the UI is backed by persisted rules. Run before claiming an App works.',
@@ -1226,6 +1260,11 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, match: { type: 'object' }, record: { type: 'object' } }, required: ['collection', 'match', 'record'] },
   },
   {
+    name: 'agentis.data.batch',
+    description: 'Apply up to 200 datastore insert/update/upsert/delete operations in one ordered call. Use for migrations and multi-record repairs; never emit dozens of data.update calls.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, operations: { type: 'array', maxItems: 200, items: { type: 'object' } } }, required: ['operations'] },
+  },
+  {
     name: 'agentis.data.delete',
     description: 'Delete an App collection record by id.',
     parameters: { type: 'object', properties: { appId: { type: 'string' }, collection: { type: 'string' }, id: { type: 'string' } }, required: ['collection', 'id'] },
@@ -1244,7 +1283,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     name: 'agentis.ui.render',
     description:
       'Author an App surface as a typed ViewNode tree (Stack/Row/Grid/Split/Tabs/Hero/KPIStrip/Metric/Chart/Table/List/Kanban/RecordMaster/Roadmap/PipelineFlow/DataBoard/Funnel/Timeline/Form/Button/ActivityStream/OrchestrationPanel/RunMonitor/AgentFeed/ApprovalsInbox/ChatThread/Inbox/CustomView…). ' +
-      'Every surface renders on the flagship Agentis design system (light+dark, premium by construction). ROOT style options: theme (content width/density), appearance:"light"|"dark" to pin one, accent to re-brand, and optional design VARIANTS ("aurora" bigger numerals · "soft" rounder · "editorial" big flat type · "console" dense) — default flagship needs nothing. Compose an App home MISSION-CONTROL-FIRST: Hero (title + subtitle + actions:[{action}] = the page action bar — put declared workflow actions HERE), KPIStrip/PipelineFlow, an OrchestrationPanel (the App\'s workflows with rules — schedule/chains/concurrency — and run buttons; no bind), then Grid[ working composite (span 2) | Stack[RunMonitor, AgentFeed] (span 1) ] so the operator watches agents work LIVE; never a flat card stack, never Forms at the top. ' +
+      'Every surface renders on the flagship Agentis design system (light+dark, premium by construction). ROOT style options: theme (content width/density), appearance:"light"|"dark" to pin one, accent to re-brand, and optional design VARIANTS ("aurora" bigger numerals · "soft" rounder · "editorial" big flat type · "console" dense) — default flagship needs nothing. Compose an App home MISSION-CONTROL-FIRST: Hero (title + subtitle + actions:[{action}] = the page action bar — put domain actions HERE), KPIStrip/PipelineFlow, an OrchestrationPanel (the App\'s workflows with rules — schedule/chains/concurrency — and its own run buttons; no bind; never duplicate Run Pipeline in Hero actions), then Grid[ working composite (span 2) | Stack[RunMonitor, AgentFeed] (span 1) ] so the operator watches agents work LIVE; never a flat card stack, never Forms at the top. ' +
       'OPERABILITY CONTRACT (hard-gated: RENDERED ≠ OPERABLE): every action you declare MUST be reachable from a control — workflow actions on Hero.actions or a Button, "<col>.insert" behind a Form, "<col>.update" powering Kanban drag + the record drawer, "<col>.delete" as a Table rowAction. A Button/Form referencing an UNDECLARED action is stripped by the gate; a declared-but-unwired workflow action gets auto-wired into the header (and flagged) — author it operable the first time. Values format themselves (URLs→links, SCREAMING_SNAKE→humanized pills, ISO dates→relative): never hand-format. ' +
       'Pick the working composite for the data: Kanban (status/stage fields; give update:{action:"<declared col.update action>"} so drag writes back) · RecordMaster (CRM/ERP record workspaces w/ sections+related) · Roadmap (date fields → time lanes) · PipelineFlow (stage funnel + conversion) · Chart/Table (metrics/logs). ' +
       'The runtime wraps surfaces in an App Shell (sidebar pages + topbar + ops drawer): author page CONTENT, never navigation — each surface becomes a page, so real products = several focused surfaces (home, board, records, roadmap, inbox). ' +
@@ -1256,6 +1295,16 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     name: 'agentis.ui.patch',
     description: 'Mutate part of an existing surface view. ops: [{ op: "set"|"insert"|"remove", path, value?|node? }].',
     parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, ops: { type: 'array' } }, required: ['surface', 'ops'] },
+  },
+  {
+    name: 'agentis.ui.inspect',
+    description: 'Inspect the persisted interface before editing. Compact by default: surfaces plus stable nodeId/type/path/collection outline and actions. Use includeTree:true only for exact property work; this avoids repeatedly loading giant surface trees.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, includeTree: { type: 'boolean' } } },
+  },
+  {
+    name: 'agentis.ui.remove',
+    description: 'Remove a component reliably by stable nodeId (from ui.inspect), or delete an entire surface with deleteSurface:true plus exact confirmSurfaceName. Re-validates and revisions component changes.',
+    parameters: { type: 'object', properties: { appId: { type: 'string' }, surface: { type: 'string' }, nodeId: { type: 'string' }, deleteSurface: { type: 'boolean' }, confirmSurfaceName: { type: 'string' } }, required: ['surface'] },
   },
   {
     name: 'agentis.ui.action_schema',

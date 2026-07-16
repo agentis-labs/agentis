@@ -5,7 +5,7 @@
  * the doctrine that the agent's self-report is never consulted.
  */
 import { describe, expect, it } from 'vitest';
-import { evaluateRunVerdict, type VerdictProbeDeps } from '../../src/services/workflow/workflowVerdict.js';
+import { evaluateRunVerdict, terminalOutputPaths, type VerdictProbeDeps } from '../../src/services/workflow/workflowVerdict.js';
 import type { WorkflowSpec } from '../../src/services/workflow/workflowSpec.js';
 
 function spec(overrides: Partial<WorkflowSpec> = {}): WorkflowSpec {
@@ -32,6 +32,27 @@ const BASE = {
 };
 
 describe('evaluateRunVerdict — outcome taxonomy', () => {
+  it('reports canonical terminal paths when an expr contract targets the wrong envelope', async () => {
+    const output = {
+      seen: { value: ['one'] },
+      last_result: { value: { status: 'sent', receipt: { id: 'provider-1' } } },
+    };
+    expect(terminalOutputPaths({ renderAs: 'json', value: output })).toContain('output.last_result.value.status');
+
+    const verdict = await evaluateRunVerdict({
+      ...BASE,
+      spec: spec({
+        acceptance: [{ id: 'sent', claim: 'message sent', verify: 'expr', expr: "output.value.last_result.value.status == 'sent'" }],
+        sufficiency: [],
+      }),
+      output,
+      deps: {},
+    });
+    expect(verdict.outcome).toBe('failed_checks');
+    expect(verdict.checks[0]!.evidence).toContain('available canonical paths:');
+    expect(verdict.checks[0]!.evidence).toContain('output.last_result.value.status');
+  });
+
   it('ACCOMPLISHED: the world answers — probe 200 + content + sufficiency clean', async () => {
     const verdict = await evaluateRunVerdict({
       ...BASE,

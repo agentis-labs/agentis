@@ -76,4 +76,33 @@ describe('§0.2 BrainMaintenanceService — disk reclamation', () => {
     expect(ctx.db.select({ id: schema.brainQualityEvents.id }).from(schema.brainQualityEvents).where(eq(schema.brainQualityEvents.id, oldEvent)).get()).toBeUndefined();
     expect(result.reclaimed.eventsPruned).toBeGreaterThanOrEqual(1);
   });
+
+  it('quarantines obvious managed import residue while protecting accessed, pinned, and operator memory', () => {
+    const old = new Date(Date.now() - 45 * DAY).toISOString();
+    const seed = (title: string, source: string, options: { managed?: boolean; pinned?: boolean; accessed?: boolean } = {}) => {
+      const id = randomUUID();
+      ctx.db.insert(schema.memoryEpisodes).values({
+        id, workspaceId: ctx.workspace.id, type: 'distilled_lesson', title,
+        summary: '`transform`/`filter` nodes, `browser` node (`browserPool`), evaluator…', source,
+        confidence: '0.5', importance: '0.3', trust: '0.4', managed: options.managed ?? true,
+        pinnedAt: options.pinned ? old : null, lastAccessedAt: options.accessed ? old : null,
+        createdAt: old, updatedAt: old,
+      }).run();
+      return id;
+    };
+    const residue = seed('SCOPE/CAPTURE CORRECTNESS (B7, added after feedback…', 'harness_ingest');
+    const accessed = seed('Accessed residue…', 'harness_ingest', { accessed: true });
+    const pinned = seed('Pinned residue…', 'harness_ingest', { pinned: true });
+    const operator = seed('Operator-authored residue…', 'operator_write', { managed: false });
+
+    const preview = maintenance.previewHygiene(ctx.workspace.id);
+    expect(preview.find((item) => item.id === residue)?.recommendation).toBe('archive');
+    const result = maintenance.runWorkspace(ctx.workspace.id);
+    expect(result.lowQualityArchived).toBeGreaterThanOrEqual(1);
+    const state = (id: string) => ctx.db.select({ status: schema.memoryEpisodes.status }).from(schema.memoryEpisodes).where(eq(schema.memoryEpisodes.id, id)).get()?.status;
+    expect(state(residue)).toBe('archived');
+    expect(state(accessed)).toBe('active');
+    expect(state(pinned)).toBe('active');
+    expect(state(operator)).toBe('active');
+  });
 });

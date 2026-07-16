@@ -83,6 +83,11 @@ export class ChatToolExecutor {
     return Boolean(this.definition(name)?.mutating);
   }
 
+  static isMutating(name: string): boolean {
+    if (name.startsWith('workflow.')) return true;
+    return Boolean(this.definition(name)?.mutating);
+  }
+
   /**
    * Execute a single tool call by name.
    *

@@ -1,16 +1,24 @@
 # Agentis
 
-## Own the agents. Rent the models.
+## Every harness. One Brain. Zero lock-in.
 
-Agentis is the open-source, self-hosted command center for agents you own. Import the
+Agentis is the multi-harness dashboard on steroids for agents you own — self-hosted,
+open-source, running on your machine today with Claude Code, Codex, Cursor, Antigravity,
+Hermes, OpenClaw, or your own HTTP and local models underneath (a harness of our own is
+coming next). Those tools forget everything the moment the process dies, and most of them
+phone your work home to someone else's cloud while they run. Agentis doesn't. Import the
 agents you already run, give them a permanent Brain of memory and skills, swap the model
-underneath them anytime, and ship what they build as real apps, workflows, and channels
+underneath them anytime, and ship what they build as real apps, workflows, and channels —
 from your own machine.
+
+**No token tax. No data extraction. No forgetting.**
 
 Agents should not disappear when a vendor changes, a subscription ends, or a local process
 restarts. Agentis gives them durable identity, memory, orchestration, tools, approvals,
 and a live product surface they can operate with you.
 
+[![npm version](https://img.shields.io/npm/v/@agentis-labs/cli.svg)](https://www.npmjs.com/package/@agentis-labs/cli)
+[![npm downloads](https://img.shields.io/npm/dw/@agentis-labs/cli.svg)](https://www.npmjs.com/package/@agentis-labs/cli)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20.10-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-9.12-orange.svg)](https://pnpm.io)
@@ -24,6 +32,41 @@ and a live product surface they can operate with you.
 
 ---
 
+## Harnesses supported today
+
+Agentis doesn't make you pick one. Import the agent you already run — no rewrite, no
+migration — and it keeps its memory, tools, and workflows even if you switch harnesses later.
+
+| Harness | What it is | Runs as |
+|---------|-----------|---------|
+| **Claude Code** | Anthropic's Claude Code CLI | local CLI process |
+| **Codex** | OpenAI's Codex CLI | local CLI process |
+| **Cursor** | Cursor's agent CLI | local CLI process |
+| **Antigravity** | Google's `agy` — the Gemini-CLI successor, also runs Claude and GPT-OSS models | local CLI process |
+| **Hermes** | Hermes agent runtime | local CLI process |
+| **OpenClaw** | Bridged through OpenClaw's official ACP protocol | local ACP server |
+| **HTTP (custom / remote)** | Any agent that speaks HTTP, with HMAC-signed callbacks | webhook |
+| **Local / OpenAI-compatible** | Ollama, LM Studio, OpenRouter, and other OpenAI-compatible endpoints | local or remote API |
+
+More harnesses land as adapters, not rewrites — and a harness of our own is next.
+
+---
+
+## See it running
+
+<!-- TODO: record a <30s clip — terminal (harness executing) side-by-side with the live
+     dashboard (Brain recall + workflow graph updating), one continuous local run, no
+     cloud dependency in frame. To embed: drag the video file into any GitHub issue,
+     PR, or Discussion comment box, wait for it to upload, then copy the resulting
+     https://github.com/agentis-labs/agentis/assets/... (or user-attachments) link and
+     paste it here on its own line — GitHub renders it as an inline player automatically,
+     no markdown wrapper needed. Delete this comment and the line below once it's in. -->
+
+*Demo video coming soon.* Until then: every screenshot in [docs.useagentis.com](https://docs.useagentis.com)
+is a real local run — no staged data, no hosted backend.
+
+---
+
 ## Install
 
 ```bash
@@ -31,9 +74,12 @@ npm install -g @agentis-labs/cli
 agentis up
 ```
 
-Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed.
-Agentis boots at `http://127.0.0.1:3737`, creates local secrets, initializes SQLite,
-seeds the first operator user, and serves the dashboard from the same process.
+Works on macOS, Linux, and Windows PowerShell with Node.js >= 20.10 installed. Agentis
+boots at `http://127.0.0.1:3737` in under 60 seconds, creates local secrets, initializes
+SQLite, seeds the first operator user, and serves the dashboard from the same process.
+
+**No API keys required to see it boot.** Connect your first harness — Claude Code, Codex,
+Cursor, or a local model — whenever you're ready.
 
 On Windows, open a new PowerShell after the global install so npm's global command
 shims are picked up on `PATH`.
@@ -46,37 +92,6 @@ docker compose up
 
 ---
 
-## Why Agentis
-
-**A permanent Brain for your agents.** Agentis stores durable memory locally with a bundled
-offline embedding model, formation gates, grounded knowledge, living skills, cited answers,
-and explicit abstention when it does not know.
-
-**Apps, not chat transcripts.** Agents can define typed data, generate UI surfaces, wire
-actions, and operate the product they created. App surfaces include tables, boards, charts,
-run monitors, agent feeds, approvals, and public read-only views.
-
-**Self-healing orchestration.** The workflow engine runs typed graphs with 47 node kinds,
-durable snapshots, partial replay, checkpoints, subflows, objective verdicts, and repair
-paths that recover honestly instead of fabricating success.
-
-**One fabric for every runtime.** Claude Code, Codex, Cursor, Antigravity, Hermes, OpenClaw,
-OpenAI-compatible endpoints, and local models sit behind one Runtime Abstraction Layer.
-Route by capability, not vendor.
-
-**Reach people and systems.** Slack, Telegram, WhatsApp, email, webhooks, MCP, A2A,
-and 90+ integration manifests all use the same connection registry, credential vault,
-and policy layer.
-
-**Agent-native by design.** The platform exposes a typed `agentis.*` surface with 132 tools
-for building, running, observing, repairing, governing, and shipping. Agents operate Agentis
-as code instead of juggling brittle one-off tool calls.
-
-**Sovereign by default.** SQLite, secrets, assets, agent homes, memories, and audit logs live
-under `AGENTIS_DATA_DIR` unless you choose otherwise. Models are swappable. Data stays yours.
-
----
-
 ## What You Can Build
 
 - Agent-run internal tools with durable data, live ops, approvals, and memory.
@@ -84,6 +99,41 @@ under `AGENTIS_DATA_DIR` unless you choose otherwise. Models are swappable. Data
 - Specialist fleets that use Claude Code, Codex, Cursor, local models, or custom HTTP agents.
 - Agentic apps that package workflows, interfaces, collections, and tests into `.agentisapp`.
 - Channel-native agents that respond across Slack, Telegram, WhatsApp, email, MCP, and A2A.
+
+---
+
+## Why Agentis: an anti-lock-in architecture
+
+**One fabric for every runtime, not one more silo.** Claude Code, Codex, Cursor, Antigravity
+(Gemini), Hermes, OpenClaw, OpenAI-compatible endpoints (Ollama, LM Studio, OpenRouter, and
+more), and local models all sit behind one Runtime Abstraction Layer. Route by capability,
+not vendor — and never rewrite your agents to switch one.
+
+**A permanent Brain, not a chat transcript.** Durable memory lives locally with a bundled
+offline embedding model, formation gates, grounded knowledge, living skills, and cited
+answers — indexed through the Model Context Protocol so any harness you plug in reads and
+writes the same memory instead of starting cold.
+
+**Apps, not conversations that evaporate.** Agents define typed data, generate UI surfaces,
+wire actions, and operate the product they created. No orchestration framework hands you
+back a wall of text and calls it done.
+
+**Self-healing orchestration, not brittle chains.** The workflow engine runs typed graphs
+with 47 node kinds, durable snapshots, partial replay, checkpoints, subflows, objective
+verdicts, and repair paths that recover honestly instead of fabricating success — no
+prompt-chaining framework to debug by staring at stack traces of stack traces.
+
+**Reach people and systems.** Slack, Telegram, WhatsApp, email, webhooks, MCP, A2A, and
+90+ integration manifests all use the same connection registry, credential vault, and
+policy layer.
+
+**Agent-native by design.** A typed `agentis.*` surface with 132 tools for building, running,
+observing, repairing, governing, and shipping. Agents operate Agentis as code instead of
+juggling brittle one-off tool calls.
+
+**Sovereign by default.** SQLite, secrets, assets, agent homes, memories, and audit logs
+live under `AGENTIS_DATA_DIR` unless you choose otherwise. Models are swappable. Harnesses
+are swappable. Data stays yours.
 
 ---
 
@@ -200,6 +250,17 @@ pnpm db:migrate
 - Extension code defaults to `node:vm`; use `isolated-vm` or Docker for untrusted code.
 
 Report vulnerabilities privately per [SECURITY.md](./SECURITY.md).
+
+---
+
+## Community
+
+- **Docs:** [docs.useagentis.com](https://docs.useagentis.com) for the full technical guide.
+- **Issues:** [GitHub Issues](https://github.com/agentis-labs/agentis/issues) for bugs and
+  feature requests.
+- **Discussions:** [GitHub Discussions](https://github.com/agentis-labs/agentis/discussions)
+  is the current war room for early adopters — architecture questions, build logs, and
+  what you're shipping with your Brain.
 
 ---
 

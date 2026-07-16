@@ -31,6 +31,7 @@ import { embedText } from '../embedding/embeddingProvider.js';
 import type { WorkspaceHarnessRuntimeResolver } from '../workspace/workspaceHarnessRuntime.js';
 import type { CapabilityIndex } from '../capability/capabilityIndex.js';
 import type { CommandModelService } from '../command/commandModel.js';
+import type { ConversationTurnLeaseRegistry } from '../conversation/conversationTurnLease.js';
 
 export interface ChatSessionExecutorDeps {
   db?: AgentisSqliteDb;
@@ -76,6 +77,16 @@ export interface ChatSessionExecutorDeps {
    */
   capabilityIndex?: CapabilityIndex;
   commandModel?: CommandModelService;
+  /** Shared experience recorder for caller-loop/marker/HTTP tools. */
+  turnLeases?: ConversationTurnLeaseRegistry;
+  /** Shared audit sink so interactive/model-repair turns are metered too. */
+  audit?: { record(entry: {
+    workspaceId: string; runId: string; agentId?: string | null; action: string;
+    actorType: 'agent'; actorId: string; outputSummary?: string | null;
+    costCents?: number | null; tokensIn?: number | null; tokensOut?: number | null;
+  }): void };
+  /** Agent monthly-spend ledger. Called only for provider-reported monetary cost. */
+  budget?: { recordSpend(args: { workspaceId: string; agentId: string; runId?: string | null; amountCents: number }): unknown };
 }
 
 export interface ChannelTurnContext {
@@ -124,6 +135,10 @@ export class ChatSessionExecutor {
   static configure(deps: ChatSessionExecutorDeps): void {
     this.#deps = deps;
     this.#healthCache.clear();
+  }
+
+  static setTurnLeaseRegistry(turnLeases: ConversationTurnLeaseRegistry): void {
+    this.#deps.turnLeases = turnLeases;
   }
 
   /**
@@ -590,13 +605,13 @@ export class ChatSessionExecutor {
               // filler) — the count an operator sees should mean "N memories
               // that actually cleared relevance", not "N padded up to the
               // limit to look full".
-              return { block: brain.block || null, atoms: brain.atomIds.length, relevant: brain.relevantCount };
+              return { block: brain.block || null, atomIds: brain.atomIds, atoms: brain.atomIds.length, relevant: brain.relevantCount };
             } catch (err) {
               logger?.warn?.('chat.brain_context.failed', { agentId: ctx.agentId, err: (err as Error).message });
               return null;
             }
           }, CONTEXT_BUILDER_BUDGET_MS, null, () => logger?.warn?.('chat.brain_context.budget_exceeded', { agentId: ctx.agentId }))
-        : Promise.resolve<{ block: string | null; atoms: number; relevant: number } | null>(null),
+        : Promise.resolve<{ block: string | null; atomIds: string[]; atoms: number; relevant: number } | null>(null),
     ]);
 
     // §B3 — prefer the unified brain context; fall back to the legacy newest-8
@@ -625,6 +640,14 @@ export class ChatSessionExecutor {
     }
     if (brainContext?.block) {
       agentMemory = brainContext.block;
+      if (ctx.turnLease && this.#deps.turnLeases && brainContext.atoms > 0) {
+        // The lease stores exact atom ids separately from prompt prose so a later
+        // verified outcome can strengthen the memories that were actually
+        // available to this runtime, independent of the adapter implementation.
+        try {
+          this.#deps.turnLeases.recordRecalledAtoms(ctx.workspaceId, ctx.conversationId, ctx.turnLease, brainContext.atomIds);
+        } catch { /* best-effort outcome attribution */ }
+      }
     } else if (!lightweightConversation && ctx.agentId && this.#deps.agentMemory) {
       try {
         agentMemory = this.#deps.agentMemory.contextSection(ctx.agentId, ctx.workspaceId);
@@ -937,6 +960,7 @@ export class ChatSessionExecutor {
       const bufferedDeltas: ChatDelta[] = [];
       let surfacedConfirmation = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
+      let roundUsage: Extract<ChatDelta, { type: 'done' }>['usage'];
 
       try {
         yield this.#activity(ctx, 'runtime', 'Waiting for model output', `Runtime pass ${turn + 1} is in progress.`, `runtime-${turn + 1}`);
@@ -946,6 +970,7 @@ export class ChatSessionExecutor {
           latencyClass: 'interactive',
           timeoutMs: modelRoundTimeoutMs,
           sessionKey: options.sessionKey ?? ctx.conversationId,
+          ...(ctx.turnLease ? { conversationId: ctx.conversationId, turnLease: ctx.turnLease } : {}),
           ...(adapterMcpNative
             ? {
                 toolMode: options.lightweightConversation ? 'caller_loop' : 'adapter_native',
@@ -974,6 +999,7 @@ export class ChatSessionExecutor {
           if (delta.type === 'confirmation_required') surfacedConfirmation = true;
           if (delta.type === 'done') {
             finishReason = delta.finishReason;
+            roundUsage = delta.usage;
             continue;
           }
           // Runtime prose is ambiguous until the round finishes. Buffer text so
@@ -987,6 +1013,7 @@ export class ChatSessionExecutor {
           }
         }
         timings.modelMs += Date.now() - roundStart;
+        this.#recordModelUsage(ctx, roundUsage ?? estimateRoundUsage(messages, assistantText), turn + 1, options.adapterType);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.#deps.logger?.warn('chat.turn.adapter_failed', { agentId: ctx.agentId, err: message });
@@ -1226,6 +1253,25 @@ export class ChatSessionExecutor {
     const durationMs = Date.now() - toolStartedAt;
     const summarized = summarizeToolResult(result.data ?? result.error ?? null);
     const ok = !result.error;
+    if (ctx.turnLease && this.#deps.turnLeases) {
+      try {
+        this.#deps.turnLeases.recordToolResult({
+          workspaceId: ctx.workspaceId,
+          conversationId: ctx.conversationId,
+          token: ctx.turnLease,
+          name: call.name,
+          toolArgs: call.arguments,
+          result: result.data ?? result.error ?? null,
+          ok,
+          mutating: ChatToolExecutor.isMutating(call.name),
+          durationMs,
+        });
+      } catch (err) {
+        // Stop may revoke the lease after the tool completed. Experience capture
+        // is best-effort and must never convert real work into a second failure.
+        this.#deps.logger?.debug?.('chat.tool_experience.skipped', { tool: call.name, reason: (err as Error).message });
+      }
+    }
     recordToolCall(call.name, durationMs, ok);
     this.#deps.logger?.info('chat.tool_call', {
       workspaceId: ctx.workspaceId,
@@ -1526,6 +1572,34 @@ export class ChatSessionExecutor {
       adapterType: timings.adapterType,
     });
   }
+
+  static #recordModelUsage(
+    ctx: ChatTurnContext,
+    usage: NonNullable<Extract<ChatDelta, { type: 'done' }>['usage']>,
+    round: number,
+    adapterType: string,
+  ): void {
+    const tokensIn = Math.max(0, Math.round(usage.inputTokens));
+    const tokensOut = Math.max(0, Math.round(usage.outputTokens));
+    const costCents = usage.costCents === undefined ? null : Math.max(0, Math.ceil(usage.costCents));
+    if (tokensIn === 0 && tokensOut === 0 && !costCents) return;
+    const runId = ctx.runId ?? `chat:${ctx.conversationId}:${ctx.clientTurnId ?? 'turn'}`;
+    this.#deps.audit?.record({
+      workspaceId: ctx.workspaceId,
+      runId,
+      agentId: ctx.agentId,
+      action: 'chat.model.completed',
+      actorType: 'agent',
+      actorId: ctx.agentId,
+      outputSummary: `${usage.estimated ? 'estimated' : 'reported'} usage; adapter=${adapterType}; round=${round}; cached_input_tokens=${Math.max(0, Math.round(usage.cachedInputTokens ?? 0))}; uncached_input_tokens=${Math.max(0, tokensIn - Math.round(usage.cachedInputTokens ?? 0))}`,
+      costCents,
+      tokensIn,
+      tokensOut,
+    });
+    if (costCents && costCents > 0) {
+      this.#deps.budget?.recordSpend({ workspaceId: ctx.workspaceId, agentId: ctx.agentId, runId, amountCents: costCents });
+    }
+  }
 }
 
 /** Per-turn stage timers accumulated across rounds (CLB instrumentation). */
@@ -1537,6 +1611,21 @@ interface TurnTimings {
   rounds: number;
   fastPath: boolean;
   adapterType: string;
+}
+
+/** Conservative fallback for runtimes that expose no usage lifecycle event. */
+function estimateRoundUsage(messages: ChatMessage[], assistantText: string): NonNullable<Extract<ChatDelta, { type: 'done' }>['usage']> {
+  const inputChars = messages.reduce((total, message) => total + stringifyChatContent(message.content).length, 0);
+  return {
+    inputTokens: Math.ceil(inputChars / 4),
+    outputTokens: Math.ceil(assistantText.length / 4),
+    estimated: true,
+  };
+}
+
+function stringifyChatContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content;
+  try { return JSON.stringify(content); } catch { return ''; }
 }
 
 // Per-MODEL-ROUND liveness timeout (ms). This is NOT a task time limit — it

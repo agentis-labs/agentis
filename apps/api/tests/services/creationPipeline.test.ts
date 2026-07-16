@@ -47,6 +47,37 @@ describe('buildWorkspaceInventory', () => {
     // are reported — none seeded here, so no built-in 'researcher' appears.
     expect(inv.specialistRoles.find((r) => r.role === 'researcher')).toBeUndefined();
   });
+
+  it('loads independent build enrichments concurrently', async () => {
+    const started = new Set<string>();
+    let releaseGate!: () => void;
+    let allStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    const ready = new Promise<void>((resolve) => { allStarted = resolve; });
+    const enter = async (name: string) => {
+      started.add(name);
+      if (started.size === 4) allStarted();
+      await gate;
+    };
+    const build = buildWorkspaceInventory({
+      db: ctx.db,
+      extensionLibrary: { listSourceFiles: async () => { await enter('extensions'); return []; } },
+      knowledgeBases: {
+        listKnowledgeBases: () => [{ id: 'kb-1', name: 'KB' }],
+        search: async () => { await enter('knowledge'); return []; },
+      },
+      workspaceIntelligence: { buildContextBlock: async () => { await enter('context'); return ''; } },
+      agentLibrary: { listCustomRoles: async () => { await enter('roles'); return []; } },
+    } as never, ctx.workspace.id, 'build a workflow');
+
+    await Promise.race([
+      ready,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`serialized enrichments: ${[...started].join(',')}`)), 500)),
+    ]);
+    releaseGate();
+    await build;
+    expect([...started].sort()).toEqual(['context', 'extensions', 'knowledge', 'roles']);
+  });
 });
 
 describe('classifyIntent', () => {

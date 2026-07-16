@@ -142,12 +142,13 @@ export async function buildWorkspaceInventory(
     .where(eq(schema.extensions.workspaceId, workspaceId))
     .all()
     .map((s) => s.slug);
-  let volumeExtensions: string[] = [];
-  try {
-    volumeExtensions = (await deps.extensionLibrary?.listSourceFiles(workspaceId) ?? []).map((extension) => extension.name);
-  } catch {
-    /* best effort */
-  }
+  const volumeExtensionsPromise = (async (): Promise<string[]> => {
+    try {
+      return (await deps.extensionLibrary?.listSourceFiles(workspaceId) ?? []).map((extension) => extension.name);
+    } catch {
+      return [];
+    }
+  })();
 
   const knowledgeBases = (deps.knowledgeBases?.listKnowledgeBases(workspaceId) ?? []).map((k) => ({
     id: k.id,
@@ -156,12 +157,12 @@ export async function buildWorkspaceInventory(
 
   // §G6 — retrieve Brain passages relevant to the request so synthesis can wire
   // knowledge nodes against real content. Best-effort; never blocks creation.
-  const knowledgeExcerpts: WorkspaceInventory['knowledgeExcerpts'] = [];
   const probe = request?.trim();
-  if (probe && deps.knowledgeBases && knowledgeBases.length > 0) {
+  const knowledgeExcerptsPromise = (async (): Promise<WorkspaceInventory['knowledgeExcerpts']> => {
+    if (!probe || !deps.knowledgeBases || knowledgeBases.length === 0) return [];
     try {
       const query = probe.slice(0, 128);
-      const hits = (await Promise.all(knowledgeBases
+      return (await Promise.all(knowledgeBases
         .map(async (kb) => (await deps
             .knowledgeBases!.search({ workspaceId, knowledgeBaseId: kb.id, query, topK: 5 }))
             .map((h) => ({ knowledgeBaseId: kb.id, content: h.content, score: h.score }))),
@@ -169,11 +170,10 @@ export async function buildWorkspaceInventory(
         .flat()
         .sort((a, b) => b.score - a.score)
         .slice(0, 5);
-      knowledgeExcerpts.push(...hits);
     } catch {
-      /* best effort */
+      return [];
     }
-  }
+  })();
 
   const wireableIntegrations = [
     ...new Set(
@@ -183,28 +183,35 @@ export async function buildWorkspaceInventory(
     ),
   ];
 
-  let workspaceContext = '';
-  try {
-    workspaceContext = (await deps.workspaceIntelligence?.buildContextBlock(workspaceId)) ?? '';
-  } catch {
-    /* best effort */
-  }
+  const workspaceContextPromise = (async (): Promise<string> => {
+    try {
+      return (await deps.workspaceIntelligence?.buildContextBlock(workspaceId)) ?? '';
+    } catch {
+      return '';
+    }
+  })();
 
   // Custom roles from agents/custom/*.md expand the casting vocabulary (Principle #11).
-  const specialistRoles: WorkspaceInventory['specialistRoles'] = [];
-  try {
-    for (const cr of (await deps.agentLibrary?.listCustomRoles(workspaceId)) ?? []) {
-      if (!specialistRoles.some((r) => r.role === cr.role))
-        specialistRoles.push({
-          role: cr.role,
-          tools: cr.tools,
-          defaultModel: cr.defaultModel,
-          custom: true,
-        });
+  const specialistRolesPromise = (async (): Promise<WorkspaceInventory['specialistRoles']> => {
+    const roles: WorkspaceInventory['specialistRoles'] = [];
+    try {
+      for (const cr of (await deps.agentLibrary?.listCustomRoles(workspaceId)) ?? []) {
+        if (!roles.some((role) => role.role === cr.role)) {
+          roles.push({ role: cr.role, tools: cr.tools, defaultModel: cr.defaultModel, custom: true });
+        }
+      }
+    } catch {
+      /* best effort */
     }
-  } catch {
-    /* best effort */
-  }
+    return roles;
+  })();
+
+  const [volumeExtensions, knowledgeExcerpts, workspaceContext, specialistRoles] = await Promise.all([
+    volumeExtensionsPromise,
+    knowledgeExcerptsPromise,
+    workspaceContextPromise,
+    specialistRolesPromise,
+  ]);
 
   return {
     availableAgents: agents.map((a) => ({

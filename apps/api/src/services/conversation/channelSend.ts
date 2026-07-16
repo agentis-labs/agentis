@@ -12,7 +12,7 @@
  */
 import type { ChannelBridge } from './channelBridge.js';
 import type { ConnectionGrantService } from '../connectionGrants.js';
-import type { ChannelDeliveryReceipt, ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
+import { ChannelDeliveryRejectedError, isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type ChannelKind, type OutboundAttachmentRef } from '../../adapters/channels/types.js';
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
@@ -130,13 +130,34 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
     };
   }
 
-  const receipt = await deps.channels.deliverToConnection({
-    connectionId: candidate.id,
-    chatId,
-    body,
-    ...(attachments.length ? { attachments } : {}),
-    ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
-  });
+  let receipt: ChannelDeliveryReceipt;
+  try {
+    receipt = await deps.channels.deliverToConnection({
+      connectionId: candidate.id,
+      chatId,
+      body,
+      ...(attachments.length ? { attachments } : {}),
+      ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
+    });
+  } catch (err) {
+    if (err instanceof ChannelDeliveryRejectedError) {
+      return {
+        sent: false,
+        verified: false,
+        errorCode: 'CHANNEL_PROVIDER_REJECTED',
+        error: err.message,
+        ...(err.remediation ? { remediation: err.remediation } : {}),
+        connection: {
+          id: candidate.id,
+          kind: candidate.kind,
+          name: candidate.name,
+          providerMessageId: err.providerMessageId,
+          providerErrorCode: err.providerErrorCode,
+        },
+      };
+    }
+    throw err;
+  }
   const providerMessageId = receipt?.providerMessageId?.trim() ?? '';
   if (!providerMessageId) {
     return {
@@ -147,6 +168,17 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
       remediation: 'Inspect the channel/provider before retrying; an unverified attempt may still have reached the recipient.',
       connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
       ...(receipt ? { receipt } : {}),
+    };
+  }
+  if (!isAcknowledgedChannelDelivery(receipt)) {
+    return {
+      sent: false,
+      verified: false,
+      errorCode: 'CHANNEL_DELIVERY_PENDING',
+      error: `${candidate.kind} accepted the local submission but has not provided server acknowledgement. Downstream state was not advanced.`,
+      remediation: 'Wait for a provider acknowledgement and inspect the durable delivery receipt before retrying. Do not resend blindly: the original attempt may still be accepted later.',
+      connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
+      receipt,
     };
   }
   return {

@@ -25,6 +25,8 @@ export interface RunPublishedWorkflowArgs {
   workflowId: string;
   graph: WorkflowGraph;
   inputs: Record<string, unknown>;
+  /** Interactive chat origin; enables scoped Stop without touching other runs. */
+  conversationId?: string | null;
   /** Poll budget before returning the last-seen (possibly non-terminal) state. */
   timeoutMs?: number;
 }
@@ -61,10 +63,12 @@ export async function startPublishedWorkflow(
     userId: args.userId,
     status: 'CREATED',
     runState: initialState,
+    conversationId: args.conversationId ?? null,
   }).run();
   await args.engine.startRun({
     workspaceId: args.workspaceId,
     ambientId: args.ambientId,
+    conversationId: args.conversationId ?? null,
     workflowId: args.workflowId,
     userId: args.userId,
     triggerId: null,

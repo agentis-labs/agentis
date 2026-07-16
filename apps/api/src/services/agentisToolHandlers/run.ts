@@ -15,6 +15,8 @@ import { collectFailedNodeIds, failedNodeCount } from '../run/runStateFailures.j
 import { analyzeRunFailure } from '../run/runFailureAnalysis.js';
 import { recordWorkflowLesson, recallWorkflowLessons } from '../workflow/workflowPlaybook.js';
 import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop, type CompassStep } from '../workflow/workflowCompass.js';
+import { collectReplayFrontierNodeIds } from '../partialReplay.js';
+import { compileAppReadiness } from '../app/appCompiler.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -27,6 +29,8 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         description:
           '[PAVED ROAD 3–4/5 — DEBUG-RUN / RUN] Start a workflow run with optional inputs. Set debugRun:true for a TEST run that '
           + 'disables self-healing and fallback recovery so you observe the RAW per-node failure '
+          + 'and, by default, resumes the latest same-graph failed/deficient frontier without repeating proven upstream work. '
+          + 'Use restartMode:"fresh" only when root inputs or upstream behavior must be exercised again. '
           + '(step 3 — do this once after a green dry_run; use a normal run in production, step 4). '
           + 'The result includes compass.next (agentis.run.await to block until it settles — event-driven, zero-token; diagnose on failure).',
         inputSchema: {
@@ -38,6 +42,11 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
             inputs: { type: 'object' },
             input: { type: 'string' },
             debugRun: { type: 'boolean', description: 'Test run: disable self-heal + fallback so raw per-node failures surface.' },
+            restartMode: {
+              type: 'string',
+              enum: ['auto', 'fresh', 'failed_frontier'],
+              description: 'Debug-run restart policy. auto (default) resumes the latest same-graph failed/deficient frontier; fresh explicitly starts at the root.',
+            },
           },
           required: ['workflowId'],
         },
@@ -53,15 +62,78 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           throw new Error(`workflow ${args.workflowId} not found in workspace`);
         }
         const graph = wf.graph as WorkflowGraph;
-        const runId = randomUUID();
         const planId = args.planId ? String(args.planId) : args.taskId ? String(args.taskId) : null;
+        const debugRun = args.debugRun === true;
+        if (wf.appId) {
+          const compile = compileAppReadiness(deps.db, ctx.workspaceId, wf.appId, debugRun ? 'debug' : 'production');
+          if (!compile.readyForExecution) {
+            throw new AgentisError(
+              'VALIDATION_FAILED',
+              `APP_COMPILE_BLOCKED: workflow belongs to App ${wf.appId}, which is not ready for ${debugRun ? 'debug' : 'production'} execution (${compile.executionBlockerCount} execution blocker(s)). Clear the zero-cost repair batch before spending on a run.`,
+              {
+                httpStatus: 409,
+                remediation: compile.repairPlan.zeroCost[0]
+                  ? `Apply all compatible compile.repairPlan.zeroCost actions, run agentis.app.verify once, then compile once. First action: ${compile.repairPlan.zeroCost[0].tool} ${JSON.stringify(compile.repairPlan.zeroCost[0].args)}`
+                  : 'Run agentis.app.compile and clear the blocking checks as one compatible batch.',
+                details: { appId: wf.appId, structuralReady: compile.structuralReady, executableReady: compile.executableReady, executionBlockerCount: compile.executionBlockerCount, evidencePendingCount: compile.evidencePendingCount, blockers: compile.checks.filter((check) => check.status === 'block' && check.blocksExecution !== false), repairPlan: compile.repairPlan },
+              },
+            );
+          }
+        }
+        const requestedRestartMode = typeof args.restartMode === 'string' ? args.restartMode : undefined;
+        if (requestedRestartMode && !['auto', 'fresh', 'failed_frontier'].includes(requestedRestartMode)) {
+          throw new AgentisError('VALIDATION_FAILED', `unknown restartMode '${requestedRestartMode}'`);
+        }
+        if (!debugRun && requestedRestartMode && requestedRestartMode !== 'fresh') {
+          throw new AgentisError('VALIDATION_FAILED', 'restartMode auto/failed_frontier is available only when debugRun:true');
+        }
+        const restartMode = debugRun ? requestedRestartMode ?? 'auto' : 'fresh';
+        const hasExplicitInputs = args.inputs !== undefined || args.input !== undefined;
+        if (restartMode === 'failed_frontier' && hasExplicitInputs) {
+          throw new AgentisError(
+            'VALIDATION_FAILED',
+            'failed_frontier preserves upstream outputs and cannot accept replacement inputs; use restartMode:"fresh"',
+          );
+        }
         const inputs = parseInputs(args.inputs ?? args.input);
-        const initialState: WorkflowRunState = buildInitialRunState({
+        const activeDebugRun = debugRun && restartMode !== 'fresh' && !hasExplicitInputs
+          ? latestSameGraphActiveRun(deps, ctx.workspaceId, wf.id, graph)
+          : null;
+        if (activeDebugRun) {
+          return {
+            runId: activeDebugRun.id,
+            workflowId: wf.id,
+            status: 'already_running',
+            restartMode: 'in_progress',
+            note: 'A same-graph debug run is already active; await or inspect it instead of starting a duplicate.',
+            compass: compassForRun({ runId: activeDebugRun.id, workflowId: wf.id, status: 'started', debugRun: true }),
+          };
+        }
+        const candidate = debugRun && restartMode !== 'fresh' && !hasExplicitInputs
+          ? latestSameGraphReplayCandidate(deps, ctx.workspaceId, wf.id, graph)
+          : null;
+        if (restartMode === 'failed_frontier' && !candidate) {
+          throw new AgentisError(
+            'REPLAY_TARGET_INVALID',
+            'no latest same-graph failed or verdict-deficient frontier exists; use restartMode:"fresh"',
+          );
+        }
+        const prepared = candidate
+          ? deps.replay.prepare({
+              workspaceId: ctx.workspaceId,
+              sourceRunId: candidate.id,
+              mode: 'replay-failed-branch',
+              userId: ctx.userId,
+            })
+          : null;
+        const runId = prepared?.runId ?? randomUUID();
+        const initialState: WorkflowRunState = prepared?.initialState ?? buildInitialRunState({
           runId,
           workflowId: wf.id,
           graph,
           inputs,
         });
+        if (prepared && candidate) initialState.replanCount = candidate.replanCount + 1;
         deps.db.insert(schema.workflowRuns).values({
           id: runId,
           workspaceId: ctx.workspaceId,
@@ -72,6 +144,11 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           status: 'CREATED',
           runState: initialState,
           triggerId: null,
+          ...(candidate ? {
+            isReplay: true,
+            parentRunId: candidate.id,
+            replanCount: candidate.replanCount + 1,
+          } : {}),
         }).run();
         deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.RUN_CREATED, {
           runId,
@@ -86,9 +163,9 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           ...(planId ? { planId } : {}),
           userId: ctx.userId,
           triggerId: null,
-          inputs,
+          inputs: prepared?.inputs ?? inputs,
           initialState,
-          debugRun: args.debugRun === true,
+          debugRun,
           graph,
         });
         // SWIFT "warn previously": a PRODUCTION run (not a debug run — that IS the
@@ -96,7 +173,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         // version is proceeding UNVERIFIED. Warn the agent at the run, before a
         // failure it would then have to self-heal.
         const divergence =
-          args.debugRun === true
+          debugRun
             ? null
             : detectProvenDivergence(readBuildLoop(wf.settings), graphContentHash(graph), wf.id);
         // PAVED-ROAD P1 — every result is a signpost: hand the agent the exact
@@ -105,12 +182,17 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           runId: handle.runId,
           workflowId: handle.workflowId,
           status: 'started',
+          restartMode: candidate ? 'failed_frontier' : 'fresh',
+          ...(candidate ? {
+            resumedFromRunId: candidate.id,
+            reusedNodeIds: initialState.completedNodeIds,
+          } : {}),
           ...(divergence ? { divergence } : {}),
           compass: compassForRun({
             runId: handle.runId,
             workflowId: handle.workflowId,
             status: 'started',
-            debugRun: args.debugRun === true,
+            debugRun,
           }),
         };
       },
@@ -135,6 +217,35 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         }
         await deps.engine.cancelRun(run.id);
         return { runId: run.id, status: 'cancelled' };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.run.regrade',
+        family: 'run',
+        mcpExposed: true,
+        description:
+          'Re-evaluate a COMPLETED run against the workflow current graph-reconciled definition of done using persisted node outputs and world probes. '
+          + 'This NEVER replays workflow nodes or repeats outward side effects. Use it after repairing only the acceptance spec/output contract; do not launch another live run just to refresh a verdict.',
+        inputSchema: {
+          type: 'object',
+          properties: { runId: { type: 'string' } },
+          required: ['runId'],
+        },
+        mutating: true,
+      },
+      handler: async (args, ctx) => {
+        const result = await deps.engine.regradeCompletedRun({ workspaceId: ctx.workspaceId, runId: String(args.runId) });
+        return {
+          ...result,
+          accomplished: result.verdict.outcome === 'accomplished',
+          executionReplayed: false,
+          outwardSideEffectsRepeated: false,
+          next:
+            result.verdict.outcome === 'accomplished'
+              ? 'Persisted evidence now satisfies the definition of done. Continue from the next business event/frontier; do not rerun this workflow.'
+              : 'Repair the definition of done using terminalOutputPaths when the evidence path is wrong; repair producing nodes only when the evidence itself is deficient. Then regrade again without replay.',
+        };
       },
     },
     {
@@ -655,6 +766,78 @@ function parseInputs(value: unknown): Record<string, unknown> {
     }
   }
   return { input: value };
+}
+
+/**
+ * Return the latest terminal execution of this exact graph when it has a
+ * concrete failed/deficient producer frontier. We intentionally do not scan
+ * past the latest same-graph terminal run: a newer accomplished execution
+ * supersedes an older failure and must not resurrect it.
+ */
+function latestSameGraphReplayCandidate(
+  deps: Pick<ToolHandlerDeps, 'db'>,
+  workspaceId: string,
+  workflowId: string,
+  graph: WorkflowGraph,
+) {
+  const currentHash = graphContentHash(graph);
+  const rows = deps.db
+    .select()
+    .from(schema.workflowRuns)
+    .where(and(
+      eq(schema.workflowRuns.workspaceId, workspaceId),
+      eq(schema.workflowRuns.workflowId, workflowId),
+    ))
+    .orderBy(desc(schema.workflowRuns.createdAt))
+    .limit(50)
+    .all();
+
+  for (const row of rows) {
+    if (!['FAILED', 'COMPLETED', 'COMPLETED_WITH_ERRORS', 'COMPLETED_WITH_CONTRACT_VIOLATION'].includes(row.status)) {
+      continue;
+    }
+    const state = row.runState as WorkflowRunState & { verdict?: { graphHash?: unknown } };
+    const snapshot = row.graphSnapshot as WorkflowGraph | null;
+    let sourceHash: string | null = null;
+    if (snapshot?.nodes && snapshot?.edges) {
+      try {
+        sourceHash = graphContentHash(snapshot);
+      } catch {
+        sourceHash = null;
+      }
+    }
+    if (!sourceHash && typeof state.verdict?.graphHash === 'string') sourceHash = state.verdict.graphHash;
+    if (sourceHash !== currentHash) continue;
+
+    return collectReplayFrontierNodeIds(state, graph).size > 0 ? row : null;
+  }
+  return null;
+}
+
+function latestSameGraphActiveRun(
+  deps: Pick<ToolHandlerDeps, 'db'>,
+  workspaceId: string,
+  workflowId: string,
+  graph: WorkflowGraph,
+) {
+  const currentHash = graphContentHash(graph);
+  const rows = deps.db
+    .select()
+    .from(schema.workflowRuns)
+    .where(and(eq(schema.workflowRuns.workspaceId, workspaceId), eq(schema.workflowRuns.workflowId, workflowId)))
+    .orderBy(desc(schema.workflowRuns.createdAt))
+    .limit(25)
+    .all();
+  return rows.find((row) => {
+    if (!['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED'].includes(row.status)) return false;
+    const snapshot = row.graphSnapshot as WorkflowGraph | null;
+    if (!snapshot?.nodes || !snapshot?.edges) return false;
+    try {
+      return graphContentHash(snapshot) === currentHash;
+    } catch {
+      return false;
+    }
+  }) ?? null;
 }
 
 const RUN_SETTLE_EVENTS: ReadonlySet<string> = new Set([

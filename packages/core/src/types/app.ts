@@ -163,6 +163,12 @@ export const appWorkflowBindingSchema = z.object({
   order: z.number().int().min(0).optional(),
   purpose: z.string().max(400).optional(),
   enabled: z.boolean().optional(),
+  /**
+   * Whether the operator's Run Pipeline/Run All command may choose this
+   * workflow as a root. Event-, channel-, webhook-, and schedule-driven roots
+   * set this false while remaining enabled for their own persisted trigger.
+   */
+  operatorEntrypoint: z.boolean().optional(),
   dependsOn: z.array(z.string()).default([]),
   /**
    * App-level recurring schedule (APP-INTERFACE-10X §2.3) — a standard 5-field
@@ -200,6 +206,7 @@ export interface AppWorkflowSummary {
   purpose: string | null;
   order: number;
   enabled: boolean;
+  operatorEntrypoint: boolean;
   dependsOn: string[];
   /** Derived from the trigger node: manual | cron | webhook | persistent_listener | … */
   triggerKind: string | null;

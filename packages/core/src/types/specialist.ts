@@ -105,6 +105,8 @@ export type AgentTool =
   // ── AG-UI: author Agentic App surfaces (AGENTIC-APPS-10X-MASTERPLAN §4) ──
   | 'ui_render'
   | 'ui_patch'
+  | 'ui_inspect'
+  | 'ui_remove'
   | 'ui_action_schema'
   // ── App Datastore: typed collections + records (§5) ──
   | 'data_define_collection'
@@ -144,6 +146,8 @@ export const DEFAULT_SPECIALIST_TOOLS: AgentTool[] = [
   'browser_fill_form',
   'ui_render',
   'ui_patch',
+  'ui_inspect',
+  'ui_remove',
   'ui_action_schema',
   'data_define_collection',
   'data_insert',
@@ -191,8 +195,10 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   workflow_memory_read: 'Read persistent state this workflow saved on a prior run (cursors, dedup keys, accumulated findings). args: { key?: string }',
   workflow_memory_write: 'Persist state for future runs of this workflow. args: { key: string, value: unknown }',
   call_workflow: 'Invoke another workflow in this workspace. args: { workflowId: string, inputs?: object }',
-  ui_render: 'Author the full UI of an Agentic App surface as a typed ViewNode tree. AGENT-NATIVE composites (prefer these — they make the surface a living agentic app, not a static dashboard): ActivityStream (a live feed of your work), DataBoard ({ bind, groupBy, titleField? } — a kanban over a collection grouped by a status field). Plus data/content nodes: Stack/Row/Grid/Card/Text/Heading/Metric/Table/List/Form/Button/Chart/Badge. Tables/Lists/Charts/Boards bind to a collection ({ bind: { collection, query?, sort?, limit? } }); Buttons/Forms declare an action ({ action: "name", args }) registered with ui_action_schema. The App Shell already names the App/page: do not repeat the app name as a leading Hero/Heading, use only the spacing rhythm 8/12/16/20/24px, and never show template strings like "{{count:collection}}" in visible UI. Lead operator-facing surfaces with an ActivityStream. Replaces the surface view. args: { surface: string, view: ViewNode }',
+  ui_render: 'Author the full UI of an Agentic App surface as a typed ViewNode tree. Prefer real operating composites: Kanban (draggable with update action; contextActions/cardActions may define label/icon/tone plus visibleWhen/disabledWhen record predicates and transitions govern allowed state moves), RecordMaster, ActivityStream, OrchestrationPanel, Table, Chart, Form. Every node receives a stable nodeId after persistence. Bind only to real collections/fields and declare every action with ui_action_schema. The App Shell already owns navigation/title. Replaces the surface view. args: { surface: string, view: ViewNode }',
   ui_patch: 'Mutate part of an existing surface view without re-sending the whole tree. args: { surface: string, ops: Array<{ op: "set"|"insert"|"remove", path, value?|node? }> }',
+  ui_inspect: 'Inspect persisted App surfaces before editing. Compact by default: semantic nodeId/type/path/collection outline plus actions; includeTree:true only when exact properties are necessary. args: { surface?: string, includeTree?: boolean }',
+  ui_remove: 'Remove one persisted component by stable nodeId, or delete a whole surface with explicit name confirmation. Inspect first. args: { surface: string, nodeId?: string, deleteSurface?: boolean, confirmSurfaceName?: string }',
   ui_action_schema: 'Declare the actions a surface\'s buttons/forms can invoke. Each action resolves to a workflow run, an agent tool, or a datastore op. args: { surface: string, actions: Array<{ name, kind: "workflow"|"tool"|"data", target, inputSchema? }> }',
   data_define_collection: 'Define (or update) a typed App Datastore collection. Fields: { key, type: "string"|"number"|"boolean"|"date"|"json", required?, indexed? }. args: { name: string, schema: { fields: [...] } }',
   data_insert: 'Insert a record into a collection. Validated against the collection schema. args: { collection: string, record: object }',

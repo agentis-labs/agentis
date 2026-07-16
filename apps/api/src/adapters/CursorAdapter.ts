@@ -22,6 +22,7 @@ import {
   chatHardCeilingMs,
   clampChatTimeout,
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
+  messagesForRuntimeSession,
   runCliChatTurn,
   type CliChatPart,
 } from './cliChatRuntime.js';
@@ -362,7 +363,7 @@ export class CursorAdapter implements AgentAdapter {
       args,
       cwd: this.opts.cwd,
       env: this.opts.env,
-      stdin: buildCursorChatPrompt(messages, tools),
+      stdin: buildCursorChatPrompt(messagesForRuntimeSession(messages, Boolean(storedSession)), tools),
       displayName: 'Cursor',
       logTag: 'cursor.chat',
       logger: this.opts.logger,

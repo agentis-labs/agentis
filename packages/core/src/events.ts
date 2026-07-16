@@ -201,6 +201,8 @@ export const REALTIME_EVENTS = {
   // Channel bridge (Batch 4 / V1-SPEC §0.3 #24, §11)
   CHANNEL_MESSAGE_RECEIVED: 'channel.message.received',
   CHANNEL_MESSAGE_SENT: 'channel.message.sent',
+  /** Provider delivery evidence changed (queued -> accepted -> delivered -> read). */
+  CHANNEL_MESSAGE_STATUS: 'channel.message.status',
   CHANNEL_CONNECTION_STATUS: 'channel.connection.status',
 
   // Package library

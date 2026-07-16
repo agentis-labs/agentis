@@ -25,12 +25,13 @@
  * cycles terminate instead of ping-ponging forever.
  */
 
-import { and, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import {
   appWorkflowBindingSchema,
   REALTIME_EVENTS,
   REALTIME_ROOMS,
   type AppWorkflowBinding,
+  type WorkflowGraph,
 } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { BusMessage, EventBus } from '../../event-bus.js';
@@ -40,6 +41,7 @@ import { queueWorkflowRun, type SchedulerDeps } from '../scheduler.js';
 import { nextCronFire } from '../cronNextFire.js';
 import { readWorkflowSpec } from '../workflow/workflowSpec.js';
 import { evaluateRunOutcome } from '../workflow/runOutcome.js';
+import { graphContentHash } from '../workflow/workflowCompass.js';
 
 /** Statuses that mean "a run is still in flight" (concurrency guard). */
 const ACTIVE_RUN_STATUSES = ['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED'] as const;
@@ -66,6 +68,7 @@ interface WorkflowBindingRow {
   userId: string;
   appId: string | null;
   title: string;
+  graph: WorkflowGraph;
   settings?: unknown;
   binding: AppWorkflowBinding;
 }
@@ -257,15 +260,60 @@ export class AppOrchestratorService {
 
   // ── 4. run-all ─────────────────────────────────────────────
 
-  /** Start every enabled root workflow (no dependsOn) in `order`; chains cascade. */
-  async runAll(workspaceId: string, appId: string, userId: string): Promise<Array<{ workflowId: string; runId: string | null; skipped?: string }>> {
-    const rows = this.appWorkflows(workspaceId, appId)
-      .filter((row) => row.binding.enabled !== false && (row.binding.dependsOn ?? []).length === 0)
+  /**
+   * Continue the App from its first unresolved business frontier. A current-
+   * graph run that is already accomplished is reused; it is not paid for and
+   * executed again. `fresh` is the explicit operator escape hatch when inputs
+   * or external state require a root restart.
+   */
+  async runAll(
+    workspaceId: string,
+    appId: string,
+    userId: string,
+    mode: 'continue' | 'fresh' = 'continue',
+    overrideAck?: string,
+  ): Promise<Array<{ workflowId: string; runId: string | null; skipped?: string; reusedRunId?: string }>> {
+    const enabled = this.appWorkflows(workspaceId, appId)
+      .filter((row) => row.binding.enabled !== false)
       .sort((a, b) => (a.binding.order ?? 0) - (b.binding.order ?? 0) || a.title.localeCompare(b.title));
-    const results: Array<{ workflowId: string; runId: string | null; skipped?: string }> = [];
+    const latest = mode === 'continue'
+      ? new Map(enabled.map((row) => [row.id, this.latestCurrentGraphRun(row)] as const))
+      : new Map<string, ReturnType<AppOrchestratorService['latestCurrentGraphRun']>>();
+    const satisfied = new Set<string>();
+    if (mode === 'continue') {
+      for (const row of enabled) {
+        const run = latest.get(row.id);
+        if (!run) continue;
+        const outcome = evaluateRunOutcome({
+          status: run.status,
+          runState: run.runState,
+          hasDefinitionOfDone: Boolean(readWorkflowSpec(row.settings)),
+        });
+        if ((row.binding.chainOn ?? 'success') === 'always' ? outcome.terminal : outcome.canAdvanceOnSuccess) {
+          satisfied.add(row.id);
+        }
+      }
+    }
+    const rows = enabled.filter((row) => {
+      if (mode === 'fresh') return (row.binding.dependsOn ?? []).length === 0 && row.binding.operatorEntrypoint !== false;
+      if (satisfied.has(row.id)) return true; // reported as reused below
+      const dependencies = row.binding.dependsOn ?? [];
+      if (dependencies.length === 0 && row.binding.operatorEntrypoint === false) return false;
+      return dependencies.every((dependencyId) => satisfied.has(dependencyId));
+    });
+    const results: Array<{ workflowId: string; runId: string | null; skipped?: string; reusedRunId?: string }> = [];
     for (const row of rows) {
+      if (satisfied.has(row.id)) {
+        results.push({ workflowId: row.id, runId: null, skipped: 'current_graph_accomplished', reusedRunId: latest.get(row.id)?.id });
+        continue;
+      }
       if (this.skipForConcurrency(row)) {
         results.push({ workflowId: row.id, runId: null, skipped: 'active_run_exclusive' });
+        continue;
+      }
+      const currentRun = latest.get(row.id);
+      if (mode === 'continue' && currentRun && ACTIVE_RUN_STATUSES.includes(currentRun.status as typeof ACTIVE_RUN_STATUSES[number])) {
+        results.push({ workflowId: row.id, runId: null, skipped: 'active_run_in_progress', reusedRunId: currentRun.id });
         continue;
       }
       try {
@@ -275,8 +323,15 @@ export class AppOrchestratorService {
           ambientId: row.ambientId,
           userId,
           triggerId: null,
-          inputs: { triggerType: 'app_run_all', appId },
-          reason: 'app_run_all',
+          inputs: {
+            triggerType: mode === 'fresh' ? 'app_run_all_fresh' : 'app_run_continue',
+            appId,
+            ...(overrideAck ? { conformanceOverrideAck: overrideAck.slice(0, 300) } : {}),
+          },
+          reason: mode === 'fresh' ? 'app_run_all_fresh' : 'app_run_continue',
+          parentRunId: mode === 'continue'
+            ? (row.binding.dependsOn ?? []).map((id) => latest.get(id)?.id).find(Boolean) ?? undefined
+            : undefined,
         });
         results.push({ workflowId: row.id, runId: queued.runId });
       } catch (err) {
@@ -352,12 +407,13 @@ export class AppOrchestratorService {
         userId: schema.workflows.userId,
         appId: schema.workflows.appId,
         title: schema.workflows.title,
+        graph: schema.workflows.graph,
         settings: schema.workflows.settings,
       })
       .from(schema.workflows)
       .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
       .all()
-      .map((row) => ({ ...row, binding: readAppBinding(row.settings) }));
+      .map((row) => ({ ...row, graph: row.graph as WorkflowGraph, binding: readAppBinding(row.settings) }));
   }
 
   private scheduledWorkflows(): WorkflowBindingRow[] {
@@ -369,13 +425,43 @@ export class AppOrchestratorService {
         userId: schema.workflows.userId,
         appId: schema.workflows.appId,
         title: schema.workflows.title,
+        graph: schema.workflows.graph,
         settings: schema.workflows.settings,
       })
       .from(schema.workflows)
       .where(isNotNull(schema.workflows.appId))
       .all()
-      .map((row) => ({ ...row, binding: readAppBinding(row.settings) }))
+      .map((row) => ({ ...row, graph: row.graph as WorkflowGraph, binding: readAppBinding(row.settings) }))
       .filter((row) => Boolean(row.binding.schedule?.cron));
+  }
+
+  /** Latest terminal/current run whose immutable snapshot matches today's graph. */
+  private latestCurrentGraphRun(row: WorkflowBindingRow): {
+    id: string;
+    status: string;
+    runState: unknown;
+  } | undefined {
+    const currentHash = graphContentHash(row.graph);
+    const candidates = this.deps.db
+      .select({
+        id: schema.workflowRuns.id,
+        status: schema.workflowRuns.status,
+        runState: schema.workflowRuns.runState,
+        graphSnapshot: schema.workflowRuns.graphSnapshot,
+      })
+      .from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.workflowId, row.id))
+      .orderBy(desc(schema.workflowRuns.createdAt))
+      .limit(25)
+      .all();
+    return candidates.find((run) => {
+      if (!run.graphSnapshot) return false;
+      try {
+        return graphContentHash(run.graphSnapshot as WorkflowGraph) === currentHash;
+      } catch {
+        return false;
+      }
+    });
   }
 
   private workflowBindingRow(workflowId: string): WorkflowBindingRow | null {
@@ -387,11 +473,12 @@ export class AppOrchestratorService {
         userId: schema.workflows.userId,
         appId: schema.workflows.appId,
         title: schema.workflows.title,
+        graph: schema.workflows.graph,
         settings: schema.workflows.settings,
       })
       .from(schema.workflows)
       .where(eq(schema.workflows.id, workflowId))
       .get();
-    return row ? { ...row, binding: readAppBinding(row.settings) } : null;
+    return row ? { ...row, graph: row.graph as WorkflowGraph, binding: readAppBinding(row.settings) } : null;
   }
 }

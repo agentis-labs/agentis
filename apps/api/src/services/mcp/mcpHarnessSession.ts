@@ -166,9 +166,10 @@ export function harnessMcpArgs(
   adapterType: AdapterType,
   servers: McpHarnessServer[],
   executionMode: 'chat' | 'plan' | 'ask' = 'chat',
+  turn?: { conversationId?: string; turnLease?: string },
 ): string[] {
   if (servers.length === 0) return [];
-  const tagged = withExecutionModeHeader(servers, executionMode);
+  const tagged = withHarnessTurnHeaders(servers, executionMode, turn);
   if (adapterType === 'claude_code') return claudeMcpArgs(tagged);
   if (adapterType === 'codex') return codexMcpArgs(tagged);
   // Cursor (`cursor-agent`) and Antigravity (`agy`) have NO spawn-arg MCP
@@ -187,10 +188,26 @@ export function harnessMcpArgs(
  * Auto turn's descriptor is byte-identical to before (no behavior change).
  */
 export const EXECUTION_MODE_HEADER = 'x-agentis-execution-mode';
+export const CONVERSATION_ID_HEADER = 'x-agentis-conversation';
+export const TURN_LEASE_HEADER = 'x-agentis-turn-lease';
 
-function withExecutionModeHeader(servers: McpHarnessServer[], executionMode: 'chat' | 'plan' | 'ask'): McpHarnessServer[] {
-  if (executionMode === 'chat') return servers;
-  return servers.map((s) => ({ ...s, headers: { ...s.headers, [EXECUTION_MODE_HEADER]: executionMode } }));
+export function withHarnessTurnHeaders(
+  servers: McpHarnessServer[],
+  executionMode: 'chat' | 'plan' | 'ask',
+  turn?: { conversationId?: string; turnLease?: string },
+): McpHarnessServer[] {
+  const conversationId = turn?.conversationId?.trim();
+  const turnLease = turn?.turnLease?.trim();
+  if (executionMode === 'chat' && !conversationId && !turnLease) return servers;
+  return servers.map((s) => ({
+    ...s,
+    headers: {
+      ...s.headers,
+      ...(executionMode === 'chat' ? {} : { [EXECUTION_MODE_HEADER]: executionMode }),
+      ...(conversationId ? { [CONVERSATION_ID_HEADER]: conversationId } : {}),
+      ...(turnLease ? { [TURN_LEASE_HEADER]: turnLease } : {}),
+    },
+  }));
 }
 
 /** Claude Code: native streamable-HTTP MCP via an inline `--mcp-config` JSON. */

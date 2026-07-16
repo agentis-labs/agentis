@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { resolveAndSend, type ChannelSendDeps } from '../../src/services/conversation/channelSend.js';
-import type { ChannelDeliveryReceipt } from '../../src/adapters/channels/types.js';
+import { ChannelDeliveryRejectedError, type ChannelDeliveryReceipt } from '../../src/adapters/channels/types.js';
 
 type Conn = { id: string; kind: string; name: string; status: string; agentId?: string | null; defaultChatId?: string | null; targetAliases?: unknown; isDefault?: boolean; health: { status: string } };
 
@@ -50,6 +50,38 @@ describe('resolveAndSend', () => {
     const res = await resolveAndSend(deps, { workspaceId: 'w', kind: 'whatsapp', body: 'hello', to: '+5511888' });
     expect(res.sent).toBe(false);
     if (!res.sent) expect(res.errorCode).toBe('CHANNEL_DELIVERY_UNVERIFIED');
+  });
+
+  it('does not report sent when WhatsApp has only a client id and no server acknowledgement', async () => {
+    const { deps } = fakeDeps([wa()], {
+      deliver: async () => ({
+        provider: 'whatsapp',
+        providerMessageId: '3EB0CLIENTONLY',
+        status: 'queued',
+        acceptedAt: '2026-07-16T00:00:00.000Z',
+        recipient: '5511999999999@s.whatsapp.net',
+        providerAcknowledged: false,
+        providerStatus: 0,
+      }),
+    });
+    const res = await resolveAndSend(deps, { workspaceId: 'w', kind: 'whatsapp', body: 'hello', to: '+5511999999999' });
+    expect(res.sent).toBe(false);
+    if (!res.sent) {
+      expect(res.errorCode).toBe('CHANNEL_DELIVERY_PENDING');
+      expect(res.receipt?.providerAcknowledged).toBe(false);
+    }
+  });
+
+  it('returns a definitive provider rejection with evidence instead of an ack timeout', async () => {
+    const { deps } = fakeDeps([wa()], {
+      deliver: async () => { throw new ChannelDeliveryRejectedError('whatsapp', '3EB0REJECTED', '463', 'new-chat outreach restricted', 'pause new outreach'); },
+    });
+    const res = await resolveAndSend(deps, { workspaceId: 'w', kind: 'whatsapp', body: 'hello', to: '+5511999999999' });
+    expect(res.sent).toBe(false);
+    if (!res.sent) {
+      expect(res.errorCode).toBe('CHANNEL_PROVIDER_REJECTED');
+      expect(res.connection).toMatchObject({ providerMessageId: '3EB0REJECTED', providerErrorCode: '463' });
+    }
   });
 
   it('fails (no send) when no connection of the kind exists — the exact "workflow claims a send with no connection" case', async () => {

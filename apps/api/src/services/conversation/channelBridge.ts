@@ -24,17 +24,18 @@ import type { CredentialVault } from '../credentialVault.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { EventBus } from '../../event-bus.js';
 import type { Logger } from '../../logger.js';
-import type {
-  ChannelAdapter,
-  ChannelDeliveryReceipt,
-  ChannelHealth,
-  ChannelHealthCheck,
-  ChannelHealthCheckName,
-  ChannelKind,
-  ChannelStatus,
-  OutboundAttachment,
-  OutboundAttachmentRef,
-  ParsedInboundMessage,
+import {
+  ChannelDeliveryRejectedError,
+  type ChannelAdapter,
+  type ChannelDeliveryReceipt,
+  type ChannelHealth,
+  type ChannelHealthCheck,
+  type ChannelHealthCheckName,
+  type ChannelKind,
+  type ChannelStatus,
+  type OutboundAttachment,
+  type OutboundAttachmentRef,
+  type ParsedInboundMessage,
 } from '../../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 import type { ArtifactService } from '../artifactService.js';
@@ -97,6 +98,8 @@ export interface PublicConnection {
   ambientId: string | null;
   /** Owning agent, or null for a workspace-owned (global/agentless) connection. */
   agentId: string | null;
+  /** App whose conversation context receives inbound turns, or null when unbound. */
+  appId: string | null;
   kind: ChannelKind;
   name: string;
   status: string;
@@ -136,6 +139,8 @@ export interface PersistentChannelTransport {
   /** Current live-session state, if this transport owns the connection. */
   status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
   send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[]): Promise<ChannelDeliveryReceipt>;
+  /** Provider account/quota diagnostics; read-only and never sends a message. */
+  outboundHealth?(connectionId: string): Promise<ChannelHealthCheck | null>;
   /** Show/clear the typing indicator (best-effort). */
   setTyping?(connectionId: string, chatId: string, on: boolean): Promise<void>;
   /** Tear down the live session when a connection is deleted. */
@@ -244,7 +249,7 @@ export class ChannelBridge {
         digest: createHash('sha256').update(attachment.data).digest('hex'),
       }))))
       .digest('hex');
-    let journalId: string | null = null;
+    const journalId = randomUUID();
     if (idempotencyKey) {
       const existing = this.deps.db
         .select()
@@ -259,7 +264,7 @@ export class ChannelBridge {
           throw new AgentisError('VALIDATION_FAILED', 'channel idempotency key was reused with a different connection, recipient, or message');
         }
         const stored = existing.receipt as ChannelDeliveryReceipt | null;
-        if (existing.status === 'accepted' && stored?.providerMessageId) {
+        if (['accepted', 'delivered', 'read'].includes(existing.status) && stored?.providerMessageId && stored.providerAcknowledged !== false) {
           return { ...stored, deduplicated: true, idempotencyKey };
         }
         throw new AgentisError(
@@ -267,17 +272,19 @@ export class ChannelBridge {
           `channel delivery ${idempotencyKey} already has status ${existing.status}; Agentis will not resend an uncertain/failed attempt automatically`,
         );
       }
-      journalId = randomUUID();
-      this.deps.db.insert(schema.channelOutboundDeliveries).values({
-        id: journalId,
-        workspaceId: row.workspaceId,
-        connectionId: row.id,
-        idempotencyKey,
-        chatId: args.chatId,
-        bodyHash,
-        status: 'sending',
-      }).run();
     }
+    // Journal every provider-bound attempt, not only workflow-idempotent ones.
+    // Direct agent/tool sends also need a durable correlation row so an async
+    // WhatsApp acknowledgement can promote queued -> accepted/delivered/read.
+    this.deps.db.insert(schema.channelOutboundDeliveries).values({
+      id: journalId,
+      workspaceId: row.workspaceId,
+      connectionId: row.id,
+      idempotencyKey: idempotencyKey ?? `attempt:${journalId}`,
+      chatId: args.chatId,
+      bodyHash,
+      status: 'sending',
+    }).run();
     try {
       const receipt = await this.#sendRow(row, args.chatId, args.body, attachments);
       if (!receipt.providerMessageId?.trim()) {
@@ -285,34 +292,59 @@ export class ChannelBridge {
       }
       this.#markActive(row.id);
       const durableReceipt = idempotencyKey ? { ...receipt, idempotencyKey } : receipt;
-      if (journalId) {
-        this.deps.db.update(schema.channelOutboundDeliveries).set({
-          status: 'accepted',
-          providerMessageId: receipt.providerMessageId,
-          receipt: durableReceipt,
-          error: null,
-          updatedAt: new Date().toISOString(),
-        }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
-      }
+      this.deps.db.update(schema.channelOutboundDeliveries).set({
+        status: receipt.status,
+        providerMessageId: receipt.providerMessageId,
+        receipt: durableReceipt,
+        error: null,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+      const eventPayload = {
+        connectionId: row.id,
+        kind: row.kind,
+        agentId: row.agentId,
+        providerMessageId: receipt.providerMessageId,
+        status: receipt.status,
+        providerAcknowledged: receipt.providerAcknowledged !== false,
+        requestedRecipient: receipt.requestedRecipient ?? args.chatId,
+        resolvedRecipient: receipt.resolvedRecipient ?? receipt.recipient ?? args.chatId,
+      };
       this.deps.bus.publish(
         REALTIME_ROOMS.workspace(row.workspaceId),
-        REALTIME_EVENTS.CHANNEL_MESSAGE_SENT,
-        { connectionId: row.id, kind: row.kind, agentId: row.agentId, providerMessageId: receipt.providerMessageId, status: receipt.status },
+        REALTIME_EVENTS.CHANNEL_MESSAGE_STATUS,
+        eventPayload,
       );
+      if (receipt.status !== 'queued' && receipt.providerAcknowledged !== false) {
+        this.deps.bus.publish(
+          REALTIME_ROOMS.workspace(row.workspaceId),
+          REALTIME_EVENTS.CHANNEL_MESSAGE_SENT,
+          eventPayload,
+        );
+      }
       return durableReceipt;
     } catch (err) {
       const msg = (err as Error).message ?? 'send failed';
-      if (journalId) {
-        // The process reached the provider boundary but lacks durable proof of
-        // acceptance. Keep the attempt non-retryable under this key: a blind
-        // resend is worse than an explicit uncertain outcome.
-        this.deps.db.update(schema.channelOutboundDeliveries).set({
-          status: 'uncertain',
-          error: msg,
+      const providerRejected = err instanceof ChannelDeliveryRejectedError;
+      // A provider rejection is certain and retryable only after remediation.
+      // A transport exception remains uncertain because the message may have
+      // crossed the provider boundary before the failure became visible.
+      this.deps.db.update(schema.channelOutboundDeliveries).set({
+        status: providerRejected ? 'failed' : 'uncertain',
+        ...(providerRejected ? { providerMessageId: err.providerMessageId } : {}),
+        error: msg,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+      if (providerRejected) {
+        // A recipient/account policy rejection does not mean the live socket is
+        // broken. Keep established conversations usable and expose the failure
+        // through outbound health instead of flipping transport status to error.
+        this.deps.db.update(schema.channelConnections).set({
+          lastError: msg,
           updatedAt: new Date().toISOString(),
-        }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+        }).where(eq(schema.channelConnections.id, row.id)).run();
+      } else {
+        this.#markError(row.id, msg);
       }
-      this.#markError(row.id, msg);
       throw err;
     }
   }
@@ -368,6 +400,36 @@ export class ChannelBridge {
       throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${id} not found`);
     }
     return this.#toPublic(row);
+  }
+
+  /**
+   * Bind a channel to an App's conversation context, or clear the binding.
+   * Both resources are workspace-scoped. Existing channel conversations are
+   * reconciled immediately so the next turn cannot retain stale App context.
+   */
+  bindApp(workspaceId: string, id: string, appId: string | null): PublicConnection {
+    const row = this.#row(workspaceId, id);
+    if (appId) {
+      const app = this.deps.db
+        .select({ id: schema.apps.id })
+        .from(schema.apps)
+        .where(and(eq(schema.apps.id, appId), eq(schema.apps.workspaceId, workspaceId)))
+        .get();
+      if (!app) throw new AgentisError('RESOURCE_NOT_FOUND', `app ${appId} not found`);
+    }
+    const now = new Date().toISOString();
+    this.deps.db.update(schema.channelConnections)
+      .set({ appId, updatedAt: now })
+      .where(eq(schema.channelConnections.id, row.id))
+      .run();
+    this.deps.db.update(schema.conversations)
+      .set({ appId, updatedAt: now })
+      .where(and(
+        eq(schema.conversations.workspaceId, workspaceId),
+        eq(schema.conversations.channelConnectionId, row.id),
+      ))
+      .run();
+    return this.get(workspaceId, id);
   }
 
   create(input: CreateConnectionInput): { connection: PublicConnection; webhookSecret: string } {
@@ -560,14 +622,14 @@ export class ChannelBridge {
   }
 
   /**
-   * Run safe provider checks and persist structured health. When a default
-   * destination exists, the outbound check sends one visible test message.
+   * Run read-only provider checks and persist structured health. A health test
+   * never sends a message: external delivery belongs to the explicit send path
+   * and must produce its own provider acknowledgement evidence.
    */
   async test(args: { workspaceId: string; id: string; chatId?: string; body?: string }): Promise<ChannelHealth> {
     const row = this.#row(args.workspaceId, args.id);
     const checks = await this.#runHealthChecks(row, {
       chatId: args.chatId,
-      body: args.body ?? 'Agentis test message',
     });
     return this.#saveHealth(row, checks);
   }
@@ -763,7 +825,7 @@ export class ChannelBridge {
 
   // ── helpers ─────────────────────────────────────────────
 
-  async #runHealthChecks(row: ChannelConnectionRow, opts: { chatId?: string; body: string }): Promise<ChannelHealthCheck[]> {
+  async #runHealthChecks(row: ChannelConnectionRow, opts: { chatId?: string }): Promise<ChannelHealthCheck[]> {
     const settings = this.#settings(row);
     const checks: ChannelHealthCheck[] = [];
     checks.push(await this.#credentialCheck(row, settings));
@@ -804,7 +866,8 @@ export class ChannelBridge {
 
   async #transportCheck(row: ChannelConnectionRow, settings: ChannelSettings): Promise<ChannelHealthCheck> {
     if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
-      const state = this.#persistent.status?.(row.id) ?? { status: settings.transportStatus ?? 'idle' };
+      // Never trust a persisted pre-restart status as live socket evidence.
+      const state = this.#persistent.status?.(row.id) ?? { status: 'idle' };
       if (state.status === 'open') {
         return this.#check('transport', true, 'persistent_transport_open', `${row.kind} live transport is open.`);
       }
@@ -866,12 +929,28 @@ export class ChannelBridge {
   async #outboundCheck(
     row: ChannelConnectionRow,
     settings: ChannelSettings,
-    opts: { chatId?: string; body: string },
+    opts: { chatId?: string },
   ): Promise<ChannelHealthCheck> {
+    let persistentProviderHealth: ChannelHealthCheck | null = null;
+    if (row.kind === 'whatsapp'
+      && this.#persistent?.handles({ id: row.id, kind: row.kind, settings })
+      && this.#persistent.outboundHealth) {
+      persistentProviderHealth = await this.#persistent.outboundHealth(row.id);
+      if (!persistentProviderHealth) {
+        return this.#check(
+          'outbound',
+          false,
+          'outbound_transport_not_live',
+          'The persistent WhatsApp session is not live yet, so outbound capability cannot be verified.',
+          'Wait for the linked session to open or relink it, then run the read-only Channel Test again.',
+        );
+      }
+      if (persistentProviderHealth && (!persistentProviderHealth.ok || (!opts.chatId && !settings.defaultChatId))) return persistentProviderHealth;
+    }
     const chatId = opts.chatId ?? settings.defaultChatId;
     if (!chatId) {
       if (row.kind === 'whatsapp' && settings.mode !== 'cloud') {
-        const state = this.#persistent?.status?.(row.id) ?? { status: settings.transportStatus ?? 'idle' };
+        const state = this.#persistent?.status?.(row.id) ?? { status: 'idle' };
         if (state.status === 'open') {
           return this.#check(
             'outbound',
@@ -895,20 +974,28 @@ export class ChannelBridge {
       const normalized = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
       const selfCheck = await this.#telegramSelfTargetCheck(row, normalized);
       if (selfCheck) return selfCheck;
-      const receipt = await this.#sendRow(row, normalized, opts.body);
-      return this.#check(
+      const route = this.#check(
         'outbound',
         true,
-        'outbound_send_ok',
-        `Provider accepted the test message for ${normalized} (id ${receipt.providerMessageId}).`,
+        'outbound_route_ready',
+        `Outbound routing is configured for ${normalized}. No message was sent by this health check.`,
       );
+      return persistentProviderHealth
+        ? {
+            ...route,
+            code: persistentProviderHealth.code,
+            message: `${persistentProviderHealth.message} Outbound routing is configured for ${normalized}; no message was sent.`,
+            ...(persistentProviderHealth.remediation ? { remediation: persistentProviderHealth.remediation } : {}),
+            ...(persistentProviderHealth.evidence ? { evidence: persistentProviderHealth.evidence } : {}),
+          }
+        : route;
     } catch (err) {
       return this.#check(
         'outbound',
         false,
-        'outbound_send_failed',
-        (err as Error).message || 'Outbound test message failed.',
-        'Fix the provider-specific send error, then run Test again.',
+        'outbound_route_invalid',
+        (err as Error).message || 'Outbound route validation failed.',
+        'Fix the destination or provider configuration, then run the read-only health check again.',
       );
     }
   }
@@ -918,7 +1005,7 @@ export class ChannelBridge {
       return this.#check('inbound', true, 'discord_outbound_only', 'Discord is configured for outbound-only REST mode.');
     }
     if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
-      const state = this.#persistent.status?.(row.id) ?? { status: settings.transportStatus ?? 'idle' };
+      const state = this.#persistent.status?.(row.id) ?? { status: 'idle' };
       if (state.status !== 'open') {
         return this.#check('inbound', false, 'inbound_transport_not_open', `${row.kind} cannot receive messages until the live transport is open.`, 'Relink or restart the live connection.');
       }
@@ -1129,7 +1216,15 @@ export class ChannelBridge {
 
   #healthFromRow(row: ChannelConnectionRow): ChannelHealth {
     const settings = this.#settings(row);
-    if (settings.health && Array.isArray(settings.health.checks)) return settings.health;
+    if (settings.health && Array.isArray(settings.health.checks)) {
+      // The row is the authoritative lifecycle state. A historical Test snapshot
+      // must never report `active` after the supervisor has persisted an error (or
+      // vice versa). Checks remain useful evidence; only their aggregate status is
+      // reconciled until the next explicit provider test refreshes them.
+      return settings.health.status === row.status
+        ? settings.health
+        : { ...settings.health, status: row.status as ChannelStatus };
+    }
     return this.#initialHealth(row.kind as ChannelKind, settings, row.status as ChannelStatus);
   }
 
@@ -1156,9 +1251,13 @@ export class ChannelBridge {
     if (failed.some((check) => check.code.includes('missing') || check.code.includes('needs') || check.code.includes('not_open'))) {
       return 'needs_action';
     }
-    if (failed.some((check) => check.name === 'credential' || check.name === 'transport' || check.name === 'outbound')) {
+    if (failed.some((check) => check.name === 'credential' || check.name === 'transport')) {
       return 'error';
     }
+    // A direction/capability failure does not mean the connection itself is
+    // dead. Preserve healthy inbound/socket use and let consumers gate on the
+    // specific failed capability.
+    if (failed.some((check) => check.name === 'outbound')) return 'degraded';
     return 'degraded';
   }
 
@@ -1440,12 +1539,14 @@ export class ChannelBridge {
   }
 
   #toPublic(row: typeof schema.channelConnections.$inferSelect): PublicConnection {
+    row = this.#reconcileLiveTransport(row);
     const settings = this.#settings(row);
     return {
       id: row.id,
       workspaceId: row.workspaceId,
       ambientId: row.ambientId,
       agentId: row.agentId,
+      appId: row.appId ?? null,
       kind: row.kind as ChannelKind,
       name: row.name,
       status: row.status,
@@ -1461,6 +1562,50 @@ export class ChannelBridge {
       lastError: row.lastError,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
+    };
+  }
+
+  /**
+   * Repair lifecycle drift on ordinary reads. An open persistent socket is
+   * stronger evidence than a stale persisted error; terminal authentication
+   * states are likewise stronger than an old successful Test snapshot.
+   */
+  #reconcileLiveTransport(
+    row: typeof schema.channelConnections.$inferSelect,
+  ): typeof schema.channelConnections.$inferSelect {
+    if (row.status === 'paused') return row;
+    const settings = this.#settings(row);
+    if (!this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) return row;
+    const state = this.#persistent.status?.(row.id);
+    if (!state) return row;
+    const authoritativeStatus: ChannelStatus | null = state.status === 'open'
+      ? 'active'
+      : state.status === 'logged_out' || state.status === 'error'
+        ? 'error'
+        : null;
+    const transportDrift = settings.transportStatus !== state.status;
+    const statusDrift = authoritativeStatus !== null && row.status !== authoritativeStatus;
+    if (!transportDrift && !statusDrift) return row;
+
+    const now = new Date().toISOString();
+    const status = authoritativeStatus ?? row.status as ChannelStatus;
+    const nextSettings: ChannelSettings = {
+      ...settings,
+      transportStatus: state.status,
+      ...(settings.health ? { health: { ...settings.health, status } } : {}),
+    };
+    this.deps.db.update(schema.channelConnections).set({
+      settings: nextSettings,
+      status,
+      updatedAt: now,
+      ...(state.status === 'open' ? { lastError: null, lastEventAt: now } : {}),
+    }).where(eq(schema.channelConnections.id, row.id)).run();
+    return {
+      ...row,
+      settings: nextSettings,
+      status,
+      updatedAt: now,
+      ...(state.status === 'open' ? { lastError: null, lastEventAt: now } : {}),
     };
   }
 }

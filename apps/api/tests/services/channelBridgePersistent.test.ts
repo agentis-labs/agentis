@@ -24,18 +24,19 @@ function seedAgent(ctx: TestContext) {
   return id;
 }
 
-function fakeTransport() {
+function fakeTransport(initialStatus = 'idle') {
   const sent: Array<{ connectionId: string; chatId: string; body: string }> = [];
   const stopped: string[] = [];
   const created: string[] = [];
   const typing: Array<{ connectionId: string; chatId: string; on: boolean }> = [];
+  let liveStatus = initialStatus;
   const transport: PersistentChannelTransport = {
     handles: (conn) => conn.kind === 'whatsapp'
       || (conn.kind === 'telegram' && (conn.settings as { transport?: string } | undefined)?.transport === 'polling')
       || (conn.kind === 'discord' && (conn.settings as { transport?: string } | undefined)?.transport === 'gateway'),
     requiresNoToken: (kind) => kind === 'whatsapp',
     onCreated: (conn) => { created.push(conn.id); },
-    status: () => ({ status: 'open' }),
+    status: () => ({ status: liveStatus }),
     send: async (connectionId, chatId, body) => {
       sent.push({ connectionId, chatId, body });
       const kind = chatId.includes('@s.whatsapp.net') ? 'whatsapp' : chatId === '987' ? 'telegram' : 'discord';
@@ -44,7 +45,7 @@ function fakeTransport() {
     setTyping: async (connectionId, chatId, on) => { typing.push({ connectionId, chatId, on }); },
     stop: async (connectionId) => { stopped.push(connectionId); },
   };
-  return { transport, sent, stopped, created, typing };
+  return { transport, sent, stopped, created, typing, setStatus: (status: string) => { liveStatus = status; } };
 }
 
 function buildBridge(ctx: TestContext) {
@@ -108,6 +109,45 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
 
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect(row.status).toBe('active'); // markActive after a successful send
+    const journal = ctx.db.select().from(schema.channelOutboundDeliveries).all();
+    expect(journal).toHaveLength(1);
+    expect(journal[0]?.status).toBe('accepted');
+  });
+
+  it('persists a client-only WhatsApp submission as queued, never as sent', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    transport.send = async (_connectionId, chatId) => ({
+      provider: 'whatsapp',
+      providerMessageId: '3EB0CLIENTONLY',
+      status: 'queued',
+      acceptedAt: '2026-07-16T00:00:00.000Z',
+      recipient: chatId,
+      providerAcknowledged: false,
+      providerStatus: 0,
+    });
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA',
+    });
+    const capture = ctx.captureBus();
+    const receipt = await bridge.deliverToConnection({
+      connectionId: connection.id,
+      chatId: '1234567@s.whatsapp.net',
+      body: 'pending',
+      idempotencyKey: 'run-pending:send',
+    });
+    capture.stop();
+
+    expect(receipt.status).toBe('queued');
+    const journal = ctx.db.select().from(schema.channelOutboundDeliveries)
+      .where(eq(schema.channelOutboundDeliveries.idempotencyKey, 'run-pending:send')).get();
+    expect(journal?.status).toBe('queued');
+    expect((journal?.receipt as { providerAcknowledged?: boolean })?.providerAcknowledged).toBe(false);
+    expect(capture.events.some((event) => event.envelope.event === 'channel.message.sent')).toBe(false);
+    expect(capture.events.some((event) => event.envelope.event === 'channel.message.status')).toBe(true);
   });
 
   it('normalizes explicit WhatsApp phone numbers before live send', async () => {
@@ -184,18 +224,116 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
 
   it('marks open WhatsApp QR healthy without requiring a default recipient', async () => {
     const { bridge } = buildBridge(ctx);
-    const { transport } = fakeTransport();
+    const { transport, setStatus } = fakeTransport();
     bridge.setPersistentTransport(transport);
     const agentId = seedAgent(ctx);
     const { connection } = bridge.create({
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
       agentId, kind: 'whatsapp', name: 'WA',
     });
+    setStatus('open');
 
     const health = await bridge.test({ workspaceId: ctx.workspace.id, id: connection.id });
     expect(health.status).toBe('active');
     expect(health.checks.find((check) => check.name === 'outbound')?.code).toBe('outbound_ready_for_explicit_recipient');
     expect(health.checks.find((check) => check.name === 'inbound')?.code).toBe('inbound_live_ready_no_default');
+  });
+
+  it('keeps a healthy linked transport degraded, not dead, when only companion outbound is restricted', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport, setStatus } = fakeTransport();
+    transport.outboundHealth = async () => ({
+      name: 'outbound',
+      ok: false,
+      code: 'whatsapp_companion_outbound_timelocked',
+      message: 'Companion outbound is temporarily restricted; the primary phone may remain usable.',
+      evidence: { restrictionScope: 'companion', primaryPhoneMayRemainUsable: true },
+      checkedAt: '2026-07-16T00:00:00.000Z',
+    });
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA restricted companion',
+    });
+    setStatus('open');
+
+    const health = await bridge.test({ workspaceId: ctx.workspace.id, id: connection.id });
+
+    expect(health.status).toBe('degraded');
+    expect(health.checks.find((check) => check.name === 'transport')?.ok).toBe(true);
+    expect(health.checks.find((check) => check.name === 'inbound')?.ok).toBe(true);
+    expect(health.checks.find((check) => check.name === 'outbound')).toMatchObject({
+      ok: false,
+      code: 'whatsapp_companion_outbound_timelocked',
+      evidence: { restrictionScope: 'companion', primaryPhoneMayRemainUsable: true },
+    });
+  });
+
+  it('reconciles persisted status and health with authoritative live transport state', () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport, setStatus } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA drift',
+    });
+    const row = ctx.db.select().from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connection.id)).get()!;
+    ctx.db.update(schema.channelConnections).set({
+      status: 'error',
+      lastError: 'stale disconnect',
+      settings: {
+        ...(row.settings as Record<string, unknown>),
+        transportStatus: 'logged_out',
+        health: { status: 'error', checks: [], lastTestAt: '2026-07-01T00:00:00.000Z' },
+      },
+    }).where(eq(schema.channelConnections.id, connection.id)).run();
+
+    setStatus('open');
+    const healed = bridge.get(ctx.workspace.id, connection.id);
+    expect(healed.status).toBe('active');
+    expect(healed.transportStatus).toBe('open');
+    expect(healed.health.status).toBe('active');
+    expect(healed.lastError).toBeNull();
+    expect(ctx.db.select().from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connection.id)).get()).toMatchObject({
+        status: 'active', lastError: null,
+      });
+
+    setStatus('logged_out');
+    const terminal = bridge.get(ctx.workspace.id, connection.id);
+    expect(terminal.status).toBe('error');
+    expect(terminal.health.status).toBe('error');
+  });
+
+  it('binds and unbinds a channel and its existing conversations to an App', () => {
+    const { bridge, conversations } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA App',
+    });
+    const appId = randomUUID();
+    ctx.db.insert(schema.apps).values({
+      id: appId, workspaceId: ctx.workspace.id, slug: `test-${appId}`,
+      name: 'Channel App', description: '', createdBy: ctx.user.id,
+    }).run();
+    const conversation = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, channelConnectionId: connection.id, channelChatId: '5511@s.whatsapp.net',
+    });
+
+    expect(bridge.bindApp(ctx.workspace.id, connection.id, appId).appId).toBe(appId);
+    expect(ctx.db.select().from(schema.conversations)
+      .where(eq(schema.conversations.id, conversation.id)).get()?.appId).toBe(appId);
+    expect(bridge.bindApp(ctx.workspace.id, connection.id, null).appId).toBeNull();
+    expect(ctx.db.select().from(schema.conversations)
+      .where(eq(schema.conversations.id, conversation.id)).get()?.appId).toBeNull();
+    expect(() => bridge.bindApp(ctx.workspace.id, connection.id, randomUUID())).toThrow(/app .* not found/);
   });
 
   it('Telegram polling: onCreated fires and outbound routes through the live session', async () => {

@@ -1,12 +1,13 @@
 ﻿import clsx from 'clsx';
 import { AlertTriangle, CircleDashed, HelpCircle } from 'lucide-react';
+import { BRAIN_LAYER_COLORS } from './brainVisualPalette';
 
 export type BrainVisibleLayers = Record<'knowledge' | 'memory' | 'judgment', boolean>;
 
 const LAYERS = [
-  { key: 'knowledge' as const, label: 'Knowledge', color: '#22d3ee' },
-  { key: 'memory' as const, label: 'Memory', color: '#a78bfa' },
-  { key: 'judgment' as const, label: 'Judgment', color: '#f59e0b' },
+  { key: 'knowledge' as const, label: 'Knowledge', color: BRAIN_LAYER_COLORS.knowledge },
+  { key: 'memory' as const, label: 'Memory', color: BRAIN_LAYER_COLORS.memory },
+  { key: 'judgment' as const, label: 'Judgment', color: BRAIN_LAYER_COLORS.judgment },
 ];
 
 export function LayerFilterChips({

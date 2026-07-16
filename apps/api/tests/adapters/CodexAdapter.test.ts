@@ -562,7 +562,9 @@ describe('CodexAdapter', () => {
     // Raw reasoning stays private; agent_message becomes the answer text.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'This is the adapters folder.' });
-    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+    expect(deltas.at(-1)).toEqual({
+      type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 },
+    });
   });
 
   it('uses only the explicit final message and drops intermediate assistant narration', async () => {
@@ -641,6 +643,40 @@ describe('CodexAdapter', () => {
     ]));
     expect((spawnMock.mock.calls[1]![1] as string[]).slice(0, 3)).toEqual(['exec', 'resume', 'thread-a']);
     expect((spawnMock.mock.calls[2]![1] as string[]).slice(0, 2)).toEqual(['exec', '--json']);
+  });
+
+  it('does not resend prior Agentis history into a resumed Codex thread', async () => {
+    const first = fakeChildProcess();
+    const second = fakeChildProcess();
+    spawnMock.mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const adapter = new CodexAdapter({
+      agentId: 'agent-1', logger, binaryPath: 'codex-test', model: 'gpt-5.5',
+    });
+
+    const initial = collectDeltas(adapter.chat([
+      { role: 'system', content: 'current brain' },
+      { role: 'user', content: 'first request' },
+    ], [], { sessionKey: 'conversation-a' }));
+    first.stdout.write('{"type":"thread.started","thread_id":"thread-a"}\n');
+    first.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"first answer"}}\n');
+    first.emit('exit', 0);
+    await initial;
+
+    const resumed = collectDeltas(adapter.chat([
+      { role: 'system', content: 'refreshed brain' },
+      { role: 'user', content: 'first request' },
+      { role: 'assistant', content: 'first answer' },
+      { role: 'user', content: 'second request' },
+    ], [], { sessionKey: 'conversation-a' }));
+    second.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"second answer"}}\n');
+    second.emit('exit', 0);
+    await resumed;
+
+    const stdin = second.stdinChunks.join('');
+    expect(stdin).toContain('refreshed brain');
+    expect(stdin).toContain('second request');
+    expect(stdin).not.toContain('first request');
+    expect(stdin).not.toContain('first answer');
   });
 
   it('on a stall (total silence past the ceiling), preserves the partial answer and pauses (max_turns), not FAILED', async () => {

@@ -27,7 +27,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import type { ChatDelta } from '@agentis/core';
+import type { ChatDelta, ChatMessage } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../services/pathExpander.js';
 import { extractMarkerToolCalls, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
@@ -49,6 +49,19 @@ const DEFAULT_CHAT_HARD_CEILING_MS = 1_800_000;
 
 /** How often a quiet-but-alive turn emits a "still working" heartbeat to the UI. */
 const HEARTBEAT_INTERVAL_MS = 15_000;
+
+/**
+ * Native runtime sessions already own prior conversation/tool history. Refresh
+ * their operating context and send only the new user turn; replaying Agentis's
+ * mirrored history doubles the same context on every resume. Stateless runtimes
+ * continue receiving the complete bounded history.
+ */
+export function messagesForRuntimeSession(messages: ChatMessage[], resumed: boolean): ChatMessage[] {
+  if (!resumed) return messages;
+  const system = [...messages].reverse().find((message) => message.role === 'system');
+  const latestUser = [...messages].reverse().find((message) => message.role === 'user');
+  return [system, latestUser].filter((message): message is ChatMessage => Boolean(message));
+}
 
 /** Human-friendly elapsed string, e.g. "45s", "4m 12s", "1h 3m". */
 function formatElapsed(ms: number): string {
@@ -101,6 +114,8 @@ export type CliChatPart =
   | { kind: 'tool'; name: string; args: unknown }
   /** A runtime error decoded from the event stream (used for exit diagnostics). */
   | { kind: 'error'; message: string }
+  /** Provider-reported usage metadata carried by a lifecycle event. */
+  | { kind: 'usage'; inputTokens: number; outputTokens: number; cachedInputTokens?: number; costCents?: number }
   /** Nothing operator-relevant (deltas, heartbeats, lifecycle events). */
   | { kind: 'ignore' };
 
@@ -256,6 +271,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   let rawFallback = '';
   let stdoutError = '';
   const pendingToolCalls: ChatDelta[] = [];
+  let reportedUsage: Extract<ChatDelta, { type: 'done' }>['usage'];
 
   // On a stall, surface whatever was already produced as a real (paused) answer
   // instead of throwing the work away as a hard failure.
@@ -271,7 +287,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     const reason = `Paused — ${cfg.displayName} went quiet for ${formatElapsed(hardCeilingMs)} with no output and may be stuck. Ask me to continue.`;
     queue.push({ type: 'text', delta: body });
     queue.push({ type: 'text', delta: `\n\n_${reason}_` });
-    queue.push({ type: 'done', finishReason: 'max_turns' });
+    queue.push({ type: 'done', finishReason: 'max_turns', ...(reportedUsage ? { usage: reportedUsage } : {}) });
     return true;
   };
 
@@ -290,7 +306,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
         ? `${cfg.displayName} request was canceled`
         : `${cfg.displayName} process error: ${err.message}`;
     queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error });
-    queue.push({ type: 'done', finishReason: 'error' });
+    queue.push({ type: 'done', finishReason: 'error', ...(reportedUsage ? { usage: reportedUsage } : {}) });
     queue.close();
   });
 
@@ -353,6 +369,14 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
           case 'error':
             if (part.message) stdoutError = part.message;
             break;
+          case 'usage':
+            reportedUsage = {
+              inputTokens: Math.max(0, Math.round(part.inputTokens)),
+              outputTokens: Math.max(0, Math.round(part.outputTokens)),
+              ...(part.cachedInputTokens !== undefined ? { cachedInputTokens: Math.max(0, Math.round(part.cachedInputTokens)) } : {}),
+              ...(part.costCents !== undefined ? { costCents: Math.max(0, Math.ceil(part.costCents)) } : {}),
+            };
+            break;
           case 'ignore':
             break;
         }
@@ -403,7 +427,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
           ? `${detail} Say "continue" to resume from here.`
           : `${cfg.displayName} ended before finishing${detail ? ` (${detail})` : ''} — your progress is above; say "continue" to resume.`;
         queue.push({ type: 'text', delta: `${partial ? '\n\n' : ''}_${note}_` });
-        queue.push({ type: 'done', finishReason: 'max_turns' });
+        queue.push({ type: 'done', finishReason: 'max_turns', ...(reportedUsage ? { usage: reportedUsage } : {}) });
         queue.close();
         return;
       }
@@ -415,7 +439,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
         result: null,
         error: detail ? `${cfg.displayName} exited ${code}: ${detail}` : `${cfg.displayName} exited ${code}`,
       });
-      queue.push({ type: 'done', finishReason: 'error' });
+      queue.push({ type: 'done', finishReason: 'error', ...(reportedUsage ? { usage: reportedUsage } : {}) });
       queue.close();
       return;
     }
@@ -439,7 +463,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     ];
     for (const call of allToolCalls) queue.push(call);
     if (!cleaned && allToolCalls.length === 0) cfg.onEmptyResult?.();
-    queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop' });
+    queue.push({ type: 'done', finishReason: allToolCalls.length > 0 ? 'tool_calls' : 'stop', ...(reportedUsage ? { usage: reportedUsage } : {}) });
     queue.close();
   });
 

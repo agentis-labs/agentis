@@ -170,6 +170,53 @@ describe('ChatSessionExecutor', () => {
     });
   });
 
+  it('records provider-reported chat usage in audit and agent monthly spend telemetry', async () => {
+    const auditEntries: Array<Record<string, unknown>> = [];
+    const spends: Array<Record<string, unknown>> = [];
+    const adapter = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'metered answer' };
+      yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 20, costCents: 2 } };
+    });
+    ChatSessionExecutor.configure({
+      audit: { record: (entry) => { auditEntries.push(entry); } },
+      budget: { recordSpend: (entry) => { spends.push(entry); return entry; } },
+    });
+
+    await collect(ChatSessionExecutor.turn(adapter, [], 'hello', {
+      workspaceId: 'ws_meter', agentId: 'agent_meter', userId: 'user_meter', conversationId: 'conv_meter',
+    }));
+
+    expect(auditEntries).toHaveLength(1);
+    expect(auditEntries[0]).toMatchObject({
+      action: 'chat.model.completed', agentId: 'agent_meter', tokensIn: 120, tokensOut: 30, costCents: 2,
+    });
+    expect(spends).toEqual([expect.objectContaining({ agentId: 'agent_meter', amountCents: 2 })]);
+  });
+
+  it('records a marked token estimate when an adapter omits usage without fabricating monetary cost', async () => {
+    const auditEntries: Array<Record<string, unknown>> = [];
+    const spends: Array<Record<string, unknown>> = [];
+    const adapter = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'answer' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    ChatSessionExecutor.configure({
+      audit: { record: (entry) => { auditEntries.push(entry); } },
+      budget: { recordSpend: (entry) => { spends.push(entry); return entry; } },
+    });
+
+    await collect(ChatSessionExecutor.turn(adapter, [], 'hello', {
+      workspaceId: 'ws_est', agentId: 'agent_est', userId: 'user_est', conversationId: 'conv_est',
+    }));
+
+    expect(auditEntries).toHaveLength(1);
+    expect(Number(auditEntries[0]?.tokensIn)).toBeGreaterThan(0);
+    expect(Number(auditEntries[0]?.tokensOut)).toBeGreaterThan(0);
+    expect(auditEntries[0]?.outputSummary).toContain('estimated usage');
+    expect(auditEntries[0]?.costCents).toBeNull();
+    expect(spends).toHaveLength(0);
+  });
+
   it('answers greetings through the real harness (no canned shortcut)', async () => {
     const adapter = new FakeChatAdapter(async function* () {
       yield { type: 'text', delta: 'Hey! What can I help you with?' };
