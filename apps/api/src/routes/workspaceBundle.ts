@@ -11,7 +11,7 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { AgentisError, exportProfileSchema, workspaceBundleEnvelopeSchema } from '@agentis/core';
+import { AgentisError, bundleFidelitySchema, bundleSelectionSchema, exportProfileSchema, workspaceBundleEnvelopeSchema } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { EventBus } from '../event-bus.js';
@@ -19,11 +19,16 @@ import type { Logger } from '../logger.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { WorkspacePackager } from '../services/workspace/workspacePackager.js';
+import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { createBackup, restoreBackup } from '../services/backup.js';
 import { join } from 'node:path';
 
 const exportSchema = z.object({
   profile: exportProfileSchema.default('share'),
+  /** `full` carries learned intelligence (brains + rows); `shareable` (default) does not. */
+  fidelity: bundleFidelitySchema.default('shareable'),
+  /** Granular pick of what to include in the export. */
+  selection: bundleSelectionSchema.partial().optional(),
   name: z.string().min(1).max(160).optional(),
   description: z.string().max(2000).nullable().optional(),
   license: z.string().max(8000).nullable().optional(),
@@ -33,6 +38,8 @@ const previewSchema = z.object({ envelope: workspaceBundleEnvelopeSchema });
 
 const importSchema = z.object({
   envelope: workspaceBundleEnvelopeSchema,
+  /** Granular pick of what to actually install from the bundle. */
+  selection: bundleSelectionSchema.partial().optional(),
   permissionsAcknowledged: z.literal(true, {
     errorMap: () => ({ message: 'permissionsAcknowledged must be true' }),
   }),
@@ -47,6 +54,8 @@ export function buildWorkspaceBundleRoutes(deps: {
   dataDir?: string;
   /** RSA keypair (PEM) used to sign `sell` bundles. */
   signer?: { privateKeyPem: string; publicKeyPem: string };
+  /** Brain store — enables carrying/rehydrating learned intelligence (full fidelity). */
+  episodes?: EpisodicMemoryStore;
 }) {
   const app = new Hono();
   const packager = new WorkspacePackager({
@@ -54,6 +63,7 @@ export function buildWorkspaceBundleRoutes(deps: {
     ...(deps.bus ? { bus: deps.bus } : {}),
     ...(deps.logger ? { logger: deps.logger } : {}),
     ...(deps.signer ? { signer: deps.signer } : {}),
+    ...(deps.episodes ? { episodes: deps.episodes } : {}),
   });
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -65,6 +75,8 @@ export function buildWorkspaceBundleRoutes(deps: {
     }
     const author = { id: ws.user.id, displayName: ws.user.displayName ?? ws.user.username };
     const envelope = packager.exportWorkspace(ws.workspaceId, body.profile, {
+      fidelity: body.fidelity,
+      ...(body.selection ? { selection: body.selection } : {}),
       ...(body.name ? { name: body.name } : {}),
       description: body.description ?? null,
       license: body.license ?? null,
@@ -85,7 +97,7 @@ export function buildWorkspaceBundleRoutes(deps: {
     const result = packager.installBundle(
       { workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id },
       body.envelope,
-      { permissionsAcknowledged: body.permissionsAcknowledged },
+      { permissionsAcknowledged: body.permissionsAcknowledged, ...(body.selection ? { selection: body.selection } : {}) },
     );
     return c.json(result, 201);
   });

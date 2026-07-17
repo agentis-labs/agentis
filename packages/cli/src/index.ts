@@ -156,6 +156,28 @@ async function runUp(): Promise<void> {
     process.stdout.write(`  Open the dashboard at ${url} and sign in.\n`);
   }
 
+  // Last-resort safety net. `apps/api/src/index.ts` installs these guards for the
+  // `pnpm dev` / standalone-binary path, but the CLI calls bootstrap() directly
+  // and so never inherited them — meaning a single async throw on a later tick
+  // (an adapter stdout handler, a best-effort DB write, a background embedding
+  // that failed to load its native runtime) became an unhandledRejection and
+  // Node killed the whole `agentis up` process, taking every live run and the
+  // dashboard down with it. Observed in the wild: a bundled onnxruntime that
+  // couldn't initialise crashed the server the moment a chat turn tried to embed.
+  // Log loudly so the underlying bug stays visible, but keep serving.
+  process.on('uncaughtException', (err) => {
+    handle.logger.error('process.uncaught_exception', {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+  });
+  process.on('unhandledRejection', (reason) => {
+    handle.logger.error('process.unhandled_rejection', {
+      error: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
+
   const stop = async () => {
     await handle.stop();
     process.exit(0);

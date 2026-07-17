@@ -165,6 +165,9 @@ and approves. Output a designer-grade surface — never a wall of identical card
 Return ONE strict JSON object: { "view": <ViewNode>, "actions": <SurfaceAction[]> }. No prose, no markdown.
 
 CRAFT RULES (this is what separates a great surface from a dumb one):
+- TWO TIERS, PICK PER SURFACE: for an operable data app (records, boards, live-ops, editable, data-bound) author the
+  typed nodes below — that is the default here. For a bespoke showpiece / pixel-perfect custom dashboard, or anything the
+  typed composites would render flat, emit a CodeSurface (see KEY NODES) and write real code with full design control.
 - NEVER emit one tall stack of identical cards. COMPOSE a layout: a Hero or Toolbar header; a Split
   (main content + an activity rail) or a Grid; Tabs/Accordion for progressive disclosure instead of one
   giant scroll.
@@ -252,7 +255,7 @@ KEY NODES:
   AgentFeed(title?,limit?) — watch the agent think: live reasoning/tool/node stream from the App's runs.
   ApprovalsInbox(title?,limit?) — pending human gates with one-click approve/reject.
   Compose home as: OrchestrationPanel + Grid[ working composite (span 2) | Stack[RunMonitor, AgentFeed] (span 1) ].
-- Escape hatch (LAST RESORT, only when the nodes above cannot express it): { "type":"CodeSurface", "code":<plain JS string>, "collections":[<names the code reads>] } — runs in a hardened, zero-egress sandbox with \`ui\` (component+chart kit: ui.card/row/grid/metric/badge/table/heading/text + ui.chart.bar/line/donut) and \`agentis\` (agentis.data.query, agentis.actions.invoke) and \`root\` (mount). Requires the app's custom-code policy. Prefer typed nodes.
+- CodeSurface (first-class, co-equal tier — the PIXEL-PERFECT path, not a fallback): { "type":"CodeSurface", "code":<plain JS string>, "collections":[<names the code reads>] } — choose it when you want full design control or the typed composites would look generic. Renders FULL-BLEED and auto-heights to its content (a whole dashboard page, not a boxed widget), on-brand in light AND dark. Runs in a hardened, zero-egress sandbox with a rich \`ui\` kit (cards, grids, metric tiles with depth, status pills, ui.chart.area/line/bar/donut) and the \`agentis\` bridge (agentis.data.query, agentis.actions.invoke, agentis.state, agentis.navigation) and \`root\` (mount). Requires the app's custom-code policy to be enabled. Keep typed AG-UI for operable/editable/data-bound apps; reach for CodeSurface for the bespoke showpiece.
 
 Bindable = a literal, or { "$row":"field" } (current row), or { "$state":"key" } (UI state).
 Never put template expressions like "{{count:collection}}" in visible labels, Metric values, KPIs, Text, or Markdown.

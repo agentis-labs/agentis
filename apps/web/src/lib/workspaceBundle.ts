@@ -2,7 +2,7 @@
  * Workspace bundle (`.agentis`) API client — export / preview / import the whole
  * workspace, plus the full-fidelity backup/restore path.
  */
-import type { ExportProfile, WorkspaceBundleEnvelope, WorkspaceBundlePreview } from '@agentis/core';
+import type { BundleFidelity, BundleSelection, ExportProfile, WorkspaceBundleEnvelope, WorkspaceBundlePreview } from '@agentis/core';
 import { api } from './api';
 
 export interface BundleInstallResult {
@@ -12,21 +12,29 @@ export interface BundleInstallResult {
   extensions: number;
   abilities: number;
   knowledgeSeeds: number;
+  brainAtoms: number;
+  collectionRows: number;
   requiredCredentials: Array<{ key: string; service: string; label: string }>;
   warnings: string[];
 }
 
 export const workspaceBundleApi = {
-  export: (body: { profile: Exclude<ExportProfile, 'backup'>; name?: string; description?: string | null; license?: string | null }) =>
-    api<WorkspaceBundleEnvelope>('/v1/workspace/bundle/export', { method: 'POST', body: JSON.stringify(body) }),
+  export: (body: {
+    profile: Exclude<ExportProfile, 'backup'>;
+    fidelity?: BundleFidelity;
+    selection?: Partial<BundleSelection>;
+    name?: string;
+    description?: string | null;
+    license?: string | null;
+  }) => api<WorkspaceBundleEnvelope>('/v1/workspace/bundle/export', { method: 'POST', body: JSON.stringify(body) }),
 
   preview: (envelope: WorkspaceBundleEnvelope) =>
     api<WorkspaceBundlePreview>('/v1/workspace/bundle/preview', { method: 'POST', body: JSON.stringify({ envelope }) }),
 
-  import: (envelope: WorkspaceBundleEnvelope) =>
+  import: (envelope: WorkspaceBundleEnvelope, selection?: Partial<BundleSelection>) =>
     api<BundleInstallResult>('/v1/workspace/bundle/import', {
       method: 'POST',
-      body: JSON.stringify({ envelope, permissionsAcknowledged: true }),
+      body: JSON.stringify({ envelope, permissionsAcknowledged: true, ...(selection ? { selection } : {}) }),
     }),
 
   backup: () =>

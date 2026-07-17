@@ -200,6 +200,66 @@ export class AppDatastore {
     };
   }
 
+  /**
+   * Read every record's `data` for a collection (bounded by `cap`), for export.
+   * Loops the keyset `query` so it never skips/duplicates rows. Returns bare data
+   * objects (no id/version) — the shape `manifestCollectionSchema.seed` expects —
+   * and a `truncated` flag when the collection exceeds `cap`.
+   */
+  exportRows(workspaceId: string, appId: string, collection: string, cap = 5000): { rows: Record<string, unknown>[]; truncated: boolean } {
+    const out: Record<string, unknown>[] = [];
+    let cursor: string | undefined;
+    let truncated = false;
+    for (;;) {
+      const remaining = cap - out.length;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      const page = this.query(workspaceId, appId, collection, { limit: Math.min(500, remaining), ...(cursor ? { cursor } : {}) });
+      for (const r of page.rows) out.push(r.data);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    return { rows: out, truncated };
+  }
+
+  /**
+   * Bulk-insert records (import / seed). Validates each row against the schema,
+   * writes its index entries, and skips (collecting) rows that fail rather than
+   * aborting the whole batch. Fires a SINGLE realtime change so a large import is
+   * one refetch, not N. Returns the count inserted and the per-row failures.
+   */
+  insertMany(
+    workspaceId: string,
+    appId: string,
+    collection: string,
+    records: Record<string, unknown>[],
+    userId?: string,
+  ): { inserted: number; failed: Array<{ index: number; error: string }> } {
+    const col = this.requireCollection(workspaceId, appId, collection);
+    const validate = this.recordValidator(col.schema);
+    const now = new Date().toISOString();
+    let inserted = 0;
+    const failed: Array<{ index: number; error: string }> = [];
+    for (let i = 0; i < records.length; i += 1) {
+      try {
+        const data = validate.parse(records[i]);
+        const id = randomUUID();
+        this.db
+          .insert(schema.appRecords)
+          .values({ id, collectionId: col.id, appId, workspaceId, dataJson: data, version: 1, createdBy: userId ?? null, createdAt: now, updatedAt: now })
+          .run();
+        this.writeIndexEntries(workspaceId, appId, col.id, id, col.schema, data);
+        inserted += 1;
+      } catch (err) {
+        failed.push({ index: i, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    if (inserted > 0) this.onChange?.({ workspaceId, appId, collection, op: 'insert', id: 'bulk' });
+    return { inserted, failed };
+  }
+
   /** Sort keys for keyset pagination: requested fields (or updatedAt desc) + id asc tiebreaker. */
   #sortKeys(sort: DataQuery['sort']): Array<{ expr: SQLWrapper; dir: 'asc' | 'desc'; read: (row: RecordRow) => unknown }> {
     const keys: Array<{ expr: SQLWrapper; dir: 'asc' | 'desc'; read: (row: RecordRow) => unknown }> = [];

@@ -364,7 +364,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/extensions', buildExtensionRoutes({ db: sqlite, auth, extensionLibrary, runtime: extensions, kv: extensionKv }));
   app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, bus, logger, skills: skillService }));
   app.route('/v1/skills', buildSkillRoutes({ db: sqlite, auth, skills: skillService }));
-  app.route('/v1/workspace/bundle', buildWorkspaceBundleRoutes({ db: sqlite, auth, bus, logger, dataDir: env.AGENTIS_DATA_DIR, signer: { privateKeyPem: secrets.jwtPrivateKeyPem, publicKeyPem: secrets.jwtPublicKeyPem } }));
+  app.route('/v1/workspace/bundle', buildWorkspaceBundleRoutes({ db: sqlite, auth, bus, logger, dataDir: env.AGENTIS_DATA_DIR, signer: { privateKeyPem: secrets.jwtPrivateKeyPem, publicKeyPem: secrets.jwtPublicKeyPem }, episodes: episodicMemoryStore }));
   app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus, artifacts: artifactService, assets: assetStore }));
   app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
   app.route('/v1/workspace/intelligence', buildWorkspaceIntelligenceRoutes({ db: sqlite, auth, intelligence: SharedIntelligence, backfill: embeddingBackfill, logger }));
@@ -471,7 +471,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
   const appPresence = new AppPresenceService({ bus, logger });
   appPresence.start();
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime }));
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime, episodes: episodicMemoryStore }));
   app.route('/v1/system', buildSystemRoutes({ db: sqlite, auth, currentVersion: env.AGENTIS_CLI_VERSION }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   const ownershipSync = new AgentOwnershipSyncService(sqlite, harnessMemoryIngestion, skillService, logger);

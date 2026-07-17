@@ -17,6 +17,44 @@ import { upsertSurfaceSchema, surfaceActionSchema } from './view.js';
 import { collectionSchemaSchema } from './datastore.js';
 import { capabilityDeclSchema } from './capability.js';
 
+/**
+ * A portable Brain atom — the serializable projection of one `memory_episodes`
+ * row (learned intelligence). It carries only the CONTENT of an episode, never
+ * its identity (`id`), its `scope_id`/`agent_id` (implied by which bucket the
+ * atom travels in — agent brain, App brain, or workspace brain — and re-assigned
+ * on install), its `embedding` (recomputed on install), or its lifecycle flags
+ * (`archivedAt`/`supersededBy`/`reinforcedAt`). Maps 1:1 onto
+ * `CreateRuntimeEpisodeInput` on import. Fields are loose (e.g. `type`/`source`
+ * as strings) so an older/newer episode taxonomy still round-trips.
+ *
+ * This is what makes "share intelligence" real: an agent's or App's accumulated
+ * memory travels with it. It lives here (not in package.ts) so both the App
+ * manifest and the workspace bundle can reference it without an import cycle.
+ */
+export const portableBrainAtomSchema = z.object({
+  type: z.string().min(1),
+  title: z.string().min(1),
+  summary: z.string().min(1),
+  details: z.string().nullable().optional(),
+  source: z.string().min(1),
+  confidence: z.number().min(0).max(1).default(0.5),
+  importance: z.number().min(0).max(1).default(0.5),
+  trust: z.number().min(0).max(1).default(0.5),
+  tags: z.array(z.string()).default([]),
+  entities: z.array(z.string()).default([]),
+  outcomeStatus: z.enum(['good', 'bad', 'mixed']).nullable().optional(),
+  metadata: z.record(z.unknown()).default({}),
+  /** Provenance only — the original creation time. Never used as an id. */
+  createdAt: z.string().optional(),
+});
+export type PortableBrainAtom = z.infer<typeof portableBrainAtomSchema>;
+
+/** A bundle of portable Brain atoms for one intelligence scope. */
+export const portableBrainSchema = z.object({
+  atoms: z.array(portableBrainAtomSchema).default([]),
+});
+export type PortableBrain = z.infer<typeof portableBrainSchema>;
+
 /** A workflow (Logic facet) carried in the manifest. */
 export const manifestWorkflowSchema = z.object({
   slug: z.string().min(1).optional(),
@@ -40,7 +78,13 @@ export const manifestCollectionSchema = z.object({
 });
 export type ManifestCollection = z.infer<typeof manifestCollectionSchema>;
 
-/** An agent (Team facet) — embedded definition or a shared-component reference. */
+/**
+ * An agent (Team facet) — a full, linkable, brain-carrying definition so the
+ * agent travels WITH its App and can be relinked as the App's owner on install.
+ * `owner` marks the App's `ownerAgentId`; `memberRole` is its seat in the App
+ * cast; `brain` is the agent's private learned memory (`scope_id = agentId`),
+ * carried only in a `full`-fidelity export.
+ */
 export const manifestAgentSchema = z.object({
   name: z.string().min(1),
   role: z.enum(['operator', 'worker']).default('worker'),
@@ -48,6 +92,16 @@ export const manifestAgentSchema = z.object({
   adapterType: z.string().optional(),
   instructions: z.string().nullable().optional(),
   capabilityTags: z.array(z.string()).default([]),
+  /** True for the agent that owns/operates this App (App.ownerAgentId). */
+  owner: z.boolean().default(false),
+  /** The agent's seat in the App cast, when it is a member. */
+  memberRole: z.enum(['operator', 'worker']).optional(),
+  /** Adapter config (never carries secret values). */
+  config: z.record(z.unknown()).default({}),
+  avatarGlyph: z.string().nullable().optional(),
+  runtimeModel: z.string().nullable().optional(),
+  /** Agent-private Brain memory (full fidelity only). */
+  brain: portableBrainSchema.optional(),
 });
 export type ManifestAgent = z.infer<typeof manifestAgentSchema>;
 
@@ -82,7 +136,10 @@ export const appManifestSchema = z.object({
   surfaces: z.array(manifestSurfaceSchema).default([]),
   collections: z.array(manifestCollectionSchema).default([]),
   agents: z.array(manifestAgentSchema).default([]),
+  /** DEPRECATED: a bare flag. Kept readable for back-compat; no longer emitted. */
   memory: z.object({ brainScope: z.boolean() }).optional(),
+  /** App-scoped Brain memory (`scope_id = appId`) — carried in full fidelity only. */
+  brain: portableBrainSchema.optional(),
   // contracts & lifecycle
   capabilities: z.array(capabilityDeclSchema).default([]),
   requiredPlugins: z.array(z.string()).default([]),

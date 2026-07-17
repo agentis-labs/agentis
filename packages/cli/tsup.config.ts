@@ -13,10 +13,17 @@ export default defineConfig({
   treeshake: true,
   outExtension: () => ({ js: '.cjs' }),
   banner: { js: '#!/usr/bin/env node' },
-  // better-sqlite3 ships native bindings, so npm installs it alongside the
-  // bundled CLI instead of trying to inline it into the executable.
+  // Native addons cannot be inlined by esbuild — their JS glue resolves the
+  // `.node` binary at runtime and breaks when bundled (observed: onnxruntime's
+  // `listSupportedBackends is not a function`, which crashed `agentis up` the
+  // moment a chat turn tried to embed). Keep them external so `npm install -g`
+  // installs each alongside the bundle with its native binding intact, exactly
+  // like better-sqlite3. `@huggingface/transformers` is external too so esbuild
+  // doesn't drag onnxruntime-node back into the bundle through it.
   external: [
     'better-sqlite3',
+    'onnxruntime-node',
+    '@huggingface/transformers',
   ],
   noExternal: [
     '@agentis/core',

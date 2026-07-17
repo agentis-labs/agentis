@@ -8,18 +8,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { Download, Copy, Check, ZoomIn, ZoomOut, X, ArrowUp, ArrowDown } from 'lucide-react';
+import { downloadBlob, cellText, toCsv } from '../../lib/download';
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
-}
-
-function cellText(v: unknown): string {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  try { return JSON.stringify(v); } catch { return String(v); }
 }
 
 export function safeExternalUrl(value: string): string | null {
@@ -36,21 +30,6 @@ export function safeResourceUrl(value: string, dataPrefixes: readonly string[] =
   const lower = trimmed.toLowerCase();
   if (dataPrefixes.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return trimmed;
   return safeExternalUrl(trimmed);
-}
-
-function downloadBlob(content: string, name: string, mime: string) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
-}
-
-function toCsv(rows: Array<Record<string, unknown>>, columns: string[]): string {
-  const esc = (s: string) => /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  const head = columns.map(esc).join(',');
-  const body = rows.map((r) => columns.map((c) => esc(cellText(r[c]))).join(',')).join('\n');
-  return `${head}\n${body}`;
 }
 
 // ─── DataTableViewer ─────────────────────────────────────────────────────────

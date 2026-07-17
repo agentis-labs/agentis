@@ -45,6 +45,9 @@ import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentToolRuntime } from '../services/agent/agentToolRuntime.js';
 import { runPublishedWorkflow, startPublishedWorkflow } from '../engine/runPublishedWorkflow.js';
 import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness } from '@agentis/app';
+import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
+import { EpisodicBrainPort } from '../services/brain/brainExport.js';
+import { bundleFidelitySchema } from '@agentis/core';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { validationError } from '../middleware/error.js';
@@ -110,6 +113,8 @@ export interface AppRoutesDeps {
   orchestrator?: AppOrchestratorService;
   /** Trigger arming runtime — powers the App's always-on (Go Live) lifecycle. */
   triggerRuntime?: TriggerRuntime;
+  /** Brain store — enables carrying/rehydrating App + agent memory on `.agentisapp` export/import. */
+  episodes?: EpisodicMemoryStore;
 }
 
 const addMemberSchema = z.object({
@@ -117,6 +122,7 @@ const addMemberSchema = z.object({
   role: appMemberRoleSchema.default('worker'),
 });
 
+const batchInsertSchema = z.object({ records: z.array(z.record(z.unknown())).min(1).max(10_000) });
 const adoptWorkflowSchema = z.object({ workflowId: z.string().min(1) });
 const renameSurfaceSchema = z.object({ name: z.string().trim().min(1).max(120) });
 const generateSurfaceRequestSchema = z.object({
@@ -293,6 +299,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   const app = new Hono<{ Variables: { user: { id: string } } }>();
   const { store, data, surfaces } = buildAppStores(deps);
   const packager = new AppPackager(deps.db);
+  const brainPort = deps.episodes ? new EpisodicBrainPort(deps.episodes) : undefined;
   const lifecycle = new AppLifecycle(deps.db);
   const environments = new AppEnvironmentStore(deps.db);
   const triggerDeployments = deps.triggerRuntime
@@ -766,7 +773,15 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
 
   app.get('/:id/export', (c) => {
     const ws = getWorkspace(c);
-    return c.json({ data: packager.export(ws.workspaceId, c.req.param('id')) });
+    // `?fidelity=full` carries the App's owning agent(s) + their Brain + the App
+    // Brain + collection rows so a single App travels self-contained.
+    const fidelity = bundleFidelitySchema.catch('shareable').parse(c.req.query('fidelity'));
+    return c.json({
+      data: packager.export(ws.workspaceId, c.req.param('id'), {
+        fidelity,
+        ...(brainPort ? { brain: brainPort } : {}),
+      }),
+    });
   });
 
   app.post('/import/preview', async (c) => {
@@ -782,7 +797,11 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const warnings = scanAppEnvelope(body.envelope);
     const preview = appendScanWarnings(packager.preview(body.envelope), warnings);
     assertAppPermissionsAcknowledged(preview, body.permissionsAcknowledged);
-    return c.json({ data: packager.import(ws.workspaceId, user.id, body.envelope) }, 201);
+    return c.json({
+      data: packager.import(ws.workspaceId, user.id, body.envelope, {
+        ...(brainPort ? { brain: brainPort } : {}),
+      }),
+    }, 201);
   });
 
   app.post('/test', async (c) => {
@@ -1349,6 +1368,17 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const parsed = insertRecordSchema.safeParse(await c.req.json());
     if (!parsed.success) throw validationError('Invalid record', parsed.error);
     return c.json({ data: data.insert(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.record, user.id) }, 201);
+  });
+
+  // Bulk insert — powers CSV/JSON data import. Validates each row; per-row failures
+  // are collected (not fatal) and one realtime change fires for the whole batch.
+  app.post('/:id/collections/:name/records/batch', async (c) => {
+    const ws = getWorkspace(c);
+    const user = c.get('user');
+    const parsed = batchInsertSchema.safeParse(await c.req.json());
+    if (!parsed.success) throw validationError('Invalid batch', parsed.error);
+    const result = data.insertMany(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.records, user.id);
+    return c.json({ data: result }, 201);
   });
 
   app.patch('/:id/collections/:name/records/:recordId', async (c) => {

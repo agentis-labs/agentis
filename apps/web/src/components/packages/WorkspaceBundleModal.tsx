@@ -6,14 +6,37 @@
  * contains (and what is stripped) before installing it into THIS workspace.
  */
 import { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowUpFromLine, Boxes, Download, HardDrive, Loader2, ShieldCheck, X } from 'lucide-react';
-import type { WorkspaceBundleEnvelope, WorkspaceBundlePreview } from '@agentis/core';
+import { AlertTriangle, ArrowUpFromLine, Boxes, BrainCircuit, Download, HardDrive, Loader2, Plug, ShieldCheck, Sparkles, X } from 'lucide-react';
+import type { BundleFidelity, WorkspaceBundleEnvelope, WorkspaceBundlePreview } from '@agentis/core';
 import { apiErrorMessage } from '../../lib/api';
 import { workspaceBundleApi } from '../../lib/workspaceBundle';
 import { useToast } from '../shared/Toast';
 import { Button } from '../shared/Button';
 
 type Profile = 'share' | 'sell';
+
+/** Facet-level pick of what learned state travels — the granular "send/receive whatever you want". */
+interface Facets {
+  includeAgentBrains: boolean;
+  includeAppBrains: boolean;
+  includeWorkspaceBrain: boolean;
+  includeKnowledge: boolean;
+  includeCollectionData: boolean;
+}
+const ALL_FACETS: Facets = {
+  includeAgentBrains: true,
+  includeAppBrains: true,
+  includeWorkspaceBrain: true,
+  includeKnowledge: true,
+  includeCollectionData: true,
+};
+const FACET_LABELS: Array<{ key: keyof Facets; label: string }> = [
+  { key: 'includeAgentBrains', label: 'Agent brains' },
+  { key: 'includeAppBrains', label: 'App brains' },
+  { key: 'includeWorkspaceBrain', label: 'Workspace memory' },
+  { key: 'includeKnowledge', label: 'Knowledge' },
+  { key: 'includeCollectionData', label: 'Collection data' },
+];
 
 export function WorkspaceBundleModal({
   importEnvelope,
@@ -28,6 +51,8 @@ export function WorkspaceBundleModal({
   const toast = useToast();
   const [mode] = useState<'export' | 'import'>(importEnvelope ? 'import' : 'export');
   const [profile, setProfile] = useState<Profile>('share');
+  const [fidelity, setFidelity] = useState<BundleFidelity>('shareable');
+  const [facets, setFacets] = useState<Facets>(ALL_FACETS);
   const [name, setName] = useState('');
   const [license, setLicense] = useState('');
   const [busy, setBusy] = useState(false);
@@ -48,11 +73,13 @@ export function WorkspaceBundleModal({
     try {
       const envelope = await workspaceBundleApi.export({
         profile,
+        fidelity,
+        ...(fidelity === 'full' ? { selection: facets } : {}),
         ...(name.trim() ? { name: name.trim() } : {}),
         ...(profile === 'sell' && license.trim() ? { license: license.trim() } : {}),
       });
       downloadJson(envelope, `${slugify(envelope.name)}.agentis`);
-      toast.success('Workspace exported', `${envelope.name} (${profile})`);
+      toast.success('Workspace exported', `${envelope.name} (${profile} · ${fidelity})`);
       onClose();
     } catch (err) {
       toast.error('Export failed', apiErrorMessage(err));
@@ -74,12 +101,15 @@ export function WorkspaceBundleModal({
     }
   }
 
-  async function doImport() {
+  async function doImport(selection?: Facets) {
     if (!importEnvelope) return;
     setBusy(true);
     try {
-      const result = await workspaceBundleApi.import(importEnvelope);
-      toast.success('Workspace imported', `${result.apps} app(s), ${result.agents} agent(s), ${result.workflows} workflow(s)`);
+      const result = await workspaceBundleApi.import(importEnvelope, selection);
+      const extra = result.brainAtoms || result.collectionRows
+        ? `, ${result.brainAtoms} memor${result.brainAtoms === 1 ? 'y' : 'ies'}, ${result.collectionRows} row(s)`
+        : '';
+      toast.success('Workspace imported', `${result.apps} app(s), ${result.agents} agent(s)${extra}`);
       onImported();
       onClose();
     } catch (err) {
@@ -107,9 +137,29 @@ export function WorkspaceBundleModal({
           {mode === 'export' ? (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-2">
-                <ProfileCard active={profile === 'share'} onClick={() => setProfile('share')} title="Share" desc="Structure only. No secrets, no live data. Embeddings recompiled on install." />
-                <ProfileCard active={profile === 'sell'} onClick={() => setProfile('sell')} title="Sell" desc="Like share + signed + licence. Export is blocked if any secret/PII is detected." />
+                <ProfileCard active={profile === 'share'} onClick={() => setProfile('share')} title="Share" desc="No secrets travel — only the list of which to reconnect." />
+                <ProfileCard active={profile === 'sell'} onClick={() => setProfile('sell')} title="Sell" desc="Like share + signed + licence. Blocked if a secret/PII is detected." />
               </div>
+
+              <Field label="What travels">
+                <div className="grid grid-cols-2 gap-2">
+                  <ProfileCard active={fidelity === 'shareable'} onClick={() => setFidelity('shareable')} title="Structure only" desc="Apps, agents, workflows, surfaces & schemas — no learned memory or data." />
+                  <ProfileCard active={fidelity === 'full'} onClick={() => setFidelity('full')} title="Full — share intelligence" desc="Also carries Brain memory, knowledge & collection rows. Still no secret values." />
+                </div>
+              </Field>
+
+              {fidelity === 'full' && (
+                <div className="rounded-card border border-accent/30 bg-accent-soft/25 px-3 py-2.5">
+                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-accent">
+                    <Sparkles size={13} /> Include intelligence
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                    {FACET_LABELS.map((f) => (
+                      <Toggle key={f.key} label={f.label} checked={facets[f.key]} onChange={(v) => setFacets((prev) => ({ ...prev, [f.key]: v }))} />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <Field label="Bundle name (optional)">
                 <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My workspace" className={INPUT} />
@@ -122,7 +172,7 @@ export function WorkspaceBundleModal({
 
               <div className="flex items-start gap-2 rounded-card border border-line bg-canvas/45 px-3 py-2.5 text-[11.5px] text-text-muted">
                 <ShieldCheck size={14} className="mt-0.5 shrink-0 text-text-secondary" />
-                Credentials never travel in a share/sell bundle — only the list of which to reconnect. For a full copy with secrets + data, use a local Backup.
+                Secret values never travel — even a Full bundle carries only credential slots to reconnect. For an exact copy including secrets, use a local Backup.
               </div>
 
               <div className="flex items-center gap-2 border-t border-line pt-4">
@@ -135,7 +185,7 @@ export function WorkspaceBundleModal({
               </div>
             </div>
           ) : (
-            <ImportPreview envelope={importEnvelope!} preview={preview} error={previewError} busy={busy} onConfirm={() => void doImport()} />
+            <ImportPreview envelope={importEnvelope!} preview={preview} error={previewError} busy={busy} onConfirm={(sel) => void doImport(sel)} />
           )}
         </div>
       </div>
@@ -154,8 +204,9 @@ function ImportPreview({
   preview: WorkspaceBundlePreview | null;
   error: string | null;
   busy: boolean;
-  onConfirm: () => void;
+  onConfirm: (selection: Facets) => void;
 }) {
+  const [facets, setFacets] = useState<Facets>(ALL_FACETS);
   if (error) {
     return (
       <div className="flex items-center gap-2 rounded-card border border-danger/30 bg-danger-soft px-3 py-2.5 text-[12px] text-danger">
@@ -167,10 +218,18 @@ function ImportPreview({
     return <div className="flex items-center gap-2 py-6 text-[12px] text-text-muted"><Loader2 size={14} className="animate-spin" /> Inspecting bundle…</div>;
   }
   const c = preview.counts;
+  const isFull = preview.fidelity === 'full';
+  const setup = preview.setup;
+  const needsSetup = setup.credentials.length + setup.plugins.length + setup.connections.length;
   return (
     <div className="space-y-4">
       <div>
-        <div className="text-[14px] font-semibold text-text-primary">{preview.name}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-[14px] font-semibold text-text-primary">{preview.name}</div>
+          <span className={`rounded-pill px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${isFull ? 'bg-accent-soft text-accent' : 'bg-surface-2 text-text-muted'}`}>
+            {isFull ? 'Full · intelligence' : 'Structure only'}
+          </span>
+        </div>
         <div className="mt-0.5 text-[11px] text-text-muted">
           profile: {preview.profile}{preview.author?.displayName ? ` · by ${preview.author.displayName}` : ''}{envelope.signature ? ' · ✓ signed' : ''}
         </div>
@@ -182,21 +241,54 @@ function ImportPreview({
         <Stat label="Workflows" value={c.workflows} />
         <Stat label="Extensions" value={c.extensions} />
         <Stat label="Knowledge" value={c.knowledgeSeeds} />
+        <Stat label="Brain" value={c.brainAtoms} highlight={c.brainAtoms > 0} />
+        <Stat label="Data rows" value={c.collectionRows} highlight={c.collectionRows > 0} />
         <Stat label="Creds" value={c.credentialSlots} />
       </div>
+
+      {isFull && (
+        <div className="rounded-card border border-accent/30 bg-accent-soft/25 px-3 py-2.5">
+          <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-accent">
+            <BrainCircuit size={13} /> Receive intelligence
+          </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+            {FACET_LABELS.map((f) => (
+              <Toggle key={f.key} label={f.label} checked={facets[f.key]} onChange={(v) => setFacets((prev) => ({ ...prev, [f.key]: v }))} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {preview.license && (
         <Field label="Licence"><div className="rounded-card border border-line bg-canvas/45 px-3 py-2 text-[12px] text-text-secondary whitespace-pre-wrap">{preview.license}</div></Field>
       )}
 
-      {preview.requiredCredentials.length > 0 && (
+      {needsSetup > 0 && (
         <div className="rounded-card border border-warn/30 bg-warn-soft/30 px-3 py-2.5">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-warn">Reconnect after import</div>
-          <div className="flex flex-wrap gap-1.5">
-            {preview.requiredCredentials.map((cred) => (
-              <span key={cred.key} className="rounded-pill border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary">{cred.label} · {cred.service}</span>
-            ))}
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-warn">
+            <Plug size={13} /> Needs setup after import
           </div>
+          {setup.credentials.length > 0 && (
+            <SetupRow title="Credentials to reconnect">
+              {setup.credentials.map((cred) => (
+                <SetupChip key={cred.key}>{cred.label} · {cred.service}</SetupChip>
+              ))}
+            </SetupRow>
+          )}
+          {setup.connections.length > 0 && (
+            <SetupRow title="Connections referenced by workflows">
+              {setup.connections.map((conn) => (
+                <SetupChip key={conn.service} title={conn.reason}>{conn.service}</SetupChip>
+              ))}
+            </SetupRow>
+          )}
+          {setup.plugins.length > 0 && (
+            <SetupRow title="Plugins that must already be installed">
+              {setup.plugins.map((p) => (
+                <SetupChip key={p}>{p}</SetupChip>
+              ))}
+            </SetupRow>
+          )}
         </div>
       )}
 
@@ -207,11 +299,33 @@ function ImportPreview({
       ))}
 
       <div className="flex items-center gap-2 border-t border-line pt-4">
-        <Button variant="primary" size="md" iconLeft={busy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} onClick={onConfirm} disabled={busy}>
+        <Button variant="primary" size="md" iconLeft={busy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} onClick={() => onConfirm(facets)} disabled={busy}>
           Install into this workspace
         </Button>
       </div>
     </div>
+  );
+}
+
+function SetupRow({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mt-1.5 first:mt-0">
+      <div className="mb-1 text-[10.5px] text-text-muted">{title}</div>
+      <div className="flex flex-wrap gap-1.5">{children}</div>
+    </div>
+  );
+}
+
+function SetupChip({ children, title }: { children: React.ReactNode; title?: string }) {
+  return <span title={title} className="rounded-pill border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary">{children}</span>;
+}
+
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="flex cursor-pointer items-center gap-2 text-[12px] text-text-secondary">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="h-3.5 w-3.5 rounded border-line accent-accent" />
+      {label}
+    </label>
   );
 }
 
@@ -228,10 +342,10 @@ function ProfileCard({ active, onClick, title, desc }: { active: boolean; onClic
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
   return (
-    <div className="rounded-card border border-line bg-canvas/45 px-2.5 py-2 text-center">
-      <div className="text-[15px] font-semibold text-text-primary">{value}</div>
+    <div className={`rounded-card border px-2.5 py-2 text-center ${highlight ? 'border-accent/40 bg-accent-soft/30' : 'border-line bg-canvas/45'}`}>
+      <div className={`text-[15px] font-semibold ${highlight ? 'text-accent' : 'text-text-primary'}`}>{value}</div>
       <div className="text-[10px] uppercase tracking-wider text-text-muted">{label}</div>
     </div>
   );

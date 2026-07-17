@@ -1,9 +1,10 @@
 ﻿
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Database, Loader2, Plus, RefreshCw, Table2, Trash2, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Database, Download, Loader2, Plus, RefreshCw, Table2, Trash2, Upload, X } from 'lucide-react';
 import clsx from 'clsx';
 import { REALTIME_EVENTS, type CollectionInfo, type CollectionRecord, type CollectionField } from '@agentis/core';
 import { appsApi } from '../../lib/appsApi';
+import { downloadBlob, toCsv, parseCsv } from '../../lib/download';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { apiErrorMessage } from '../../lib/api';
 import { formatDisplay, humanizeToken } from './format';
@@ -114,6 +115,77 @@ function CollectionGrid({ appId, collection }: { appId: string; collection: Coll
     [appId, collection.name],
   );
 
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportMenu, setExportMenu] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  /** Read every record's data across all pages (bounded) for an export. */
+  const gatherAll = useCallback(async (): Promise<Array<Record<string, unknown>>> => {
+    const all: Array<Record<string, unknown>> = [];
+    let cur: string | undefined;
+    for (let guard = 0; guard < 400 && all.length < 20_000; guard += 1) {
+      const res = await appsApi.query(appId, collection.name, { limit: 500, ...(cur ? { cursor: cur } : {}) });
+      for (const r of res.rows) all.push(r.data);
+      if (!res.nextCursor) break;
+      cur = res.nextCursor;
+    }
+    return all;
+  }, [appId, collection.name]);
+
+  const exportData = useCallback(
+    async (format: 'csv' | 'json') => {
+      setExportMenu(false);
+      setExporting(true);
+      setError(null);
+      try {
+        const data = await gatherAll();
+        if (format === 'csv') {
+          downloadBlob(toCsv(data, fields.map((f) => f.key)), `${collection.name}.csv`, 'text/csv;charset=utf-8');
+        } else {
+          downloadBlob(JSON.stringify(data, null, 2), `${collection.name}.json`, 'application/json');
+        }
+        setNotice(`Exported ${data.length} row${data.length === 1 ? '' : 's'} as ${format.toUpperCase()}.`);
+      } catch (err) {
+        setError(apiErrorMessage(err));
+      } finally {
+        setExporting(false);
+      }
+    },
+    [gatherAll, fields, collection.name],
+  );
+
+  const importFile = useCallback(
+    async (file: File) => {
+      setImporting(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const text = await file.text();
+        let records: Array<Record<string, unknown>>;
+        if (file.name.toLowerCase().endsWith('.json')) {
+          const parsed = JSON.parse(text);
+          const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.rows) ? parsed.rows : null;
+          if (!list) throw new Error('JSON import must be an array of row objects (or { rows: [...] }).');
+          records = list.map((raw: Record<string, unknown>) => coerceImportRow(fields, raw));
+        } else {
+          records = parseCsv(text).map((raw) => coerceImportRow(fields, raw));
+        }
+        if (records.length === 0) throw new Error('No rows found in the file.');
+        const res = await appsApi.insertMany(appId, collection.name, records);
+        const failed = res.failed.length;
+        setNotice(`Imported ${res.inserted} row${res.inserted === 1 ? '' : 's'}${failed ? ` · ${failed} skipped (invalid)` : ''}.`);
+        await load();
+      } catch (err) {
+        setError(apiErrorMessage(err));
+      } finally {
+        setImporting(false);
+      }
+    },
+    [appId, collection.name, fields, load],
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
@@ -122,16 +194,45 @@ function CollectionGrid({ appId, collection }: { appId: string; collection: Coll
           <div className="text-[11px] text-text-muted">{rows.length}{cursor ? '+' : ''} row{rows.length === 1 ? '' : 's'} · {fields.length} fields</div>
         </div>
         <div className="ml-auto flex items-center gap-1.5">
-          <button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line px-2.5 text-[12px] text-text-secondary hover:bg-surface-2 disabled:opacity-50">
+          <button type="button" onClick={() => void load()} disabled={loading} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line px-2.5 text-[12px] text-text-secondary hover:bg-surface-2 disabled:opacity-50" title="Refresh">
             {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
           </button>
+          <button type="button" onClick={() => fileInput.current?.click()} disabled={importing} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line px-2.5 text-[12px] text-text-secondary hover:bg-surface-2 disabled:opacity-50" title="Import CSV or JSON">
+            {importing ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Import
+          </button>
+          <div className="relative">
+            <button type="button" onClick={() => setExportMenu((v) => !v)} disabled={exporting} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-line px-2.5 text-[12px] text-text-secondary hover:bg-surface-2 disabled:opacity-50" title="Export CSV or JSON">
+              {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Export
+            </button>
+            {exportMenu ? (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setExportMenu(false)} />
+                <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-btn border border-line bg-surface shadow-dropdown">
+                  <button type="button" onClick={() => void exportData('csv')} className="block w-full px-3 py-1.5 text-left text-[12px] text-text-secondary hover:bg-surface-2">Export as CSV</button>
+                  <button type="button" onClick={() => void exportData('json')} className="block w-full px-3 py-1.5 text-left text-[12px] text-text-secondary hover:bg-surface-2">Export as JSON</button>
+                </div>
+              </>
+            ) : null}
+          </div>
           <button type="button" onClick={() => setEditing('new')} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-canvas hover:bg-accent-hover">
             <Plus size={13} /> Insert
           </button>
         </div>
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".csv,.json,text/csv,application/json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void importFile(f);
+            e.target.value = ''; // allow re-importing the same file
+          }}
+        />
       </div>
 
       {error ? <div className="border-b border-danger/30 bg-danger/5 px-4 py-1.5 text-[11px] text-danger">{error}</div> : null}
+      {notice ? <div className="border-b border-line bg-surface-2 px-4 py-1.5 text-[11px] text-text-secondary">{notice}</div> : null}
 
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-[12px]">
@@ -336,6 +437,30 @@ function coerce(fields: CollectionField[], draft: Record<string, string>): Recor
     else if (f.type === 'boolean') out[f.key] = raw === 'true';
     else if (f.type === 'json') out[f.key] = raw === '' ? null : JSON.parse(raw); // throws → surfaced as error
     else out[f.key] = raw;
+  }
+  return out;
+}
+
+/**
+ * Coerce one imported row to the collection's field types. Mirrors {@link coerce}
+ * but tolerates already-typed values (from a JSON import) — only string cells (as
+ * a CSV always produces) are converted. Unknown keys are dropped.
+ */
+function coerceImportRow(fields: CollectionField[], raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of fields) {
+    const v = raw[f.key];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== 'string') {
+      out[f.key] = v; // JSON already carries the right type
+      continue;
+    }
+    const s = v.trim();
+    if (s === '') continue; // empty cell → leave unset (server enforces `required`)
+    if (f.type === 'number') out[f.key] = Number(s);
+    else if (f.type === 'boolean') out[f.key] = s === 'true';
+    else if (f.type === 'json') out[f.key] = JSON.parse(s); // throws → surfaced as error
+    else out[f.key] = s;
   }
   return out;
 }

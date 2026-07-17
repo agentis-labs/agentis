@@ -1,6 +1,6 @@
 ﻿import { z } from 'zod';
 import { appIdentitySchema } from './app.js';
-import { appManifestSchema } from './manifest.js';
+import { appManifestSchema, portableBrainSchema } from './manifest.js';
 import { upsertSurfaceSchema } from './view.js';
 import { collectionSchemaSchema } from './datastore.js';
 
@@ -31,6 +31,8 @@ export const agentContentsSchema = z.object({
   runtimeModel: z.string().nullable().optional(),
   role: z.string().nullable().optional(),
   monthlyBudgetCents: z.number().int().nonnegative().nullable().optional(),
+  /** Agent-private Brain memory (`scope_id = agentId`) — full fidelity only. */
+  brain: portableBrainSchema.optional(),
 });
 export type AgentContents = z.infer<typeof agentContentsSchema>;
 
@@ -236,6 +238,39 @@ export type PackageExportEnvelope = z.infer<typeof packageExportEnvelopeSchema>;
 export const exportProfileSchema = z.enum(['backup', 'share', 'sell']);
 export type ExportProfile = z.infer<typeof exportProfileSchema>;
 
+/**
+ * The STRUCTURAL fidelity of a bundle — orthogonal to `profile` (which is the
+ * trust/secrets dimension). This decides how much *learned intelligence* travels:
+ *   - `shareable` → definitions + structure only (no Brain atoms, no collection
+ *                   rows). The legacy behaviour, and the safe default.
+ *   - `full`      → ALSO carries Brain atoms (agent + App + workspace), knowledge,
+ *                   and collection rows. Embeddings are still recomputed on install
+ *                   and secret VALUES still never travel — "full" means full learned
+ *                   intelligence, not full secrets (those are `backup`-only).
+ * Enforcement is structural (decided in the packager), never a UI checkbox.
+ */
+export const bundleFidelitySchema = z.enum(['shareable', 'full']);
+export type BundleFidelity = z.infer<typeof bundleFidelitySchema>;
+
+/**
+ * Granular pick of what to export or import. The SAME shape drives both
+ * directions: on export it decides what gets serialized; on import it decides
+ * which of the already-serialized items actually get written. A selection can
+ * only NARROW within what `fidelity` + `profile` permit (a `shareable` bundle
+ * carries no brains even if `includeAgentBrains` is true). `null` id lists mean
+ * "all".
+ */
+export const bundleSelectionSchema = z.object({
+  agentIds: z.array(z.string()).nullable().default(null),
+  appIds: z.array(z.string()).nullable().default(null),
+  includeAgentBrains: z.boolean().default(true),
+  includeAppBrains: z.boolean().default(true),
+  includeWorkspaceBrain: z.boolean().default(true),
+  includeKnowledge: z.boolean().default(true),
+  includeCollectionData: z.boolean().default(true),
+});
+export type BundleSelection = z.infer<typeof bundleSelectionSchema>;
+
 export const bundleAuthorSchema = z.object({
   id: z.string().optional(),
   displayName: z.string().optional(),
@@ -267,6 +302,16 @@ export const workspaceBundleManifestSchema = z.object({
     .default([]),
   /** Credential REQUIREMENTS the installer must fill in — never the secret values. */
   credentialSlots: z.array(credentialSlotSchema).default([]),
+  /** Workspace-global Brain memory (`scope_id = null`) — carried in full fidelity only. */
+  workspaceBrain: portableBrainSchema.optional(),
+  /** Self-describing structural fidelity of this bundle. Absent ⇒ legacy `shareable`. */
+  fidelity: bundleFidelitySchema.default('shareable'),
+  /**
+   * Content-shape marker. `2` = may carry learned intelligence (brains/rows).
+   * Preview/install branch on FIELD PRESENCE, not this number, so v1 bundles
+   * (no marker) install unchanged.
+   */
+  bundleContentVersion: z.number().int().optional(),
 });
 export type WorkspaceBundleManifest = z.infer<typeof workspaceBundleManifestSchema>;
 
@@ -276,6 +321,8 @@ export const workspaceBundleEnvelopeSchema = z.object({
   formatVersion: z.literal(1).default(1),
   agentisVersion: z.string().min(1).default('1.0.0'),
   profile: exportProfileSchema,
+  /** Structural fidelity (mirrors manifest.fidelity). Absent ⇒ legacy `shareable`. */
+  fidelity: bundleFidelitySchema.default('shareable'),
   name: z.string().min(1).max(160),
   description: z.string().max(2000).nullable().optional(),
   manifest: workspaceBundleManifestSchema,
@@ -297,6 +344,8 @@ export const workspaceBundlePreviewSchema = z.object({
   format: z.literal('.agentis'),
   formatVersion: z.literal(1),
   profile: exportProfileSchema,
+  /** Structural fidelity of the incoming bundle. Absent bundles read as `shareable`. */
+  fidelity: bundleFidelitySchema.default('shareable'),
   name: z.string(),
   checksum: z.string(),
   exportedAt: z.string(),
@@ -310,8 +359,22 @@ export const workspaceBundlePreviewSchema = z.object({
     integrations: z.number().int().nonnegative(),
     knowledgeSeeds: z.number().int().nonnegative(),
     credentialSlots: z.number().int().nonnegative(),
+    /** Learned intelligence carried (full fidelity only). */
+    brainAtoms: z.number().int().nonnegative().default(0),
+    collectionRows: z.number().int().nonnegative().default(0),
   }),
   requiredCredentials: z.array(z.object({ key: z.string(), service: z.string(), label: z.string() })).default([]),
+  /**
+   * First-class "nodes needing setup" — everything the operator must configure
+   * before the imported work can run. Surfaced prominently on the import screen.
+   */
+  setup: z
+    .object({
+      credentials: z.array(z.object({ key: z.string(), service: z.string(), label: z.string() })).default([]),
+      plugins: z.array(z.string()).default([]),
+      connections: z.array(z.object({ service: z.string(), reason: z.string() })).default([]),
+    })
+    .default({ credentials: [], plugins: [], connections: [] }),
   permissions: z.array(z.string()).default([]),
   warnings: z.array(z.string()).default([]),
 });

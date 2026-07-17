@@ -24,13 +24,13 @@ export interface ResolvedTheme {
   design: ResolvedDesign;
 }
 
-/** Per-theme defaults. Every theme leads with the flagship `agentis` design
- * system (INTERFACE-OVERHAUL-10X — one system, structural variants); a stored
- * legacy `design` id still wins via resolveTheme's explicit-design override. */
+/** Per-theme defaults: each theme leads with the design language that fits its
+ * job (aligned with genuiAudit.inferDesign so gated and un-gated renders agree);
+ * a stored explicit `design` id still wins via resolveTheme's override. */
 const PRESETS: Record<SurfaceTheme, Omit<ResolvedTheme, 'theme' | 'design'> & { design: DesignLanguage }> = {
-  operations: { density: 'compact', defaultAccent: 'accent', contentWidth: 1680, design: 'agentis' },
-  analytics: { density: 'compact', defaultAccent: 'accent', contentWidth: 1520, design: 'agentis' },
-  product: { density: 'comfortable', defaultAccent: 'accent', contentWidth: 1120, design: 'agentis' },
+  operations: { density: 'compact', defaultAccent: 'accent', contentWidth: 1680, design: 'operations' },
+  analytics: { density: 'compact', defaultAccent: 'accent', contentWidth: 1520, design: 'aurora' },
+  product: { density: 'comfortable', defaultAccent: 'accent', contentWidth: 1120, design: 'soft' },
   editorial: { density: 'comfortable', defaultAccent: 'accent', contentWidth: 860, design: 'editorial' },
 };
 

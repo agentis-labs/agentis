@@ -345,6 +345,11 @@ export const appsApi = {
       method: 'POST',
       body: JSON.stringify({ record }),
     }).then((r) => r.data),
+  insertMany: (id: string, collection: string, records: Array<Record<string, unknown>>) =>
+    api<Wrapped<{ inserted: number; failed: Array<{ index: number; error: string }> }>>(
+      `/v1/apps/${id}/collections/${encodeURIComponent(collection)}/records/batch`,
+      { method: 'POST', body: JSON.stringify({ records }) },
+    ).then((r) => r.data),
   updateRecord: (id: string, collection: string, recordId: string, patch: Record<string, unknown>) =>
     api<Wrapped<CollectionRecord>>(`/v1/apps/${id}/collections/${encodeURIComponent(collection)}/records/${encodeURIComponent(recordId)}`, {
       method: 'PATCH',

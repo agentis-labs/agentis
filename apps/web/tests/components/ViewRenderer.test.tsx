@@ -270,4 +270,25 @@ describe('Table sorting (E3)', () => {
     await userEvent.type(screen.getByLabelText('Filter rows'), 'zzz-no-match');
     expect(screen.getByText(/no matches/i)).toBeTruthy(); // filter-aware empty state
   });
+
+  // Regression: a multi-column table in a NARROW container (a Split rail, a
+  // narrow viewport) used to collapse its columns to sub-word widths inside an
+  // `overflow-hidden` panel, so the browser broke cell/header text one glyph per
+  // line — the "vertical column of single characters" failure. The table must
+  // now sit in a horizontal-scroll wrapper with a min-width floor so it scrolls
+  // instead of squishing.
+  it('keeps a table scrollable with a min-width floor (no single-character columns)', async () => {
+    const { container } = renderNode(
+      { type: 'Table', bind: { collection: 'orders', live: true }, columns: [
+        { key: 'product', label: 'Product' }, { key: 'status', label: 'Status' },
+        { key: 'region', label: 'Region' }, { key: 'total', label: 'Total' },
+      ] },
+      [{ product: 'Widget', status: 'shipped', region: 'EMEA', total: 42 }],
+    );
+    const table = await screen.findByRole('table');
+    const scroller = table.closest('.overflow-x-auto');
+    expect(scroller).toBeTruthy(); // horizontal scroll wrapper present
+    const minWidth = parseInt((table as HTMLElement).style.minWidth || '0', 10);
+    expect(minWidth).toBeGreaterThanOrEqual(480); // never collapses below a readable width
+  });
 });

@@ -35,6 +35,12 @@ export interface ResolvedDesign {
  * tracked labels → 13.5px body → 15px titles → 26px page titles → 32-40px
  * numerals. Color belongs to DATA (status pills, charts, pulses); chrome quiet.
  */
+/** Appearance-aware depth: a KPI/metric tile gets a subtle top-lit gradient so it
+ *  reads as a raised surface in BOTH light and dark (the `--color-*` tokens flip).
+ *  This is the monochrome-safe way to add depth — no coloring the chrome. */
+const TILE_DEPTH = 'linear-gradient(180deg, var(--color-surface-2), var(--color-surface))';
+const TILE_FLAT = 'var(--color-surface)';
+
 const FLAGSHIP_VARS: CSSProperties = {
   '--s-radius': '12px',
   '--s-pad': '20px',
@@ -42,10 +48,12 @@ const FLAGSHIP_VARS: CSSProperties = {
   '--s-card-bg': 'var(--app-card-bg)',
   '--s-card-border': 'var(--app-card-border)',
   '--s-card-shadow': 'var(--app-card-shadow)',
-  '--s-kpi-bg': 'var(--app-tile-bg)',
-  '--s-kpi-size': '32px',
-  '--s-heading-size': '26px',
-  '--s-title-size': '16px',
+  // Tiles lift off the page with a subtle gradient (depth, not decoration).
+  '--s-kpi-bg': TILE_DEPTH,
+  // Type scale that JUMPS: 11 label → 13.5 body → 15 title → 27 page → 34 numeral.
+  '--s-kpi-size': '34px',
+  '--s-heading-size': '27px',
+  '--s-title-size': '15px',
   '--s-body-size': '13.5px',
   '--s-accent-glow': 'var(--shadow-glow)',
 } as CSSProperties;
@@ -53,7 +61,8 @@ const FLAGSHIP_VARS: CSSProperties = {
 interface VariantDef {
   label: string;
   hint: string;
-  /** Structural overrides layered over the flagship bundle. */
+  /** Structural + depth overrides layered over the flagship bundle. Each variant
+   *  is a genuinely distinct look (radius/scale/density/depth), not a re-skin. */
   vars?: CSSProperties;
   policy?: Partial<ResolvedDesign['policy']>;
 }
@@ -61,34 +70,44 @@ interface VariantDef {
 const VARIANTS: Record<DesignLanguage, VariantDef> = {
   agentis: {
     label: 'Agentis',
-    hint: 'The flagship system — premium cards, real type scale, light & dark.',
+    hint: 'The flagship system — premium cards, real type scale, subtle depth, light & dark.',
   },
-  // Legacy ids → structural variants of the flagship (zero-migration upgrades).
+  // Dense command center — single accent, tight rhythm, flat tiles (readability
+  // over flourish). For ops consoles / control planes.
   operations: {
-    label: 'Operations (variant)',
-    hint: 'Flagship structure, single-accent charts — dense command centers.',
+    label: 'Operations',
+    hint: 'Dense command center — single accent, tight rhythm, flat tiles.',
+    vars: { '--s-radius': '10px', '--s-pad': '16px', '--s-gap': '12px', '--s-kpi-bg': TILE_FLAT, '--s-kpi-size': '28px', '--s-heading-size': '22px', '--s-title-size': '14px', '--s-body-size': '13px' } as CSSProperties,
     policy: { multiPalette: false },
   },
+  // Executive analytics — loud numerals, rounder cards, gradient tiles + colored
+  // KPI edges + gradient charts. The "big dashboard" look.
   aurora: {
-    label: 'Aurora (variant)',
-    hint: 'Bigger numerals, rounder cards — executive dashboards.',
-    vars: { '--s-radius': '16px', '--s-pad': '22px', '--s-kpi-size': '38px', '--s-heading-size': '28px' } as CSSProperties,
+    label: 'Aurora',
+    hint: 'Executive analytics — loud numerals, rounder cards, gradient tiles, colorful charts.',
+    vars: { '--s-radius': '16px', '--s-pad': '22px', '--s-gap': '18px', '--s-kpi-bg': TILE_DEPTH, '--s-kpi-size': '40px', '--s-heading-size': '30px', '--s-title-size': '16px' } as CSSProperties,
   },
+  // Consumer / CRM — friendlier, rounder, roomier, gentler numerals.
   soft: {
-    label: 'Soft (variant)',
-    hint: 'Rounder, friendlier spacing — consumer/CRM products.',
-    vars: { '--s-radius': '18px', '--s-pad': '22px', '--s-gap': '16px', '--s-body-size': '14px' } as CSSProperties,
+    label: 'Soft',
+    hint: 'Consumer / CRM — rounder, roomier, friendly numerals.',
+    vars: { '--s-radius': '18px', '--s-pad': '22px', '--s-gap': '18px', '--s-kpi-bg': TILE_DEPTH, '--s-kpi-size': '32px', '--s-heading-size': '26px', '--s-title-size': '15px', '--s-body-size': '14px' } as CSSProperties,
   },
+  // Content-forward — big flat type, generous whitespace, NO tile depth, single
+  // accent, flat charts. Reports & briefings.
   editorial: {
-    label: 'Editorial (variant)',
-    hint: 'Big type, generous whitespace, flat color — content & reports.',
-    vars: { '--s-radius': '10px', '--s-pad': '26px', '--s-gap': '22px', '--s-kpi-size': '40px', '--s-heading-size': '30px', '--s-title-size': '16px', '--s-body-size': '15px' } as CSSProperties,
+    label: 'Editorial',
+    hint: 'Content-forward — big flat type, generous whitespace, flat color.',
+    vars: { '--s-radius': '10px', '--s-pad': '26px', '--s-gap': '24px', '--s-kpi-bg': TILE_FLAT, '--s-kpi-size': '42px', '--s-heading-size': '32px', '--s-title-size': '17px', '--s-body-size': '15px' } as CSSProperties,
     policy: { gradientCharts: false, multiPalette: false },
   },
+  // Ops / SRE monitor — sharp corners, compact grid, tight type, flat tiles,
+  // single accent. A wall of live signals.
   console: {
-    label: 'Console (variant)',
-    hint: 'Tight grid, compact scale — ops/SRE monitors.',
-    vars: { '--s-radius': '10px', '--s-pad': '14px', '--s-gap': '10px', '--s-kpi-size': '26px', '--s-heading-size': '20px', '--s-title-size': '13.5px', '--s-body-size': '12.5px' } as CSSProperties,
+    label: 'Console',
+    hint: 'Ops / SRE monitor — sharp corners, compact grid, tight scale.',
+    vars: { '--s-radius': '8px', '--s-pad': '13px', '--s-gap': '10px', '--s-kpi-bg': TILE_FLAT, '--s-kpi-size': '24px', '--s-heading-size': '19px', '--s-title-size': '13px', '--s-body-size': '12.5px' } as CSSProperties,
+    policy: { multiPalette: false },
   },
 };
 

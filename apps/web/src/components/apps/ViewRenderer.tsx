@@ -850,6 +850,77 @@ function neutralizeScriptClose(code: string): string {
   return code.replace(/<\/(script)/gi, '<\\/$1');
 }
 
+/** Frame → parent height report, so a full-bleed surface grows to its content
+ *  (no fixed-height scroll box). One-way notification (no `id`), ignored by the
+ *  request/reply bridge. */
+const RESIZE_REPORTER = `
+  <script>
+    (function(){
+      var SRC='${APP_CLIENT_MESSAGE_SOURCE}', VER=${APP_CLIENT_PROTOCOL_VERSION};
+      function report(){ try { var el=document.documentElement; var hh=Math.max(el.scrollHeight, document.body?document.body.scrollHeight:0); parent.postMessage({ source:SRC, version:VER, kind:'resize', height:hh }, '*'); } catch(e){} }
+      if (window.ResizeObserver) { var ro=new ResizeObserver(report); ro.observe(document.documentElement); if(document.body) ro.observe(document.body); }
+      window.addEventListener('load', report);
+      setTimeout(report, 50); setTimeout(report, 250); setTimeout(report, 800);
+    })();
+  <\/script>`;
+
+/**
+ * Map the surface's REAL resolved palette (`--color-*` / `--s-*` off the nearest
+ * `.s-surface` ancestor) onto the sandbox kit's token names, so a CodeSurface /
+ * CustomView is on-brand in light AND dark (and follows accent re-brands + color
+ * islands) automatically — no hardcoded palette inside the frame. Re-reads when
+ * the platform theme or per-app appearance flips.
+ */
+const SANDBOX_VAR_MAP: Array<[string, string]> = [
+  ['--canvas', '--color-canvas'], ['--surface', '--color-surface'], ['--surface-2', '--color-surface-2'],
+  ['--surface-3', '--color-surface-3'], ['--line', '--color-line'], ['--line-strong', '--color-line-strong'],
+  ['--text', '--color-text-primary'], ['--text-2', '--color-text-secondary'], ['--muted', '--color-text-muted'],
+  ['--on-accent', '--color-on-accent'], ['--accent', '--color-accent'], ['--success', '--color-success'],
+  ['--danger', '--color-danger'], ['--warn', '--color-warn'], ['--info', '--color-info'],
+  ['--radius', '--s-radius'], ['--pad', '--s-pad'],
+];
+
+function useSurfaceVars(hostRef: React.RefObject<HTMLElement | null>): string {
+  const [css, setCss] = useState('');
+  useEffect(() => {
+    const surface = (hostRef.current?.closest('.s-surface') as HTMLElement | null) ?? document.querySelector('.s-surface');
+    if (!surface) { setCss(':root{}'); return; }
+    const read = () => {
+      const cs = getComputedStyle(surface);
+      const decl = SANDBOX_VAR_MAP.map(([to, from]) => {
+        const value = cs.getPropertyValue(from).trim();
+        return value ? `${to}:${value};` : '';
+      }).join('');
+      setCss(`:root{${decl}}`);
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class'] });
+    observer.observe(surface, { attributes: true, attributeFilter: ['data-appearance', 'data-design'] });
+    return () => observer.disconnect();
+  }, [hostRef]);
+  return css;
+}
+
+/** Listen for the frame's one-way height reports; returns the grown height (or
+ *  null until the first report). Only active when `enabled` (auto/full-bleed). */
+function useFrameHeight(frameRef: React.RefObject<HTMLIFrameElement | null>, enabled: boolean): number | null {
+  const [height, setHeight] = useState<number | null>(null);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow) return;
+      const data = event.data as { source?: string; version?: number; kind?: string; height?: number } | undefined;
+      if (!data || data.source !== APP_CLIENT_MESSAGE_SOURCE || data.version !== APP_CLIENT_PROTOCOL_VERSION || data.kind !== 'resize') return;
+      const next = Number(data.height);
+      if (Number.isFinite(next) && next > 0) setHeight(Math.min(20_000, Math.ceil(next)));
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [frameRef, enabled]);
+  return height;
+}
+
 /**
  * Parent-side bridge handler shared by CustomView + CodeSurface. Forwards the
  * frame's calls to the runtime client, enforcing the collection + action
@@ -867,6 +938,9 @@ function useSandboxBridge(
       if (event.source !== frameRef.current?.contentWindow) return;
       const message = event.data as AppClientMessage | undefined;
       if (!message || message.source !== APP_CLIENT_MESSAGE_SOURCE || message.version !== APP_CLIENT_PROTOCOL_VERSION) return;
+      // Only handle request/reply calls (numeric `id`). One-way notifications
+      // (e.g. the height reporter's `kind:'resize'`) carry no id — ignore them.
+      if (typeof (message as { id?: unknown }).id !== 'number') return;
       const reply = (response: Omit<AppClientResponse, 'source' | 'version' | 'id'>) => {
         (event.source as Window | null)?.postMessage(
           { source: APP_CLIENT_MESSAGE_SOURCE, version: APP_CLIENT_PROTOCOL_VERSION, id: message.id, ...response } satisfies AppClientResponse,
@@ -922,27 +996,42 @@ function SandboxBlocked({ label }: { label: string }) {
 
 function CustomViewFrame({ node }: { node: Extract<ViewNode, { type: 'CustomView' }> }) {
   const { allowCustomCode, surfaceActions } = useRuntime();
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const allowed = useMemo(() => new Set(node.collections ?? []), [node.collections]);
   const allowedActions = useMemo(() => new Set(surfaceActions.map((a) => a.name)), [surfaceActions]);
   useSandboxBridge(frameRef, allowed, allowedActions, allowCustomCode);
+  const surfaceVars = useSurfaceVars(hostRef);
+  const auto = node.height == null;
+  const grown = useFrameHeight(frameRef, auto);
 
   const srcDoc = useMemo(
-    () => `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"></head><body style="margin:0;font-family:system-ui;color:#111">${node.html}${BRIDGE_SCRIPT}</body></html>`,
-    [node.html],
+    // Inject the real surface palette so raw markup is legible on-brand in light AND dark.
+    () => `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${surfaceVars} html,body{margin:0} body{font-family:Inter,system-ui,-apple-system,sans-serif;color:var(--text,#111);background:var(--canvas,transparent)}</style></head><body>${node.html}${BRIDGE_SCRIPT}${RESIZE_REPORTER}</body></html>`,
+    [node.html, surfaceVars],
   );
 
   if (!allowCustomCode) return <SandboxBlocked label="Custom view blocked by app policy." />;
-  return <iframe title="Custom view" ref={frameRef} sandbox="allow-scripts" srcDoc={srcDoc} className="w-full rounded-card border border-line bg-white" style={{ height: node.height ?? 320 }} />;
+  return (
+    <div ref={hostRef} className={node.fullBleed ? undefined : 'rounded-card border border-line overflow-hidden'}>
+      <iframe title="Custom view" ref={frameRef} sandbox="allow-scripts" srcDoc={surfaceVars ? srcDoc : undefined} className="w-full bg-canvas" style={{ height: auto ? (grown ?? 320) : node.height, display: 'block' }} />
+    </div>
+  );
 }
 
 /** The full-power tier: agent JS + the Agentis kit, in the same hardened sandbox. */
 function CodeSurfaceFrame({ node }: { node: Extract<ViewNode, { type: 'CodeSurface' }> }) {
   const { allowCustomCode, surfaceActions } = useRuntime();
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const allowed = useMemo(() => new Set(node.collections ?? []), [node.collections]);
   const allowedActions = useMemo(() => new Set(surfaceActions.map((a) => a.name)), [surfaceActions]);
   useSandboxBridge(frameRef, allowed, allowedActions, allowCustomCode);
+  const surfaceVars = useSurfaceVars(hostRef);
+  // Auto-height by default (grow to content — a whole dashboard page); a set
+  // `height` opts back into a fixed box.
+  const auto = node.height == null;
+  const grown = useFrameHeight(frameRef, auto);
 
   const srcDoc = useMemo(() => {
     const body = `
@@ -956,12 +1045,18 @@ function CodeSurfaceFrame({ node }: { node: Extract<ViewNode, { type: 'CodeSurfa
           try { ${neutralizeScriptClose(node.code)} }
           catch (err) { root.innerHTML = '<pre style="white-space:pre-wrap;color:#ef4444;font:12px/1.5 monospace">' + String(err && err.stack || err) + '<\\/pre>'; }
         })();
-      <\/script>`;
-    return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${CODE_SURFACE_TOKENS}</style></head><body>${body}</body></html>`;
-  }, [node.code]);
+      <\/script>
+      ${RESIZE_REPORTER}`;
+    // The parent's real palette wins over the kit's dark fallback (:root order).
+    return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${CODE_SURFACE_TOKENS}${surfaceVars}</style></head><body>${body}</body></html>`;
+  }, [node.code, surfaceVars]);
 
   if (!allowCustomCode) return <SandboxBlocked label="Code surface blocked by app policy — enable custom-coded views in the App engine." />;
-  return <iframe title="Code surface" ref={frameRef} sandbox="allow-scripts" srcDoc={srcDoc} className="w-full rounded-card border border-line bg-canvas" style={{ height: node.height ?? 360 }} />;
+  return (
+    <div ref={hostRef} className={node.fullBleed ? undefined : 'rounded-card border border-line overflow-hidden'}>
+      <iframe title="Code surface" ref={frameRef} sandbox="allow-scripts" srcDoc={surfaceVars ? srcDoc : undefined} className="w-full bg-canvas" style={{ height: auto ? (grown ?? 360) : node.height, display: 'block' }} />
+    </div>
+  );
 }
 
 function ActionButton({
@@ -1086,11 +1181,16 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
           {query ? <span className="shrink-0 text-[11px] text-text-muted">{filtered.length} of {rows.length}</span> : null}
         </div>
       ) : null}
-      <table className="w-full text-left text-[13px]">
+      {/* Horizontal scroll + a min-width floor: in a narrow container (a Split
+          rail, a narrow viewport) an unwrapped table collapses its columns to
+          sub-word widths and the browser breaks cell text one glyph per line —
+          the "vertical column of single characters" failure. Scroll instead. */}
+      <div className="overflow-x-auto">
+      <table className="w-full text-left text-[13px]" style={{ minWidth: Math.max(480, colCount * 128) }}>
         <thead className="bg-surface-2/50 text-text-muted">
           <tr>
             {node.columns.map((col) => (
-              <th key={col.key} className={clsx('px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.07em]', numericCols.has(col.key) && 'text-right')}>
+              <th key={col.key} className={clsx('whitespace-nowrap px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.07em]', numericCols.has(col.key) && 'text-right')}>
                 <button
                   type="button"
                   onClick={() => toggleSort(col.key)}
@@ -1159,6 +1259,7 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
           ))}
         </tbody>
       </table>
+      </div>
       {paginate ? (
         <div className="flex items-center justify-between border-t border-line px-3 py-2 text-[11px] text-text-muted">
           <span className="tabular-nums">{current * TABLE_PAGE_SIZE + 1}–{Math.min((current + 1) * TABLE_PAGE_SIZE, filtered.length)} of {filtered.length}</span>

@@ -298,7 +298,7 @@ type ViewNodeBase =
    * data + actions flow only through the postMessage bridge, which the parent
    * authz-checks against app policy server-side. `html` is the agent's markup.
    */
-  | { type: 'CustomView'; html: string; collections?: string[]; height?: number }
+  | { type: 'CustomView'; html: string; collections?: string[]; height?: number; fullBleed?: boolean }
   /**
    * Code surface (GENUI-RENAISSANCE Pillar 4) — the full-power tier. The agent
    * writes plain JS (`code`) that runs in the SAME hardened, null-origin,
@@ -307,7 +307,7 @@ type ViewNodeBase =
    * So the agent can build *anything* the typed grammar can't express — on-brand,
    * live, and safe. `collections` is the read allowlist (same as CustomView).
    */
-  | { type: 'CodeSurface'; code: string; collections?: string[]; height?: number };
+  | { type: 'CodeSurface'; code: string; collections?: string[]; height?: number; fullBleed?: boolean };
 
 /** Any node, plus optional bounded visual intent. */
 export type ViewNode = ViewNodeBase & { nodeId?: string; style?: StyleIntent };
@@ -434,8 +434,8 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
       stages: z.array(z.object({ key: z.string().min(1), label: z.string().optional(), description: z.string().optional() })).optional(),
       ...styled,
     }),
-    z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
-    z.object({ type: z.literal('CodeSurface'), code: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), ...styled }),
+    z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), fullBleed: z.boolean().optional(), ...styled }),
+    z.object({ type: z.literal('CodeSurface'), code: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), fullBleed: z.boolean().optional(), ...styled }),
   ]) as z.ZodType<ViewNode>,
 );
 
