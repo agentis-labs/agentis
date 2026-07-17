@@ -17,8 +17,10 @@
  *     first-call latency sane; it degrades to lexical order if embedding fails).
  *
  * Atoms are derived live from existing rows (apps, workflows and their nodes +
- * phases, agents, extensions) — no new table, no migration. Node and phase atoms
- * are what make deep targeting ("run the CRM's qualify node") addressable.
+ * phases, agents, extensions) plus the mounted MCP tools resolved through the
+ * bridge — no new table, no migration. Node and phase atoms are what make deep
+ * targeting ("run the CRM's qualify node") addressable; mcp_tool atoms make the
+ * mounted third-party surface reachable by the same search → load → invoke path.
  */
 
 import { createHash } from 'node:crypto';
@@ -29,7 +31,7 @@ import type { WorkflowGraph } from '@agentis/core';
 import type { Logger } from '../../logger.js';
 import type { EmbeddingProvider } from '../embedding/embeddingProvider.js';
 import { cosineSimilarity, embedText } from '../embedding/embeddingProvider.js';
-import { appUrn, workflowUrn, nodeUrn, phaseUrn, agentUrn, skillUrn, type CapabilityKind } from './capabilityUrn.js';
+import { appUrn, workflowUrn, nodeUrn, phaseUrn, agentUrn, skillUrn, mcpToolUrn, type CapabilityKind } from './capabilityUrn.js';
 
 export interface CapabilityAtom {
   urn: string;
@@ -56,6 +58,26 @@ export interface CapabilityIndexDeps {
   logger?: Logger;
   /** Per-workspace embedding provider (same resolver the Brain/abilities use). */
   embeddingProvider?: (workspaceId: string) => EmbeddingProvider;
+  /**
+   * Mounted MCP tools for a workspace (structurally typed — the index must not
+   * couple to McpToolBridge). Async because it is network I/O behind the bridge's
+   * own cache; the index therefore holds a snapshot rather than calling inline.
+   */
+  mcpTools?: (workspaceId: string) => Promise<Array<{
+    id: string;
+    serverName: string;
+    toolName: string;
+    description?: string;
+    provides?: string;
+  }>>;
+  /**
+   * Which built-in integration connectors this workspace actually has a credential
+   * for (`configured`) vs. merely supports (`available`). Structurally typed and
+   * synchronous — it is a cheap vault existence check, resolved in bootstrap from
+   * the connector catalog + the engine's credential lookup so the index need not
+   * import either. Powers the "mounted connections" block; absent → no such block.
+   */
+  configuredIntegrations?: (workspaceId: string) => { configured: string[]; available: string[] };
 }
 
 interface AtomCacheEntry {
@@ -64,6 +86,8 @@ interface AtomCacheEntry {
 }
 
 const ATOMS_TTL_MS = 15_000;
+/** MCP snapshot TTL — matches the bridge's own per-server cache window. */
+const MCP_TTL_MS = 60_000;
 /** Cap how many workflow graphs we walk for node/phase atoms per build. */
 const MAX_WORKFLOWS_SCANNED = 200;
 /** Node kinds that are pure canvas/boilerplate — never worth a search atom. */
@@ -75,6 +99,15 @@ const SCOPE_BOOST = 0.12;
 
 export class CapabilityIndex {
   readonly #atomCache = new Map<string, AtomCacheEntry>();
+  /**
+   * MCP atoms live in their OWN cache with their own TTL — never in #atomCache.
+   * The DB-derived atoms rebuild every 15s from cheap local reads; MCP tools cost
+   * network I/O behind the bridge. Entangling the two would either hammer remote
+   * servers every 15s or stale out the local rows for a minute.
+   */
+  readonly #mcpCache = new Map<string, { atoms: CapabilityAtom[]; expiresAt: number }>();
+  /** Rendered "mounted connections" block, cached per workspace (TTL = MCP window). */
+  readonly #connectionsCache = new Map<string, { block: string; expiresAt: number }>();
   /** urn → { hash, vector } embedding cache, keyed per workspace. */
   readonly #vecCache = new Map<string, Map<string, { hash: string; vec: number[] }>>();
 
@@ -83,6 +116,8 @@ export class CapabilityIndex {
   /** Drop cached atoms/vectors for a workspace (call on mutation). */
   invalidate(workspaceId: string): void {
     this.#atomCache.delete(workspaceId);
+    this.#mcpCache.delete(workspaceId);
+    this.#connectionsCache.delete(workspaceId);
     this.#vecCache.delete(workspaceId);
   }
 
@@ -90,7 +125,11 @@ export class CapabilityIndex {
   manifest(workspaceId: string): CapabilityManifest {
     const workspace = this.deps.db.select({ name: schema.workspaces.name }).from(schema.workspaces)
       .where(eq(schema.workspaces.id, workspaceId)).get();
-    const atoms = this.#buildAtoms(workspaceId);
+    // manifest() is sync and runs on every chat turn, so it reads whatever MCP
+    // snapshot exists and warms the next one in the background. Accepted tradeoff:
+    // mcp_tool counts can lag by one turn on a cold cache. search() awaits.
+    void this.#refreshMcpAtoms(workspaceId).catch(() => {});
+    const atoms = this.#allAtoms(workspaceId);
     const counts: Record<string, number> = {};
     for (const a of atoms) counts[a.kind] = (counts[a.kind] ?? 0) + 1;
     const sample = (kind: CapabilityKind, n: number): string[] =>
@@ -113,6 +152,69 @@ export class CapabilityIndex {
   }
 
   /**
+   * The MOUNTED CONNECTIONS block — a short, resident statement of the third-party
+   * surface that is LIVE for this workspace RIGHT NOW: the mounted MCP servers with
+   * their tool names, and the integration connectors that actually have a credential.
+   *
+   * This is the fix for "the agent doesn't know it can use the mounted MCP/integrations":
+   * the CAPABILITY MANIFEST tells it *what kinds of things exist*, but only this block
+   * names the concrete servers/connectors and says plainly they are configured and
+   * callable — so the agent reaches for agentis.mcp.call / agentis.integration.call
+   * instead of assuming nothing is connected. Returns '' when nothing is mounted or
+   * configured (no noise on a bare workspace). Never throws.
+   */
+  async mountedConnectionsBlock(workspaceId: string): Promise<string> {
+    const cached = this.#connectionsCache.get(workspaceId);
+    if (cached && cached.expiresAt > Date.now()) return cached.block;
+    let block = '';
+    try {
+      await this.#refreshMcpAtoms(workspaceId);
+      const mcpAtoms = this.#mcpAtoms(workspaceId);
+      // Group tool names under their server (atom title is "<server> › <tool>").
+      const byServer = new Map<string, string[]>();
+      for (const atom of mcpAtoms) {
+        const [server, tool] = atom.title.split(' › ');
+        if (!server) continue;
+        const tools = byServer.get(server) ?? [];
+        if (tool) tools.push(tool);
+        byServer.set(server, tools);
+      }
+      const integrations = this.deps.configuredIntegrations?.(workspaceId) ?? { configured: [], available: [] };
+
+      const lines: string[] = [];
+      if (byServer.size > 0) {
+        const servers = [...byServer.entries()].map(([server, tools]) => {
+          const shown = tools.slice(0, 8).join(', ');
+          const more = tools.length > 8 ? `, +${tools.length - 8} more` : '';
+          return `- ${server}${shown ? ` (tools: ${shown}${more})` : ''}`;
+        });
+        lines.push(
+          'Mounted MCP servers — LIVE in this workspace, call their tools with agentis.mcp.call (or add an `mcp` node to a workflow); agentis.mcp.list for the full tool set:',
+          ...servers,
+        );
+      }
+      if (integrations.configured.length > 0) {
+        lines.push(
+          `Configured integrations — credentialed and callable RIGHT NOW with agentis.integration.call: ${integrations.configured.join(', ')}.`,
+        );
+      }
+      if (integrations.available.length > 0) {
+        lines.push(
+          `Also supported but NOT yet credentialed (ask the operator to connect one before calling): ${integrations.available.slice(0, 12).join(', ')}${integrations.available.length > 12 ? ', …' : ''}.`,
+        );
+      }
+      if (lines.length > 0) {
+        block = ['MOUNTED CONNECTIONS', 'These are already connected to this workspace — prefer them over assuming a capability is missing. Do NOT pass secrets; credentials resolve from the vault.', ...lines].join('\n');
+      }
+    } catch (err) {
+      this.deps.logger?.warn?.('capability_index.connections_failed', { workspaceId, err: (err as Error).message });
+      block = '';
+    }
+    this.#connectionsCache.set(workspaceId, { block, expiresAt: Date.now() + MCP_TTL_MS });
+    return block;
+  }
+
+  /**
    * Rank capability atoms against an intent. Hybrid: lexical prefilter →
    * semantic re-rank of the shortlist. Never throws — degrades to lexical order.
    */
@@ -123,7 +225,10 @@ export class CapabilityIndex {
   ): Promise<CapabilityAtom[]> {
     const query = (intent ?? '').trim();
     const limit = Math.max(1, Math.min(opts.limit ?? 8, 25));
-    let atoms = this.#buildAtoms(workspaceId);
+    // Await the MCP snapshot (self-guards on TTL) so the advertised `mcp_tool`
+    // filter is truthful on the FIRST search, not one call later.
+    await this.#refreshMcpAtoms(workspaceId);
+    let atoms = this.#allAtoms(workspaceId);
     if (opts.kind) atoms = atoms.filter((a) => a.kind === opts.kind);
     if (atoms.length === 0) return [];
 
@@ -173,7 +278,10 @@ export class CapabilityIndex {
 
   /** Fetch a single atom by URN for hydration (capability.load). */
   atomByUrn(workspaceId: string, urn: string): CapabilityAtom | undefined {
-    return this.#buildAtoms(workspaceId).find((a) => a.urn === urn);
+    // Sync by contract — same tradeoff as manifest(): read the current snapshot,
+    // warm the next one in the background.
+    void this.#refreshMcpAtoms(workspaceId).catch(() => {});
+    return this.#allAtoms(workspaceId).find((a) => a.urn === urn);
   }
 
 
@@ -198,6 +306,43 @@ export class CapabilityIndex {
     const vec = await embedText(provider, text);
     store.set(atom.urn, { hash, vec });
     return vec;
+  }
+
+  /** Every atom in the workspace: the DB-derived rows + the MCP snapshot. */
+  #allAtoms(workspaceId: string): CapabilityAtom[] {
+    return [...this.#buildAtoms(workspaceId), ...this.#mcpAtoms(workspaceId)];
+  }
+
+  /** SYNC read of the current MCP snapshot — empty until the first refresh lands. */
+  #mcpAtoms(workspaceId: string): CapabilityAtom[] {
+    return this.#mcpCache.get(workspaceId)?.atoms ?? [];
+  }
+
+  /**
+   * Refresh the MCP snapshot if its TTL has lapsed. NEVER throws: one unreachable
+   * MCP server must degrade to "no mcp_tool atoms", never break a search or a chat turn.
+   */
+  async #refreshMcpAtoms(workspaceId: string): Promise<void> {
+    const list = this.deps.mcpTools;
+    if (!list) return;
+    const cached = this.#mcpCache.get(workspaceId);
+    if (cached && cached.expiresAt > Date.now()) return;
+    try {
+      const tools = await list(workspaceId);
+      const atoms: CapabilityAtom[] = tools.map((t) => ({
+        urn: mcpToolUrn(t.id),
+        kind: 'mcp_tool' as const,
+        title: `${t.serverName} › ${t.toolName}`,
+        purpose: oneLine(t.description ?? `MCP tool ${t.toolName} on ${t.serverName}`),
+        ...(t.provides ? { inputDigest: t.provides } : {}),
+      }));
+      this.#mcpCache.set(workspaceId, { atoms, expiresAt: Date.now() + MCP_TTL_MS });
+    } catch (err) {
+      this.deps.logger?.warn?.('capability_index.mcp_failed', { workspaceId, err: (err as Error).message });
+      // Back off for a full TTL on failure too — keep whatever we had (possibly
+      // nothing) rather than retrying network I/O on every turn.
+      this.#mcpCache.set(workspaceId, { atoms: cached?.atoms ?? [], expiresAt: Date.now() + MCP_TTL_MS });
+    }
   }
 
   #buildAtoms(workspaceId: string): CapabilityAtom[] {

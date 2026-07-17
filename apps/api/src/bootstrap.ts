@@ -131,7 +131,7 @@ import { OutboundPolicyService } from './services/outboundPolicy.js';
 import { buildTaskRoutes } from './routes/tasks.js';
 import { buildBudgetRoutes } from './routes/budgets.js';
 import { BudgetService } from './services/budget.js';
-import { defaultConnectorRegistry } from '@agentis/integrations';
+import { defaultConnectorRegistry, connectorCatalog } from '@agentis/integrations';
 import { WorkflowStoreService } from './services/workflow/workflowStore.js';
 import { WorkspaceStoreService } from './services/workspace/workspaceStore.js';
 import { WorkspaceVolumeService } from './services/workspace/workspaceVolume.js';
@@ -961,10 +961,40 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 
   const toolRegistry = new AgentisToolRegistry({ logger });
   // The compressed, searchable map of the whole workspace (apps/workflows/nodes/
-  // phases/agents/extensions) — backs the agentis.capability.* reach tools and the
-  // Command Model briefing. Reuses the per-workspace embedding provider the Brain
-  // and abilities already use, so search is real-semantic with no extra config.
-  const capabilityIndex = new CapabilityIndex({ db: sqlite, logger, embeddingProvider: abilityEmbeddings });
+  // phases/agents/extensions/mounted MCP tools) — backs the agentis.capability.*
+  // reach tools and the Command Model briefing. Reuses the per-workspace embedding
+  // provider the Brain and abilities already use, so search is real-semantic with no
+  // extra config; the MCP bridge makes mounted third-party tools reachable by URN.
+  const capabilityIndex = new CapabilityIndex({
+    db: sqlite,
+    logger,
+    embeddingProvider: abilityEmbeddings,
+    mcpTools: (ws) => mcpToolBridge.listTools(ws),
+    // Partition the runnable connector catalog by real vault state so the agent's
+    // resident "mounted connections" block names what is credentialed vs. merely
+    // supported — the same existence check agentis.integration.list uses, so the
+    // prompt and the tool never disagree. Existence only; no secret is read.
+    configuredIntegrations: (ws) => {
+      const configured: string[] = [];
+      const available: string[] = [];
+      for (const c of connectorCatalog()) {
+        if (c.readiness !== 'runnable') continue;
+        let hasCred = false;
+        try {
+          hasCred = engine.hasIntegrationCredential(ws, c.service);
+        } catch {
+          hasCred = false;
+        }
+        (hasCred ? configured : available).push(c.name);
+      }
+      return { configured, available };
+    },
+  });
+  // The capability index doubles as the agent-facing "what is mounted" plane, so
+  // the workflow dispatch prompt injects the SAME live connections block that chat
+  // does. engineDeps is read live by the engine, so setting it post-construction is
+  // enough (see appBrain below).
+  engineDeps.capabilityIndex = capabilityIndex;
   // App-mind loop (G10) — constructed here (deps ready since §Brain) so the Command
   // Model can fuse each App's graded lessons into a manager's briefing. Referenced
   // later by the app routes + scheduler sweep.

@@ -14,15 +14,17 @@
  * client.data.query, live on DATA_CHANGED); writes go through declared surface
  * actions only — the blocks never invent a data path.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import { Archive, Check, ChevronRight, Columns3, Edit3, ExternalLink, GanttChartSquare, MoreHorizontal, MoveRight, Pause, Play, RotateCcw, Search, Trash2, X } from 'lucide-react';
-import type { RecordActionRef, RecordCondition, RecordPredicate, Tone, ViewNode } from '@agentis/core';
+import type { RecordActionRef, Tone, ViewNode } from '@agentis/core';
 import { registerBlock } from './registry';
 import { EmptyState, PanelShell, SkeletonRows, resolveActionArgs, useActionInvoker, useBoundRows, useRuntime } from '../ViewRenderer';
 import { toneFillClass, toneFromStatus, toneSoftClass } from '../styleIntent';
 import { seriesColor } from '../theme';
 import { displayLabel, isIdLike } from '../../../lib/prettyRef';
+import { matchesRecordPredicate, recordActionLabel, visibleRecordActions } from '../recordActions';
+import { formatDisplay } from '../format';
 
 type Row = Record<string, unknown>;
 
@@ -93,65 +95,13 @@ function humanize(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function formatValue(v: unknown): string {
-  if (v == null) return '—';
-  if (typeof v === 'number') return v.toLocaleString();
-  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
-  if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return String(v); } }
-  return String(v);
+function formatValue(v: unknown, key?: string): ReactNode {
+  return formatDisplay(v, { key });
 }
 
 // ── Kanban ────────────────────────────────────────────────────
 
 const DRAG_MIME = 'application/agentis-kanban-card';
-
-function valueAt(source: Row, path: string): unknown {
-  return path.split('.').filter(Boolean).reduce<unknown>((value, key) => (
-    value != null && typeof value === 'object' ? (value as Row)[key] : undefined
-  ), source);
-}
-
-function conditionValue(value: unknown, row: Row, state: Row): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  const bind = value as { $row?: string; $bind?: string; $state?: string };
-  if (bind.$row) return valueAt(row, bind.$row);
-  if (bind.$bind) return valueAt(row, bind.$bind);
-  if (bind.$state) return valueAt(state, bind.$state);
-  return value;
-}
-
-function matchesCondition(condition: RecordCondition, row: Row, state: Row): boolean {
-  const actual = valueAt(row, condition.field);
-  const expected = conditionValue(condition.value, row, state);
-  const list = Array.isArray(expected) ? expected : [expected];
-  switch (condition.op) {
-    case 'neq': return actual !== expected;
-    case 'in': return list.includes(actual);
-    case 'not_in': return !list.includes(actual);
-    case 'exists': return actual !== undefined && actual !== null;
-    case 'not_exists': return actual === undefined || actual === null;
-    case 'truthy': return Boolean(actual);
-    case 'falsy': return !actual;
-    case 'contains': return Array.isArray(actual) ? actual.includes(expected) : String(actual ?? '').includes(String(expected ?? ''));
-    case 'gt': return Number(actual) > Number(expected);
-    case 'gte': return Number(actual) >= Number(expected);
-    case 'lt': return Number(actual) < Number(expected);
-    case 'lte': return Number(actual) <= Number(expected);
-    case 'eq':
-    default: return actual === expected;
-  }
-}
-
-function matchesPredicate(predicate: RecordPredicate | undefined, row: Row, state: Row): boolean {
-  if (!predicate) return true;
-  const all = predicate.all?.every((condition) => matchesCondition(condition, row, state)) ?? true;
-  const any = predicate.any?.some((condition) => matchesCondition(condition, row, state)) ?? true;
-  return all && any;
-}
-
-function visibleRecordActions(actions: RecordActionRef[] | undefined, row: Row, state: Row): RecordActionRef[] {
-  return (actions ?? []).filter((action) => matchesPredicate(action.visibleWhen, row, state));
-}
 
 function actionIcon(action: RecordActionRef) {
   const props = { size: 14, strokeWidth: 1.8 };
@@ -167,10 +117,6 @@ function actionIcon(action: RecordActionRef) {
     case 'delete': return <Trash2 {...props} />;
     default: return <MoreHorizontal {...props} />;
   }
-}
-
-function actionLabel(action: RecordActionRef): string {
-  return action.label ?? humanize(action.action);
 }
 
 async function confirmRecordAction(action: RecordActionRef): Promise<boolean> {
@@ -208,7 +154,7 @@ function RecordContextMenu({ menu, actions, state, busy, onRun, onClose }: {
       onContextMenu={(event) => event.preventDefault()}
     >
       {visible.length === 0 ? <div className="px-2.5 py-3 text-[12px] text-text-muted">No actions are available in this state.</div> : visible.map((action) => {
-        const disabled = matchesPredicate(action.disabledWhen, menu.row, state);
+        const disabled = matchesRecordPredicate(action.disabledWhen, menu.row, state);
         return (
           <button
             key={action.action}
@@ -225,7 +171,7 @@ function RecordContextMenu({ menu, actions, state, busy, onRun, onClose }: {
           >
             <span className="mt-0.5 shrink-0">{actionIcon(action)}</span>
             <span className="min-w-0">
-              <span className="block text-[12.5px] font-medium">{actionLabel(action)}</span>
+              <span className="block text-[12.5px] font-medium">{recordActionLabel(action)}</span>
               {action.description || (disabled && action.disabledReason) ? <span className="mt-0.5 block text-[10.5px] leading-snug text-text-muted">{disabled ? action.disabledReason : action.description}</span> : null}
             </span>
           </button>
@@ -269,7 +215,7 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
     return node.transitions.some((transition) => (
       (!transition.from || transition.from.includes(from))
       && transition.to.includes(to)
-      && matchesPredicate(transition.when, row, uiState)
+      && matchesRecordPredicate(transition.when, row, uiState)
     ));
   };
   const moveCard = async (id: string, to: string) => {
@@ -284,7 +230,7 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
     }
   };
   const runRecordAction = async (action: RecordActionRef, row: Row) => {
-    if (matchesPredicate(action.disabledWhen, row, uiState) || !(await confirmRecordAction(action))) return;
+    if (matchesRecordPredicate(action.disabledWhen, row, uiState) || !(await confirmRecordAction(action))) return;
     setBusyAction(action.action);
     try {
       await invoke(action.action, { ...resolveActionArgs(action.args, { row, state: uiState }), id: rowId(row) });
@@ -439,7 +385,7 @@ function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: strin
             {entries.map(([k, v]) => (
               <div key={k} className="min-w-0">
                 <dt className="s-label">{humanize(k)}</dt>
-                <dd className="mt-1 break-words text-[13.5px] text-text-primary">{formatValue(v)}</dd>
+                <dd className="mt-1 break-words text-[13.5px] text-text-primary">{formatValue(v, k)}</dd>
               </div>
             ))}
           </dl>
@@ -447,7 +393,7 @@ function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: strin
         {visibleRecordActions(actions, row, uiState).length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-3">
             {visibleRecordActions(actions, row, uiState).map((a) => {
-              const disabled = matchesPredicate(a.disabledWhen, row, uiState);
+              const disabled = matchesRecordPredicate(a.disabledWhen, row, uiState);
               return (
               <button
                 key={a.action}
@@ -461,7 +407,7 @@ function RecordDrawer({ row, title, actions, onClose }: { row: Row; title: strin
                 }}
                 className={clsx('inline-flex h-7 items-center gap-1.5 rounded-btn border px-2.5 text-[11.5px] font-medium transition-colors disabled:opacity-50', a.tone === 'danger' ? 'border-danger/30 text-danger hover:bg-danger/10' : 'border-line text-text-secondary hover:bg-surface-2 hover:text-text-primary')}
               >
-                {actionIcon(a)} {actionLabel(a)}
+                {actionIcon(a)} {recordActionLabel(a)}
               </button>
               );
             })}
@@ -573,7 +519,7 @@ function RecordPage({ node, row }: { node: Extract<ViewNode, { type: 'RecordMast
           {status ? <span className={clsx('mt-0.5 inline-flex rounded-full px-1.5 py-px text-[10px] font-medium', toneSoftClass(toneFromStatus(status)))}>{status}</span> : null}
         </div>
         {visibleRecordActions(node.recordActions, row, uiState).map((a) => {
-          const disabled = matchesPredicate(a.disabledWhen, row, uiState);
+          const disabled = matchesRecordPredicate(a.disabledWhen, row, uiState);
           return (
           <button
             key={a.action}
@@ -587,7 +533,7 @@ function RecordPage({ node, row }: { node: Extract<ViewNode, { type: 'RecordMast
             }}
             className={clsx('inline-flex h-7 shrink-0 items-center gap-1.5 rounded-btn border px-2.5 text-[11.5px] font-medium transition-colors disabled:opacity-50', a.tone === 'danger' ? 'border-danger/30 text-danger hover:bg-danger/10' : 'border-line text-text-secondary hover:bg-surface-2 hover:text-text-primary')}
           >
-            {actionIcon(a)} {actionLabel(a)}
+            {actionIcon(a)} {recordActionLabel(a)}
           </button>
           );
         })}
@@ -600,7 +546,7 @@ function RecordPage({ node, row }: { node: Extract<ViewNode, { type: 'RecordMast
               {section.fields.map((key) => (
                 <div key={key} className="min-w-0">
                   <dt className="s-label">{humanize(key)}</dt>
-                  <dd className="mt-1 break-words text-[13.5px] text-text-primary">{formatValue(row[key])}</dd>
+                  <dd className="mt-1 break-words text-[13.5px] text-text-primary">{formatValue(row[key], key)}</dd>
                 </div>
               ))}
             </dl>

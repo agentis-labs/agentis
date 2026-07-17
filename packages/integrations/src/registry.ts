@@ -60,6 +60,13 @@ export interface ConnectorCatalogEntry {
   description: string;
   operations: string[];
   readiness: ConnectorReadiness;
+  /**
+   * The manifest's declared credential type ('bearer_token', 'oauth2', 'none', …).
+   * Callers that ask "is this connector actually usable right now?" need it to
+   * tell a connector that is MISSING its credential from one that never needed
+   * one (`none`, e.g. http_request), which is usable with an empty vault.
+   */
+  authType: string;
 }
 
 /** Every advertised connector tagged runnable vs needs-setup, sorted by service. */
@@ -72,6 +79,7 @@ export function connectorCatalog(): ConnectorCatalogEntry[] {
       description: manifest.description,
       operations: manifest.operations,
       readiness: connectorReadiness(manifest.service),
+      authType: typeof manifest.credentialSchema?.type === 'string' ? manifest.credentialSchema.type : 'unknown',
     }))
     .sort((a, b) => a.service.localeCompare(b.service));
 }

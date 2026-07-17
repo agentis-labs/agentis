@@ -76,7 +76,7 @@ export function clearDraft(key: string): void {
 }
 
 interface Props {
-  onSend: (text: string, options?: { useViewportContext?: boolean }) => Promise<void> | void;
+  onSend: (text: string, options?: { useViewportContext?: boolean; attachments?: SendAttachment[] }) => Promise<void> | void;
   awareness?: {
     label: string;
     active: boolean;
@@ -124,7 +124,15 @@ interface Attachment {
   type: string;
   url?: string;
   loading: boolean;
-  progress: number;
+  /** Set once the upload to `/v1/artifacts/upload` succeeds — this is what gets sent with the message. */
+  artifactId?: string;
+  error?: boolean;
+}
+
+/** A file attachment that finished uploading and is ready to send with a message. */
+export interface SendAttachment {
+  id: string;
+  name: string;
 }
 
 export function Composer({ onSend, awareness, initialText, placeholder, footer, draftKey, agentId, isRunning = false, onStop }: Props) {
@@ -150,40 +158,34 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = useCallback((files: FileList) => {
-    const newAttachments: Attachment[] = Array.from(files).map((file) => {
+    const pairs = Array.from(files).map((file) => {
       const id = `att-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       const isImage = file.type.startsWith('image/');
       const url = isImage ? URL.createObjectURL(file) : undefined;
-
-      // Simulate upload progress
-      let progress = 0;
-      const interval = window.setInterval(() => {
-        setAttachments((prev) =>
-          prev.map((att) => {
-            if (att.id === id) {
-              const nextProgress = att.progress + Math.floor(Math.random() * 20) + 15;
-              if (nextProgress >= 100) {
-                window.clearInterval(interval);
-                return { ...att, progress: 100, loading: false };
-              }
-              return { ...att, progress: nextProgress };
-            }
-            return att;
-          })
-        );
-      }, 120);
-
-      return {
-        id,
-        name: file.name,
-        type: file.type,
-        url,
-        loading: true,
-        progress: 0,
-      };
+      const attachment: Attachment = { id, name: file.name, type: file.type, url, loading: true };
+      return { file, attachment };
     });
 
-    setAttachments((prev) => [...prev, ...newAttachments]);
+    setAttachments((prev) => [...prev, ...pairs.map((p) => p.attachment)]);
+
+    pairs.forEach(({ file, attachment }) => {
+      const form = new FormData();
+      form.set('file', file);
+      form.set('name', file.name);
+      api<{ artifact: { id: string } }>('/v1/artifacts/upload', { method: 'POST', body: form })
+        .then((res) => {
+          setAttachments((prev) =>
+            prev.map((att) =>
+              att.id === attachment.id ? { ...att, loading: false, artifactId: res.artifact.id } : att,
+            ),
+          );
+        })
+        .catch(() => {
+          setAttachments((prev) =>
+            prev.map((att) => (att.id === attachment.id ? { ...att, loading: false, error: true } : att)),
+          );
+        });
+    });
   }, []);
 
   const triggerFileSelect = useCallback(() => {
@@ -373,6 +375,9 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     // queues the message and auto-dispatches it once the current turn ends.
     const value = text.trim();
     if (!value && attachments.length === 0) return;
+    if (attachments.some((att) => att.loading)) return; // still uploading — the send button/Enter both route through here
+    const uploaded = attachments.filter((att) => att.artifactId);
+    if (!value && uploaded.length === 0) return; // every upload failed and there's no text — nothing to send
     if (value.startsWith('/')) {
       const m = value.match(/^\/(\w+)\s*(.*)$/);
       if (m && m[1]) {
@@ -384,7 +389,10 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     setAttachments([]);
     if (draftKey) clearDraft(draftKey);
     try {
-      await onSend(value, { useViewportContext });
+      await onSend(value, {
+        useViewportContext,
+        attachments: uploaded.map((att) => ({ id: att.artifactId!, name: att.name })),
+      });
       setUseViewportContext(true);
     } catch (error) {
       setText(value);
@@ -532,12 +540,9 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                     {att.name}
                   </span>
                   {att.loading ? (
-                    <div className="mt-1 h-1 w-16 overflow-hidden rounded bg-line">
-                      <div
-                        className="h-full bg-accent transition-all duration-300"
-                        style={{ width: `${att.progress}%` }}
-                      />
-                    </div>
+                    <span className="text-[9px] text-text-muted">Uploading…</span>
+                  ) : att.error ? (
+                    <span className="text-[9px] text-danger">Upload failed</span>
                   ) : (
                     <span className="text-[9px] text-text-muted">
                       {(att.type.split('/')[1] || 'file').toUpperCase()}

@@ -18,7 +18,7 @@
  */
 
 import { basename, dirname, join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
@@ -41,6 +41,26 @@ function maybeBindBundledWebDist(): void {
     }
   } catch {
     // best-effort; bootstrap will simply skip the static mount.
+  }
+}
+
+// Publish the installed CLI version so the API can compare it against the
+// latest release on npm and surface an "update available" prompt in the
+// dashboard. package.json sits one level above both `src/` (dev) and `dist/`
+// (published), so `../package.json` resolves in both. Best-effort: a missing
+// or unreadable manifest just leaves the update check dormant.
+function bindCliVersion(): void {
+  if (process.env.AGENTIS_CLI_VERSION) return;
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifestPath = resolve(here, '..', 'package.json');
+    if (existsSync(manifestPath)) {
+      const raw = readFileSync(manifestPath, 'utf8');
+      const version = (JSON.parse(raw) as { version?: unknown }).version;
+      if (typeof version === 'string') process.env.AGENTIS_CLI_VERSION = version;
+    }
+  } catch {
+    // best-effort; the update check simply reports no current version.
   }
 }
 
@@ -113,6 +133,7 @@ function parseFlags(argv: string[]): { positionals: string[]; flags: Record<stri
 }
 
 async function runUp(): Promise<void> {
+  bindCliVersion();
   maybeBindBundledWebDist();
   const { bootstrap } = await import('@agentis/api/bootstrap');
   const handle = await bootstrap();
@@ -285,9 +306,13 @@ async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-async function verifyEnvelopeChecksum(envelope: AppManifestEnvelope): Promise<void> {
+// Verify the checksum against the RAW manifest as it sits in the file — never a
+// schema-parsed projection. `validateAgentisApp` strips/defaults manifest fields
+// to match the current schema; hashing that output breaks the checksum of an
+// authentic older export. Hash the raw bytes, which is what `serialize` hashed.
+async function verifyEnvelopeChecksum(envelope: { manifest: unknown; checksum?: unknown }): Promise<void> {
   const { canonicalizeManifest } = await import('@agentis/core');
-  const checksum = createHash('sha256').update(canonicalizeManifest(envelope.manifest)).digest('hex');
+  const checksum = createHash('sha256').update(canonicalizeManifest(envelope.manifest as never)).digest('hex');
   if (checksum !== envelope.checksum) {
     throw new Error('checksum mismatch: package is corrupt or tampered');
   }
@@ -302,6 +327,31 @@ async function appClient(flags: Record<string, string | true>) {
   }
   const { createAgentisClient } = await import('@agentis/sdk');
   return createAgentisClient({ baseUrl: url, token: key, workspaceId });
+}
+
+/**
+ * A ZodError's `.message` is a multi-hundred-line JSON dump of every union
+ * branch it tried — unreadable in a terminal and it buries the one line that
+ * matters. Render `path: message` instead. Duck-typed: the CLI has no zod dep.
+ */
+function describeError(err: unknown): string {
+  const shaped = err as { name?: unknown; issues?: unknown; message?: unknown };
+  if (shaped?.name === 'ZodError' && Array.isArray(shaped.issues)) {
+    const lines = shaped.issues
+      .slice(0, 10)
+      .map((raw) => {
+        const issue = raw as { path?: unknown; message?: unknown; expected?: unknown; received?: unknown };
+        const path = Array.isArray(issue.path) && issue.path.length ? issue.path.join('.') : '(root)';
+        // An `invalid_union` reports its branch failures in unionErrors; the
+        // top-level message ("Invalid input") alone doesn't say what was wrong.
+        const detail = typeof issue.message === 'string' ? issue.message : 'invalid';
+        const got = issue.received ? ` (received ${String(issue.received)})` : '';
+        return `  ${path}: ${detail}${got}`;
+      });
+    const more = shaped.issues.length - lines.length;
+    return `${shaped.issues.length} validation issue(s):\n${lines.join('\n')}${more > 0 ? `\n  …and ${more} more` : ''}`;
+  }
+  return typeof shaped?.message === 'string' ? shaped.message : String(err);
 }
 
 async function runAppCmd(argv: string[]): Promise<number> {
@@ -322,8 +372,9 @@ async function runAppCmd(argv: string[]): Promise<number> {
       if (!file) throw new Error('agentis app validate requires a file');
       const value = await readJsonFile(file);
       if (value && typeof value === 'object' && (value as { format?: unknown }).format === '.agentisapp') {
+        // Checksum first, over the RAW file bytes; then validate shape.
+        await verifyEnvelopeChecksum(value as { manifest: unknown; checksum?: unknown });
         const envelope = validateAgentisApp(value);
-        await verifyEnvelopeChecksum(envelope);
         process.stdout.write(`Valid .agentisapp: ${envelope.manifest.identity.name} v${envelope.manifest.identity.version}\n`);
       } else {
         const manifest = validateAppManifest(value);
@@ -346,19 +397,24 @@ async function runAppCmd(argv: string[]): Promise<number> {
       const specFile = typeof flags.spec === 'string' ? flags.spec : undefined;
       if (!file) throw new Error('agentis app test requires a .agentisapp file');
       if (!specFile) throw new Error('agentis app test requires --spec <file>');
-      const envelope = validateAgentisApp(await readJsonFile(file));
-      await verifyEnvelopeChecksum(envelope);
+      const raw = await readJsonFile(file);
+      await verifyEnvelopeChecksum(raw as { manifest: unknown; checksum?: unknown });
+      validateAgentisApp(raw); // shape check with a friendly error before the round-trip
       const spec = await readJsonFile(specFile) as AppTestOptions;
-      const result = await (await appClient(flags)).testApp(envelope, spec);
+      // Send the RAW file so the server verifies the checksum over the same bytes.
+      const result = await (await appClient(flags)).testApp(raw as AppManifestEnvelope, spec);
       process.stdout.write(`Passed ${result.data.assertions.length} assertion(s) across ${result.data.surfaces.length} surface(s)\n`);
       return 0;
     }
     if (sub === 'install') {
       const file = positionals[0];
       if (!file) throw new Error('agentis app install requires a .agentisapp file');
-      const envelope = validateAgentisApp(await readJsonFile(file));
-      await verifyEnvelopeChecksum(envelope);
+      const raw = await readJsonFile(file);
+      await verifyEnvelopeChecksum(raw as { manifest: unknown; checksum?: unknown });
+      validateAgentisApp(raw); // shape check with a friendly error before the round-trip
       const client = await appClient(flags);
+      // Send the RAW file so the server verifies the checksum over the same bytes.
+      const envelope = raw as AppManifestEnvelope;
       const preview = await client.previewAppImport(envelope);
       process.stdout.write(
         `Installing ${preview.data.identity.name} v${preview.data.identity.version} ` +
@@ -383,7 +439,7 @@ async function runAppCmd(argv: string[]): Promise<number> {
     }
     throw new Error(`unknown app command: ${sub}`);
   } catch (err) {
-    process.stderr.write(`agentis app ${sub} failed: ${(err as Error).message}\n`);
+    process.stderr.write(`agentis app ${sub} failed: ${describeError(err)}\n`);
     return 1;
   }
 }

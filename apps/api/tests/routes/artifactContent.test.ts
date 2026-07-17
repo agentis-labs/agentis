@@ -25,7 +25,7 @@ beforeEach(async () => {
 afterEach(() => { ctx.close(); rmSync(assetsDir, { recursive: true, force: true }); });
 
 function app(artifacts = new ArtifactService(ctx.db, ctx.logger, ctx.bus, assetsDir)) {
-  return ctx.buildApp([{ path: '/v1/artifacts', app: buildArtifactRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, artifacts }) }]);
+  return ctx.buildApp([{ path: '/v1/artifacts', app: buildArtifactRoutes({ db: ctx.db, auth: ctx.auth, bus: ctx.bus, artifacts, assets: store }) }]);
 }
 
 describe('/v1/artifacts/:id/content', () => {

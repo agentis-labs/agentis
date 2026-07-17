@@ -47,7 +47,7 @@ describe('chat-driven App build', () => {
     // first surface — a dead end. The whole family must be MCP-exposed.
     const mcpIds = new Set(registry.catalog({ mcpOnly: true }).tools.map((t) => t.id));
     for (const id of [
-      'agentis.ui.render', 'agentis.ui.patch', 'agentis.ui.action_schema',
+      'agentis.ui.render', 'agentis.ui.patch', 'agentis.ui.inspect', 'agentis.ui.remove', 'agentis.ui.action_schema',
       'agentis.data.define_collection', 'agentis.data.insert', 'agentis.data.query',
       'agentis.app.list',
     ]) {
@@ -71,6 +71,12 @@ describe('chat-driven App build', () => {
       view: { type: 'Stack', children: [{ type: 'Heading', value: 'Pipeline' }, { type: 'Table', bind: { collection: 'leads' }, columns: [{ key: 'company' }, { key: 'value' }] }] },
     });
     expect(rendered.ok).toBe(true);
+
+    const inspected = await exec('agentis.ui.inspect', { appId, surface: 'home' });
+    const table = ((inspected.output as { surfaces: Array<{ nodes: Array<{ nodeId: string; type: string }> }> }).surfaces[0]!.nodes)
+      .find((node) => node.type === 'Table');
+    expect(table?.nodeId).toBeTruthy();
+    expect((await exec('agentis.ui.remove', { appId, surface: 'home', nodeId: table!.nodeId })).ok).toBe(true);
 
     const q = await exec('agentis.data.query', { appId, collection: 'leads' });
     expect((q.output as { rows: unknown[] }).rows).toHaveLength(1);

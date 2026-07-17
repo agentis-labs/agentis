@@ -10,8 +10,11 @@ import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 import { deriveArtifactOrigin, type ArtifactService } from '../services/artifactService.js';
+import type { AssetStore } from '../services/assetStore.js';
 
 const ARTIFACT_ORIGINS = ['agent', 'app', 'workflow', 'channel', 'manual'] as const;
+/** Chat/composer uploads — generous enough for photos and short videos without letting the API buffer unbounded bytes in memory. */
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 const createArtifactSchema = z.object({
   type: artifactTypeSchema.default('document'),
@@ -31,7 +34,7 @@ const createArtifactSchema = z.object({
 const updateArtifactSchema = createArtifactSchema.partial();
 const pinSchema = z.object({ pinned: z.boolean().default(true) });
 
-export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus; artifacts: ArtifactService }) {
+export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; bus: EventBus; artifacts: ArtifactService; assets: AssetStore }) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -88,6 +91,41 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
     deps.db.insert(schema.artifacts).values(artifact).run();
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ARTIFACT_CREATED, { artifact });
     return c.json({ artifact }, 201);
+  });
+
+  // Chat/composer file attachments — content-addressed via AssetStore so the
+  // same photo sent twice dedupes, and the resulting artifact is what
+  // `metadata.artifactIds` on a conversation message points at.
+  app.post('/upload', async (c) => {
+    const ws = getWorkspace(c);
+    const contentType = c.req.header('content-type') ?? '';
+    if (!contentType.startsWith('multipart/form-data')) {
+      throw new AgentisError('VALIDATION_FAILED', 'Expected multipart/form-data with a file field');
+    }
+    const form = await c.req.formData();
+    const file = form.get('file');
+    if (!isFileLike(file)) {
+      throw new AgentisError('VALIDATION_FAILED', 'multipart/form-data must include a file field');
+    }
+    const bytes = Buffer.from(await file.arrayBuffer());
+    if (bytes.byteLength === 0) throw new AgentisError('VALIDATION_FAILED', 'Attachment is empty');
+    if (bytes.byteLength > MAX_UPLOAD_BYTES) {
+      throw new AgentisError('VALIDATION_FAILED', 'Attachment exceeds the 25 MiB upload limit');
+    }
+    const name = stringField(form.get('name')) ?? file.name ?? 'attachment';
+    const conversationId = stringField(form.get('conversationId'));
+    const asset = await deps.assets.put({
+      workspaceId: ws.workspaceId,
+      bytes,
+      name,
+      mime: file.type || undefined,
+      userId: ws.user.id,
+      conversationId: conversationId ?? null,
+      origin: 'manual',
+      savedBy: 'chat_composer',
+    });
+    deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.ARTIFACT_CREATED, { artifact: asset });
+    return c.json({ artifact: asset }, 201);
   });
 
   app.get('/:id', (c) => {
@@ -164,6 +202,14 @@ export function buildArtifactRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
 
 function isArtifactOrigin(value: string | undefined): value is typeof ARTIFACT_ORIGINS[number] {
   return ARTIFACT_ORIGINS.includes(value as typeof ARTIFACT_ORIGINS[number]);
+}
+
+function isFileLike(value: FormDataEntryValue | null): value is File {
+  return Boolean(value && typeof value !== 'string' && typeof value.arrayBuffer === 'function');
+}
+
+function stringField(value: FormDataEntryValue | null): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 /**

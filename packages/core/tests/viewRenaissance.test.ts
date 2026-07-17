@@ -70,6 +70,31 @@ describe('new nodes validate', () => {
     })).toMatchObject({ chartType: 'area', stacked: true });
     expect(viewNodeSchema.parse({ type: 'Chart', bind: { collection: 'm', live: true }, chartType: 'donut', x: 'label', y: 'value' })).toMatchObject({ chartType: 'donut' });
   });
+
+  it('validates universal state-aware Kanban interactions', () => {
+    const board = viewNodeSchema.parse({
+      type: 'Kanban',
+      nodeId: 'work-board',
+      bind: { collection: 'work_items', live: true },
+      groupBy: 'status',
+      columns: ['queued', 'active', 'done'],
+      update: { action: 'update_item' },
+      transitions: [
+        { from: ['queued'], to: ['active'] },
+        { from: ['active'], to: ['done'], when: { all: [{ field: 'approved', op: 'truthy' }] } },
+      ],
+      contextActions: [
+        { action: 'start_item', label: 'Start', icon: 'play', visibleWhen: { all: [{ field: 'status', op: 'eq', value: 'queued' }] } },
+        { action: 'hold_item', label: 'Hold', args: { patch: { status: 'held', reason: { $row: 'hold_reason' } } }, visibleWhen: { all: [{ field: 'status', op: 'in', value: ['queued', 'active'] }] } },
+        { action: 'delete_item', label: 'Delete', icon: 'delete', tone: 'danger', confirm: { title: 'Delete item?', message: 'This cannot be undone.' } },
+      ],
+    });
+    expect(board).toMatchObject({ type: 'Kanban', nodeId: 'work-board' });
+    expect(() => viewNodeSchema.parse({
+      type: 'Kanban', bind: { collection: 'c' }, groupBy: 'state',
+      contextActions: [{ action: 'x', visibleWhen: {} }],
+    })).toThrow();
+  });
 });
 
 describe('collectionsInView — read authz over the new nodes', () => {

@@ -149,6 +149,24 @@ describe('ConversationStore — extended', () => {
     expect(messages[0]!.metadata).toMatchObject({ clientTurnId: 'new-turn' });
   });
 
+  it('resolves the active thread to the newest one even on a createdAt tie', () => {
+    const old = store.getOrCreateByAgent({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
+    store.appendOutbound({ workspaceId: wsA, conversationId: old.id, operatorId: userA, body: 'hello' });
+    const fresh = store.startNewConversation({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
+    expect(fresh.id).not.toBe(old.id);
+
+    // Same-millisecond reset: createdAt ties, and the old thread's non-null
+    // lastMessageAt must not win the tiebreak (regression for the rowid order).
+    db.update(schema.conversations)
+      .set({ createdAt: '2026-01-01T00:00:00.000Z' })
+      .where(eq(schema.conversations.agentId, 'agent-1'))
+      .run();
+
+    const active = store.getOrCreateByAgent({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
+    expect(active.id).toBe(fresh.id);
+    expect(store.messages(active.id)).toHaveLength(0);
+  });
+
   it('updateSession updates the title and archives/unarchives the session', () => {
     const c = store.getOrCreateByAgent({ workspaceId: wsA, ambientId: null, userId: userA, agentId: 'agent-1' });
     expect(c.archivedAt).toBeNull();

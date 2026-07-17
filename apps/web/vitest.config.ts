@@ -13,6 +13,8 @@ export default defineConfig({
     setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.test.{ts,tsx}'],
     css: false,
-    testTimeout: 10_000,
+    // userEvent-heavy flows run ~4s alone but multiply under full-suite
+    // parallel load; 10s flaked on slower machines.
+    testTimeout: 20_000,
   },
 });

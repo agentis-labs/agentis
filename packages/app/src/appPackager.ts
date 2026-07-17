@@ -37,8 +37,27 @@ import { AppStore } from './appStore.js';
 import { AppDatastore } from './appDatastore.js';
 import { AppSurfaceStore } from './appSurfaceStore.js';
 
-function checksum(manifest: AppManifest): string {
-  return createHash('sha256').update(canonicalizeManifest(manifest)).digest('hex');
+// Hash the manifest AS GIVEN (raw object), never a schema-parsed projection.
+// canonicalizeManifest is a pure deep key-sort, so it is well-defined on the
+// raw manifest — and hashing raw is what makes the checksum survive schema
+// evolution (see deserialize).
+function checksum(manifest: unknown): string {
+  return createHash('sha256').update(canonicalizeManifest(manifest as AppManifest)).digest('hex');
+}
+
+/**
+ * The transported envelope with the manifest kept RAW (unknown). Import paths
+ * must not schema-parse the manifest before verifying the checksum — parsing
+ * strips/defaults fields and changes the canonical form, so an authentic but
+ * older export would fail verification. Callers pass this shape (or a fully
+ * typed AppManifestEnvelope, which is assignable) into deserialize.
+ */
+export interface RawAppEnvelope {
+  format?: unknown;
+  formatVersion?: unknown;
+  manifest: unknown;
+  checksum?: unknown;
+  exportedAt?: unknown;
 }
 
 function permissionSummary(manifest: AppManifest): string[] {
@@ -148,7 +167,7 @@ export class AppPackager {
   }
 
   /** canonical AppManifest IR → rows (creates a fresh App). Collections come back EMPTY. */
-  preview(envelope: AppManifestEnvelope): AppInstallPreview {
+  preview(envelope: RawAppEnvelope): AppInstallPreview {
     const manifest = this.deserialize(envelope);
     const warnings: string[] = [];
     const seedRows = manifest.collections.reduce((count, collection) => count + (collection.seed?.length ?? 0), 0);
@@ -234,13 +253,18 @@ export class AppPackager {
     return { format: '.agentisapp', formatVersion: 1, manifest: parsed, checksum: checksum(parsed), exportedAt: new Date().toISOString() };
   }
 
-  deserialize(envelope: AppManifestEnvelope): AppManifest {
+  deserialize(envelope: RawAppEnvelope): AppManifest {
     if (envelope.format !== '.agentisapp') throw new AgentisError('VALIDATION_FAILED', 'not an .agentisapp envelope');
-    const manifest = appManifestSchema.parse(envelope.manifest);
-    if (checksum(manifest) !== envelope.checksum) {
+    // Verify the checksum against the RAW transported manifest — the same bytes
+    // `serialize` hashed. Parsing first and hashing the parsed projection makes
+    // the checksum brittle to schema evolution: when a later build drops or
+    // defaults a manifest field (e.g. policy.audience/shareable), re-parsing an
+    // OLD but authentic export changes its canonical form and the checksum
+    // "mismatches" even though nothing was tampered with. Hash raw, then parse.
+    if (checksum(envelope.manifest) !== envelope.checksum) {
       throw new AgentisError('VALIDATION_FAILED', 'checksum mismatch — package is corrupt or tampered');
     }
-    return manifest;
+    return appManifestSchema.parse(envelope.manifest);
   }
 
   // ── Route-facing wrappers ───────────────────────────────────
@@ -249,7 +273,7 @@ export class AppPackager {
     return this.serialize(this.toManifest(workspaceId, appId));
   }
 
-  import(workspaceId: string, userId: string, envelope: AppManifestEnvelope): { appId: string } {
+  import(workspaceId: string, userId: string, envelope: RawAppEnvelope): { appId: string } {
     return this.fromManifest(workspaceId, userId, this.deserialize(envelope));
   }
 }

@@ -42,7 +42,8 @@ export type DataBind = z.infer<typeof dataBindSchema>;
 
 export const actionRefSchema = z.object({
   action: z.string().min(1),
-  args: z.record(bindableSchema).optional(),
+  /** JSON payload; binding refs may appear at any depth and resolve recursively. */
+  args: z.record(z.unknown()).optional(),
 });
 export type ActionRef = z.infer<typeof actionRefSchema>;
 
@@ -56,7 +57,8 @@ export const recordConditionSchema = z.object({
     'eq', 'neq', 'in', 'not_in', 'exists', 'not_exists',
     'truthy', 'falsy', 'contains', 'gt', 'gte', 'lt', 'lte',
   ]).default('eq'),
-  value: bindableSchema.optional(),
+  /** Literal JSON (including arrays for `in`) or a binding ref. */
+  value: z.unknown().optional(),
 });
 export type RecordCondition = z.infer<typeof recordConditionSchema>;
 

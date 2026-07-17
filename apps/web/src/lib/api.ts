@@ -63,13 +63,68 @@ export interface ApiError {
   details?: unknown;
 }
 
+/**
+ * Pull the human-readable specifics out of `error.details`. The API already
+ * sends these (zod issues, security-scan findings, permission diffs); without
+ * this the UI would show only a flat "Request validation failed" and the
+ * operator has no way to learn WHICH field or rule rejected their input.
+ */
+function apiErrorDetail(details: unknown): string | null {
+  if (!details || typeof details !== 'object') return null;
+  const d = details as { issues?: unknown; findings?: unknown; expected?: unknown; acknowledged?: unknown };
+
+  if (Array.isArray(d.issues)) {
+    const parts = d.issues
+      .slice(0, 6)
+      .map((raw) => {
+        const issue = raw as { path?: unknown; message?: unknown };
+        if (typeof issue.message !== 'string') return null;
+        const path = Array.isArray(issue.path) ? issue.path.join('.') : '';
+        return path ? `${path}: ${issue.message}` : issue.message;
+      })
+      .filter((part): part is string => Boolean(part));
+    if (parts.length) {
+      const more = d.issues.length - parts.length;
+      return parts.join('; ') + (more > 0 ? ` (+${more} more)` : '');
+    }
+  }
+
+  if (Array.isArray(d.findings)) {
+    const parts = d.findings
+      .slice(0, 6)
+      .map((raw) => {
+        const finding = raw as { rule?: unknown; message?: unknown; severity?: unknown };
+        const message = typeof finding.message === 'string' ? finding.message : null;
+        const rule = typeof finding.rule === 'string' ? finding.rule : null;
+        if (!message && !rule) return null;
+        return rule && message ? `${rule}: ${message}` : (message ?? rule);
+      })
+      .filter((part): part is string => Boolean(part));
+    if (parts.length) {
+      const more = d.findings.length - parts.length;
+      return parts.join('; ') + (more > 0 ? ` (+${more} more)` : '');
+    }
+  }
+
+  if (Array.isArray(d.expected)) {
+    const acknowledged = Array.isArray(d.acknowledged) ? d.acknowledged : [];
+    const missing = d.expected.filter((item) => !acknowledged.includes(item));
+    if (missing.length) return `not acknowledged: ${missing.slice(0, 8).join(', ')}`;
+  }
+
+  return null;
+}
+
 export function apiErrorMessage(error: unknown): string {
   if (error && typeof error === 'object') {
-    const shaped = error as { message?: unknown; code?: unknown };
-    const message = typeof shaped.message === 'string' && shaped.message.trim()
+    const shaped = error as { message?: unknown; code?: unknown; details?: unknown };
+    const base = typeof shaped.message === 'string' && shaped.message.trim()
       ? shaped.message.trim()
       : null;
     const code = typeof shaped.code === 'string' && shaped.code.trim() ? shaped.code.trim() : null;
+    const detail = apiErrorDetail(shaped.details);
+    // Don't repeat detail the server already folded into the message.
+    const message = base && detail && !base.includes(detail) ? `${base} — ${detail}` : (base ?? detail);
     if (message && code) return `${message} (${code})`;
     if (message) return message;
     if (code) return code;

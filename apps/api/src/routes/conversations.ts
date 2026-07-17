@@ -57,6 +57,8 @@ const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
   clientTurnId: z.string().min(1).max(120).optional(),
   useViewportContext: z.boolean().optional().default(true),
+  /** Composer file/photo uploads — artifact ids from `POST /v1/artifacts/upload`. */
+  attachments: z.array(z.string().min(1)).max(10).optional(),
   /** Composer toggle: persist the sticky permission mode alongside this turn. */
   permissionMode: z.enum(['ask', 'plan', 'auto']).optional(),
   viewportOverride: z.object({
@@ -1166,6 +1168,29 @@ async function runConversationTurn(
   }
 }
 
+/**
+ * The chat bubble stores the operator's literal text; the agent's prompt gets
+ * a short filename note appended so it isn't blind to an attachment it can't
+ * yet see the bytes of (no multimodal ingestion wired up here — this is just
+ * enough context for the agent to acknowledge and ask about it if relevant).
+ */
+async function withAttachmentNote(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  body: string,
+  attachmentIds: string[] | undefined,
+): Promise<string> {
+  if (!attachmentIds?.length) return body;
+  const rows = db
+    .select({ title: schema.artifacts.title })
+    .from(schema.artifacts)
+    .where(and(inArray(schema.artifacts.id, attachmentIds), eq(schema.artifacts.workspaceId, workspaceId)))
+    .all();
+  if (!rows.length) return body;
+  const names = rows.map((row) => row.title).filter(Boolean).join(', ');
+  return `${body}\n\n[Attached file(s): ${names}]`;
+}
+
 async function sendConversationMessage(
   c: Context,
   deps: ConversationRouteDeps,
@@ -1219,6 +1244,7 @@ async function sendConversationMessage(
       workspaceId: ws.workspaceId,
       conversationId: conversation.id,
       text: body.body,
+      attachments: body.attachments,
     });
     return c.json({ queued: true, item: serializeQueueItem(item), conversationId: conversation.id, agentId }, 202);
   }
@@ -1228,7 +1254,7 @@ async function sendConversationMessage(
     conversationId: conversation.id,
     operatorId: ws.user.id,
     body: body.body,
-    metadata: { clientTurnId },
+    metadata: body.attachments?.length ? { clientTurnId, artifactIds: body.attachments } : { clientTurnId },
   });
   if (c.req.header('accept')?.includes('text/event-stream')) {
     return streamConversationTurnReply(c, deps, ws, {
@@ -1236,7 +1262,7 @@ async function sendConversationMessage(
       conversation,
       clientTurnId,
       currentMessageId: message.id,
-      userMessage: body.body,
+      userMessage: await withAttachmentNote(deps.db, ws.workspaceId, body.body, body.attachments),
       useViewportContext: body.useViewportContext,
       viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
     });

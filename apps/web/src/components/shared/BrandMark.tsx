@@ -5,6 +5,8 @@ interface BrandMarkProps {
   title?: string;
 }
 
+const LOGOTYPE_RATIO = 2404 / 246;
+
 export function BrandMark({ size = 24, variant = 'mark', className, title = 'Agentis' }: BrandMarkProps) {
   // The source mark art bleeds to the edge of its frame, whereas the previous
   // hand-drawn glyph carried ~30% breathing room (it filled only 66%×74% of its
@@ -26,7 +28,7 @@ export function BrandMark({ size = 24, variant = 'mark', className, title = 'Age
     return (
       <BrandAsset
         asset="logotype"
-        width={size * 5.2}
+        width={size * LOGOTYPE_RATIO}
         height={size}
         title={title}
         className={className}
@@ -34,10 +36,12 @@ export function BrandMark({ size = 24, variant = 'mark', className, title = 'Age
     );
   }
 
+  const logotypeHeight = size * 0.42;
+
   return (
-    <span className={['inline-flex items-center gap-2.5', className].filter(Boolean).join(' ')}>
+    <span className={['inline-flex items-center gap-1.5', className].filter(Boolean).join(' ')}>
       {mark}
-      <BrandAsset asset="logotype" width={size * 2.7} height={size * 0.58} title={title} />
+      <BrandAsset asset="logotype" width={logotypeHeight * LOGOTYPE_RATIO} height={logotypeHeight} title={title} />
     </span>
   );
 }

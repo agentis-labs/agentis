@@ -11,7 +11,7 @@ agents you already run, give them a permanent Brain of memory and skills, swap t
 underneath them anytime, and ship what they build as real apps, workflows, and channels —
 from your own machine.
 
-**No token tax. No data extraction. No forgetting.**
+**Runs on your machine. Keeps every agent's memory. Never routes your work through our servers.**
 
 Agents should not disappear when a vendor changes, a subscription ends, or a local process
 restarts. Agentis gives them durable identity, memory, orchestration, tools, approvals,
@@ -32,6 +32,12 @@ and a live product surface they can operate with you.
 
 ---
 
+## See it running
+
+![Agentis workspace dashboard](https://raw.githubusercontent.com/agentis-labs/agentis/main/docs/assets/agentis-workspace-print.png)
+
+---
+
 ## Harnesses supported today
 
 Agentis doesn't make you pick one. Import the agent you already run — no rewrite, no
@@ -49,21 +55,6 @@ migration — and it keeps its memory, tools, and workflows even if you switch h
 | **Local / OpenAI-compatible** | Ollama, LM Studio, OpenRouter, and other OpenAI-compatible endpoints | local or remote API |
 
 More harnesses land as adapters, not rewrites — and a harness of our own is next.
-
----
-
-## See it running
-
-<!-- TODO: record a <30s clip — terminal (harness executing) side-by-side with the live
-     dashboard (Brain recall + workflow graph updating), one continuous local run, no
-     cloud dependency in frame. To embed: drag the video file into any GitHub issue,
-     PR, or Discussion comment box, wait for it to upload, then copy the resulting
-     https://github.com/agentis-labs/agentis/assets/... (or user-attachments) link and
-     paste it here on its own line — GitHub renders it as an inline player automatically,
-     no markdown wrapper needed. Delete this comment and the line below once it's in. -->
-
-*Demo video coming soon.* Until then: every screenshot in [docs.useagentis.com](https://docs.useagentis.com)
-is a real local run — no staged data, no hosted backend.
 
 ---
 
@@ -89,6 +80,23 @@ Prefer Docker?
 ```bash
 docker compose up
 ```
+
+### CLI
+
+The CLI stays deliberately small — everything else runs through the API and dashboard.
+
+| Command | What it does |
+|---------|---------------|
+| `agentis up` | Boot Agentis on this machine (default when no command is given). |
+| `agentis backup [--out <dir>]` | Snapshot the data dir — database, secrets, agent homes — into `<dir>`. |
+| `agentis restore <dir> [--force]` | Restore a backup directory into the data dir. |
+| `agentis create <dir> [--name <name>]` | Scaffold a code-authored Agentic App. |
+| `agentis app validate\|pack\|test\|install\|export` | Validate, build, test, install, or export a `.agentisapp` package. |
+| `agentis bootstrap --url <url> --api-key <key> --adapter <adapter>` | Commission an orchestrator, manager, or specialist agent through the API. |
+| `agentis bootstrap generate-config --from <claude_code\|codex>` | Generate an `agentis-config.json` scaffold from local harness context. |
+| `agentis help` | Print the full command and flag reference. |
+
+Run `agentis help` for the complete flag list on every command.
 
 ---
 

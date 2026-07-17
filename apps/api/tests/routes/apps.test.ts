@@ -2,10 +2,10 @@
  * /v1/apps package routes: `.agentisapp` preview + install.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import type { AppManifestEnvelope } from '@agentis/core';
+import { canonicalizeManifest, type AppManifestEnvelope } from '@agentis/core';
 import { buildAppRoutes } from '../../src/routes/apps.js';
 import { graphContentHash } from '../../src/services/workflow/workflowCompass.js';
 import { AppDatastore, AppPackager, AppStore, AppSurfaceStore } from '@agentis/app';
@@ -368,6 +368,121 @@ describe('/v1/apps conversation simulator (G8)', () => {
 });
 
 describe('/v1/apps package install', () => {
+  // Regression: a real .agentisapp (Fashion Store Factory) failed to import
+  // because record/card actions carry a nested object payload —
+  // `args: { patch: { status: 'operator_hold' } }` — and predicate conditions
+  // carry array values (`op: 'not_in', value: [...]`). The old actionRef/
+  // condition schemas only allowed flat scalar bindables, so the whole install
+  // was rejected at schema-validation with an opaque VALIDATION_FAILED. This
+  // drives the REAL preview→install route with that exact shape end to end.
+  it('installs an app whose actions carry nested object args and array-valued conditions', async () => {
+    const store = new AppStore(ctx.db);
+    const sourceId = store.create(ctx.workspace.id, ctx.user.id, { name: 'Store Factory' }).id;
+    store.update(ctx.workspace.id, sourceId, { version: '0.1.0' });
+    new AppDatastore(ctx.db).defineCollection(ctx.workspace.id, sourceId, {
+      name: 'leads',
+      schema: { fields: [{ key: 'status', type: 'string', required: true }, { key: 'stage', type: 'string' }, { key: 'hold_reason', type: 'string' }] },
+    });
+    // A Kanban whose cardActions + a RecordMaster whose recordActions both use
+    // the nested-object payload and array-valued predicates from the real file.
+    new AppSurfaceStore({ db: ctx.db }).render(ctx.workspace.id, sourceId, 'board', {
+      type: 'Tabs',
+      tabs: [
+        {
+          label: 'Board',
+          children: [{
+            type: 'Kanban',
+            bind: { collection: 'leads', live: true },
+            groupBy: 'status',
+            update: { action: 'update_lead' },
+            cardActions: [
+              { action: 'hold_lead', label: 'Hold', icon: 'pause',
+                args: { patch: { status: 'operator_hold', reason: { $row: 'hold_reason' } } },
+                visibleWhen: { all: [
+                  { field: 'status', op: 'neq', value: 'operator_hold' },
+                  { field: 'stage', op: 'not_in', value: ['delivered', 'rejected'] },
+                ] } },
+            ],
+          }],
+        },
+        {
+          label: 'Records',
+          children: [{
+            type: 'RecordMaster',
+            bind: { collection: 'leads', live: true },
+            titleField: 'status',
+            recordActions: [
+              { action: 'resume_lead', label: 'Resume',
+                args: { patch: { status: 'active', meta: { touchedBy: { $state: 'operator' } } } },
+                disabledWhen: { any: [{ field: 'status', op: 'in', value: ['delivered', 'rejected'] }] } },
+            ],
+          }],
+        },
+      ],
+    });
+
+    const exported = await app().request(`/v1/apps/${sourceId}/export`, { headers: ctx.authHeaders });
+    expect(exported.status).toBe(200);
+    const { data: envelope } = (await exported.json()) as { data: AppManifestEnvelope };
+
+    const preview = await app().request('/v1/apps/import/preview', {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify(envelope),
+    });
+    expect(preview.status).toBe(200);
+    const previewBody = (await preview.json()) as { data: { permissions: string[] } };
+
+    const installed = await app().request('/v1/apps/import', {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({ envelope, permissionsAcknowledged: previewBody.data.permissions }),
+    });
+    expect(installed.status).toBe(201);
+    const installedBody = (await installed.json()) as { data: { appId: string } };
+    // The nested payload survives the round-trip byte-for-byte.
+    const view = JSON.stringify(new AppSurfaceStore({ db: ctx.db }).get(ctx.workspace.id, installedBody.data.appId, 'board').view);
+    expect(view).toContain('operator_hold');
+    expect(view).toContain('"$row":"hold_reason"');
+    expect(view).toContain('"$state":"operator"');
+  });
+
+  // Forward-compat at the HTTP boundary: the /v1/apps/import route must not
+  // strip the manifest before the checksum is verified. An authentic export
+  // carrying fields the current schema dropped (real case: policy.audience/
+  // shareable) must still preview + install — verification hashes the RAW
+  // transported bytes. Regression for "checksum mismatch — corrupt or tampered".
+  it('imports an authentic export carrying manifest fields the current schema dropped', async () => {
+    const sourceId = seedApp();
+    const exported = await app().request(`/v1/apps/${sourceId}/export`, { headers: ctx.authHeaders });
+    const { data: envelope } = (await exported.json()) as { data: { manifest: Record<string, unknown>; checksum: string } };
+
+    // Rewrite the envelope the way an older build would have emitted it: extra
+    // fields + a checksum computed over those raw bytes. (Mirrors an on-disk
+    // .agentisapp from a prior schema version.)
+    const rawManifest = {
+      ...envelope.manifest,
+      policy: { ...(envelope.manifest.policy as Record<string, unknown>), audience: [], shareable: false },
+      unknownFutureField: 'from-another-version',
+    };
+    const legacyEnvelope = {
+      format: '.agentisapp',
+      formatVersion: 1,
+      manifest: rawManifest,
+      checksum: createHash('sha256').update(canonicalizeManifest(rawManifest as never)).digest('hex'),
+      exportedAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    const preview = await app().request('/v1/apps/import/preview', {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify(legacyEnvelope),
+    });
+    expect(preview.status, await preview.clone().text()).toBe(200);
+    const previewBody = (await preview.json()) as { data: { permissions: string[] } };
+
+    const installed = await app().request('/v1/apps/import', {
+      method: 'POST', headers: ctx.authHeaders,
+      body: JSON.stringify({ envelope: legacyEnvelope, permissionsAcknowledged: previewBody.data.permissions }),
+    });
+    expect(installed.status, await installed.clone().text()).toBe(201);
+  });
+
   it('creates an App and its entry workflow in one transaction', async () => {
     const response = await app().request('/v1/apps', {
       method: 'POST',

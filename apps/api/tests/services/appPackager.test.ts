@@ -6,8 +6,9 @@
  * reject tampering; collections come back EMPTY (empty-with-schema).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
+import { canonicalizeManifest } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { AppDatastore, AppPackager, AppStore, AppSurfaceStore } from '@agentis/app';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -69,6 +70,36 @@ describe('AppPackager — IR projection', () => {
 
     envelope.manifest.identity.name = 'Evil Hijack'; // mutate after checksum
     expect(() => packager.deserialize(envelope)).toThrowError(/checksum mismatch/);
+  });
+
+  // Forward-compat: an authentic older export carries manifest fields that a
+  // LATER schema no longer knows (real case: policy.audience/shareable were
+  // dropped). The checksum was computed over those raw bytes at export time, so
+  // verification must hash the RAW manifest — not a schema-parsed projection —
+  // or every such file "mismatches" and can never be reimported.
+  it('imports an authentic export carrying fields the current schema dropped', () => {
+    const m = packager.toManifest(ctx.workspace.id, appId);
+    // Simulate a manifest exported by an older/newer build: extra fields the
+    // current appManifestSchema will strip on parse.
+    const rawManifest = {
+      ...m,
+      policy: { ...m.policy, audience: [], shareable: false },
+      unknownFutureField: 'from-another-version',
+    };
+    const envelope = {
+      format: '.agentisapp' as const,
+      formatVersion: 1 as const,
+      manifest: rawManifest as never,
+      checksum: createHash('sha256').update(canonicalizeManifest(rawManifest as never)).digest('hex'),
+      exportedAt: '2026-01-01T00:00:00.000Z',
+    };
+    // Verifies over raw bytes → passes; returns the strict (stripped) manifest.
+    const parsed = packager.deserialize(envelope);
+    expect(parsed.identity.name).toBe(m.identity.name);
+    expect('unknownFutureField' in parsed).toBe(false);
+    // And it installs end to end.
+    const { appId: newId } = packager.import(ctx.workspace.id, ctx.user.id, envelope);
+    expect(new AppStore(ctx.db).get(ctx.workspace.id, newId).id).toBe(newId);
   });
 
   it('export → import recreates the app end to end', () => {

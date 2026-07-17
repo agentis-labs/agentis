@@ -88,6 +88,20 @@ describe('repairSurface — auto-fixes the garbage', () => {
     expect(JSON.stringify(once.view)).toBe(JSON.stringify(twice.view)); // idempotent
     expect(JSON.stringify(once.view)).toContain('"Hero"');
   });
+
+  it('assigns stable unique semantic ids to every component', () => {
+    const first = repairSurface({
+      type: 'Stack',
+      children: [
+        { type: 'Heading', value: 'Queue' },
+        { type: 'Split', left: { type: 'Text', value: 'A' }, right: { type: 'Text', value: 'B' } },
+      ],
+    });
+    const ids = [...JSON.stringify(first.view).matchAll(/"nodeId":"([^"]+)"/g)].map((match) => match[1]);
+    expect(ids.length).toBe(5);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(JSON.stringify(repairSurface(first.view).view)).toBe(JSON.stringify(first.view));
+  });
 });
 
 describe('operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X)', () => {
@@ -139,6 +153,30 @@ describe('operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X)', 
     expect(json).not.toContain('not_declared');
     expect(json).toContain('Keep');
     expect(fixes.some((f) => f.includes('undeclared action'))).toBe(true);
+  });
+
+  it('keeps declared state-aware context actions reachable and strips dead ones', () => {
+    const { view, fixes } = repairSurface(
+      {
+        type: 'Kanban',
+        bind: { collection: 'items', live: true },
+        groupBy: 'status',
+        update: { action: 'update_item' },
+        contextActions: [
+          { action: 'start_item', label: 'Start', visibleWhen: { all: [{ field: 'status', op: 'eq', value: 'queued' }] } },
+          { action: 'ghost', label: 'Ghost' },
+        ],
+      },
+      { collections: ['items'], actions: [
+        { name: 'update_item', kind: 'data', target: 'items.update' },
+        { name: 'start_item', kind: 'workflow', target: 'wf-start' },
+      ] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).toContain('start_item');
+    expect(json).not.toContain('ghost');
+    expect(fixes).toContain('removed undeclared kanban context actions');
+    expect(fixes.some((fix) => fix.includes('wired 1 workflow action'))).toBe(false);
   });
 
   it('keeps navigate/setState buttons (client built-ins need no declaration)', () => {

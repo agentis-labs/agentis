@@ -53,7 +53,10 @@ export class ConversationStore {
           isNull(schema.conversations.archivedAt),
         ),
       )
-      .orderBy(desc(schema.conversations.createdAt), desc(schema.conversations.lastMessageAt))
+      // rowid tiebreak: createdAt has millisecond precision, so a thread reset
+      // in the same instant as the previous send would otherwise resolve to
+      // the OLD thread (its lastMessageAt beats the fresh thread's NULL).
+      .orderBy(desc(schema.conversations.createdAt), desc(sql`rowid`))
       .get();
     if (existing) {
       if (args.mirroredSessionId && !existing.mirroredSessionId) {
@@ -110,7 +113,8 @@ export class ConversationStore {
           isNull(schema.conversations.archivedAt),
         ),
       )
-      .orderBy(desc(schema.conversations.createdAt), desc(schema.conversations.lastMessageAt))
+      // Same rowid tiebreak as getOrCreateByAgent — newest insert wins ties.
+      .orderBy(desc(schema.conversations.createdAt), desc(sql`rowid`))
       .get();
     if (existing) {
       // Backfill: a pre-existing thread adopts the App once its channel is bound.

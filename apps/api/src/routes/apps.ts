@@ -24,7 +24,6 @@ import {
   upsertSurfaceSchema,
   uiRenderSchema,
   uiPerformRegionSchema,
-  appManifestEnvelopeSchema,
   promoteAppEnvironmentSchema,
   upsertAppEnvironmentSchema,
   appWorkflowBindingSchema,
@@ -48,6 +47,7 @@ import { runPublishedWorkflow, startPublishedWorkflow } from '../engine/runPubli
 import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness } from '@agentis/app';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
+import { validationError } from '../middleware/error.js';
 import { scanArtifactBytes, type ScanFinding } from '../services/registryScanner.js';
 import { generateSurfaceView } from '../services/surfaceGenerator.js';
 import { aggregateRunAnalytics } from '../services/run/runAnalytics.js';
@@ -198,13 +198,25 @@ const createAppRequestSchema = createAppSchema.extend({
   { message: 'entryWorkflowId and createEntryWorkflow cannot be used together' },
 );
 
+// Import-path envelope shell: validates the wrapper but keeps `manifest` RAW.
+// The packager verifies the checksum over the transported manifest bytes before
+// schema-parsing it — parsing first strips/defaults fields and would break the
+// checksum of authentic older exports (see AppPackager.deserialize).
+const rawAppEnvelopeSchema = z.object({
+  format: z.literal('.agentisapp'),
+  formatVersion: z.literal(1).optional(),
+  manifest: z.record(z.unknown()),
+  checksum: z.string().min(1),
+  exportedAt: z.string().optional(),
+});
+
 const importAppSchema = z.object({
-  envelope: appManifestEnvelopeSchema,
+  envelope: rawAppEnvelopeSchema,
   permissionsAcknowledged: z.array(z.string()).default([]),
 });
 
 const appTestSchema = z.object({
-  envelope: appManifestEnvelopeSchema,
+  envelope: rawAppEnvelopeSchema,
   actions: z.array(z.object({
     surface: z.string().min(1),
     name: z.string().min(1),
@@ -358,7 +370,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const ws = getWorkspace(c);
     const user = c.get('user');
     const parsed = createAppRequestSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid app input');
+    if (!parsed.success) throw validationError('Invalid app input', parsed.error);
     const { createEntryWorkflow, entryWorkflowTitle, entryWorkflowGraph, ...input } = parsed.data;
     if (input.domainId) ensureAppDomain(deps.db, ws.workspaceId, input.domainId);
 
@@ -547,7 +559,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const appId = c.req.param('id');
     store.get(ws.workspaceId, appId);
     const parsed = doctorRepairRequestSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid Doctor repair request');
+    if (!parsed.success) throw validationError('Invalid Doctor repair request', parsed.error);
     return c.json({
       data: repairAppConformance(deps.db, ws.workspaceId, appId, {
         dryRun: parsed.data.confirm !== true,
@@ -569,7 +581,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const appId = c.req.param('id');
     store.get(ws.workspaceId, appId);
     const parsed = orchestrationRuleInputSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid orchestration rule');
+    if (!parsed.success) throw validationError('Invalid orchestration rule', parsed.error);
     return c.json({ data: upsertOrchestrationRule(deps.db, ws.workspaceId, parsed.data, { appId }) }, 201);
   });
 
@@ -582,7 +594,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       throw new AgentisError('RESOURCE_NOT_FOUND', `workflow event rule not found in App: ${ruleId}`);
     }
     const parsed = orchestrationRulePatchSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid orchestration rule patch');
+    if (!parsed.success) throw validationError('Invalid orchestration rule patch', parsed.error);
     return c.json({ data: upsertOrchestrationRule(deps.db, ws.workspaceId, parsed.data, { id: ruleId, appId }) });
   });
 
@@ -758,7 +770,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   });
 
   app.post('/import/preview', async (c) => {
-    const envelope = appManifestEnvelopeSchema.parse(await c.req.json());
+    const envelope = rawAppEnvelopeSchema.parse(await c.req.json());
     const warnings = scanAppEnvelope(envelope);
     return c.json({ data: appendScanWarnings(packager.preview(envelope), warnings) });
   });
@@ -789,7 +801,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
 
   app.post('/:id/upgrade/preview', async (c) => {
     const ws = getWorkspace(c);
-    const envelope = appManifestEnvelopeSchema.parse(await c.req.json());
+    const envelope = rawAppEnvelopeSchema.parse(await c.req.json());
     const manifest = packager.deserialize(envelope);
     return c.json({ data: lifecycle.planUpgrade(ws.workspaceId, c.req.param('id'), manifest) });
   });
@@ -797,7 +809,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.post('/:id/upgrade', async (c) => {
     const ws = getWorkspace(c);
     const user = c.get('user');
-    const envelope = appManifestEnvelopeSchema.parse(await c.req.json());
+    const envelope = rawAppEnvelopeSchema.parse(await c.req.json());
     const manifest = packager.deserialize(envelope);
     return c.json({ data: lifecycle.upgrade(ws.workspaceId, user.id, c.req.param('id'), manifest, { installedChecksum: envelope.checksum }) });
   });
@@ -837,7 +849,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.patch('/:id', async (c) => {
     const ws = getWorkspace(c);
     const parsed = updateAppSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid app update');
+    if (!parsed.success) throw validationError('Invalid app update', parsed.error);
     if (parsed.data.domainId) ensureAppDomain(deps.db, ws.workspaceId, parsed.data.domainId);
     return c.json({ data: store.update(ws.workspaceId, c.req.param('id'), parsed.data) });
   });
@@ -858,7 +870,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.post('/:id/members', async (c) => {
     const ws = getWorkspace(c);
     const parsed = addMemberSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid member input');
+    if (!parsed.success) throw validationError('Invalid member input', parsed.error);
     store.addMember(ws.workspaceId, c.req.param('id'), parsed.data.agentId, parsed.data.role);
     return c.json({ data: store.listMembers(ws.workspaceId, c.req.param('id')) }, 201);
   });
@@ -985,7 +997,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId);
     const conversationId = c.req.param('conversationId');
     const parsed = takeoverSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid takeover input');
+    if (!parsed.success) throw validationError('Invalid takeover input', parsed.error);
     const conv = deps.db
       .select({ id: schema.conversations.id })
       .from(schema.conversations)
@@ -1006,7 +1018,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId);
     const conversationId = c.req.param('conversationId');
     const parsed = operatorSendSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid send input');
+    if (!parsed.success) throw validationError('Invalid send input', parsed.error);
     const conv = deps.db
       .select({ id: schema.conversations.id, channelConnectionId: schema.conversations.channelConnectionId, channelChatId: schema.conversations.channelChatId })
       .from(schema.conversations)
@@ -1066,7 +1078,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId);
     const conversationId = c.req.param('conversationId');
     const parsed = needsAttentionSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid needs-attention input');
+    if (!parsed.success) throw validationError('Invalid needs-attention input', parsed.error);
     const conv = deps.db
       .select({ id: schema.conversations.id })
       .from(schema.conversations)
@@ -1094,7 +1106,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId); // 404s if the App is not in this workspace
     if (!deps.presence) return c.json({ data: { viewers: [] } });
     const parsed = presenceHeartbeatSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid presence input');
+    if (!parsed.success) throw validationError('Invalid presence input', parsed.error);
     const profile = deps.db
       .select({ displayName: schema.users.displayName, username: schema.users.username })
       .from(schema.users)
@@ -1158,7 +1170,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     authorizeConversation(ws.workspaceId, appId, conversationId);
     if (!deps.participants) throw new AgentisError('INTERNAL_ERROR', 'participants service unavailable');
     const parsed = addParticipantSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid participant input');
+    if (!parsed.success) throw validationError('Invalid participant input', parsed.error);
     if (parsed.data.participantType !== 'contact' && !parsed.data.participantId) {
       throw new AgentisError('VALIDATION_FAILED', 'participantId is required for agent/human participants');
     }
@@ -1208,7 +1220,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const current = deps.contacts.get(ws.workspaceId, contactId);
     if (!current || current.appId !== appId) throw new AgentisError('RESOURCE_NOT_FOUND', `contact ${contactId} not found in this app`);
     const parsed = contactPatchSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid contact patch');
+    if (!parsed.success) throw validationError('Invalid contact patch', parsed.error);
     const updated = deps.contacts.update(ws.workspaceId, contactId, parsed.data);
     // Phase M2 — a stage transition into a terminal stage (won/lost) IS an outcome.
     // Derive it so the learning loop fires with no separate call (non-throwing).
@@ -1235,7 +1247,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       if (!current || current.appId !== appId) throw new AgentisError('RESOURCE_NOT_FOUND', `contact ${contactId} not found in this app`);
     }
     const parsed = contactOutcomeSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid outcome (expected won|lost|abandoned)');
+    if (!parsed.success) throw validationError('Invalid outcome (expected won|lost|abandoned)', parsed.error);
     const result = await deps.learning.recordOutcome({
       workspaceId: ws.workspaceId,
       appId,
@@ -1267,7 +1279,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId); // authorize + 404 in-workspace
     if (!deps.simulator) throw new AgentisError('INTERNAL_ERROR', 'conversation simulator not available');
     const parsed = simulateRequestSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid simulation scenario');
+    if (!parsed.success) throw validationError('Invalid simulation scenario', parsed.error);
     const result = await deps.simulator.runScenario({
       workspaceId: ws.workspaceId,
       userId: user.id,
@@ -1285,7 +1297,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.post('/:id/workflows', async (c) => {
     const ws = getWorkspace(c);
     const parsed = adoptWorkflowSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid adopt input');
+    if (!parsed.success) throw validationError('Invalid adopt input', parsed.error);
     store.adoptWorkflow(ws.workspaceId, c.req.param('id'), parsed.data.workflowId);
     return c.json({ data: store.listWorkflowIds(ws.workspaceId, c.req.param('id')) });
   });
@@ -1320,14 +1332,14 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.post('/:id/collections', async (c) => {
     const ws = getWorkspace(c);
     const parsed = defineCollectionSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid collection schema');
+    if (!parsed.success) throw validationError('Invalid collection schema', parsed.error);
     return c.json({ data: data.defineCollection(ws.workspaceId, c.req.param('id'), parsed.data) }, 201);
   });
 
   app.post('/:id/collections/:name/query', async (c) => {
     const ws = getWorkspace(c);
     const parsed = dataQuerySchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid query');
+    if (!parsed.success) throw validationError('Invalid query', parsed.error);
     return c.json(data.query(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data));
   });
 
@@ -1335,14 +1347,14 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const ws = getWorkspace(c);
     const user = c.get('user');
     const parsed = insertRecordSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid record');
+    if (!parsed.success) throw validationError('Invalid record', parsed.error);
     return c.json({ data: data.insert(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.record, user.id) }, 201);
   });
 
   app.patch('/:id/collections/:name/records/:recordId', async (c) => {
     const ws = getWorkspace(c);
     const parsed = updateRecordSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid patch');
+    if (!parsed.success) throw validationError('Invalid patch', parsed.error);
     return c.json({ data: data.update(ws.workspaceId, c.req.param('id'), c.req.param('name'), c.req.param('recordId'), parsed.data.patch) });
   });
 
@@ -1350,7 +1362,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const ws = getWorkspace(c);
     const user = c.get('user');
     const parsed = upsertRecordSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid upsert');
+    if (!parsed.success) throw validationError('Invalid upsert', parsed.error);
     return c.json({ data: data.upsert(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.match, parsed.data.record, user.id) });
   });
 
@@ -1375,7 +1387,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.patch('/:id/surfaces/:name', async (c) => {
     const ws = getWorkspace(c);
     const parsed = renameSurfaceSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid surface name');
+    if (!parsed.success) throw validationError('Invalid surface name', parsed.error);
     return c.json({
       data: surfaces.rename(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data.name),
     });
@@ -1390,14 +1402,17 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   app.put('/:id/surfaces', async (c) => {
     const ws = getWorkspace(c);
     const parsed = upsertSurfaceSchema.safeParse(await c.req.json());
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid surface');
+    if (!parsed.success) throw validationError('Invalid surface', parsed.error);
     return c.json({ data: surfaces.upsert(ws.workspaceId, c.req.param('id'), parsed.data) });
   });
 
   app.post('/:id/surfaces/:name/render', async (c) => {
     const ws = getWorkspace(c);
     const parsed = uiRenderSchema.shape.view.safeParse((await c.req.json()).view);
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid view tree');
+    if (!parsed.success) {
+      const issues = parsed.error.issues.slice(0, 12).map((issue) => `${issue.path.join('.') || 'view'}: ${issue.message}`);
+      throw new AgentisError('VALIDATION_FAILED', `Invalid view tree — ${issues.join('; ')}`);
+    }
     return c.json({ data: surfaces.render(ws.workspaceId, c.req.param('id'), c.req.param('name'), parsed.data) });
   });
 
@@ -1408,7 +1423,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const ws = getWorkspace(c);
     const body = await c.req.json().catch(() => ({}));
     const parsed = uiPerformRegionSchema.safeParse({ ...body, surface: c.req.param('name') });
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'Invalid perform-region request');
+    if (!parsed.success) throw validationError('Invalid perform-region request', parsed.error);
     return c.json({
       data: surfaces.performRegion(ws.workspaceId, c.req.param('id'), parsed.data.surface, {
         region: parsed.data.region,
@@ -1427,7 +1442,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const ws = getWorkspace(c);
     const appId = c.req.param('id');
     const parsed = generateSurfaceRequestSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'prompt required');
+    if (!parsed.success) throw validationError('prompt required', parsed.error);
     const result = await generateSurfaceView({
       prompt: parsed.data.prompt,
       collections: data.listCollections(ws.workspaceId, appId),
@@ -1469,7 +1484,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const user = c.get('user');
     const appId = c.req.param('id');
     const parsed = operatorCommandSchema.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) throw new AgentisError('VALIDATION_FAILED', 'command required');
+    if (!parsed.success) throw validationError('command required', parsed.error);
     if (!deps.engine) throw new AgentisError('VALIDATION_FAILED', 'operator commands are not enabled in this runtime');
     const workflowId = store.listWorkflowIds(ws.workspaceId, appId)[0];
     if (!workflowId) throw new AgentisError('VALIDATION_FAILED', 'this app has no workflow yet — add one so the operator can act');

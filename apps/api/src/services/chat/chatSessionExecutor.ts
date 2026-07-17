@@ -763,7 +763,20 @@ export class ChatSessionExecutor {
         this.#deps.logger?.warn?.('chat.command_model.failed', { workspaceId: ctx.workspaceId, agentId: ctx.agentId, err: (err as Error).message });
       }
     }
-    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(commandBriefingBlock, 2600), clampBlock(capabilityManifestBlock, 900), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), options.systemAddendum]
+    // The live mounted-connections surface (MCP servers + credentialed integrations).
+    // Injected ALWAYS on a substantive turn — including for managers, who get the
+    // Command Briefing instead of the manifest and would otherwise never be told what
+    // is actually connected. This is the block that stops an agent assuming it has no
+    // integrations/MCP when the workspace has them mounted. Best-effort.
+    let mountedConnectionsBlock: string | null = null;
+    if (!lightweightConversation && this.#deps.capabilityIndex) {
+      try {
+        mountedConnectionsBlock = (await this.#deps.capabilityIndex.mountedConnectionsBlock(ctx.workspaceId)) || null;
+      } catch (err) {
+        this.#deps.logger?.warn?.('chat.mounted_connections.failed', { workspaceId: ctx.workspaceId, err: (err as Error).message });
+      }
+    }
+    const systemAddendum = [clampBlock(operatingManualBlock, 4000), clampBlock(commandBriefingBlock, 2600), clampBlock(capabilityManifestBlock, 900), clampBlock(mountedConnectionsBlock, 1200), clampBlock(brainSystemInjection, CONTEXT_BUDGET.brainInjection), options.systemAddendum]
       .map((value) => value?.trim())
       .filter((value): value is string => Boolean(value));
     const systemPrompt = systemAddendum.length > 0

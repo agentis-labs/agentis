@@ -13,7 +13,7 @@ import { listInteractions, type InteractionEvent } from '../../lib/connections';
 import { useToast } from '../shared/Toast';
 import { Skeleton } from '../shared/Skeleton';
 import { rtSubscribe, useRealtime } from '../../lib/realtime';
-import { Composer } from './Composer';
+import { Composer, type SendAttachment } from './Composer';
 import type { ToolCallData as ToolCallPillData } from './toolCalls';
 import { ProactiveCard, type ProactiveCardData } from './ProactiveCard';
 import { ChatMarkdown } from './ChatMarkdown';
@@ -56,6 +56,7 @@ type QueuedItem = {
   id: string;
   conversationId?: string;
   text: string;
+  attachments?: string[] | null;
   createdAt: string;
   position: number;
 };
@@ -89,6 +90,8 @@ interface MessageMeta {
   runStatus?: string;
   runTitle?: string | null;
   isEphemeral?: boolean;
+  /** Composer file/photo uploads carried with this message — artifact ids. */
+  artifactIds?: string[];
 }
 
 type ConfirmationStatus = 'pending' | 'approving' | 'approved' | 'cancelled' | 'failed';
@@ -165,6 +168,12 @@ function taskLabel(message: string): string {
   return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean;
 }
 
+/** Fallback body text when a message carries attachments but no caption — the backend requires a non-empty body. */
+function defaultAttachmentCaption(attachments: SendAttachment[]): string {
+  const names = attachments.map((a) => a.name).join(', ');
+  return attachments.length === 1 ? `📎 ${names}` : `📎 Sent ${attachments.length} files: ${names}`;
+}
+
 function createClientTurnId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
@@ -197,6 +206,7 @@ function normalizeAgentMessage(message: AgentMsg): ChatMessage {
     authorId: message.authorId ?? '',
     authorKind: (message.role ?? message.authorType ?? 'agent') as ChatMessage['authorKind'],
     text: message.body,
+    artifactIds: message.metadata?.artifactIds,
     createdAt: message.createdAt,
     source: message.metadata?.source,
     metadata: message.metadata,
@@ -754,7 +764,8 @@ export function ThreadView({
     if (dispatchedQueueIdsRef.current.has(item.id)) return;
     dispatchedQueueIdsRef.current.add(item.id);
     setPendingQueue((prev) => prev.filter((q) => q.id !== item.id));
-    void handleSend(item.text);
+    const attachments = item.attachments?.length ? item.attachments.map((id) => ({ id, name: id })) : undefined;
+    void handleSend(item.text, { attachments });
   }
 
   useEffect(() => {
@@ -1125,11 +1136,17 @@ export function ThreadView({
    * streaming (§ChatComposerQueue). The backend re-checks the in-flight-turn
    * guard itself, so this is correct even if `streamingAgentActive` is a beat
    * stale. */
-  async function enqueueMessage(text: string) {
+  async function enqueueMessage(text: string, attachments?: SendAttachment[]) {
     try {
       const res = await api<{ queued: boolean; item?: QueuedItem }>(sendEndpoint, {
         method: 'POST',
-        body: JSON.stringify({ body: text, clientTurnId: createClientTurnId(), useViewportContext: true, permissionMode }),
+        body: JSON.stringify({
+          body: text,
+          clientTurnId: createClientTurnId(),
+          useViewportContext: true,
+          permissionMode,
+          attachments: attachments?.length ? attachments.map((a) => a.id) : undefined,
+        }),
       });
       if (res.queued && res.item) {
         const item = res.item;
@@ -1152,20 +1169,26 @@ export function ThreadView({
     }
   }
 
-  async function handleSend(text: string, options?: { useViewportContext?: boolean }) {
+  async function handleSend(text: string, options?: { useViewportContext?: boolean; attachments?: SendAttachment[] }) {
     if (readOnly) {
       toast.warn('Past conversation', 'Use the + button in the header to start a fresh conversation.');
       return;
     }
     const value = text.trim();
-    if (!value) return;
+    const attachments = options?.attachments ?? [];
+    if (!value && attachments.length === 0) return;
+    // Attachment(s) with no caption still need a non-empty body — the backend
+    // requires one and the chat bubble needs something to show alongside the
+    // rendered attachment card.
+    const bodyText = value || defaultAttachmentCaption(attachments);
+    const artifactIds = attachments.map((a) => a.id);
     // ChatGPT/Gemini-style queue-then-auto-continue: a turn is already
     // streaming in this thread, so don't race a second live turn — queue this
     // send. `streamConversationTurnReply` auto-dispatches it, oldest first,
     // once the in-flight turn ends (see the CONVERSATION_QUEUE_UPDATED
     // realtime subscription above).
     if (kind === 'agent' && streamingAgentActive) {
-      await enqueueMessage(value);
+      await enqueueMessage(bodyText, attachments);
       return;
     }
     if (kind === 'room') {
@@ -1173,7 +1196,11 @@ export function ThreadView({
         const responders = resolveMentionedAgentIds(value, agentMap);
         const res = await api<{ message?: RoomMsg }>(sendEndpoint, {
           method: 'POST',
-          body: JSON.stringify({ contentType: 'text', content: { text: value }, mentions: responders }),
+          body: JSON.stringify({
+            contentType: 'text',
+            content: { text: bodyText, ...(artifactIds.length ? { artifactIds } : {}) },
+            mentions: responders,
+          }),
         });
         const message = res.message;
         if (message) setMessages((prev) => upsertMessage(prev, normalizeRoomMessage(message)));
@@ -1207,10 +1234,11 @@ export function ThreadView({
       id: `tmp-${clientTurnId}`,
       authorId: 'operator',
       authorKind: 'operator',
-      text: value,
+      text: bodyText,
+      artifactIds: artifactIds.length ? artifactIds : undefined,
       createdAt,
       deliveryStatus: 'sending',
-      metadata: { clientTurnId },
+      metadata: artifactIds.length ? { clientTurnId, artifactIds } : { clientTurnId },
     };
     const streamId = `stream-${clientTurnId}`;
     const streamingMessage: ChatMessage = {
@@ -1240,7 +1268,7 @@ export function ThreadView({
     setMessages((current) => dedupeMessages([...current, operatorMessage, streamingMessage]));
     setAgentTyping(true);
     setStepTrack(null);
-    setActiveTask({ agentId: id, agentName: name, label: taskLabel(value), done: 0, total: 0, startedAt: Date.now() });
+    setActiveTask({ agentId: id, agentName: name, label: taskLabel(bodyText), done: 0, total: 0, startedAt: Date.now() });
 
     const toolStartedAt = new Map<string, number>();
     let toolTotal = 0;
@@ -1256,9 +1284,10 @@ export function ThreadView({
         method: 'POST',
         signal: controller.signal,
         body: JSON.stringify({
-          body: value,
+          body: bodyText,
           clientTurnId,
           useViewportContext: options?.useViewportContext !== false,
+          attachments: artifactIds.length ? artifactIds : undefined,
           viewportOverride,
           permissionMode,
         }),
@@ -1930,6 +1959,7 @@ function MessageBubble({
               failed={msg.deliveryStatus === 'failed'}
             />
           )}
+          <ChatArtifactAttachments artifactIds={artifactIds} />
           {!isEditing && bodyBeforePlan && (
             isOperator ? (
               <div className="mb-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{bodyBeforePlan}</div>
@@ -1940,7 +1970,6 @@ function MessageBubble({
               </div>
             )
           )}
-          <ChatArtifactAttachments artifactIds={artifactIds} />
           {msg.metadata?.confirmation && (
             <ConfirmationCard
               data={msg.metadata.confirmation}

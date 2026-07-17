@@ -212,6 +212,13 @@ export interface EngineDeps {
   connectors?: ConnectorRegistry;
   /** Registered MCP servers' tools, callable from an `mcp` node (masterplan 2.3). */
   mcpBridge?: McpBridgePort;
+  /**
+   * The capability plane — used here only to inject the resident "mounted
+   * connections" block (live MCP servers + credentialed integrations) into the
+   * agent_task dispatch prompt, so a task agent knows the same connected surface a
+   * chat agent does. Structurally typed to avoid a hard dependency on the service.
+   */
+  capabilityIndex?: { mountedConnectionsBlock(workspaceId: string): Promise<string> };
   /** Native channel send — required for the deterministic `channel` node. */
   channelSend?: ChannelSendPort;
   /** Agentic App datastore access for the `data_query` / `data_mutate` nodes. */
@@ -4681,8 +4688,20 @@ export class WorkflowEngine {
     // reasons over the whole plan, not 70 node bodies) AND the runId + how to
     // extend it — which also gives an external harness the run handle it needs (M2).
     const evolutionBlock = this.#buildLivePlanBlock(ctx);
+    // The live mounted-connections surface (MCP servers + credentialed integrations),
+    // so a task agent reaches for what is actually connected instead of assuming none
+    // exists. Best-effort — never block a dispatch on it.
+    let connectionsBlock = '';
+    try {
+      if (this.deps.capabilityIndex) {
+        const raw = await this.deps.capabilityIndex.mountedConnectionsBlock(ctx.workspaceId);
+        if (raw) connectionsBlock = `<mounted_connections>\n${raw}\n</mounted_connections>`;
+      }
+    } catch (err) {
+      this.deps.logger.warn('engine.mounted_connections.failed', { runId: ctx.runId, err: (err as Error).message });
+    }
     return {
-      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
+      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, connectionsBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
     };
   }
 
@@ -5488,6 +5507,18 @@ export class WorkflowEngine {
       credential,
       inputData: {},
     });
+  }
+
+  /**
+   * Is a workspace-bound credential present for `integrationId`? Backs
+   * `agentis.integration.list`, which must report what the agent can call RIGHT
+   * NOW rather than what the static catalog merely supports. Shares the vault
+   * lookup with {@link runIntegrationOperation}, so list and call agree.
+   * Existence only — no secret is decrypted or returned.
+   */
+  hasIntegrationCredential(workspaceId: string, integrationId: string): boolean {
+    if (!integrationId?.trim()) return false;
+    return this.#executors.hasIntegrationCredential(workspaceId, integrationId);
   }
 
 

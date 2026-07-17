@@ -23,6 +23,10 @@ from your own machine.
 This package launches the whole local runtime: API, WebSocket bridge, workflow engine,
 embedded SQLite, credential vault, and bundled React dashboard.
 
+## See it running
+
+![Agentis workspace dashboard](https://raw.githubusercontent.com/agentis-labs/agentis/main/docs/assets/agentis-workspace-print.png)
+
 ## Harnesses supported today
 
 Import the agent you already run — no rewrite, no migration — and it keeps its memory,

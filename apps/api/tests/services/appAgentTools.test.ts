@@ -92,6 +92,24 @@ describe('Agentic App agent tools', () => {
     expect(surface.revision).toBe(1); // fresh surface created at rev 0, patch bumps to 1
   });
 
+  it('inspects compact semantic ids and removes one component without replacing the tree', async () => {
+    await run('ui_render', {
+      surface: 'home',
+      view: { type: 'Stack', children: [{ type: 'Heading', value: 'Keep' }, { type: 'Callout', title: 'Remove me', value: 'Temporary' }] },
+    });
+    const inspected = await run('ui_inspect', { surface: 'home' });
+    expect(inspected.ok).toBe(true);
+    const outline = (inspected.result as { surfaces: Array<{ nodes: Array<{ nodeId: string; type: string }> }> }).surfaces[0]!.nodes;
+    const target = outline.find((node) => node.type === 'Callout');
+    expect(target?.nodeId).toBeTruthy();
+
+    const removed = await run('ui_remove', { surface: 'home', nodeId: target!.nodeId });
+    expect(removed.ok).toBe(true);
+    const stored = new AppSurfaceStore({ db: ctx.db }).get(ctx.workspace.id, appId, 'home');
+    expect(JSON.stringify(stored.view)).toContain('Keep');
+    expect(JSON.stringify(stored.view)).not.toContain('Remove me');
+  });
+
   it('promotes a datastore record into workspace memory (brain bridge)', async () => {
     await run('data_define_collection', { name: 'customers', schema: { fields: [{ key: 'name', type: 'string', required: true }, { key: 'pref', type: 'string' }] } });
     const ins = await run('data_insert', { collection: 'customers', record: { name: 'Acme', pref: 'email only' } });

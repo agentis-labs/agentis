@@ -3,10 +3,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { Settings as SettingsIcon, LogOut, Package as PackageIcon, Database as DataIcon } from 'lucide-react';
+import {
+  Settings as SettingsIcon,
+  LogOut,
+  Package as PackageIcon,
+  Database as DataIcon,
+  Star,
+  ArrowUpCircle,
+  Copy,
+  Check,
+} from 'lucide-react';
 import clsx from 'clsx';
 import { ThemeToggle } from './ThemeToggle';
 import { useAgentisStore } from '../../store/agentisStore';
+import { useVersionUpdate } from '../../lib/useVersionUpdate';
 
 interface AvatarMenuProps {
   name: string;
@@ -33,6 +43,18 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
   const menuRef = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
   const { setSettingsOpen } = useAgentisStore();
+  const version = useVersionUpdate();
+  const [copied, setCopied] = useState(false);
+  const updateAvailable = Boolean(version?.updateAvailable);
+
+  function copyUpdateCommand() {
+    const command = version?.installCommand;
+    if (!command) return;
+    void navigator.clipboard?.writeText(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2_000);
+    });
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -83,6 +105,12 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
           <span>{initials(name)}</span>
         )}
       </button>
+      {updateAvailable && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface bg-accent"
+        />
+      )}
 
       {open && createPortal(
         <div
@@ -109,6 +137,35 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
               </div>
             </div>
           </div>
+
+          {updateAvailable && (
+            <div className="border-b border-line px-3 py-3">
+              <div className="rounded-card border border-accent/30 bg-accent-soft p-3">
+                <div className="flex items-center gap-2 text-[12px] font-semibold text-accent">
+                  <ArrowUpCircle size={14} />
+                  Update available
+                </div>
+                <div className="mt-1 text-[11px] text-text-secondary">
+                  <span className="font-mono">{version?.current}</span>
+                  {' → '}
+                  <span className="font-mono font-semibold text-text-primary">{version?.latest}</span>
+                </div>
+                <div className="mt-2 flex items-center gap-2 rounded-md border border-line bg-surface px-2 py-1.5">
+                  <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary">
+                    {version?.installCommand}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={copyUpdateCommand}
+                    aria-label="Copy update command"
+                    className="shrink-0 rounded p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary"
+                  >
+                    {copied ? <Check size={13} className="text-accent" /> : <Copy size={13} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="border-b border-line px-3 py-3">
             <div className="mb-2 px-1 text-[10px] font-medium uppercase tracking-wider text-text-muted">
@@ -145,6 +202,17 @@ export function AvatarMenu({ name, email, imageUrl, onLogout }: AvatarMenuProps)
               <SettingsIcon size={14} />
               Settings
             </button>
+            <a
+              role="menuitem"
+              href={version?.github ?? 'https://github.com/agentis-labs/agentis'}
+              target="_blank"
+              rel="noreferrer noopener"
+              onClick={() => setOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-[13px] text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary"
+            >
+              <Star size={14} className="text-amber-400" />
+              Star us on GitHub
+            </a>
             <button
               type="button"
               role="menuitem"

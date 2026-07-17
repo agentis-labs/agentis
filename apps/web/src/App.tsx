@@ -402,7 +402,7 @@ function Shell({
           className="flex h-9 items-center text-text-primary"
           aria-label="Agentis home"
         >
-          <BrandMark variant="wordmark" size={13} />
+          <BrandMark variant="full" size={18} />
         </button>
         <span className="text-text-muted">/</span>
         <WorkspaceSwitcher

@@ -239,6 +239,18 @@ const WORKFLOW_BRANCH_ROW_PATTERN = [2, 3, 4, 5];
 
 const VIEWPORT_MIN = 0.36;
 const VIEWPORT_MAX = 2.25;
+// Floor for "fit to view" / reset / subtree-focus ONLY (computeHomeViewport)
+// — distinct from VIEWPORT_MIN, which floors deliberate manual zoom-out
+// (scroll/pinch/step) so the canvas never becomes illegibly small under a
+// user's own gesture. "Fit to view" has a different job: show everything.
+// Clamping it to the SAME 0.36 floor meant a wide org chart (many managers,
+// or any unassigned-workflow lane widening the row) on a narrower browser
+// window computed a required zoom below 0.36 to fit, got clamped UP to 0.36,
+// and rendered the excess cropped at the canvas edge — no amount of correct
+// width-reservation math fixes that, since this floor overrides it regardless
+// of how accurately the content bounds were measured. 0.08 is a pure safety
+// floor against a degenerate (near-zero) zoom, not a practical constraint.
+const FIT_VIEWPORT_MIN = 0.08;
 const LIVE_WORKSPACE_MARGIN = 12;
 const LIVE_WORKSPACE_MIN_WIDTH = 320;
 const LIVE_WORKSPACE_MIN_HEIGHT = 320;
@@ -1161,7 +1173,7 @@ export function buildCanvasModel(
   // collide. Branch identity/spaceId are resolved first (no x needed), then
   // each branch is sized from its workflow count and packed.
   const { managerNodeIds, spaceSourceIds, hasDirectBranch, branchCount } = deriveTopBranchLayout(data, agents, roles);
-  const branchSlots = packTopBranches(branchCount, canvasSize.width);
+  const branchSlots = packTopBranches(managerNodeIds.length, hasDirectBranch, canvasSize.width);
   const managerSlots = branchSlots.slice(0, managerNodeIds.length);
   const directSlot = hasDirectBranch ? branchSlots[managerNodeIds.length] ?? null : null;
   const branchSlotById = new Map<string, BranchSlot>();
@@ -1352,8 +1364,10 @@ function CanvasNodeCard({
   const isLive = Boolean(node.active) || live;
   const compact = node.height <= 60 || node.kind === 'artifact';
   const showSubtitle = !compact || node.kind !== 'worker';
-  // Match the docked-chat header (Orchy / Personal Orchestrator): title 14px,
-  // subtitle 10px, uniform across every node kind.
+  // Node labels sit inside the zoom-scaled world layer, so at fit-zoom the text
+  // renders smaller on screen than the fixed composer chip. Title stays at its
+  // original 14px (enlarging it broke the card layout); the subtitle is nudged
+  // up from 10px to 12px for legibility without overflowing the cards.
   const titleClass = 'text-[14px]';
   const avatarClass = node.kind === 'orchestrator'
     ? 'h-12 w-12'
@@ -1472,7 +1486,7 @@ function CanvasNodeCard({
         </span>
         <span className="min-w-0 flex-1">
           <span className={clsx('block truncate font-semibold text-text-primary', titleClass)}>{node.title}</span>
-          {showSubtitle && <span className="mt-0.5 block truncate text-[10px] text-text-muted">{node.subtitle}</span>}
+          {showSubtitle && <span className="mt-0.5 block truncate text-[12px] text-text-muted">{node.subtitle}</span>}
           {node.kind === 'manager' && (node.specialistCount ?? 0) > 0 && (
             <span className="mt-1 inline-flex items-center gap-1 rounded-full border border-line bg-canvas/55 px-1.5 py-0.5 text-[9px] font-medium text-text-secondary">
               <Users size={9} aria-hidden="true" />
@@ -3139,7 +3153,10 @@ function computeVirtualCanvasSize(
   // Reserve the full packed branch row (managers + the direct-workflows branch)
   // INCLUDING each edge lane's half-span plus margins, so the uniform-stride
   // pyramid never clamps a lane to one column (vertical line) at the canvas edge.
-  const packedContentWidth = packContentWidth(deriveTopBranchLayout(data, agents, roles).branchCount);
+  // Measured from the real (possibly asymmetric — see packContentWidth) slot
+  // geometry, not approximated from a branch count.
+  const topBranchLayout = deriveTopBranchLayout(data, agents, roles);
+  const packedContentWidth = packContentWidth(topBranchLayout.managerNodeIds.length, topBranchLayout.hasDirectBranch);
   const width = Math.max(
     containerSize.width,
     1040,
@@ -3179,8 +3196,17 @@ function computeCanvasContentBounds(nodes: CanvasNode[]): CanvasBounds {
   };
 }
 
+// The zoom/fullscreen control puck floats over the bottom-right corner
+// (~60px footprint incl. its margin). The fit inset must clear it so the last
+// branch column never tucks underneath. Applied SYMMETRICALLY (both sides get
+// it) on purpose: an asymmetric right-only inset would shift the fit's center
+// left of the viewport and drag the orchestrator off-center — which is exactly
+// the regression this whole fix is about. A little extra left breathing room is
+// the acceptable price of keeping the orchestrator dead-centered.
+const CANVAS_CONTROL_CLEARANCE = 76;
+
 function computeViewportInsets(containerSize: VirtualCanvasSize, chatState: ChatPanelState = 'hidden', _dockedWidth = 0): CanvasInsets {
-  const baseSideInset = clamp(containerSize.width * 0.035, 24, 52);
+  const baseSideInset = clamp(containerSize.width * 0.05, CANVAS_CONTROL_CLEARANCE, 120);
   return {
     top: clamp(containerSize.height * (chatState === 'docked' ? 0.14 : 0.16), 96, 138),
     right: baseSideInset,
@@ -3189,11 +3215,22 @@ function computeViewportInsets(containerSize: VirtualCanvasSize, chatState: Chat
   };
 }
 
+/**
+ * `anchor` is the world point centered under the viewport once zoomed to fit;
+ * null defaults to the geometric center of `bounds`. The whole-tree callers
+ * (fit to view, initial load, fullscreen, return-to-overview) pass the
+ * orchestrator node so it stays dead-centered horizontally. The branch row is
+ * packed symmetrically about the orchestrator's axis (see `packTopBranches`),
+ * so the content is balanced around it and this anchor also lands the whole
+ * tree centered — the orchestrator never drifts off-center even on a narrow
+ * viewport. (`centerOnSubtree` passes null because a drilled-in subtree has no
+ * orchestrator to anchor on.)
+ */
 function computeHomeViewport(containerSize: VirtualCanvasSize, bounds: CanvasBounds, chatState: ChatPanelState = 'hidden', dockedWidth = 0, anchor?: Vec2 | null): CanvasViewport {
   const insets = computeViewportInsets(containerSize, chatState, dockedWidth);
   const safeWidth = Math.max(1, containerSize.width - insets.left - insets.right);
   const safeHeight = Math.max(1, containerSize.height - insets.top - insets.bottom);
-  const zoom = clamp(Math.min(safeWidth / bounds.width, safeHeight / bounds.height, 1) * 0.98, VIEWPORT_MIN, 1);
+  const zoom = clamp(Math.min(safeWidth / bounds.width, safeHeight / bounds.height, 1) * 0.98, FIT_VIEWPORT_MIN, 1);
   const safeCenterX = insets.left + safeWidth / 2;
   const anchorX = anchor?.x ?? bounds.left + bounds.width / 2;
   return {
@@ -4036,39 +4073,61 @@ const BRANCH_GAP = 40;
  * is structural, not spacing-based: every branch gets a symmetric lane exactly
  * `stride` wide, and `maxBranchColumns` caps each lane's workflow columns to fit
  * that width — so nodes can never cross into a neighbour no matter how tightly
- * managers pack. Few branches get roomy 2-column lanes; as the row fills up the
- * stride tapers toward a single column, so even ~15 managers stay compact.
+ * managers pack.
+ *
+ * Every lane stays at least `twoColMin` wide — enough for a 2-column workflow
+ * grid. The old floor (`tight`, one manager-width) collapsed a lane to a single
+ * vertical column of cards once the row had ~5+ branches (e.g. 4 domains + the
+ * orchestrator's direct lane), which reads as a thin "one line" and was the
+ * reported bug. Small orgs still get extra breathing room (`roomy`); large orgs
+ * widen the virtual canvas instead of collapsing to one column, and fit-to-view
+ * zooms out to show it.
  */
 function branchStride(count: number): number {
   const roomy = 2 * AUTHORITY_LANE_COLUMN_WIDTH + BRANCH_GAP;
-  const tight = Math.max(NODE.manager.width, AUTHORITY_LANE_COLUMN_WIDTH) + BRANCH_GAP;
-  if (count <= 4) return roomy;
-  if (count >= 9) return tight;
-  const t = (count - 4) / 5;
-  return roomy + (tight - roomy) * t;
+  // Tightest lane that still fits two workflow columns (see maxBranchColumns:
+  // needs available = stride - 2*nodeClearance >= 2 columns' worth).
+  const twoColMin = 2 * AUTHORITY_LANE_COLUMN_WIDTH + RESOURCE_LAYOUT.nodeClearance;
+  return count <= 6 ? roomy : twoColMin;
 }
 
 /**
- * Full horizontal span of the branch row INCLUDING each edge lane's half-span,
- * so the virtual canvas is wide enough that no edge lane clamps to a single
- * column at the canvas border (the cause of workflows stacking as a vertical
- * line). Each lane is one stride wide minus clearance, centered on its branch.
+ * Full horizontal span the branch row needs, measured from the real slot
+ * geometry so the virtual canvas is wide enough that no edge lane clamps to a
+ * single column at the canvas border (which stacks its workflows into a
+ * vertical line).
+ *
+ * The orchestrator is pinned to `canvasWidth / 2` and the branch row is packed
+ * symmetrically about that axis (see `packTopBranches`), so the required width
+ * is twice the furthest extent from center. Passing 0 for canvasWidth centers
+ * the slots on 0, making each slot's extent its own |left|/|right|.
  */
-function packContentWidth(count: number): number {
-  if (count <= 0) return 0;
-  const stride = branchStride(count);
-  const halfSpan = stride / 2 - RESOURCE_LAYOUT.nodeClearance;
-  return (count - 1) * stride + 2 * halfSpan;
+function packContentWidth(managerCount: number, hasDirectBranch: boolean): number {
+  const slots = packTopBranches(managerCount, hasDirectBranch, 0);
+  if (slots.length === 0) return 0;
+  const maxAbsExtent = Math.max(...slots.map((s) => Math.max(Math.abs(s.left), Math.abs(s.right))));
+  return maxAbsExtent * 2;
 }
 
 /**
- * Pack the orchestrator's direct branches (managers + the direct-workflows
- * group) into one centered row beneath the orchestrator, at a uniform stride.
- * Center-out: the middle branch lands directly under the orchestrator and the
- * row stays a balanced pyramid. Each branch's lane is symmetric and exactly one
- * stride wide, so sibling lanes can never collide.
+ * Pack the orchestrator's direct branches into one BALANCED row beneath it, at
+ * a uniform stride, centered on the orchestrator's axis (canvasWidth / 2, where
+ * the orchestrator node is pinned). Each lane is symmetric and exactly one
+ * stride wide, so siblings never collide.
+ *
+ * Every branch — the managers AND the orchestrator's direct-workflows lane
+ * (present whenever any workflow has no domain) — is a co-equal column in this
+ * one row. The whole set straddles the center evenly: an ODD count puts one
+ * branch dead-center under the orchestrator with the rest split equally either
+ * side; an EVEN count leaves the orchestrator above the middle gap with the
+ * branches split N/2 left, N/2 right. This is what keeps the orchestrator
+ * visually centered. (An earlier version treated the direct lane as an
+ * appendix hung off the right end while centering only the managers — that
+ * skewed the whole row rightward, pushing the orchestrator's apparent center
+ * left and clipping the far lane off-screen.)
  */
-function packTopBranches(count: number, canvasWidth: number): BranchSlot[] {
+function packTopBranches(managerCount: number, hasDirectBranch: boolean, canvasWidth: number): BranchSlot[] {
+  const count = managerCount + (hasDirectBranch ? 1 : 0);
   if (count <= 0) return [];
   const stride = branchStride(count);
   const center = canvasWidth / 2;

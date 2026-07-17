@@ -24,7 +24,6 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useWorkspaceChromeData } from '../lib/workspaceChromeData';
 import { useChatPanelStore } from './chat/ChatPanelStore';
-import { BrandMark } from './shared/BrandMark';
 
 interface NavItem {
   to: string;
@@ -67,15 +66,6 @@ export function Sidebar() {
         collapsed ? 'w-14' : 'w-56',
       )}
     >
-      <div
-        className={clsx(
-          'flex h-14 shrink-0 items-center border-b border-line text-text-primary',
-          collapsed ? 'justify-center px-0' : 'px-3.5',
-        )}
-      >
-        <BrandMark variant={collapsed ? 'mark' : 'full'} size={collapsed ? 26 : 24} />
-      </div>
-
       <nav className="flex-1 overflow-y-auto py-3">
         <ul className="flex flex-col gap-0.5 px-2">
           {NAV.map((item) => (

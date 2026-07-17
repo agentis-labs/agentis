@@ -227,6 +227,20 @@ describe('RecordMaster', () => {
     expect(screen.getAllByText('ada@calc.io').length).toBeGreaterThan(0);
     expect(screen.getByPlaceholderText('Search…')).toBeTruthy();
   });
+  it('renders URL fields as clickable links in the selected record page', async () => {
+    renderNode(
+      {
+        type: 'RecordMaster',
+        bind: { collection: 'contacts', live: true },
+        titleField: 'name',
+        sections: [{ title: 'Contact', fields: ['whatsapp_link'] }],
+      },
+      [{ id: 'c1', name: 'Boutique Flor da Moda', whatsapp_link: 'https://wa.me/5567991632091' }],
+    );
+
+    const link = await screen.findByRole('link', { name: /wa\.me\/5567991632091/i });
+    expect(link).toHaveAttribute('href', 'https://wa.me/5567991632091');
+  });
 });
 
 describe('PipelineFlow', () => {

@@ -87,6 +87,50 @@ describe('CapabilityIndex', () => {
     expect(hits.some((h) => h.kind === 'node' && /qualify/i.test(h.title))).toBe(true);
   });
 
+  it('indexes mounted MCP tools as mcp_tool atoms so the advertised filter is truthful', async () => {
+    seedApp('CRM');
+    const index = new CapabilityIndex({
+      db: ctx.db,
+      logger: ctx.logger,
+      mcpTools: async () => [
+        { id: 'supabase__query', serverName: 'Supabase', toolName: 'query', description: 'Run a SQL query', provides: 'database' },
+        { id: 'supabase__insert', serverName: 'Supabase', toolName: 'insert' },
+      ],
+    });
+
+    // First search warms + includes the MCP snapshot; the mcp_tool filter returns real tools.
+    const hits = await index.search(ws(), 'run a sql query', { kind: 'mcp_tool', limit: 5 });
+    expect(hits.length).toBe(2);
+    expect(hits.every((h) => h.kind === 'mcp_tool')).toBe(true);
+    expect(hits.some((h) => /Supabase.*query/.test(h.title))).toBe(true);
+    // A cold snapshot must never throw when no resolver is configured.
+    const bare = new CapabilityIndex({ db: ctx.db, logger: ctx.logger });
+    expect(await bare.search(ws(), 'anything', { kind: 'mcp_tool' })).toEqual([]);
+  });
+
+  it('renders a mounted-connections block naming live MCP servers + credentialed integrations', async () => {
+    const index = new CapabilityIndex({
+      db: ctx.db,
+      logger: ctx.logger,
+      mcpTools: async () => [
+        { id: 'supabase__query', serverName: 'Supabase', toolName: 'query' },
+      ],
+      configuredIntegrations: () => ({ configured: ['Vercel'], available: ['Stripe', 'Notion'] }),
+    });
+
+    const block = await index.mountedConnectionsBlock(ws());
+    expect(block).toContain('MOUNTED CONNECTIONS');
+    expect(block).toContain('Supabase');
+    expect(block).toContain('agentis.mcp.call');
+    expect(block).toContain('Vercel');
+    expect(block).toContain('agentis.integration.call');
+    expect(block).toContain('Stripe'); // available-but-not-credentialed still surfaced
+
+    // Nothing mounted or configured → empty block, no prompt noise.
+    const empty = new CapabilityIndex({ db: ctx.db, logger: ctx.logger });
+    expect(await empty.mountedConnectionsBlock(ws())).toBe('');
+  });
+
   it('domain scope boosts the caller\'s own workflows first (soft, never filters)', async () => {
     const mgr = seedAgent('Mira', 'manager');
     const dom = seedDomain('Marketing', mgr);

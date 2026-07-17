@@ -25,7 +25,7 @@ export function registerIntegrationTools(registry: AgentisToolRegistry, deps: To
       definition: {
         id: 'agentis.integration.list',
         family: 'inspect',
-        description: 'List the built-in integration connectors that run out of the box (Vercel, Supabase, GitHub, Notion, Stripe, …) with their operations. Pass a service + operation to agentis.integration.call. Deploying a generated site = vercel.create_deployment (uploads inline files, returns a live URL — unlike the Vercel MCP deploy tool, which only advises the CLI).',
+        description: 'List the built-in integration connectors (Vercel, Supabase, GitHub, Notion, Stripe, …) with their operations, split by whether THIS workspace actually has a credential for them: `configured` = credentialed and callable right now; `available` = supported by the platform but NOT credentialed, so calling it will fail until the operator connects one. Pass a service + operation to agentis.integration.call. Deploying a generated site = vercel.create_deployment (uploads inline files, returns a live URL — unlike the Vercel MCP deploy tool, which only advises the CLI).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -35,13 +35,31 @@ export function registerIntegrationTools(registry: AgentisToolRegistry, deps: To
         mutating: false,
         mcpExposed: true,
       },
-      handler: async (args) => {
+      handler: async (args, ctx) => {
         const filter = typeof args.service === 'string' ? args.service.trim().toLowerCase() : '';
         const runnable = connectorCatalog().filter((c) => c.readiness === 'runnable' && (!filter || c.service === filter));
+        const shape = (c: (typeof runnable)[number]) => ({ service: c.service, name: c.name, category: c.category, description: c.description, operations: c.operations });
+        // Partition by REAL vault state, not the static `readiness` flag: an agent
+        // must know what it can call right now vs. what is merely supported. The
+        // check shares the engine's vault lookup so list and call never disagree; a
+        // failed lookup for one service degrades that service to `available` rather
+        // than breaking the whole tool.
+        const configured: ReturnType<typeof shape>[] = [];
+        const available: ReturnType<typeof shape>[] = [];
+        for (const c of runnable) {
+          let hasCredential = false;
+          try {
+            hasCredential = deps.engine.hasIntegrationCredential(ctx.workspaceId, c.service);
+          } catch {
+            hasCredential = false;
+          }
+          (hasCredential ? configured : available).push(shape(c));
+        }
         return {
           count: runnable.length,
-          integrations: runnable.map((c) => ({ service: c.service, name: c.name, category: c.category, description: c.description, operations: c.operations })),
-          note: 'Call agentis.integration.call with { integration, operation, params }. Credentials are resolved from the workspace vault by service — never pass secrets.',
+          configured,
+          available,
+          note: 'Connectors under `configured` have a workspace credential and can be called RIGHT NOW via agentis.integration.call { integration, operation, params }. Those under `available` are supported but have NO credential — ask the operator to connect one in Settings → Integrations before calling; calling one will fail. Credentials resolve from the vault by service — never pass secrets.',
         };
       },
     },

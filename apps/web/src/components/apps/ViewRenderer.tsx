@@ -22,7 +22,7 @@ import {
   type AppClientMessage,
   type AppClientResponse,
 } from '@agentis/app-client';
-import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPresenceViewer, AppWorkflowSummary, DataBind, SurfaceAction, Tone, ViewNode } from '@agentis/core';
+import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPresenceViewer, AppWorkflowSummary, DataBind, RecordActionRef, SurfaceAction, Tone, ViewNode } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { tokens } from '../../lib/api';
@@ -35,6 +35,7 @@ import { containerClasses, textClasses, toneFillClass, toneFromStatus, toneSoftC
 import { StatusPill, classifyValue, formatDisplay, formatNumber, isWordyMetric, numeralScale } from './format';
 import { DataChart, Sparkline as SparkSvg, type ChartSeries } from './charts';
 import { CODE_SURFACE_KIT, CODE_SURFACE_TOKENS } from './codeSurfaceKit';
+import { matchesRecordPredicate, recordActionLabel, visibleRecordActions } from './recordActions';
 import { registerBlock, getBlock, type BlockContext, type ResolveScope } from './blocks/registry';
 // Side-effect registrations on the open block seam. These modules import shared
 // helpers back from this file (cycle-safe: they dereference them only at render
@@ -970,6 +971,9 @@ function ActionButton({
   scope,
   variant,
   size,
+  disabled,
+  disabledReason,
+  confirm,
 }: {
   label: string;
   action: string;
@@ -977,6 +981,9 @@ function ActionButton({
   scope?: Record<string, unknown>;
   variant?: 'primary' | 'secondary' | 'danger';
   size?: 'sm' | 'md';
+  disabled?: boolean;
+  disabledReason?: string;
+  confirm?: { title: string; message: string; confirmLabel?: string };
 }) {
   const resolvedScope = useResolvedScope(scope);
   const invoke = useActionInvoker();
@@ -986,9 +993,11 @@ function ActionButton({
   return (
     <button
       type="button"
-      disabled={busy}
+      disabled={busy || disabled}
+      title={disabled ? disabledReason : undefined}
       onClick={async () => {
         if (editing) return; // inert in the builder canvas — selection is handled by the wrapper
+        if (confirm && !window.confirm(`${confirm.title}\n\n${confirm.message}`)) return;
         setBusy(true);
         try {
           await invoke(action, resolveActionArgs(args, resolvedScope));
@@ -1028,6 +1037,7 @@ const TABLE_PAGE_SIZE = 10;
 
 function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
   const { rows, loading } = useBoundRows(node.bind);
+  const { uiState } = useRuntime();
   const editing = useContext(EditCtx);
   // Client-side over the bound rows: click a header to sort (asc → desc → off),
   // a filter box, and pagination — all kick in only for sizeable tables.
@@ -1128,7 +1138,20 @@ function BoundTable({ node }: { node: Extract<ViewNode, { type: 'Table' }> }) {
               {node.rowActions?.length ? (
                 <td className="px-3 py-2.5">
                   <div className="flex justify-end gap-1.5">
-                    {node.rowActions.map((a, j) => <ActionButton key={j} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={row} variant="secondary" size="sm" />)}
+                    {visibleRecordActions(node.rowActions, row, uiState).map((a, j) => (
+                      <ActionButton
+                        key={j}
+                        label={recordActionLabel(a)}
+                        action={a.action}
+                        args={a.args}
+                        scope={row}
+                        variant={a.tone === 'danger' ? 'danger' : 'secondary'}
+                        size="sm"
+                        disabled={matchesRecordPredicate(a.disabledWhen, row, uiState)}
+                        disabledReason={a.disabledReason}
+                        confirm={a.confirm}
+                      />
+                    ))}
                   </div>
                 </td>
               ) : null}
@@ -1169,10 +1192,10 @@ function RecordDrawer({ collection, row, identityKey, rowActions, onClose }: {
   collection: string;
   row: Record<string, unknown>;
   identityKey?: string;
-  rowActions?: ActionRef[];
+  rowActions?: RecordActionRef[];
   onClose: () => void;
 }) {
-  const { surfaceActions } = useRuntime();
+  const { surfaceActions, uiState } = useRuntime();
   const invoke = useActionInvoker();
   const updateAction = surfaceActions.find((a) => a.kind === 'data' && a.target === `${collection}.update`);
   const [patch, setPatch] = useState<Record<string, unknown>>({});
@@ -1264,8 +1287,8 @@ function RecordDrawer({ collection, row, identityKey, rowActions, onClose }: {
         </div>
         <footer className="flex items-center gap-2 border-t border-line bg-surface px-4 py-3">
           {error ? <span className="min-w-0 flex-1 truncate text-[12px] text-danger">{error}</span> : <span className="min-w-0 flex-1" />}
-          {rowActions?.map((a, i) => (
-            <ActionButton key={i} label={prettifyAction(a.action)} action={a.action} args={a.args} scope={row} variant="secondary" size="sm" />
+          {visibleRecordActions(rowActions, row, uiState).map((a, i) => (
+            <ActionButton key={i} label={recordActionLabel(a)} action={a.action} args={a.args} scope={row} variant={a.tone === 'danger' ? 'danger' : 'secondary'} size="sm" disabled={matchesRecordPredicate(a.disabledWhen, row, uiState)} disabledReason={a.disabledReason} confirm={a.confirm} />
           ))}
           {updateAction ? (
             <button type="button" disabled={busy || dirty === 0} onClick={() => void save()} className="s-btn s-btn-primary">

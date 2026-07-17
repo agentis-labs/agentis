@@ -504,6 +504,19 @@ export class NodeExecutorController {
     }
   }
 
+  /**
+   * Does this workspace have a bound credential for `integrationId`? Answers the
+   * question `agentis.integration.list` needs — "can the agent call this RIGHT
+   * NOW?" — through the SAME row lookup {@link resolveIntegrationCredential}
+   * uses at call time, so the list can never disagree with the call.
+   *
+   * Deliberately does NOT decrypt: existence is the whole answer, and never
+   * touching the plaintext keeps secrets out of any caller's reach.
+   */
+  hasIntegrationCredential(workspaceId: string, integrationId: string): boolean {
+    return this.#credentialRowForIntegration(workspaceId, integrationId) !== null;
+  }
+
   #credentialRowById(workspaceId: string, credentialId: string): typeof schema.credentials.$inferSelect {
     const row = this.host.deps.db
       .select()

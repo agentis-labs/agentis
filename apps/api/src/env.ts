@@ -60,6 +60,13 @@ const envSchema = z.object({
   // serves the built dashboard from this directory at any non-/v1 path.
   AGENTIS_DASHBOARD_DIST: z.string().optional(),
 
+  // The version of the installed `@agentis-labs/cli` npm package driving this
+  // process. The CLI sets it from its own package.json at boot so the server
+  // can compare it against the latest published release and surface an
+  // "update available" prompt. Unset when running from source (dev) — the
+  // update check simply reports no current version and stays silent.
+  AGENTIS_CLI_VERSION: z.string().optional(),
+
   // E2E test harness. When `true`, the API mounts `/v1/_test/reset` (drops
   // every row + re-runs the seed) and forces a deterministic seed password
   // if one is not explicitly provided. Never enable in production — the
