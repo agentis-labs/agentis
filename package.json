@@ -57,6 +57,7 @@
   },
   "pnpm": {
     "overrides": {
+      "adm-zip": "0.6.0",
       "shell-quote": "1.8.4",
       "tmp": "0.2.7",
       "ws": "8.21.0",
