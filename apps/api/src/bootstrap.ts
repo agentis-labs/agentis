@@ -1752,7 +1752,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 
       // Warm the bundled on-device embedding model in the BACKGROUND (after the
       // server is already serving) so the first knowledge upload / brain write
-      // doesn't pay the cold start — model download (~110MB, once) + load (tens
+      // doesn't pay the cold start — model download (~450 MB, once) + load (tens
       // of seconds) — INSIDE the request, which previously stalled the whole API
       // (uploads appeared to hang for minutes). Fire-and-forget; never blocks boot.
       void embeddingProvider.embed('warmup').then(

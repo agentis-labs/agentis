@@ -212,16 +212,16 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // can take minutes, and silence for that long reads as a hung process.
   const embeddingPrewarmed = isLocalEmbeddingModelReady();
   if (embeddingPrewarmed) {
-    logger.info('embedding.model_ready', { source: 'cli_preflight' });
+    logger.info('embedding.model_ready', { source: 'in_process' });
   } else {
     logger.info('embedding.model_warming', {
       model: 'Xenova/multilingual-e5-small',
       cacheDir: `${env.AGENTIS_DATA_DIR}/models`,
       note: 'first run downloads the model (~450 MB); the Brain cannot store or recall memories until it finishes',
     });
-    // DEFERRED + RETRIED for programmatic API consumers that do not enter through
-    // the CLI preflight. The normal `agentis up` path has already loaded the model
-    // before bootstrap, so it never reaches this fallback or races the cache.
+    // DEFERRED + RETRIED for programmatic API consumers. The CLI now begins its
+    // preparation only after the server is listening; both paths share the same
+    // memoised pipeline, so they join one download instead of racing cache writes.
     const warmDelaysMs = [8_000, 75_000, 150_000];
     void (async () => {
       for (const [attempt, delay] of warmDelaysMs.entries()) {

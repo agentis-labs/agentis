@@ -71,7 +71,7 @@ Usage:
   agentis up                              Start Agentis (default if no command given).
   agentis setup                           Prepare the embedding model and Chromium runtime.
   agentis warmup                          Pre-download the embedding model (~450 MB, once).
-                                          Needed for offline/air-gapped hosts; up prepares it automatically.
+                                          Needed for offline/air-gapped hosts; up prepares it in the background.
   agentis backup [--out <dir>]            Snapshot the data dir into <dir>.
                                           Default <dir>: <data-dir>/backups/<timestamp>.
   agentis restore <dir> [--force]         Restore a backup directory into the data dir.
@@ -146,12 +146,6 @@ async function runUp(): Promise<void> {
   const dir = await dataDir();
   process.env.AGENTIS_DATA_DIR ??= dir;
 
-  // First-run runtime preparation must finish before bootstrap starts memory
-  // workers. The previous fire-and-forget child raced the server's own warm and
-  // re-embed jobs against the same empty transformers cache, leaving partial
-  // files that every later run mistook for a complete model.
-  await prepareRuntime({ showOfflineHint: false });
-
   const { bootstrap } = await import('@agentis/api/bootstrap');
   const handle = await bootstrap();
   const { url } = await handle.start();
@@ -201,6 +195,14 @@ async function runUp(): Promise<void> {
   };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
+
+  // Runtime assets are optional during boot and large on a clean machine. Start
+  // them only after the server is listening and the dashboard has been opened.
+  // The API's local embedding pipeline is memoised in-process, so this joins any
+  // warm already started by bootstrap instead of racing a second cache writer.
+  void prepareRuntime({ showOfflineHint: false, background: true }).then((code) => {
+    if (code === 0) process.stdout.write('Background runtime setup complete.\n');
+  });
 }
 
 /**
@@ -212,13 +214,17 @@ async function runUp(): Promise<void> {
  * built ready-to-run. This makes the download an explicit, scriptable step:
  * run it where there IS network, then ship/copy the cache dir.
  */
-async function runWarmupCmd(options: { showOfflineHint?: boolean } = {}): Promise<number> {
+async function runWarmupCmd(options: { showOfflineHint?: boolean; background?: boolean } = {}): Promise<number> {
   const dir = await dataDir();
   // The provider reads this to place its cache; set it so a warm run and a later
   // `agentis up` agree on the location.
   process.env.AGENTIS_DATA_DIR ??= dir;
   const cacheDir = process.env.AGENTIS_EMBEDDING_CACHE_DIR ?? join(dir, 'models');
-  process.stdout.write(`Downloading the embedding model (~450 MB, once) → ${cacheDir}\n`);
+  process.stdout.write(
+    options.background
+      ? `Preparing the embedding model in the background (~450 MB on first run) → ${cacheDir}\n`
+      : `Downloading the embedding model (~450 MB, once) → ${cacheDir}\n`,
+  );
   try {
     const { warmLocalEmbeddingModel } = await import('@agentis/api/embeddingProvider');
     const started = Date.now();
@@ -278,7 +284,7 @@ function runInherited(command: string, args: string[], timeoutMs: number): Promi
 }
 
 /** Ensure both the browser package and its separately-downloaded binary work. */
-async function prepareChromium(): Promise<number> {
+async function prepareChromium(options: { background?: boolean } = {}): Promise<number> {
   try {
     const specifier = 'playwright';
     const runtime = (await import(specifier)) as unknown as PlaywrightRuntime;
@@ -291,7 +297,11 @@ async function prepareChromium(): Promise<number> {
       // Install through the CLI belonging to this exact global package version.
     }
 
-    process.stdout.write('Downloading Chromium for Agentis browser tools (once)...\n');
+    process.stdout.write(
+      options.background
+        ? 'Preparing Chromium in the background for Agentis browser tools (first run only)...\n'
+        : 'Downloading Chromium for Agentis browser tools (once)...\n',
+    );
     await runInherited(process.execPath, [resolvePlaywrightCli(), 'install', 'chromium'], 900_000);
     await launchChromiumProbe(runtime);
     process.stdout.write(`Chromium ready at ${runtime.chromium.executablePath()}\n`);
@@ -305,9 +315,11 @@ async function prepareChromium(): Promise<number> {
   }
 }
 
-async function prepareRuntime(options: { showOfflineHint?: boolean } = {}): Promise<number> {
-  const embedding = await runWarmupCmd({ showOfflineHint: options.showOfflineHint });
-  const chromium = await prepareChromium();
+async function prepareRuntime(options: { showOfflineHint?: boolean; background?: boolean } = {}): Promise<number> {
+  const [embedding, chromium] = await Promise.all([
+    runWarmupCmd({ showOfflineHint: options.showOfflineHint, background: options.background }),
+    prepareChromium({ background: options.background }),
+  ]);
   return embedding === 0 && chromium === 0 ? 0 : 1;
 }
 
