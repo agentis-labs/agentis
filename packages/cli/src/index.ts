@@ -21,7 +21,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { AppTestOptions, AppManifestEnvelope } from '@agentis/sdk';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
@@ -138,9 +138,43 @@ function parseFlags(argv: string[]): { positionals: string[]; flags: Record<stri
   return { positionals, flags };
 }
 
+/**
+ * Download the embedding model in a SEPARATE process when it isn't cached yet.
+ *
+ * Empirically: the identical bundled code downloads fine from its own process
+ * (`agentis warmup`, cold cache, ~20s) but fails every time inside the running
+ * server process — reproducibly, on a pristine install, long after boot settles,
+ * with `fetch` to huggingface.co returning 200 from that very process. The root
+ * cause in-process is still unidentified; what IS established is that the
+ * separate-process path works. So `up` uses it rather than shipping a first run
+ * where the Brain silently never works.
+ *
+ * Fire-and-forget: the server's own deferred warm picks the model up as soon as
+ * the cache is populated, so this never blocks startup.
+ */
+function spawnEmbeddingWarmIfNeeded(dir: string): void {
+  try {
+    // Matches LocalEmbeddingProvider's default model + cache layout.
+    if (existsSync(join(dir, 'models', 'Xenova', 'multilingual-e5-small'))) return;
+    const entry = process.argv[1];
+    if (!entry) return;
+    process.stdout.write('  Preparing the Brain: downloading the embedding model in the background (once).\n');
+    const child = spawn(process.execPath, [entry, 'warmup'], {
+      env: { ...process.env, AGENTIS_DATA_DIR: dir },
+      stdio: 'ignore',
+      detached: false,
+    });
+    child.on('error', () => { /* advisory only — the server's own warm still retries */ });
+    child.unref();
+  } catch {
+    // Never let a warm-up convenience break `agentis up`.
+  }
+}
+
 async function runUp(): Promise<void> {
   bindCliVersion();
   maybeBindBundledWebDist();
+  spawnEmbeddingWarmIfNeeded(await dataDir());
   const { bootstrap } = await import('@agentis/api/bootstrap');
   const handle = await bootstrap();
   const { url } = await handle.start();

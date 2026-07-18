@@ -18,6 +18,8 @@
  * a deterministic stub — see `tests/_helpers/stubEmbeddingProvider.ts`.)
  */
 
+import { resolve } from 'node:path';
+
 // ────────────────────────────────────────────────────────────
 // Interface
 // ────────────────────────────────────────────────────────────
@@ -233,9 +235,15 @@ export const DEFAULT_LOCAL_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
  */
 function embeddingCacheDir(): string | undefined {
   const explicit = process.env.AGENTIS_EMBEDDING_CACHE_DIR?.trim();
-  if (explicit) return explicit;
+  // MUST be absolute. `resolveDefaultDataDir()` returns a bare relative
+  // `.agentis` whenever the process is not inside an Agentis workspace — i.e.
+  // every global npm install. Handing transformers.js a relative cacheDir makes
+  // it fail with "Unable to get model file path or buffer", so the model could
+  // never download and the Brain stayed permanently empty. `resolve()` is a
+  // no-op for a path that is already absolute.
+  if (explicit) return resolve(explicit);
   const dataDir = process.env.AGENTIS_DATA_DIR?.trim();
-  return dataDir ? `${dataDir.replace(/[\\/]+$/, '')}/models` : undefined;
+  return dataDir ? resolve(dataDir, 'models') : undefined;
 }
 
 /** True when the operator has pinned this install to local-only model files. */
