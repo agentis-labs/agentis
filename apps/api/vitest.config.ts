@@ -13,16 +13,18 @@ export default defineConfig({
     // the cause of the "flaky in the full suite, green in isolation" failures.
     testTimeout: 30_000,
     hookTimeout: 30_000,
-    // The memory analogue of the timeout note above. A worker that drives real
-    // Chromium (the browser-node test) alongside the engine's large graph
-    // fixtures exhausts the default V8 old-space and dies with "Fatal JavaScript
-    // out of memory: MemoryChunk allocation failed during deserialization" —
-    // but ONLY in the full suite, since standalone it has the heap to itself.
-    // That reads as a mysterious failing test rather than a resource limit.
-    poolOptions: {
-      forks: {
-        execArgv: ['--max-old-space-size=4096'],
-      },
-    },
+    // NOTE (memory, the analogue of the timeout note above): under the full
+    // suite the Chromium browser-node test can die with "Fatal JavaScript out of
+    // memory: MemoryChunk allocation failed during deserialization" — green in
+    // isolation, so it reads as a broken test rather than a resource limit.
+    //
+    // Do NOT "fix" this with `poolOptions.forks.execArgv:
+    // ['--max-old-space-size=4096']`. That was measured and made things
+    // decisively WORSE: the forks pool runs many workers in parallel, so a 4GB
+    // per-fork heap oversubscribes the machine and the run degrades from 1
+    // failure to 10 failures / 25 failed files with cascading
+    // "[vitest-worker]: Timeout calling onTaskUpdate" errors. If this needs
+    // solving, cap parallelism (`poolOptions.forks.maxForks`) or isolate the
+    // browser test into its own project — do not raise per-worker heap.
   },
 });
