@@ -189,6 +189,7 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
  */
 /** One loaded pipeline per model id, shared across all provider instances. */
 const localPipelines = new Map<string, Promise<unknown>>();
+const loadedLocalModels = new Set<string>();
 
 /**
  * Raised whenever the local model cannot be loaded. Callers that sweep many rows
@@ -218,11 +219,40 @@ export function isEmbeddingModelUnavailable(err: unknown): boolean {
  * hung. So: remember the failure, fail fast and QUIETLY for a cooldown, then let
  * exactly one attempt through to recover on its own if the cause was temporary.
  */
-const MODEL_FAILURE_COOLDOWN_MS = 60_000;
-let lastModelFailure: { at: number } | null = null;
+/**
+ * ESCALATING cooldown. A flat 60s still meant a permanently-unreachable model
+ * produced log lines forever (a real attempt every minute, and background sweeps
+ * complaining in between). Back off hard so a genuinely dead model costs one line
+ * every half hour, while a transient blip still recovers within a minute.
+ */
+const MODEL_FAILURE_COOLDOWN_STEPS_MS = [60_000, 300_000, 1_800_000];
+let lastModelFailure: { at: number; streak: number } | null = null;
+
+function cooldownMsFor(streak: number): number {
+  const index = Math.min(Math.max(streak, 1) - 1, MODEL_FAILURE_COOLDOWN_STEPS_MS.length - 1);
+  return MODEL_FAILURE_COOLDOWN_STEPS_MS[index]!;
+}
+
+/**
+ * True while the model is in a failure cooldown. Background sweeps should check
+ * this and skip their cycle SILENTLY — attempting (and logging) per cycle is what
+ * turned one dead model into an endless console flood.
+ */
+export function isEmbeddingModelCoolingDown(provider?: EmbeddingProvider): boolean {
+  // A local-model outage must never pause a workspace configured to use an API
+  // provider. Callers with a resolved provider pass it so the guard stays local.
+  if (provider && !provider.modelId.startsWith('local:')) return false;
+  const failure = lastModelFailure;
+  return !!failure && Date.now() - failure.at < cooldownMsFor(failure.streak);
+}
 
 /** Default model — kept here so the warmer and the provider can never diverge. */
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
+
+/** True only after transformers has fully loaded the requested model. */
+export function isLocalEmbeddingModelReady(model = DEFAULT_LOCAL_EMBEDDING_MODEL): boolean {
+  return loadedLocalModels.has(model);
+}
 
 /**
  * Where the ONNX weights live on disk.
@@ -298,9 +328,32 @@ function configureTransformersEnv(mod: Record<string, unknown>): void {
  * deliberately no lexical fallback (that would silently degrade recall), so this
  * message is the operator's only signal — make it carry the remedy.
  */
+/**
+ * Flatten an error's `cause` chain into one line.
+ *
+ * Node's `fetch` rejects with a bare `TypeError: fetch failed` and puts the real
+ * reason — certificate rejection, DNS, ECONNRESET — in `.cause`. Printing only
+ * `.message` cost us hours on a live install: the operator saw "fetch failed"
+ * while curl reached the same URL fine, and the actual cause was never shown.
+ */
+function describeCauseChain(err: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current != null; depth += 1) {
+    if (!(current instanceof Error)) {
+      parts.push(String(current));
+      break;
+    }
+    const code = (current as NodeJS.ErrnoException).code;
+    parts.push(code ? `${current.message} [${code}]` : current.message);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return parts.join(' ← ');
+}
+
 function describeModelLoadFailure(model: string, err: unknown): EmbeddingModelUnavailableError {
   const cacheDir = embeddingCacheDir() ?? '(transformers default)';
-  const detail = err instanceof Error ? err.message : String(err);
+  const detail = describeCauseChain(err);
   return new EmbeddingModelUnavailableError(
     `Could not load the local embedding model "${model}" — the Brain cannot store or recall memories until it loads.\n` +
       `  cache dir: ${cacheDir}\n` +
@@ -345,8 +398,8 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
     // Inside the cooldown, fail fast with a ONE-LINE error. The full remedy was
     // already logged when the breaker tripped; repeating it per row is the flood.
     const failure = lastModelFailure;
-    if (failure && Date.now() - failure.at < MODEL_FAILURE_COOLDOWN_MS) {
-      const retryInSec = Math.ceil((MODEL_FAILURE_COOLDOWN_MS - (Date.now() - failure.at)) / 1000);
+    if (failure && Date.now() - failure.at < cooldownMsFor(failure.streak)) {
+      const retryInSec = Math.ceil((cooldownMsFor(failure.streak) - (Date.now() - failure.at)) / 1000);
       return Promise.reject(
         new EmbeddingModelUnavailableError(
           `Embedding model unavailable — retrying in ${retryInSec}s (see the earlier embedding model error for how to fix it).`,
@@ -363,6 +416,7 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
         return mod.pipeline('feature-extraction', this.#model, ...(dtype ? [{ dtype } as never] : []));
       })
       .then((loaded) => {
+        loadedLocalModels.add(this.#model);
         lastModelFailure = null; // recovered — reset the breaker
         return loaded;
       })
@@ -370,7 +424,8 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
         // Don't memoise the PIPELINE (a transient blip must be able to recover),
         // but do trip the breaker so the retry storm is bounded.
         localPipelines.delete(this.#model);
-        lastModelFailure = { at: Date.now() };
+        loadedLocalModels.delete(this.#model);
+        lastModelFailure = { at: Date.now(), streak: (lastModelFailure?.streak ?? 0) + 1 };
         throw describeModelLoadFailure(this.#model, err);
       });
     localPipelines.set(this.#model, pipe);

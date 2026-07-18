@@ -5,7 +5,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { cosineSimilarity, isEmbeddingModelUnavailable, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
+import { cosineSimilarity, isEmbeddingModelCoolingDown, isEmbeddingModelUnavailable, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
 import type { EmbeddingProviderResolver } from './embedding/embeddingProviderRegistry.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 
@@ -190,6 +190,8 @@ export class SessionMomentService {
       .limit(limit)
       .all();
     if (rows.length === 0) return 0;
+    // Known-unavailable and cooling down — skip silently (see sharedIntelligence).
+    if (isEmbeddingModelCoolingDown(provider)) return 0;
     const identity = providerIdentity(provider);
     let embedded = 0;
     for (const row of rows) {

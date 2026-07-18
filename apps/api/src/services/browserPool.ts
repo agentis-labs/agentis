@@ -298,9 +298,19 @@ export class BrowserPool {
 
   async #initialize(): Promise<void> {
     await this.#load();
-    if (!this.#chromiumInstalled()) {
-      await this.#installChromium();
+    if (this.#chromiumInstalled()) {
+      try {
+        const probe = await this.#pw!.chromium.launch({ headless: true });
+        await probe.close();
+        return;
+      } catch {
+        // A partial Playwright cache can contain the full Chrome executable but
+        // not the headless shell. Run the idempotent installer to repair it.
+      }
     }
+    await this.#installChromium();
+    const probe = await this.#pw!.chromium.launch({ headless: true });
+    await probe.close();
   }
 
   async #load(): Promise<PWModule> {
@@ -337,11 +347,15 @@ export class BrowserPool {
         execFile(
           process.execPath,
           [requireResolveCli(), 'install', 'chromium'],
-          { timeout: 300_000 },
+          { timeout: 900_000, windowsHide: true },
           (error, _stdout, stderr) => {
             if (error) {
               this.logger.error('browser.chromium.install_failed', { err: error.message, stderr: String(stderr).slice(-500) });
-              reject(new AgentisError('BROWSER_OPERATION_FAILED', `Chromium install failed: ${error.message}`));
+              const detail = String(stderr).trim().split('\n').slice(-3).join(' ').slice(-500);
+              reject(new AgentisError(
+                'BROWSER_OPERATION_FAILED',
+                `Chromium install failed: ${error.message}${detail ? ` (${detail})` : ''}`,
+              ));
               return;
             }
             this.logger.info('browser.chromium.installed', {});

@@ -28,7 +28,11 @@ import { BudgetService } from '../services/budget.js';
 import { CommandIndex } from '../services/command/commandIndex.js';
 import { ConversationStore } from '../services/conversation/conversationStore.js';
 import { CredentialVault } from '../services/credentialVault.js';
-import { LocalEmbeddingProvider, warmLocalEmbeddingModel } from '../services/embedding/embeddingProvider.js';
+import {
+  isLocalEmbeddingModelReady,
+  LocalEmbeddingProvider,
+  warmLocalEmbeddingModel,
+} from '../services/embedding/embeddingProvider.js';
 import { EmbeddingProviderRegistry } from '../services/embedding/embeddingProviderRegistry.js';
 import { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { ExtensionLibraryService } from '../services/extensionLibrary.js';
@@ -206,47 +210,43 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // still reports the actionable error if the model is genuinely unavailable.
   // Say what is happening BEFORE the wait: the first run downloads ~450 MB and
   // can take minutes, and silence for that long reads as a hung process.
-  logger.info('embedding.model_warming', {
-    model: 'Xenova/multilingual-e5-small',
-    cacheDir: `${env.AGENTIS_DATA_DIR}/models`,
-    note: 'first run downloads the model (~450 MB); the Brain cannot store or recall memories until it finishes',
-  });
-  // DEFERRED + RETRIED, deliberately.
-  //
-  // Warming inline here reproducibly failed on a fresh install within ~3s — far
-  // too fast to be a real download — while the very same bundled code succeeded
-  // from a quiet process (`agentis warmup`). Bootstrap drives better-sqlite3
-  // SYNCHRONOUSLY (open → migrate → seed), so the event loop is blocked for
-  // seconds right when the fetch would run. Rather than race that, start after
-  // boot has settled and retry: a first-run download must not hinge on winning a
-  // timing contest against our own startup.
-  //
-  // Delays clear the provider's 60s failure cooldown, so each retry is a real
-  // attempt rather than an instant short-circuit.
-  const warmDelaysMs = [8_000, 75_000, 150_000];
-  void (async () => {
-    for (const [attempt, delay] of warmDelaysMs.entries()) {
-      await new Promise((r) => setTimeout(r, delay).unref());
-      const startedAt = Date.now();
-      try {
-        await warmLocalEmbeddingModel();
-        logger.info('embedding.model_ready', { ms: Date.now() - startedAt, attempt: attempt + 1 });
-        return;
-      } catch (err) {
-        const last = attempt === warmDelaysMs.length - 1;
-        // Only the FINAL failure carries the full remedy; earlier ones stay terse
-        // so a slow-but-recovering first run doesn't spam the console.
-        if (last) {
-          logger.warn('embedding.model_warm_failed', {
-            attempts: warmDelaysMs.length,
-            detail: err instanceof Error ? err.message : String(err),
-          });
-        } else {
-          logger.info('embedding.model_warm_retrying', { attempt: attempt + 1, nextInMs: warmDelaysMs[attempt + 1] });
+  const embeddingPrewarmed = isLocalEmbeddingModelReady();
+  if (embeddingPrewarmed) {
+    logger.info('embedding.model_ready', { source: 'cli_preflight' });
+  } else {
+    logger.info('embedding.model_warming', {
+      model: 'Xenova/multilingual-e5-small',
+      cacheDir: `${env.AGENTIS_DATA_DIR}/models`,
+      note: 'first run downloads the model (~450 MB); the Brain cannot store or recall memories until it finishes',
+    });
+    // DEFERRED + RETRIED for programmatic API consumers that do not enter through
+    // the CLI preflight. The normal `agentis up` path has already loaded the model
+    // before bootstrap, so it never reaches this fallback or races the cache.
+    const warmDelaysMs = [8_000, 75_000, 150_000];
+    void (async () => {
+      for (const [attempt, delay] of warmDelaysMs.entries()) {
+        await new Promise((r) => setTimeout(r, delay).unref());
+        const startedAt = Date.now();
+        try {
+          await warmLocalEmbeddingModel();
+          logger.info('embedding.model_ready', { ms: Date.now() - startedAt, attempt: attempt + 1 });
+          return;
+        } catch (err) {
+          const last = attempt === warmDelaysMs.length - 1;
+          // Only the FINAL failure carries the full remedy; earlier ones stay terse
+          // so a slow-but-recovering first run doesn't spam the console.
+          if (last) {
+            logger.warn('embedding.model_warm_failed', {
+              attempts: warmDelaysMs.length,
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          } else {
+            logger.info('embedding.model_warm_retrying', { attempt: attempt + 1, nextInMs: warmDelaysMs[attempt + 1] });
+          }
         }
       }
-    }
-  })();
+    })();
+  }
   const agentMemoryService = new AgentMemoryService(sqlite, new EpisodicMemoryStore(sqlite, logger, embeddingResolver));
   // PersonalBrain is USER-scoped (cross-workspace); there is no per-user provider
   // config, so it uses a default local (semantic) embedder until an account-level

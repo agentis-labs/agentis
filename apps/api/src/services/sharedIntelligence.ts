@@ -30,6 +30,7 @@ import {
   type EmbeddingProvider,
   cosineSimilarity,
   embedText,
+  isEmbeddingModelCoolingDown,
   isEmbeddingModelUnavailable,
   selectEmbeddingProvider,
   vectorIsComparable,
@@ -1207,6 +1208,9 @@ export class SharedIntelligenceService {
       .all();
     let reembedded = 0;
     let failed = 0;
+    // The model is known-unavailable and still cooling down — skip this cycle
+    // SILENTLY. Attempting (and logging) every cycle is what floods the console.
+    if (rows.length > 0 && isEmbeddingModelCoolingDown(provider)) return { reembedded, failed };
     for (const row of rows) {
       try {
         const embedding = await embedText(provider, `${row.title} ${row.summary}`);
@@ -3490,4 +3494,3 @@ function mergeDisputeContent(a: string, b: string): string {
   if (a.trim() === b.trim()) return a.trim();
   return `Context-aware synthesis: ${a.trim()} In a different context, ${b.trim()}`;
 }
-

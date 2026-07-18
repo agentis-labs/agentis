@@ -23,6 +23,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { exec, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import type { AppTestOptions, AppManifestEnvelope } from '@agentis/sdk';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
 
@@ -68,8 +69,9 @@ const HELP = `agentis — the operating system for agentic software
 
 Usage:
   agentis up                              Start Agentis (default if no command given).
+  agentis setup                           Prepare the embedding model and Chromium runtime.
   agentis warmup                          Pre-download the embedding model (~450 MB, once).
-                                          Needed for offline/air-gapped hosts; up warms in background.
+                                          Needed for offline/air-gapped hosts; up prepares it automatically.
   agentis backup [--out <dir>]            Snapshot the data dir into <dir>.
                                           Default <dir>: <data-dir>/backups/<timestamp>.
   agentis restore <dir> [--force]         Restore a backup directory into the data dir.
@@ -138,43 +140,18 @@ function parseFlags(argv: string[]): { positionals: string[]; flags: Record<stri
   return { positionals, flags };
 }
 
-/**
- * Download the embedding model in a SEPARATE process when it isn't cached yet.
- *
- * Empirically: the identical bundled code downloads fine from its own process
- * (`agentis warmup`, cold cache, ~20s) but fails every time inside the running
- * server process — reproducibly, on a pristine install, long after boot settles,
- * with `fetch` to huggingface.co returning 200 from that very process. The root
- * cause in-process is still unidentified; what IS established is that the
- * separate-process path works. So `up` uses it rather than shipping a first run
- * where the Brain silently never works.
- *
- * Fire-and-forget: the server's own deferred warm picks the model up as soon as
- * the cache is populated, so this never blocks startup.
- */
-function spawnEmbeddingWarmIfNeeded(dir: string): void {
-  try {
-    // Matches LocalEmbeddingProvider's default model + cache layout.
-    if (existsSync(join(dir, 'models', 'Xenova', 'multilingual-e5-small'))) return;
-    const entry = process.argv[1];
-    if (!entry) return;
-    process.stdout.write('  Preparing the Brain: downloading the embedding model in the background (once).\n');
-    const child = spawn(process.execPath, [entry, 'warmup'], {
-      env: { ...process.env, AGENTIS_DATA_DIR: dir },
-      stdio: 'ignore',
-      detached: false,
-    });
-    child.on('error', () => { /* advisory only — the server's own warm still retries */ });
-    child.unref();
-  } catch {
-    // Never let a warm-up convenience break `agentis up`.
-  }
-}
-
 async function runUp(): Promise<void> {
   bindCliVersion();
   maybeBindBundledWebDist();
-  spawnEmbeddingWarmIfNeeded(await dataDir());
+  const dir = await dataDir();
+  process.env.AGENTIS_DATA_DIR ??= dir;
+
+  // First-run runtime preparation must finish before bootstrap starts memory
+  // workers. The previous fire-and-forget child raced the server's own warm and
+  // re-embed jobs against the same empty transformers cache, leaving partial
+  // files that every later run mistook for a complete model.
+  await prepareRuntime({ showOfflineHint: false });
+
   const { bootstrap } = await import('@agentis/api/bootstrap');
   const handle = await bootstrap();
   const { url } = await handle.start();
@@ -235,7 +212,7 @@ async function runUp(): Promise<void> {
  * built ready-to-run. This makes the download an explicit, scriptable step:
  * run it where there IS network, then ship/copy the cache dir.
  */
-async function runWarmupCmd(): Promise<number> {
+async function runWarmupCmd(options: { showOfflineHint?: boolean } = {}): Promise<number> {
   const dir = await dataDir();
   // The provider reads this to place its cache; set it so a warm run and a later
   // `agentis up` agree on the location.
@@ -247,13 +224,91 @@ async function runWarmupCmd(): Promise<number> {
     const started = Date.now();
     await warmLocalEmbeddingModel();
     process.stdout.write(`Embedding model ready in ${((Date.now() - started) / 1000).toFixed(1)}s.\n`);
-    process.stdout.write('For an offline host, copy that directory over and set:\n');
-    process.stdout.write(`  AGENTIS_EMBEDDING_MODEL_PATH=${cacheDir}\n  AGENTIS_EMBEDDING_OFFLINE=true\n`);
+    if (options.showOfflineHint !== false) {
+      process.stdout.write('For an offline host, copy that directory over and set:\n');
+      process.stdout.write(`  AGENTIS_EMBEDDING_MODEL_PATH=${cacheDir}\n  AGENTIS_EMBEDDING_OFFLINE=true\n`);
+    }
     return 0;
   } catch (err) {
     process.stderr.write(`agentis warmup failed: ${(err as Error).message}\n`);
     return 1;
   }
+}
+
+type PlaywrightRuntime = {
+  chromium: {
+    executablePath(): string;
+    launch(options: { headless: true }): Promise<{ close(): Promise<void> }>;
+  };
+};
+
+async function launchChromiumProbe(runtime: PlaywrightRuntime): Promise<void> {
+  const browser = await runtime.chromium.launch({ headless: true });
+  await browser.close();
+}
+
+function resolvePlaywrightCli(): string {
+  const entry = process.argv[1] ? resolve(process.argv[1]) : fileURLToPath(import.meta.url);
+  const req = createRequire(entry);
+  return join(dirname(req.resolve('playwright/package.json')), 'cli.js');
+}
+
+function runInherited(command: string, args: string[], timeoutMs: number): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, {
+      env: process.env,
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`command timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+    timer.unref();
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolvePromise();
+      else reject(new Error(`command exited with ${code ?? signal ?? 'unknown status'}`));
+    });
+  });
+}
+
+/** Ensure both the browser package and its separately-downloaded binary work. */
+async function prepareChromium(): Promise<number> {
+  try {
+    const specifier = 'playwright';
+    const runtime = (await import(specifier)) as unknown as PlaywrightRuntime;
+    try {
+      await launchChromiumProbe(runtime);
+      process.stdout.write(`Chromium ready at ${runtime.chromium.executablePath()}\n`);
+      return 0;
+    } catch {
+      // Playwright intentionally ships browser binaries separately from npm.
+      // Install through the CLI belonging to this exact global package version.
+    }
+
+    process.stdout.write('Downloading Chromium for Agentis browser tools (once)...\n');
+    await runInherited(process.execPath, [resolvePlaywrightCli(), 'install', 'chromium'], 900_000);
+    await launchChromiumProbe(runtime);
+    process.stdout.write(`Chromium ready at ${runtime.chromium.executablePath()}\n`);
+    return 0;
+  } catch (err) {
+    process.stderr.write(
+      `Chromium setup failed: ${(err as Error).message}\n` +
+        'Agentis will still start and retry on the first browser action. Run "agentis setup" to retry explicitly.\n',
+    );
+    return 1;
+  }
+}
+
+async function prepareRuntime(options: { showOfflineHint?: boolean } = {}): Promise<number> {
+  const embedding = await runWarmupCmd({ showOfflineHint: options.showOfflineHint });
+  const chromium = await prepareChromium();
+  return embedding === 0 && chromium === 0 ? 0 : 1;
 }
 
 async function runBackupCmd(argv: string[]): Promise<number> {
@@ -544,6 +599,10 @@ async function main() {
   }
   if (cmd === 'up') {
     await runUp();
+    return;
+  }
+  if (cmd === 'setup') {
+    process.exitCode = await prepareRuntime();
     return;
   }
   if (cmd === 'warmup') {
