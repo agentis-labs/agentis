@@ -136,7 +136,7 @@ describe('ConversationStore', () => {
     expect(reloaded.unreadCount).toBe(0);
   });
 
-  it('uses id as a tiebreaker when paginating messages with the same timestamp', () => {
+  it('uses insertion order when paginating messages with the same timestamp', () => {
     const conv = store.getOrCreateByAgent(baseGet);
     const first = store.appendOutbound({
       workspaceId: 'ws1',
@@ -159,8 +159,8 @@ describe('ConversationStore', () => {
     const newest = store.messages(conv.id, 1).at(0)!;
     const older = store.messages(conv.id, 5, newest.createdAt, newest.id);
 
-    expect([first.id, second.id]).toContain(newest.id);
+    expect(newest.id).toBe(second.id);
     expect(older).toHaveLength(1);
-    expect(older[0]!.id).not.toBe(newest.id);
+    expect(older[0]!.id).toBe(first.id);
   });
 });

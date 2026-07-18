@@ -153,6 +153,16 @@ export class ConversationStore {
   }
 
   messages(conversationId: string, limit = 50, before?: string | null, beforeId?: string | null) {
+    const beforeRowId = beforeId
+      ? this.deps.db
+          .select({ rowid: sql<number>`rowid` })
+          .from(schema.conversationMessages)
+          .where(and(
+            eq(schema.conversationMessages.conversationId, conversationId),
+            eq(schema.conversationMessages.id, beforeId),
+          ))
+          .get()?.rowid
+      : undefined;
     return this.deps.db
       .select()
       .from(schema.conversationMessages)
@@ -160,19 +170,22 @@ export class ConversationStore {
         eq(schema.conversationMessages.conversationId, conversationId),
         ...(before
           ? [
-              beforeId
+              beforeRowId != null
                 ? or(
                     lt(schema.conversationMessages.createdAt, before),
                     and(
                       eq(schema.conversationMessages.createdAt, before),
-                      lt(schema.conversationMessages.id, beforeId),
+                      sql`rowid < ${beforeRowId}`,
                     ),
                   )!
                 : lt(schema.conversationMessages.createdAt, before),
             ]
           : []),
       ))
-      .orderBy(desc(schema.conversationMessages.createdAt), desc(schema.conversationMessages.id))
+      // UUIDs are random and cannot represent chronology when two writes share
+      // the same millisecond. SQLite rowid preserves their insertion order and
+      // gives cursor pagination the same deterministic ordering.
+      .orderBy(desc(schema.conversationMessages.createdAt), desc(sql<number>`rowid`))
       .limit(limit)
       .all()
       .reverse();
@@ -283,7 +296,7 @@ export class ConversationStore {
         eq(schema.conversationMessages.workspaceId, args.workspaceId),
         eq(schema.conversationMessages.conversationId, args.conversationId),
       ))
-      .orderBy(desc(schema.conversationMessages.createdAt), desc(schema.conversationMessages.id))
+      .orderBy(desc(schema.conversationMessages.createdAt), desc(sql<number>`rowid`))
       .limit(1)
       .get();
     this.deps.db
@@ -463,7 +476,7 @@ export class ConversationStore {
         eq(schema.conversationMessages.conversationId, current.id),
         eq(schema.conversationMessages.authorType, 'operator'),
       ))
-      .orderBy(schema.conversationMessages.createdAt, schema.conversationMessages.id)
+      .orderBy(schema.conversationMessages.createdAt, sql<number>`rowid`)
       .limit(1)
       .get();
     this.deps.db
