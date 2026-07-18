@@ -323,10 +323,48 @@ describe('<WorkspaceEcosystemCanvas />', () => {
       .sort((a, b) => a.x - b.x);
     expect(managers).toHaveLength(15);
 
-    // Managers sit at a uniform, tight stride (not spread by their subtrees).
+    // Managers sit at a uniform stride (not spread by their subtrees).
     const gaps = managers.slice(1).map((m, i) => m.x - managers[i]!.x);
     expect(gaps.every((g) => Math.abs(g - gaps[0]!) < 1)).toBe(true);
-    expect(gaps[0]!).toBeLessThan(managers[0]!.width + 120);
+
+    // "Not spread by their subtrees" asserted directly: give every manager 4×
+    // the workflow load and the stride must not budge. Each branch gets a
+    // symmetric lane exactly one stride wide and its columns are capped to fit,
+    // so lane width is a function of branch COUNT alone.
+    //
+    // (This replaces an older `gaps[0] < width + 120` bound, which encoded the
+    // long-gone one-manager-width floor. That floor collapsed each lane to a
+    // single vertical column of cards once a row had ~5+ branches — a real
+    // reported bug — and was deliberately raised to a two-column minimum.)
+    const heavyWorkflows = spaces.flatMap((s, i) =>
+      Array.from({ length: 8 }, (_, k) => ({ id: `wf-${i}-${k}`, title: `Flow ${i} ${k}`, status: 'idle', spaceId: s.id })),
+    );
+    const heavy = buildCanvasModel(
+      { loading: false, knowledgeBases: [], spaces, workflows: heavyWorkflows },
+      agents, [], [], [], [], { width: 5600, height: 1600 },
+    );
+    const heavyManagers = spaces
+      .map((_, i) => heavy.nodes.find((n) => n.id === `agent-mgr-${i}`)!)
+      .sort((a, b) => a.x - b.x);
+    expect(heavyManagers[1]!.x - heavyManagers[0]!.x).toBeCloseTo(gaps[0]!, 1);
+
+    // A large fleet packs at least as tight as a small one — it never fans out
+    // as managers are added (small orgs get extra breathing room instead).
+    const smallSpaces = spaces.slice(0, 4);
+    const smallModel = buildCanvasModel(
+      {
+        loading: false,
+        knowledgeBases: [],
+        spaces: smallSpaces,
+        workflows: workflows.filter((w) => smallSpaces.some((s) => s.id === w.spaceId)),
+      },
+      agents.filter((a) => a.role === 'orchestrator' || smallSpaces.some((s) => s.id === a.spaceId)),
+      [], [], [], [], { width: 5600, height: 1600 },
+    );
+    const smallManagers = smallSpaces
+      .map((_, i) => smallModel.nodes.find((n) => n.id === `agent-mgr-${i}`)!)
+      .sort((a, b) => a.x - b.x);
+    expect(gaps[0]!).toBeLessThanOrEqual(smallManagers[1]!.x - smallManagers[0]!.x);
 
     // The structural no-overlap rule: no two nodes sharing a row collide.
     const nodes = model.nodes.filter((n) => !n.ghost || n.role === 'manager');

@@ -213,7 +213,7 @@ function RunModal() {
     if (payload?.runId !== runId && payload?.id !== runId) return;
     const next = describeRealtimeActivity(event, { nodeTitle });
     if (!next) return;
-    setActivity((current) => [{ ...next, id: `${next.id}:${Date.now()}` }, ...current].slice(0, 40));
+    setActivity((current) => [{ ...next, id: `${next.id}:${Date.now()}` }, ...current].slice(0, 300));
     void refreshDetail();
   });
 
@@ -478,11 +478,13 @@ function RunModal() {
               {activity.length > 0 && (
                 <div className="mt-4">
                   <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Live activity</div>
-                  <div className="space-y-2">
-                    {activity.slice(0, 5).map((item) => (
+                  {/* Scrolls: a 5-item window silently hid the agent's reasoning
+                      stream. The operator gets the whole buffer, newest first. */}
+                  <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
+                    {activity.map((item) => (
                       <div key={item.id} className="rounded-md border border-line bg-surface px-2.5 py-2">
                         <div className="truncate text-[11px] font-medium text-text-primary">{item.nodeTitle ?? item.title}</div>
-                        <div className="mt-0.5 line-clamp-2 text-[10px] text-text-muted">{item.detail}</div>
+                        <div className="mt-0.5 whitespace-pre-wrap break-words text-[10px] text-text-muted">{item.detail}</div>
                       </div>
                     ))}
                   </div>

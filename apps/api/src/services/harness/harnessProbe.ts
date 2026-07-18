@@ -22,6 +22,14 @@ export interface HarnessDetectionResult {
   authDetail?: string;
   config?: Record<string, unknown>;
   installCommand?: string;
+  /**
+   * The harness is installed but NOT yet usable — required config is missing, so
+   * registering an agent on it would fail validation. Callers must not
+   * auto-select a `needsConfig` harness (openclaw is `found` whenever its binary
+   * is on PATH, but the adapter contract makes `gatewayUrl` mandatory; picking it
+   * blind produced "Runtime probe failed: openclaw requires gatewayUrl").
+   */
+  needsConfig?: boolean;
 }
 
 interface ProbeResult {
@@ -162,10 +170,12 @@ async function detectHarnessesUncached(env: NodeJS.ProcessEnv = process.env): Pr
       detail: gatewayUrl
         ? `Gateway URL configured: ${gatewayUrl}`
         : openClawBinary.ok
-          ? firstNonEmpty(openClawBinary.detail, 'openclaw binary found on PATH')
+          ? 'openclaw binary found on PATH — set a Gateway URL to use it'
           : undefined,
       binaryPath: openClawBinary.ok ? openClawBinary.binaryPath : undefined,
       config: gatewayUrl ? { gatewayUrl } : undefined,
+      // Installed but unusable without a gateway URL — the adapter requires it.
+      needsConfig: openClawFound && !gatewayUrl,
       installCommand: 'Install OpenClaw, then set its Gateway URL below (or export AGENTIS_OPENCLAW_GATEWAY_URL).',
     },
     {

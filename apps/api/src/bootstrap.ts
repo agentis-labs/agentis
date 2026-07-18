@@ -605,6 +605,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   let platformToolFn:
     | ((toolId: string, args: Record<string, unknown>, ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: { mode?: 'intentional' | 'all' | 'none'; saveScreenshots?: boolean; saveGeneratedAssets?: boolean } | null }) => Promise<{ ok: boolean; output?: unknown; error?: string }>)
     | undefined;
+  // Late-bound so in-run session steps stream through the engine's activity
+  // spine (run room + replayable tail) instead of a live-only bus publish.
+  let notifyActivityFn: WorkflowEngine['notifyAgentActivity'] | undefined;
   const sessionRuntime = new AgentSessionRuntime({
     sessions: sessionStore,
     ...(envSessionAdapter ? { adapter: envSessionAdapter } : {}),
@@ -622,6 +625,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       if (!platformToolFn) return Promise.resolve({ ok: false, error: 'platform tools are not ready yet.' });
       return platformToolFn(toolId, args, ctx);
     },
+    notifyActivity: (args) => notifyActivityFn?.(args),
     // Cross-runtime identity for blackboard entries — resolved from the live
     // adapter registry (in-memory, no DB). (AGENT-COOPERATION-10X §Pillar 2.)
     resolveRuntimeLabel: (agentId: string) => {
@@ -737,6 +741,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const engine = new WorkflowEngine(engineDeps);
   // Bind the session runtime's evolve callback now that the engine exists (M2).
   evolveGraphFn = (args) => engine.evolveGraph(args);
+  notifyActivityFn = (args) => engine.notifyAgentActivity(args);
   // Brain — knowledge graph + memory subsystem (workspace-scoped).
   // §B1.1 — KnowledgeStore keeps a default instance for its synchronous lexical
   // path; the KnowledgeBase service already resolves the per-workspace provider

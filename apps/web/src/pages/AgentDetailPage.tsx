@@ -120,6 +120,7 @@ export function AgentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [pausing, setPausing] = useState(false);
+  const [packMenu, setPackMenu] = useState(false);
   const installSession = useAgentInstallSession(agent?.id);
 
   async function togglePause() {
@@ -164,14 +165,19 @@ export function AgentDetailPage() {
     setDeleteOpen(true);
   }
 
-  async function handlePackageAgent() {
+  async function handlePackageAgent(includeBrain: boolean) {
     if (!agent) return;
     try {
-      const packed = await api<{ id: string }>(`/v1/packages/pack/agent/${agent.id}`, { method: 'POST', body: JSON.stringify({}) });
-      const envelope = await api<Record<string, unknown>>(`/v1/packages/${packed.id}/export`);
+      // The pack route returns the row WRAPPED as { package: … } — reading `.id`
+      // off the envelope yields undefined and exports `/packages/undefined/export`.
+      const packed = await api<{ package: { id: string } }>(`/v1/packages/pack/agent/${agent.id}`, {
+        method: 'POST',
+        body: JSON.stringify({ includeBrain }),
+      });
+      const envelope = await api<Record<string, unknown>>(`/v1/packages/${packed.package.id}/export`);
       const filename = `${agent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.agentisagt`;
       downloadJson(envelope, filename);
-      toast.success('Agent packaged successfully', agent.name);
+      toast.success('Agent packaged successfully', includeBrain ? `${agent.name} · with memory` : `${agent.name} · without memory`);
     } catch (e) {
       toast.error('Failed to package agent', apiErrorMessage(e));
     }
@@ -286,7 +292,32 @@ export function AgentDetailPage() {
             >
               {agent.isPaused ? 'Resume' : 'Pause'}
             </Button>
-            <Button variant="secondary" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => void handlePackageAgent()}>Package</Button>
+            <div className="relative">
+              <Button variant="secondary" size="sm" iconLeft={<ArrowUpFromLine size={12} />} onClick={() => setPackMenu((v) => !v)}>Package</Button>
+              {packMenu ? (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setPackMenu(false)} />
+                  <div className="absolute right-0 z-20 mt-1 w-56 overflow-hidden rounded-btn border border-line bg-surface shadow-dropdown">
+                    <button
+                      type="button"
+                      onClick={() => { setPackMenu(false); void handlePackageAgent(true); }}
+                      className="block w-full px-3 py-2 text-left text-[12px] text-text-secondary hover:bg-surface-2"
+                    >
+                      <div className="font-medium text-text-primary">Package with memory</div>
+                      <div className="text-[11px] text-text-muted">Carries the agent&apos;s learned Brain.</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setPackMenu(false); void handlePackageAgent(false); }}
+                      className="block w-full border-t border-line px-3 py-2 text-left text-[12px] text-text-secondary hover:bg-surface-2"
+                    >
+                      <div className="font-medium text-text-primary">Package without memory</div>
+                      <div className="text-[11px] text-text-muted">Definition only — a blank-slate agent.</div>
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
             <Button variant="danger" size="sm" iconLeft={<Trash2 size={12} />} onClick={() => void handleDelete()}>Delete</Button>
           </div>
         </div>

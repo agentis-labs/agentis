@@ -158,6 +158,8 @@ export interface HarnessDetectionResult {
   authDetail?: string;
   config?: Record<string, unknown>;
   installCommand?: string;
+  /** Installed but missing required config — never auto-select these. */
+  needsConfig?: boolean;
 }
 
 const ADAPTERS: Array<{

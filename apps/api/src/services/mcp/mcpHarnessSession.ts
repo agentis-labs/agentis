@@ -69,11 +69,18 @@ const HARNESS_KEY_NAME = 'Harness MCP (auto)';
  * saw ZERO Agentis tools ("MCP server not mounted") even in Auto mode. Finding the
  * file makes the mount survive any layout.
  */
+const BRIDGE_FILENAME = 'agentis-mcp-stdio-bridge.mjs';
+
 function resolveBridgePath(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 10; i += 1) {
-    const candidate = resolve(dir, 'scripts', 'agentis-mcp-stdio-bridge.mjs');
+    // `scripts/<bridge>` covers the repo layout AND the published tarball, where
+    // prepack copies the bridge to `dist/scripts/` (module is `dist/index.cjs`).
+    const candidate = resolve(dir, 'scripts', BRIDGE_FILENAME);
     if (existsSync(candidate)) return candidate;
+    // `<bridge>` as a direct sibling — belt-and-braces for flatter bundle layouts.
+    const sibling = resolve(dir, BRIDGE_FILENAME);
+    if (existsSync(sibling)) return sibling;
     const parent = dirname(dir);
     if (parent === dir) break; // filesystem root
     dir = parent;
@@ -83,6 +90,27 @@ function resolveBridgePath(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../scripts/agentis-mcp-stdio-bridge.mjs');
 }
 const MCP_STDIO_BRIDGE_PATH = resolveBridgePath();
+
+/**
+ * Whether the stdio bridge actually exists on disk.
+ *
+ * This MUST be checked before emitting Codex's `mcp_servers.*` spawn override.
+ * If the file is missing, Codex is told to `node <nonexistent>`, the child exits
+ * with MODULE_NOT_FOUND, Codex silently drops the server, and the agent sees ZERO
+ * `agentis.*` tools — it can still chat, so the failure looks like "the agent is
+ * broken" rather than "MCP didn't mount". That silent mode cost a release: the
+ * bridge is a runtime file (spawned, not imported) so tsup cannot bundle it, and
+ * it was absent from the published tarball until `packages/cli/scripts/prepack.mjs`
+ * started copying it into `dist/scripts/`.
+ */
+export function mcpStdioBridgeAvailable(): boolean {
+  return existsSync(MCP_STDIO_BRIDGE_PATH);
+}
+
+/** The resolved bridge path — exported for diagnostics + the packaging test. */
+export function mcpStdioBridgePath(): string {
+  return MCP_STDIO_BRIDGE_PATH;
+}
 
 export class McpHarnessSessionService {
   /** workspaceId → freshly-minted plaintext token (process lifetime). */
@@ -223,6 +251,18 @@ function claudeMcpArgs(servers: McpHarnessServer[]): string[] {
 
 /** Codex: bridge the remote HTTP endpoint to stdio via Agentis's local proxy. */
 function codexMcpArgs(servers: McpHarnessServer[]): string[] {
+  // Never emit a spawn override pointing at a bridge that isn't there — that is
+  // the silent-zero-tools failure mode. Shout instead, so the cause is obvious.
+  if (!mcpStdioBridgeAvailable()) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[agentis] FATAL: MCP stdio bridge not found at ${MCP_STDIO_BRIDGE_PATH}. ` +
+        'Codex cannot mount the `agentis` MCP server, so the agent will have ZERO agentis.* tools ' +
+        '(it can chat, but cannot build, patch, or harden workflows). This usually means the CLI was ' +
+        'published without `dist/scripts/agentis-mcp-stdio-bridge.mjs` — reinstall/upgrade the Agentis CLI.',
+    );
+    return [];
+  }
   const args: string[] = [];
   for (const s of servers) {
     const proxyArgs = [MCP_STDIO_BRIDGE_PATH, s.url];

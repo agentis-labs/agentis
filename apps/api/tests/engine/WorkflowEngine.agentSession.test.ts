@@ -71,6 +71,11 @@ function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verif
   const agentTools = new AgentToolRuntime({ volume });
   const scratchpad = new ScratchpadService(ctx.bus, ctx.logger);
   const sessions = new AgentSessionService(ctx.db, ctx.logger);
+  // Late-bound exactly as bootstrap wires it (the engine is built below), so the
+  // tests exercise the production path where session steps stream through the
+  // engine's activity spine — run room AND replayable tail — rather than the
+  // live-only fallback publish.
+  let notifyActivityFn: WorkflowEngine['notifyAgentActivity'] | undefined;
   const sessionRuntime = new AgentSessionRuntime({
     sessions,
     adapter,
@@ -80,6 +85,7 @@ function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verif
     logger: ctx.logger,
     agentTools,
     verifyCompletion: opts.verifyCompletion,
+    notifyActivity: (args) => notifyActivityFn?.(args),
   });
   const evaluatorRuntime = new EvaluatorRuntime({
     baseUrl: 'http://stub/v1',
@@ -91,7 +97,7 @@ function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verif
         headers: { 'content-type': 'application/json' },
       })) as unknown as typeof fetch,
   });
-  return new WorkflowEngine({
+  const engine = new WorkflowEngine({
     db: ctx.db,
     bus: ctx.bus,
     logger: ctx.logger,
@@ -108,6 +114,8 @@ function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verif
     sessionRuntime,
     plans: opts.plans,
   });
+  notifyActivityFn = (args) => engine.notifyAgentActivity(args);
+  return engine;
 }
 
 function sessionGraph(agentId?: string): WorkflowGraph {
@@ -212,6 +220,37 @@ describe('WorkflowEngine — agent_session', () => {
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     expect(run.status).toBe('COMPLETED');
     expect(nodeOutput(runId)?.result).toBe('all done, here is the answer');
+  });
+
+  /**
+   * A session step's reasoning used to go out as a raw AGENT_WORK_STEP published
+   * straight to the bus — live-only, bypassing the engine's activity spine, so it
+   * never entered the replayable tail and a surface opened mid-run back-filled
+   * nothing. It also clipped the thought to 400 chars. Both are fixed by routing
+   * through `notifyAgentActivity`, which is what this locks in.
+   */
+  it('streams session reasoning through the run activity spine, uncropped', async () => {
+    const thought = `I need to reconcile the ledger first. ${'Reasoning continues in detail. '.repeat(40)}`;
+    const engine = buildEngine(scriptedAdapter([{ text: thought }]));
+    const runRoomPayloads: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    const off = ctx.bus.subscribe((m) => {
+      if (!m.room.startsWith('run:')) return;
+      runRoomPayloads.push({ event: m.envelope.event, payload: m.envelope.payload as Record<string, unknown> });
+    });
+    const events: string[] = [];
+    await runSessionGraph(engine, events);
+    off();
+
+    const reasoning = runRoomPayloads.filter(
+      (e) => e.event === REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE && e.payload.activityKind === 'thinking',
+    );
+    expect(reasoning.length).toBeGreaterThan(0);
+    // Attributed to the node, so the live modal files the thought under the step.
+    expect(reasoning[0]!.payload.nodeId).toBe('S');
+    // Well past the old 400-char guillotine, and not truncated mid-thought.
+    const message = String(reasoning[0]!.payload.message);
+    expect(message.length).toBeGreaterThan(1000);
+    expect(message).toContain('I need to reconcile the ledger first.');
   });
 
   it('injects persisted identity into the agent_session run context', async () => {

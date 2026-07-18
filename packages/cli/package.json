@@ -1,6 +1,6 @@
 {
   "name": "@agentis-labs/cli",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Multi-harness dashboard for agents you own — Claude Code, Codex, Cursor, Antigravity, Hermes, and OpenClaw, with a permanent Brain of memory that survives any harness or model swap. Install with `npm install -g @agentis-labs/cli`.",
   "license": "Apache-2.0",
   "author": "Robson Prado <robsonpradodev>",
@@ -66,8 +66,10 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "better-sqlite3": "^12.4.1",
+    "node-cron": "^3.0.3",
     "onnxruntime-node": "1.24.3",
-    "playwright": "^1.60.0"
+    "playwright": "^1.60.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@agentis/api": "workspace:*",

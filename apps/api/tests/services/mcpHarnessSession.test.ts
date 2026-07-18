@@ -4,10 +4,12 @@
  * URL auto-derived (loopback), token auto-minted, on by default.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { McpHarnessSessionService, harnessMcpArgs, type McpHarnessServer } from '../../src/services/mcp/mcpHarnessSession.js';
+import { McpHarnessSessionService, harnessMcpArgs, mcpStdioBridgeAvailable, type McpHarnessServer } from '../../src/services/mcp/mcpHarnessSession.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 describe('McpHarnessSessionService', () => {
@@ -85,6 +87,26 @@ describe('harnessMcpArgs', () => {
     // First TOML-array element is the bridge path (backslashes doubled for TOML).
     const bridge = argsLine.slice(argsLine.indexOf('["') + 2, argsLine.indexOf('.mjs') + 4).replace(/\\\\/g, '\\');
     expect(existsSync(bridge)).toBe(true);
+    expect(mcpStdioBridgeAvailable()).toBe(true);
+  });
+
+  /**
+   * PACKAGING CONTRACT. The test above only proves the bridge resolves in the REPO
+   * layout — it passed while the PUBLISHED CLI shipped without the bridge at all,
+   * so npm users got a Codex session with zero agentis.* tools. The bridge is
+   * spawned (`node <path>`), not imported, so tsup cannot bundle it; prepack must
+   * copy it into `dist/scripts/`, which is where resolveBridgePath's walk-up finds
+   * it from `dist/index.cjs`. Guard that copy step explicitly.
+   */
+  it('prepack copies the stdio bridge into the published tarball (dist/scripts)', () => {
+    const prepack = readFileSync(
+      resolve(fileURLToPath(new URL('../../../../packages/cli/scripts/prepack.mjs', import.meta.url))),
+      'utf8',
+    );
+    expect(prepack).toContain('agentis-mcp-stdio-bridge.mjs');
+    expect(prepack).toContain("resolve(cliDist, 'scripts')");
+    // …and it must be a hard failure, never a silently-skipped copy.
+    expect(prepack).toMatch(/throw new Error\(`\[prepack\] missing MCP stdio bridge/);
   });
 
   it('is a no-op for non-CLI adapters / empty servers', () => {

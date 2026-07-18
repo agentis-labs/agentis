@@ -107,9 +107,26 @@ export class WorkflowTriggerDeploymentService {
             at: new Date().toISOString(),
           }).run();
         } else {
+          // Human-first message: the OPERATOR sees this in the UI, and telling
+          // them to run `agentis.workflow.*` tools they cannot invoke is a dead
+          // end. State the situation and the choice; keep the agent's tool hints
+          // in `details.agentHint` where a harness can still read them. The
+          // `BLOCKED_LIFECYCLE_NOT_HARDENED:` prefix is load-bearing — activateApp
+          // classifies a blocked workflow by matching it (see activateApp below).
           throw new AgentisError(
             'WORKFLOW_GRAPH_INVALID',
-            `BLOCKED_LIFECYCLE_NOT_HARDENED: this workflow is at stage "${stage}" — an unattended ${effectiveType} trigger only arms once the workflow is HARDENED at the current graph (spec scoped → dry-run green → suite green → debug run ACCOMPLISHED → agentis.workflow.harden). Run agentis.workflow.loop_status for the exact next call, or pass override:{ack:"<reason>"} to arm anyway (audited).`,
+            `BLOCKED_LIFECYCLE_NOT_HARDENED: This workflow hasn't been proven at its current version yet (stage "${stage}"), so Agentis won't arm an unattended ${effectiveType} trigger on it automatically. You can activate it anyway — you'll be asked to give a reason, which is recorded in the audit log.`,
+            {
+              details: {
+                blocked: 'not_hardened',
+                stage,
+                triggerType: effectiveType,
+                /** The UI uses this to offer the audited override instead of a dead end. */
+                overridable: true,
+                agentHint:
+                  'spec scoped → dry-run green → suite green → debug run ACCOMPLISHED → agentis.workflow.harden. Run agentis.workflow.loop_status for the exact next call, or pass override:{ack:"<reason>"} to arm anyway (audited).',
+              },
+            },
           );
         }
       }

@@ -198,6 +198,51 @@ describe('Intelligence bundle — back-compat', () => {
   });
 });
 
+describe('App packaging — subflows travel and rebind', () => {
+  it('carries a BARE subflow child and rewrites the reference to the new id', () => {
+    const ws = ctx.workspace.id;
+    const store = new AppStore(ctx.db);
+    const app = store.create(ws, ctx.user.id, { name: 'Parent App' });
+
+    // The child is a BARE workflow (appId null) — the case the old
+    // `WHERE appId = :appId` projection silently dropped.
+    const childId = randomUUID();
+    ctx.db.insert(schema.workflows).values({
+      id: childId, workspaceId: ws, userId: ctx.user.id, title: 'Child flow',
+      graph: { version: 1, nodes: [], edges: [] },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }).run();
+
+    // The App-owned parent invokes it via a subflow node.
+    ctx.db.insert(schema.workflows).values({
+      id: randomUUID(), workspaceId: ws, userId: ctx.user.id, appId: app.id, title: 'Parent flow',
+      graph: {
+        version: 1,
+        nodes: [{ id: 'n1', type: 'task', position: { x: 0, y: 0 }, config: { kind: 'subflow', workflowId: childId, inputMapping: {}, outputMapping: {} } }],
+        edges: [],
+      },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }).run();
+
+    const appPackager = new AppPackager(ctx.db);
+    const manifest = appPackager.toManifest(ws, app.id);
+    // Both workflows travel, each keyed by its source id.
+    expect(manifest.workflows.map((w) => w.title).sort()).toEqual(['Child flow', 'Parent flow']);
+    expect(manifest.workflows.find((w) => w.title === 'Child flow')?.exportId).toBe(childId);
+
+    // Install into a fresh workspace and confirm the ref was rebound.
+    const target = makeWorkspace('subflow-target');
+    const { appId: newAppId } = appPackager.fromManifest(target, ctx.user.id, manifest);
+    const installed = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.appId, newAppId)).all();
+    const parent = installed.find((w) => w.title === 'Parent flow')!;
+    const child = installed.find((w) => w.title === 'Child flow')!;
+    const ref = (parent.graph as { nodes: Array<{ config: { workflowId?: string } }> }).nodes[0]!.config.workflowId;
+
+    expect(ref).toBe(child.id);   // rebound to the NEW child
+    expect(ref).not.toBe(childId); // not the stale source id
+  });
+});
+
 describe('brainExport — lossless projection', () => {
   it('maps an episode to a portable atom without id/scope/embedding, and filters workspace scope by tag', () => {
     const agentId = seedAgent(ctx.workspace.id, 'Mapper Bot');

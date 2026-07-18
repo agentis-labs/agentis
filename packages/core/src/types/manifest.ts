@@ -61,6 +61,14 @@ export const manifestWorkflowSchema = z.object({
   title: z.string().min(1),
   description: z.string().nullable().optional(),
   graph: z.unknown(), // WorkflowGraph; kept unknown here to avoid a heavy import cycle
+  /**
+   * The workflow's id IN THE SOURCE workspace. Not an identity in the target —
+   * purely a rebinding key: `subflow.workflowId` / `loop.bodyWorkflowId` inside
+   * a sibling graph reference this value, and install rewrites them to the newly
+   * minted ids. Without it a subflow node imports pointing at a workflow id that
+   * exists only in the exporter's workspace, and the run fails at execution time.
+   */
+  exportId: z.string().min(1).optional(),
 });
 export type ManifestWorkflow = z.infer<typeof manifestWorkflowSchema>;
 

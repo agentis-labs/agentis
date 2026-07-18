@@ -211,10 +211,17 @@ export async function registerAdapter(
   config = options.skipConfigRepair ? config : (await repairCliHarnessConfig(adapterType, config)).config;
   await deps.adapters.unregister(agentId);
   if (adapterType === 'openclaw') {
-    const gatewayUrl = String(config.gatewayUrl ?? '');
+    // Resolve an explicit gatewayUrl first, else fall back to the provisioned
+    // gateway row this agent points at. Without the fallback an agent correctly
+    // linked to a gateway (`gatewayId`) still failed with "requires gatewayUrl",
+    // because only the inline config field was ever read.
+    const gatewayUrl = String(config.gatewayUrl ?? '') || resolveGatewayUrlById(deps.db, workspaceId, stringOf(config.gatewayId));
     const credentialId = stringOf(config.deviceTokenCredentialId) ?? stringOf(config.authCredentialId);
     if (!gatewayUrl) {
-      throw new AgentisError('VALIDATION_FAILED', 'openclaw requires gatewayUrl');
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        'OpenClaw needs a Gateway URL before this agent can run. Add one in the agent\'s runtime settings (or set AGENTIS_OPENCLAW_GATEWAY_URL).',
+      );
     }
     await assertSafeGatewayUrl(gatewayUrl);
     const deviceToken = credentialId ? deps.vault.decrypt(loadCredential(deps.db, workspaceId, credentialId).encryptedValue) : stringOf(config.authToken);
@@ -631,6 +638,21 @@ function hermesChatTransportOf(value: unknown, version: unknown): 'cli' | 'acp' 
 function sessionKeyStrategyOf(value: unknown): 'issue' | 'fixed' | 'run' | undefined {
   const strategy = stringOf(value);
   return strategy === 'issue' || strategy === 'fixed' || strategy === 'run' ? strategy : undefined;
+}
+
+/**
+ * The gateway URL of a provisioned OpenClaw gateway row, or '' when absent.
+ * Lets an agent that stores only `gatewayId` resolve its URL instead of being
+ * rejected for a missing `gatewayUrl`.
+ */
+function resolveGatewayUrlById(db: AgentisSqliteDb, workspaceId: string, gatewayId: string | null): string {
+  if (!gatewayId) return '';
+  const row = db
+    .select({ gatewayUrl: schema.openclawGateways.gatewayUrl })
+    .from(schema.openclawGateways)
+    .where(and(eq(schema.openclawGateways.id, gatewayId), eq(schema.openclawGateways.workspaceId, workspaceId)))
+    .get();
+  return row?.gatewayUrl ?? '';
 }
 
 function loadCredential(db: AgentisSqliteDb, workspaceId: string, id: string) {

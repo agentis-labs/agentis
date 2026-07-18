@@ -2,6 +2,7 @@
 import { REALTIME_EVENTS } from '@agentis/core';
 import clsx from 'clsx';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
+import { describeRealtimeActivity } from '../../lib/realtimeActivity';
 import type { CanvasNode, Vec2 } from './homeCanvasTypes';
 
 interface LiveRow {
@@ -105,23 +106,41 @@ export function CanvasActivityPopover({ node, screenPos }: { node: CanvasNode | 
   );
 }
 
+/**
+ * Presentation for each event this popover renders.
+ *
+ * The popover deliberately fixes its OWN label and tone per event — it is a
+ * compact three-row hover card, not the full activity feed, so it doesn't want
+ * the normalizer's semantic tones (`success`/`danger`) which its `LiveRow` type
+ * can't express anyway. That part is legitimately local.
+ *
+ * What is NOT local is pulling the detail text out of the payload. Hand-rolling
+ * a second copy of that is what let this file's AGENT_WORK_STEP field order
+ * drift out of sync with `describeRealtimeActivity` until it checked `step`
+ * (which carries the node KIND) before `detail`, and every work step rendered
+ * the literal string "agent_task". Extraction now has one owner.
+ */
+const ROW_PRESENTATION: Partial<Record<string, { label: string; tone: LiveRow['tone']; fallback: string }>> = {
+  [REALTIME_EVENTS.AGENT_STATUS_CHANGED]: { label: 'Status', tone: 'accent', fallback: 'Status changed' },
+  [REALTIME_EVENTS.AGENT_WORK_STEP]: { label: 'Work step', tone: 'accent', fallback: 'Step updated' },
+  [REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL]: { label: 'Tool call', tone: 'muted', fallback: 'Tool invoked' },
+  [REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE]: { label: 'Terminal', tone: 'muted', fallback: 'Terminal output' },
+};
+
 function describeEvent(env: RealtimeEnvelope): LiveRow | null {
-  const payload = isRecord(env.payload) ? env.payload : {};
   const id = `${env.event}-${env.emittedAt}`;
-  if (env.event === REALTIME_EVENTS.AGENT_HEARTBEAT) return { id, label: 'Heartbeat', detail: 'Runtime is alive', tone: 'accent' };
-  if (env.event === REALTIME_EVENTS.AGENT_STATUS_CHANGED) {
-    return { id, label: 'Status', detail: stringField(payload, ['status', 'nextStatus']) ?? 'Status changed', tone: 'accent' };
+  // AGENT_HEARTBEAT has no branch in the shared normalizer (it carries no
+  // payload worth formatting — the signal IS the event), so it stays local.
+  if (env.event === REALTIME_EVENTS.AGENT_HEARTBEAT) {
+    return { id, label: 'Heartbeat', detail: 'Runtime is alive', tone: 'accent' };
   }
-  if (env.event === REALTIME_EVENTS.AGENT_WORK_STEP) {
-    return { id, label: 'Work step', detail: stringField(payload, ['summary', 'step', 'message']) ?? 'Step updated', tone: 'accent' };
-  }
-  if (env.event === REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL) {
-    return { id, label: 'Tool call', detail: stringField(payload, ['tool', 'name', 'command']) ?? 'Tool invoked', tone: 'muted' };
-  }
-  if (env.event === REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE) {
-    return { id, label: 'Terminal', detail: stringField(payload, ['message', 'text', 'line']) ?? 'Terminal output', tone: 'muted' };
-  }
-  return null;
+  const presentation = ROW_PRESENTATION[env.event];
+  if (!presentation) return null;
+  // The normalizer returns null when an event carries nothing worth showing
+  // (e.g. a terminal message with no text) — fall back rather than drop the row,
+  // matching what this popover did before.
+  const detail = describeRealtimeActivity(env)?.detail?.trim();
+  return { id, label: presentation.label, detail: detail || presentation.fallback, tone: presentation.tone };
 }
 
 function kindLabel(kind: CanvasNode['kind']): string {
@@ -133,18 +152,6 @@ function kindLabel(kind: CanvasNode['kind']): string {
   if (kind === 'approval') return 'Approval';
   if (kind === 'ghost') return 'Planned node';
   return 'Artifact';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function stringField(source: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = source[key];
-    if (typeof value === 'string' && value.trim()) return value;
-  }
-  return undefined;
 }
 
 

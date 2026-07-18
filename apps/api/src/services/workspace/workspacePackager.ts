@@ -94,12 +94,13 @@ export class WorkspacePackager {
   constructor(private readonly deps: WorkspacePackagerDeps) {
     this.apps = new AppStore(deps.db);
     this.appPackager = new AppPackager(deps.db);
+    this.brainPort = deps.episodes ? new EpisodicBrainPort(deps.episodes) : undefined;
     this.packager = new PackagerService({
       db: deps.db,
       ...(deps.bus ? { bus: deps.bus } : {}),
       ...(deps.logger ? { logger: deps.logger } : {}),
+      ...(this.brainPort ? { brain: this.brainPort } : {}),
     });
-    this.brainPort = deps.episodes ? new EpisodicBrainPort(deps.episodes) : undefined;
   }
 
   // ── Export ──────────────────────────────────────────────────

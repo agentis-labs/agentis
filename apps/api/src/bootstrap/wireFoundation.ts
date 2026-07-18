@@ -28,7 +28,7 @@ import { BudgetService } from '../services/budget.js';
 import { CommandIndex } from '../services/command/commandIndex.js';
 import { ConversationStore } from '../services/conversation/conversationStore.js';
 import { CredentialVault } from '../services/credentialVault.js';
-import { LocalEmbeddingProvider } from '../services/embedding/embeddingProvider.js';
+import { LocalEmbeddingProvider, warmLocalEmbeddingModel } from '../services/embedding/embeddingProvider.js';
 import { EmbeddingProviderRegistry } from '../services/embedding/embeddingProviderRegistry.js';
 import { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { ExtensionLibraryService } from '../services/extensionLibrary.js';
@@ -191,6 +191,17 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // hard-wired hashing instance). This is the keystone of the semantic-recall fix.
   const embeddingRegistry = new EmbeddingProviderRegistry(sqlite, logger);
   const embeddingResolver = embeddingRegistry.resolver();
+  // The local model's ~450 MB weights are NOT bundled — they download once on
+  // first use. Warm them in the background at boot so that cost (or a failure on
+  // an offline/firewalled host) surfaces here, in the logs, while the operator is
+  // still setting up — rather than stalling their first chat turn. Fire-and-forget
+  // by design: a warm failure must never block startup, and the real embed path
+  // still reports the actionable error if the model is genuinely unavailable.
+  void warmLocalEmbeddingModel()
+    .then(() => logger.info('embedding.model_ready'))
+    .catch((err: unknown) => logger.warn('embedding.model_warm_failed', {
+      detail: err instanceof Error ? err.message : String(err),
+    }));
   const agentMemoryService = new AgentMemoryService(sqlite, new EpisodicMemoryStore(sqlite, logger, embeddingResolver));
   // PersonalBrain is USER-scoped (cross-workspace); there is no per-user provider
   // config, so it uses a default local (semantic) embedder until an account-level

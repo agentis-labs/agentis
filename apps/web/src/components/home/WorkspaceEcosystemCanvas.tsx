@@ -4408,7 +4408,7 @@ function activeRunSubtitle(run: WorkspaceActiveRun): string {
  * socket-independent run activity stream.
  */
 function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => void }) {
-  const feed = useRunActivity(run.id, { cap: 40 });
+  const feed = useRunActivity(run.id, { cap: 200 });
   const [stopping, setStopping] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const termRef = useRef<HTMLDivElement>(null);
@@ -4425,9 +4425,11 @@ function LiveRunRow({ run, onOpen }: { run: WorkspaceActiveRun; onOpen: () => vo
   const agentName = feed.find((a) => a.agentName)?.agentName;
   const nodeTitle = feed.find((a) => a.nodeTitle)?.nodeTitle;
   // Live terminal: the most recent meaningful steps, oldest→newest (terminal order).
+  // 6 lines truncated the stream to a glimpse; the terminal scrolls (and
+  // auto-follows below), so give it real scrollback.
   const lines = feed
     .filter((a) => a.kind === 'message' || a.kind === 'tool' || a.kind === 'agent' || a.kind === 'node')
-    .slice(0, 6)
+    .slice(0, 40)
     .reverse();
   const elapsed = run.startedAt ? formatElapsed(run.startedAt, now) : null;
 

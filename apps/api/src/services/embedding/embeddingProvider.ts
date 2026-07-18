@@ -4,8 +4,12 @@
  * configured provider so writes and queries live in the same vector space.
  *
  * Providers:
- *   - `LocalEmbeddingProvider` — bundled, offline, free, multilingual ONNX
+ *   - `LocalEmbeddingProvider` — self-hosted, free, multilingual ONNX
  *     (`multilingual-e5-small`, 384-dim). The zero-config DEFAULT.
+ *     NOT bundled: the ~450 MB weights are downloaded once on first use and
+ *     cached under `<data-dir>/models`. Inference is local (no data egress), but
+ *     the FIRST run needs network unless the cache is pre-populated — see
+ *     `AGENTIS_EMBEDDING_MODEL_PATH` / `AGENTIS_EMBEDDING_OFFLINE`.
  *   - `OpenAIEmbeddingProvider` — opt-in API embeddings (or any OpenAI-compatible
  *     endpoint, incl. a self-hosted local embedding server).
  *
@@ -166,8 +170,14 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
 /**
  * Local, self-hosted semantic embeddings via ONNX (transformers.js). Default
  * model `multilingual-e5-small` (384-dim, ~100 languages) — a real semantic
- * brain with no API key and no data egress. The model (~120 MB INT8) is fetched
- * once and cached by the runtime; inference is CPU-only.
+ * brain with no API key and no data egress at query time. The weights are
+ * fetched ONCE on first use and cached under `<data-dir>/models`; inference is
+ * CPU-only. Boot warms them in the background (see `warmLocalEmbeddingModel`) so
+ * the download never lands mid-chat-turn.
+ *
+ * Size: the default fp32 `model.onnx` is ~450 MB (measured). Set
+ * `AGENTIS_EMBEDDING_DTYPE=q8` for the ~4x smaller quantized weights and faster
+ * CPU inference — see `configuredDtype` for why that is not the default.
  *
  * The runtime is dynamically imported on first use so startup (and deployments
  * that configure OpenAI instead) never pay the cost of loading onnxruntime.
@@ -178,6 +188,102 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
 /** One loaded pipeline per model id, shared across all provider instances. */
 const localPipelines = new Map<string, Promise<unknown>>();
 
+/** Default model — kept here so the warmer and the provider can never diverge. */
+export const DEFAULT_LOCAL_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
+
+/**
+ * Where the ONNX weights live on disk.
+ *
+ * transformers.js otherwise picks its own default, which on a global `npm i -g`
+ * can land inside `node_modules` — a directory the user may not be able to write
+ * to, and which is wiped on every upgrade (re-downloading ~450 MB). Anchor it to
+ * the Agentis data dir so the cache is writable, survives upgrades, and can be
+ * pre-populated for air-gapped installs.
+ */
+function embeddingCacheDir(): string | undefined {
+  const explicit = process.env.AGENTIS_EMBEDDING_CACHE_DIR?.trim();
+  if (explicit) return explicit;
+  const dataDir = process.env.AGENTIS_DATA_DIR?.trim();
+  return dataDir ? `${dataDir.replace(/[\\/]+$/, '')}/models` : undefined;
+}
+
+/** True when the operator has pinned this install to local-only model files. */
+function offlineOnly(): boolean {
+  return String(process.env.AGENTIS_EMBEDDING_OFFLINE ?? '').toLowerCase() === 'true';
+}
+
+/**
+ * Optional weight precision (`q8`, `fp16`, …). Default is the library's own —
+ * fp32, which for multilingual-e5-small is a **449 MB** download. `q8` cuts that
+ * to roughly a quarter and speeds up CPU inference, at a negligible recall cost.
+ *
+ * NOT changed by default: existing installs already hold fp32 vectors, and
+ * quietly switching precision would mix two slightly different vector spaces.
+ * When it IS set, the precision is folded into `modelId` (below) so stored
+ * vectors stay self-describing and the existing (model, dims) comparability +
+ * re-embed machinery handles the transition instead of silently mismatching.
+ */
+function configuredDtype(): string | undefined {
+  return process.env.AGENTIS_EMBEDDING_DTYPE?.trim() || undefined;
+}
+
+/**
+ * Configure the transformers runtime BEFORE the first pipeline load.
+ *
+ * `AGENTIS_EMBEDDING_MODEL_PATH` points at a directory of already-downloaded
+ * model files; combined with `AGENTIS_EMBEDDING_OFFLINE=true` this makes an
+ * air-gapped install work with no network at all.
+ */
+function configureTransformersEnv(mod: Record<string, unknown>): void {
+  const env = mod.env as
+    | { cacheDir?: string; localModelPath?: string; allowRemoteModels?: boolean; allowLocalModels?: boolean }
+    | undefined;
+  if (!env) return;
+  const cacheDir = embeddingCacheDir();
+  if (cacheDir) env.cacheDir = cacheDir;
+  const localPath = process.env.AGENTIS_EMBEDDING_MODEL_PATH?.trim();
+  if (localPath) {
+    env.localModelPath = localPath;
+    env.allowLocalModels = true;
+  }
+  if (offlineOnly()) env.allowRemoteModels = false;
+}
+
+/**
+ * Turn a model-load failure into something an operator can act on.
+ *
+ * The weights are NOT bundled — they are fetched once (~450 MB) on first use. On
+ * a fresh, offline, or firewalled install that first fetch fails deep inside a
+ * chat turn, and the raw transformers error ("Could not locate file…") gives no
+ * hint that the fix is network access or a pre-populated cache. There is
+ * deliberately no lexical fallback (that would silently degrade recall), so this
+ * message is the operator's only signal — make it carry the remedy.
+ */
+function describeModelLoadFailure(model: string, err: unknown): Error {
+  const cacheDir = embeddingCacheDir() ?? '(transformers default)';
+  const detail = err instanceof Error ? err.message : String(err);
+  return new Error(
+    `Could not load the local embedding model "${model}" — the Brain cannot store or recall memories until it loads.\n` +
+      `  cache dir: ${cacheDir}\n` +
+      `  cause: ${detail}\n` +
+      'Fix one of:\n' +
+      '  • Allow network access on first run — the model (~450 MB) is downloaded once and cached.\n' +
+      '  • Pre-download it, then set AGENTIS_EMBEDDING_MODEL_PATH=<dir> and AGENTIS_EMBEDDING_OFFLINE=true.\n' +
+      '  • Or configure an API embedding provider instead of the local one.',
+  );
+}
+
+/**
+ * Load (and cache) the local model ahead of first use.
+ *
+ * Called in the background at boot so the ~450 MB first fetch happens while the
+ * operator is still setting up, instead of stalling — or failing — inside their
+ * first chat turn. Safe to call repeatedly: the pipeline promise is memoised.
+ */
+export async function warmLocalEmbeddingModel(model = DEFAULT_LOCAL_EMBEDDING_MODEL): Promise<void> {
+  await new LocalEmbeddingProvider({ model }).embed('warmup');
+}
+
 export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
   readonly type = 'local';
   readonly dimension: number;
@@ -185,16 +291,31 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
   readonly #model: string;
 
   constructor(config: EmbeddingProviderConfig = {}) {
-    this.#model = config.model ?? 'Xenova/multilingual-e5-small';
+    this.#model = config.model ?? DEFAULT_LOCAL_EMBEDDING_MODEL;
     this.dimension = config.dimension ?? 384;
-    this.modelId = `local:${this.#model}`;
+    const dtype = configuredDtype();
+    // Precision is part of the vector's identity: q8 and fp32 vectors of the same
+    // model are close but not identical, so they must never be silently pooled.
+    this.modelId = dtype ? `local:${this.#model}@${dtype}` : `local:${this.#model}`;
   }
 
   #pipeline(): Promise<unknown> {
     let pipe = localPipelines.get(this.#model);
     if (!pipe) {
-      pipe = import('@huggingface/transformers').then(({ pipeline }) =>
-        pipeline('feature-extraction', this.#model));
+      pipe = import('@huggingface/transformers')
+        .then((mod) => {
+          // Must happen before the first pipeline() call — cacheDir/localModelPath
+          // are read at load time.
+          configureTransformersEnv(mod as unknown as Record<string, unknown>);
+          const dtype = configuredDtype();
+          return mod.pipeline('feature-extraction', this.#model, ...(dtype ? [{ dtype } as never] : []));
+        })
+        .catch((err) => {
+          // Don't memoise a failure: a transient network blip would otherwise
+          // poison the model for the rest of the process lifetime.
+          localPipelines.delete(this.#model);
+          throw describeModelLoadFailure(this.#model, err);
+        });
       localPipelines.set(this.#model, pipe);
     }
     return pipe;

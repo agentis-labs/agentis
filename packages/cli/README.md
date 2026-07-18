@@ -6,14 +6,14 @@
 
 ## Every harness. One Brain. Zero lock-in.
 
-Agentis is the multi-harness dashboard on steroids for agents you own — self-hosted,
-open-source, running on your machine today with Claude Code, Codex, Cursor, Antigravity,
+Own your agents, don't rent them. Agentis is a self-hosted, open-source multi-harness
+dashboard that runs on your machine today with Claude Code, Codex, Cursor, Antigravity,
 Hermes, OpenClaw, or your own HTTP and local models underneath (a harness of our own is
 coming next). Those tools forget everything the moment the process dies, and most of them
 phone your work home to someone else's cloud while they run. Agentis doesn't. Import the
-agents you already run, give them a permanent Brain of memory and skills, swap the model
-underneath them anytime, and ship what they build as real apps, workflows, and channels —
-from your own machine.
+agents you already run into one dashboard, give them a permanent Brain of memory and
+skills, swap the model underneath them anytime, and ship what they build as real agentic
+apps powered by a workflow engine. No lock-in.
 
 **No token tax. No data extraction. No forgetting.**
 

@@ -99,6 +99,7 @@ import { McpHarnessSessionService } from '../services/mcp/mcpHarnessSession.js';
 import { ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
 import { OrchestratorModelRouter } from '../services/orchestrator/orchestratorModelRouter.js';
 import { PackagerService } from '../services/packager.js';
+import { EpisodicBrainPort } from '../services/brain/brainExport.js';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import type { VoiceChannelAdapter } from '../adapters/channels/voice.js';
@@ -306,7 +307,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.use('/v1/*', auditLog({ activity, logger }));
 
   // ── Route surface (V1) ──────────────────────────────────
-  const sharedPackager = new PackagerService({ db: sqlite, bus, logger, skills: skillService });
+  const sharedPackager = new PackagerService({ db: sqlite, bus, logger, skills: skillService, brain: new EpisodicBrainPort(episodicMemoryStore) });
   app.route('/v1/auth', buildAuthRoutes({ db: sqlite, auth, secrets }));
   app.route('/v1/bootstrap', buildBootstrapRoutes({
     db: sqlite,
@@ -362,7 +363,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/runs', buildReplayRoutes({ db: sqlite, auth, engine, replay }));
   app.route('/v1/runs', buildAuditRoutes({ db: sqlite, auth, audit: auditTrail }));
   app.route('/v1/extensions', buildExtensionRoutes({ db: sqlite, auth, extensionLibrary, runtime: extensions, kv: extensionKv }));
-  app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, bus, logger, skills: skillService }));
+  app.route('/v1/packages', buildPackageRoutes({ db: sqlite, auth, bus, logger, skills: skillService, episodes: episodicMemoryStore }));
   app.route('/v1/skills', buildSkillRoutes({ db: sqlite, auth, skills: skillService }));
   app.route('/v1/workspace/bundle', buildWorkspaceBundleRoutes({ db: sqlite, auth, bus, logger, dataDir: env.AGENTIS_DATA_DIR, signer: { privateKeyPem: secrets.jwtPrivateKeyPem, publicKeyPem: secrets.jwtPublicKeyPem }, episodes: episodicMemoryStore }));
   app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus, artifacts: artifactService, assets: assetStore }));

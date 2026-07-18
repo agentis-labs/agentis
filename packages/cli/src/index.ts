@@ -68,6 +68,8 @@ const HELP = `agentis — the operating system for agentic software
 
 Usage:
   agentis up                              Start Agentis (default if no command given).
+  agentis warmup                          Pre-download the embedding model (~450 MB, once).
+                                          Needed for offline/air-gapped hosts; up warms in background.
   agentis backup [--out <dir>]            Snapshot the data dir into <dir>.
                                           Default <dir>: <data-dir>/backups/<timestamp>.
   agentis restore <dir> [--force]         Restore a backup directory into the data dir.
@@ -96,6 +98,10 @@ Environment:
   AGENTIS_SEED_USERNAME          Operator username on first boot. Default: operator
   AGENTIS_SEED_PASSWORD          Operator password on first boot. Default: random.
   AGENTIS_DATABASE_URL           Set to a postgres URL to use standard mode.
+  AGENTIS_EMBEDDING_CACHE_DIR    Where the embedding model is cached. Default: <data-dir>/models
+  AGENTIS_EMBEDDING_MODEL_PATH   Directory of pre-downloaded model files (offline installs).
+  AGENTIS_EMBEDDING_OFFLINE      true = never fetch the model remotely (use the local path only).
+  AGENTIS_EMBEDDING_DTYPE        q8 = ~4x smaller download + faster CPU inference. Default: fp32.
 
 Run \`agentis up\` and open http://127.0.0.1:3737 in your browser.
 `;
@@ -184,6 +190,36 @@ async function runUp(): Promise<void> {
   };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
+}
+
+/**
+ * Pre-download the local embedding model.
+ *
+ * The Brain's ~450 MB ONNX weights are NOT shipped in the package — they are
+ * fetched once on first use. `agentis up` warms them in the background, but that
+ * is no help for an air-gapped or firewalled host, or a CI image that must be
+ * built ready-to-run. This makes the download an explicit, scriptable step:
+ * run it where there IS network, then ship/copy the cache dir.
+ */
+async function runWarmupCmd(): Promise<number> {
+  const dir = await dataDir();
+  // The provider reads this to place its cache; set it so a warm run and a later
+  // `agentis up` agree on the location.
+  process.env.AGENTIS_DATA_DIR ??= dir;
+  const cacheDir = process.env.AGENTIS_EMBEDDING_CACHE_DIR ?? join(dir, 'models');
+  process.stdout.write(`Downloading the embedding model (~450 MB, once) → ${cacheDir}\n`);
+  try {
+    const { warmLocalEmbeddingModel } = await import('@agentis/api/embeddingProvider');
+    const started = Date.now();
+    await warmLocalEmbeddingModel();
+    process.stdout.write(`Embedding model ready in ${((Date.now() - started) / 1000).toFixed(1)}s.\n`);
+    process.stdout.write('For an offline host, copy that directory over and set:\n');
+    process.stdout.write(`  AGENTIS_EMBEDDING_MODEL_PATH=${cacheDir}\n  AGENTIS_EMBEDDING_OFFLINE=true\n`);
+    return 0;
+  } catch (err) {
+    process.stderr.write(`agentis warmup failed: ${(err as Error).message}\n`);
+    return 1;
+  }
 }
 
 async function runBackupCmd(argv: string[]): Promise<number> {
@@ -474,6 +510,10 @@ async function main() {
   }
   if (cmd === 'up') {
     await runUp();
+    return;
+  }
+  if (cmd === 'warmup') {
+    process.exitCode = await runWarmupCmd();
     return;
   }
   if (cmd === 'backup') {

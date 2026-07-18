@@ -13,6 +13,7 @@ import {
   type PackageExportEnvelope,
 } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { BrainReader, BrainWriter } from '@agentis/app';
 import type { EventBus } from '../event-bus.js';
 import { scanArtifactBytes, type ScanFinding } from './registryScanner.js';
 
@@ -61,6 +62,12 @@ export class PackagerService {
       logger?: Logger;
       /** When wired, `skill` package installs create a Brain skill atom. */
       skills?: SkillService;
+      /**
+       * When wired, an `agent` package can carry that agent's learned Brain
+       * (`scope_id = agentId`) and rehydrate it on install. An agent without its
+       * memory is a blank slate — this is what makes a packaged agent portable.
+       */
+      brain?: BrainReader & BrainWriter;
     },
   ) {}
 
@@ -204,7 +211,12 @@ export class PackagerService {
     return this.insertPacked(scope, { name: workflow.title, description: workflow.description ?? null }, 'workflow', contents, workflow.id);
   }
 
-  packFromAgent(scope: PackageScope, agentId: string, meta: Partial<PackageMeta> = {}) {
+  /**
+   * Pack one agent. `opts.includeBrain` carries the agent's learned Brain
+   * (`scope_id = agentId`) so the packaged agent arrives with its memory rather
+   * than as a blank slate. Requires `deps.brain`; without it nothing is carried.
+   */
+  packFromAgent(scope: PackageScope, agentId: string, meta: Partial<PackageMeta> = {}, opts: { includeBrain?: boolean } = {}) {
     const agent = this.deps.db
       .select()
       .from(schema.agents)
@@ -212,6 +224,7 @@ export class PackagerService {
       .get();
     if (!agent) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
     const name = meta.name ?? agent.name;
+    const withBrain = (opts.includeBrain ?? false) && !!this.deps.brain;
     const contents: PackageContents = {
       kind: 'agent',
       agent: {
@@ -223,6 +236,7 @@ export class PackagerService {
         avatarGlyph: agent.avatarGlyph ?? null,
         runtimeModel: agent.runtimeModel ?? null,
         role: agent.role ?? null,
+        ...(withBrain ? { brain: { atoms: this.deps.brain!.exportScope(scope.workspaceId, agent.id) } } : {}),
       },
     };
     return this.insertPacked(scope, { ...meta, name }, 'agent', contents, agent.id);
@@ -354,6 +368,12 @@ export class PackagerService {
           updatedAt: now,
         })
         .run();
+      // Rehydrate the agent's learned Brain at the NEW agent id, so an imported
+      // agent arrives with its memory instead of as a blank slate. Embeddings are
+      // recomputed by the episode store on write.
+      if (contents.agent.brain && contents.agent.brain.atoms.length > 0 && this.deps.brain) {
+        this.deps.brain.importScope(scope.workspaceId, id, contents.agent.brain.atoms, 'agent');
+      }
       return { kind: 'agent', resourceId: id, path: `/agents/${id}` };
     }
     if (contents.kind === 'extension') {

@@ -20,6 +20,8 @@ import type { EventBus } from '../event-bus.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { PackagerService } from '../services/packager.js';
+import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
+import { EpisodicBrainPort } from '../services/brain/brainExport.js';
 
 const templateDefSchema = z.object({
   name: z.string().min(1),
@@ -117,6 +119,8 @@ export function buildPackageRoutes(deps: {
   bus?: EventBus;
   logger?: Logger;
   skills?: SkillService;
+  /** Brain store — lets an `agent` package carry/rehydrate that agent's memory. */
+  episodes?: EpisodicMemoryStore;
 }) {
   const app = new Hono();
   const packager = new PackagerService({
@@ -124,6 +128,7 @@ export function buildPackageRoutes(deps: {
     bus: deps.bus,
     logger: deps.logger,
     skills: deps.skills,
+    ...(deps.episodes ? { brain: new EpisodicBrainPort(deps.episodes) } : {}),
   });
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
@@ -169,10 +174,14 @@ export function buildPackageRoutes(deps: {
   });
 
   app.post('/pack/agent/:agentId', async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    // `includeBrain` carries the agent's learned memory with it (opt-in).
+    const includeBrain = z.object({ includeBrain: z.boolean().default(false) }).parse(body).includeBrain;
     const row = packager.packFromAgent(
       scope(c),
       c.req.param('agentId'),
-      packMetaSchema.parse(await c.req.json().catch(() => ({}))),
+      packMetaSchema.parse(body),
+      { includeBrain },
     );
     return c.json({ package: { ...toPackageDto(row), checksum: row.checksum } }, 201);
   });

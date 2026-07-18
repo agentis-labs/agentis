@@ -182,12 +182,7 @@ export class AppPackager {
       }
       return { name: col.name, schema: col.schema, seed };
     });
-    const workflows = this.db
-      .select({ title: schema.workflows.title, description: schema.workflows.description, graph: schema.workflows.graph })
-      .from(schema.workflows)
-      .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
-      .all()
-      .map((w) => ({ title: w.title, description: w.description ?? null, graph: w.graph }));
+    const workflows = this.#exportWorkflows(workspaceId, appId, opts.warnings);
 
     // Team (Team facet): the owning agent + seated members travel WITH the App so
     // it installs self-contained. Definitions always travel; brains only in `full`.
@@ -211,6 +206,51 @@ export class AppPackager {
       ...(withAppBrain ? { brain: { atoms: opts.brain!.exportScope(workspaceId, appId) } } : {}),
       source: app.source,
     });
+  }
+
+  /**
+   * The App's workflows PLUS every workflow they reach through a `subflow` /
+   * `loop` node, followed transitively.
+   *
+   * App-owned selection alone is not enough: a subflow child is frequently a BARE
+   * workflow (`appId` null, created independently and never adopted), so the old
+   * `WHERE appId = :appId` projection silently dropped it and the imported App
+   * referenced a workflow that did not exist in the target workspace. Each entry
+   * carries `exportId` (its source id) so install can rebind the references.
+   */
+  #exportWorkflows(workspaceId: string, appId: string, warnings?: string[]): AppManifest['workflows'] {
+    const owned = this.db
+      .select({ id: schema.workflows.id, title: schema.workflows.title, description: schema.workflows.description, graph: schema.workflows.graph })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
+      .all();
+
+    const byId = new Map(owned.map((w) => [w.id, w]));
+    const queue = owned.flatMap((w) => referencedWorkflowIds(w.graph));
+    const seen = new Set(owned.map((w) => w.id));
+    while (queue.length > 0) {
+      const refId = queue.shift()!;
+      if (seen.has(refId)) continue;
+      seen.add(refId);
+      const child = this.db
+        .select({ id: schema.workflows.id, title: schema.workflows.title, description: schema.workflows.description, graph: schema.workflows.graph })
+        .from(schema.workflows)
+        .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, refId)))
+        .get();
+      if (!child) {
+        warnings?.push(`A subflow references workflow ${refId}, which no longer exists — that step will not run after import.`);
+        continue;
+      }
+      byId.set(child.id, child);
+      queue.push(...referencedWorkflowIds(child.graph));
+    }
+
+    return [...byId.values()].map((w) => ({
+      title: w.title,
+      description: w.description ?? null,
+      graph: w.graph,
+      exportId: w.id,
+    }));
   }
 
   /** The App's cast (owner + members) as portable manifest agents, name-sorted. */
@@ -309,12 +349,32 @@ export class AppPackager {
       installedChecksum: checksum(parsed),
     });
 
-    for (const wf of parsed.workflows) {
+    // Two passes so subflow references survive the id change: mint every new id
+    // FIRST, then rewrite each graph's `subflow.workflowId` / `loop.bodyWorkflowId`
+    // through the old→new map before inserting. A single pass would write graphs
+    // still pointing at the exporter's workflow ids — syntactically valid UUIDs
+    // that resolve to nothing here, so the App imports "fine" and fails at run time.
+    const workflowIdByExportId = new Map<string, string>();
+    const minted = parsed.workflows.map((wf) => {
       const id = randomUUID();
+      if (wf.exportId) workflowIdByExportId.set(wf.exportId, id);
+      return { id, wf };
+    });
+    for (const { id, wf } of minted) {
       const now = new Date().toISOString();
       db
         .insert(schema.workflows)
-        .values({ id, workspaceId, userId, appId: app.id, title: wf.title, description: wf.description ?? null, graph: wf.graph as WorkflowGraph, createdAt: now, updatedAt: now })
+        .values({
+          id,
+          workspaceId,
+          userId,
+          appId: app.id,
+          title: wf.title,
+          description: wf.description ?? null,
+          graph: rebindWorkflowRefs(wf.graph, workflowIdByExportId) as WorkflowGraph,
+          createdAt: now,
+          updatedAt: now,
+        })
         .run();
     }
     for (const col of parsed.collections) {
@@ -424,6 +484,49 @@ export class AppPackager {
   import(workspaceId: string, userId: string, envelope: RawAppEnvelope, opts: AppImportOptions = {}): { appId: string } {
     return this.fromManifest(workspaceId, userId, this.deserialize(envelope), opts);
   }
+}
+
+/**
+ * The workflow ids a graph reaches through sub-workflow nodes.
+ * `subflow.workflowId` and `loop.bodyWorkflowId` are the two ways one workflow
+ * invokes another (both run via SubflowExecutor).
+ */
+function referencedWorkflowIds(graph: unknown): string[] {
+  const nodes = Array.isArray((graph as { nodes?: unknown } | null)?.nodes) ? (graph as { nodes: unknown[] }).nodes : [];
+  const out: string[] = [];
+  for (const node of nodes) {
+    const config = (node as { config?: Record<string, unknown> } | null)?.config;
+    if (!config) continue;
+    if (config.kind === 'subflow' && typeof config.workflowId === 'string') out.push(config.workflowId);
+    else if (config.kind === 'loop' && typeof config.bodyWorkflowId === 'string') out.push(config.bodyWorkflowId);
+  }
+  return out;
+}
+
+/**
+ * Rewrite sub-workflow references through an old-id → new-id map. Ids with no
+ * mapping are left untouched (the child genuinely wasn't part of this bundle),
+ * which keeps the rewrite lossless rather than nulling unknown refs.
+ */
+function rebindWorkflowRefs(graph: unknown, idMap: Map<string, string>): unknown {
+  if (idMap.size === 0) return graph;
+  const g = graph as { nodes?: unknown[] } | null;
+  if (!g || !Array.isArray(g.nodes)) return graph;
+  return {
+    ...g,
+    nodes: g.nodes.map((node) => {
+      const config = (node as { config?: Record<string, unknown> } | null)?.config;
+      if (!config) return node;
+      if (config.kind === 'subflow' && typeof config.workflowId === 'string') {
+        const next = idMap.get(config.workflowId);
+        if (next) return { ...(node as object), config: { ...config, workflowId: next } };
+      } else if (config.kind === 'loop' && typeof config.bodyWorkflowId === 'string') {
+        const next = idMap.get(config.bodyWorkflowId);
+        if (next) return { ...(node as object), config: { ...config, bodyWorkflowId: next } };
+      }
+      return node;
+    }),
+  };
 }
 
 function stringArray(value: unknown): string[] {

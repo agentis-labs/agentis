@@ -141,7 +141,17 @@ export function describeRealtimeActivity(
       };
     }
     case REALTIME_EVENTS.RUN_PAUSED:
-      return { ...base, kind: 'run', tone: 'warn', title: 'Run paused', detail: 'Execution can resume from its preserved frontier.' };
+      return {
+        ...base,
+        kind: 'run',
+        tone: 'warn',
+        title: 'Run paused',
+        // A run parked on a recoverable blocker (out of credits, rate limit)
+        // carries WHY. The old hardcoded sentence threw that away, so an operator
+        // whose agent ran out of credits saw a generic "paused" with no cause.
+        detail: stringField(payload, ['blockedReason', 'reason', 'error', 'detail'])
+          ?? 'Execution can resume from its preserved frontier.',
+      };
     case REALTIME_EVENTS.RUN_CANCELLED:
       return { ...base, kind: 'run', tone: 'muted', title: 'Run cancelled', detail: 'Execution was stopped.' };
     case REALTIME_EVENTS.RUN_COMPLETED:

@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./bootstrap": "./src/bootstrap.ts",
     "./backup": "./src/services/backup.ts",
-    "./defaultDataDir": "./src/defaultDataDir.ts"
+    "./defaultDataDir": "./src/defaultDataDir.ts",
+    "./embeddingProvider": "./src/services/embedding/embeddingProvider.ts"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -40,6 +41,7 @@
     "hono": "^4.12.28",
     "jose": "^5.9.3",
     "mammoth": "^1.12.0",
+    "node-cron": "^3.0.3",
     "pdf-parse": "^2.4.5",
     "playwright": "^1.60.0",
     "qrcode": "^1.5.4",

@@ -321,7 +321,13 @@ export function AgentCreateWizard({
       setDetections(loadedDetections);
 
       // ("found") harness in priority order; otherwise leave the default and
-      const found = ADAPTER_PRIORITY.find((type) => loadedDetections.some((d) => d.adapterType === type && d.status === 'found'));
+      // let the operator choose. Skip any harness flagged `needsConfig`: it is
+      // installed but missing required config, so auto-selecting it creates an
+      // agent that immediately fails its runtime probe (e.g. openclaw is "found"
+      // whenever its binary is on PATH, but the adapter requires a gatewayUrl).
+      const found = ADAPTER_PRIORITY.find((type) =>
+        loadedDetections.some((d) => d.adapterType === type && d.status === 'found' && !d.needsConfig),
+      );
       if (found) {
         setAdapterType(found);
       }

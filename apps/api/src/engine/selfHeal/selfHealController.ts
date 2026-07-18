@@ -818,7 +818,7 @@ export class SelfHealController {
       })) {
         if (delta.type === 'text') text += delta.delta;
         if (delta.type === 'confirmation_required') sawConfirmation = true;
-        this.relaySelfHealChatDelta(ctx, node, healerId, delta, clip);
+        this.relayChatDelta(ctx, node, healerId, delta, clip);
       }
     } catch (err) {
       if (signal.aborted) throw signal.reason ?? err;
@@ -837,7 +837,7 @@ export class SelfHealController {
       // a chat turn — the monitor/console/canvas all read these events, so the
   }
 
-  relaySelfHealChatDelta(
+  relayChatDelta(
     ctx: RunningContext,
     node: WorkflowNode,
     healerId: string,
@@ -851,7 +851,25 @@ export class SelfHealController {
       // failed tool call (phase:'tool', status:'error') during the repair
       // loop fall through to 'thinking' — never surfaced as a failure.
       const failed = delta.status === 'error' || delta.phase === 'error';
-      this.host.emitWorkStep(ctx, node, failed ? 'fail' : delta.phase === 'complete' ? 'complete' : 'thinking', [delta.label, delta.detail].filter(Boolean).join(' - '));
+      const detail = [delta.label, delta.detail].filter(Boolean).join(' - ');
+      this.host.emitWorkStep(ctx, node, failed ? 'fail' : delta.phase === 'complete' ? 'complete' : 'thinking', detail);
+      // `emitWorkStep` publishes to the WORKSPACE room only, but the run SSE /
+      // socket stream filters strictly on the RUN room — so on its own it never
+      // reaches the workflow live modal or `useRunActivity`, and the operator saw
+      // only the handful of thoughts that happened to survive the /activity
+      // back-fill. Activity deltas ARE the harness thought stream (chat renders
+      // exactly these), so mirror them run-scoped too. Runtime-phase activities
+      // carry reasoning; the rest are tool/step narration — both belong in the
+      // terminal, so relay every one and let the surfaces filter.
+      if (detail) {
+        this.host.notifyAgentActivity({
+          runId: ctx.runId,
+          agentId: healerId,
+          taskId: node.id,
+          kind: 'thinking',
+          text: clip(detail, 4000),
+        });
+      }
       return;
     }
     if (delta.type === 'thinking') {

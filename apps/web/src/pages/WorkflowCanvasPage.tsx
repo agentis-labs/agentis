@@ -265,6 +265,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   const [deploymentLoading, setDeploymentLoading] = useState(false);
   const [deploymentBusy, setDeploymentBusy] = useState(false);
   const [deploymentError, setDeploymentError] = useState<string | null>(null);
+  /** Set when arming was refused because the workflow isn't hardened — drives the
+   *  operator's audited-override prompt instead of a dead-end toast. */
+  const [hardenPrompt, setHardenPrompt] = useState<{ message: string } | null>(null);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [enginePage, setEnginePage] = useState<EnginePage>('overview');
   const [variablesOpen, setVariablesOpen] = useState(false);
@@ -1591,7 +1594,14 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     }
   }
 
-  async function handleActivate() {
+  /**
+   * Arm the workflow's trigger. `overrideAck` is the operator's stated reason for
+   * arming a workflow that hasn't reached `hardened` at its current graph — the
+   * API records it in the audit log. Without this the operator hits a hard wall:
+   * the gate's remedy is a set of `agentis.workflow.*` tool calls only an agent
+   * can make, so a human with a workflow they know works had no way through.
+   */
+  async function handleActivate(overrideAck?: string) {
     if (!wf) return;
     if (openFirstIncompleteNode()) {
       setActivateOpen(false);
@@ -1603,7 +1613,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       await saveNow();
       const result = await api<{ deployment: WorkflowDeployment }>(`/v1/workflows/${wf.id}/activate`, {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify(overrideAck?.trim() ? { override: { ack: overrideAck.trim() } } : {}),
       });
       setDeployment(result.deployment);
       const refreshed = await api<{ workflow: WorkflowDetail }>(`/v1/workflows/${wf.id}`);
@@ -1612,11 +1622,18 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       setWf(refreshed.workflow);
       setTitleDraft(refreshed.workflow.title);
       lastSavedFingerprintRef.current = graphFingerprint(refreshed.workflow.graph, refreshed.workflow.title);
+      setHardenPrompt(null);
       toast.success(activationSuccessMessage(result.deployment.triggerType));
     } catch (e) {
       const message = apiErrorMessage(e);
-      setDeploymentError(message);
-      toast.error('Activation failed', message);
+      // Not-hardened is a CHOICE, not a failure: offer the audited override.
+      if (!overrideAck && /BLOCKED_LIFECYCLE_NOT_HARDENED/.test(message)) {
+        setHardenPrompt({ message });
+        setDeploymentError(null);
+      } else {
+        setDeploymentError(message);
+        toast.error('Activation failed', message);
+      }
     } finally {
       setDeploymentBusy(false);
     }
@@ -2409,7 +2426,74 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
 
 
 
+      {hardenPrompt && (
+        <ActivateAnywayDialog
+          message={hardenPrompt.message}
+          busy={deploymentBusy}
+          onCancel={() => setHardenPrompt(null)}
+          onConfirm={(reason) => void handleActivate(reason)}
+        />
+      )}
+
       {extManagerOpen && <ExtensionsModal onClose={() => setExtManagerOpen(false)} />}
+    </div>
+  );
+}
+
+/**
+ * The operator's way past the "not hardened" arming gate. Agentis withholds
+ * automatic arming until a workflow has proven itself at its current graph, but
+ * the operator owns this workspace — they can proceed with a recorded reason.
+ * Requires a real reason (the API trims, so whitespace won't pass) and states
+ * plainly that it goes in the audit log.
+ */
+function ActivateAnywayDialog({
+  message,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  message: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (reason: string) => void;
+}) {
+  const [reason, setReason] = useState('');
+  const humanMessage = message.replace(/^BLOCKED_LIFECYCLE_NOT_HARDENED:\s*/, '');
+  const ready = reason.trim().length >= 3;
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-canvas/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" onClick={onCancel}>
+      <div className="w-[min(520px,94vw)] overflow-hidden rounded-2xl border border-line bg-surface shadow-modal" onClick={(e) => e.stopPropagation()}>
+        <header className="flex items-center gap-2 border-b border-line px-5 py-4">
+          <AlertCircle size={16} className="text-warn" />
+          <div className="text-[14px] font-semibold text-text-primary">Activate without a proven run?</div>
+        </header>
+        <div className="space-y-3 px-5 py-4">
+          <p className="text-[12.5px] leading-relaxed text-text-secondary">{humanMessage}</p>
+          <label className="block">
+            <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-text-muted">Reason (recorded in the audit log)</span>
+            <textarea
+              autoFocus
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              rows={3}
+              placeholder="e.g. I've run this manually several times and verified the output."
+              className="w-full resize-y rounded-input border border-line bg-surface-2 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent"
+            />
+          </label>
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
+          <button type="button" onClick={onCancel} className="h-9 rounded-btn border border-line px-3 text-[12px] text-text-secondary hover:bg-surface-2">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onConfirm(reason)}
+            disabled={!ready || busy}
+            className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-warn px-4 text-[12px] font-semibold text-canvas hover:opacity-90 disabled:opacity-45"
+          >
+            {busy ? <LoaderCircle size={13} className="animate-spin" /> : null} Activate anyway
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

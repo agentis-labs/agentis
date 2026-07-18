@@ -3318,7 +3318,7 @@ export class WorkflowEngine {
         systemAddendum,
       })) {
         if (delta.type === 'text') text += delta.delta;
-        this.#selfHeal.relaySelfHealChatDelta(ctx, node, agentId, delta, clip);
+        this.#selfHeal.relayChatDelta(ctx, node, agentId, delta, clip);
       }
     } catch (err) {
       this.deps.logger.warn('engine.agent_task.harness_loop_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
@@ -7425,7 +7425,10 @@ export class WorkflowEngine {
         : phase === 'complete'
           ? `Completed ${node.title}`
           : phase === 'thinking'
-            ? `Repairing ${node.title}`
+            // NOT "Repairing" — this phase is emitted by every agent_task's live
+            // reasoning relay, not just self-heal. `detail` carries the real
+            // thought and wins in the frontend normalizer; this is the fallback.
+            ? `Working on ${node.title}`
           : `Failed at ${node.title}`;
     const workStepPayload = {
       workspaceId: ctx.workspaceId,
@@ -7767,6 +7770,16 @@ export class WorkflowEngine {
       }
     }
 
+    // A run parked on a recoverable blocker (out of credits / rate limit) sets the
+    // run status to WAITING with a `blockedReason` on the node. WAITING has no
+    // branch below, so it used to fall through to RUN_RUNNING — the run announced
+    // "running" and then went permanently silent, which is exactly what a freeze
+    // looks like to an operator. It is a PAUSE (the REST layer already reports
+    // these as `status: 'paused'` + blockedReason); say so on the wire too.
+    // Plain WAITING with no blocker is a legitimate wait (approval, schedule,
+    // await_event) and must keep its existing signal.
+    const blockedReason = Object.values(ctx.state.nodeStates ?? {})
+      .find((n) => n?.status === 'WAITING' && n?.blockedReason)?.blockedReason;
     const eventName =
       status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION'
         ? REALTIME_EVENTS.RUN_COMPLETED
@@ -7775,7 +7788,7 @@ export class WorkflowEngine {
         // mental model ("a node failed → the workflow failed").
         : status === 'CANCELLED'
           ? REALTIME_EVENTS.RUN_CANCELLED
-          : status === 'PAUSED'
+          : status === 'PAUSED' || (status === 'WAITING' && blockedReason)
             ? REALTIME_EVENTS.RUN_PAUSED
             : status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS'
           ? REALTIME_EVENTS.RUN_FAILED
@@ -7787,6 +7800,14 @@ export class WorkflowEngine {
       status,
       workflowId: ctx.workflowId,
       workspaceId: ctx.workspaceId,
+      // WHY the run parked, on the wire — so a surface can say "out of credits"
+      // immediately instead of showing a bare "paused" and waiting for a refetch
+      // (or, before this, showing nothing at all). Scoped to the pause signal:
+      // a lingering blockedReason on some other node must never ride along on a
+      // COMPLETED/FAILED payload and misreport why the run ended.
+      ...(blockedReason && eventName === REALTIME_EVENTS.RUN_PAUSED
+        ? { blockedReason, error: blockedReason }
+        : {}),
       ...(runVerdict ? {
         verdict: runVerdict.outcome,
         accomplished: runVerdict.outcome === 'accomplished',

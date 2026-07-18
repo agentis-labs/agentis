@@ -186,6 +186,25 @@ export interface AgentSessionRuntimeDeps {
     args: Record<string, unknown>,
     ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: ArtifactRetentionPolicy | null },
   ) => Promise<{ ok: boolean; output?: unknown; error?: string }>;
+  /**
+   * Late-bound bridge to `WorkflowEngine.notifyAgentActivity` — the ONE spine
+   * that publishes a run's live reasoning AND appends it to the replayable
+   * activity tail. Session steps used to bypass it and publish a raw
+   * AGENT_WORK_STEP straight to the bus, so they were live-only: a surface
+   * opened mid-run (or reopened after a reconnect) back-filled nothing and the
+   * operator saw a terminal that began wherever they happened to be looking.
+   * Absent = degrades to the direct publish (live, but no back-fill).
+   */
+  notifyActivity?: (args: {
+    runId: string;
+    agentId?: string;
+    taskId?: string;
+    kind: 'thinking' | 'text' | 'tool_call' | 'tool_result';
+    text?: string;
+    tool?: string;
+    toolInput?: unknown;
+    toolResult?: unknown;
+  }) => void;
 }
 
 // Control-tool names — a closed set so we never branch on magic strings.
@@ -930,13 +949,50 @@ export class AgentSessionRuntime {
     };
   }
 
+  /**
+   * Stream one completed cognitive step into the run's live terminal.
+   *
+   * Routed through `notifyActivity` (the engine's activity spine) rather than a
+   * raw bus publish, so a session step lands in the replayable tail exactly like
+   * every other agent_task path — the reasoning survives a mid-run open or a
+   * reconnect instead of being live-only. Tool calls go out as their own
+   * activities so the terminal names them (the old AGENT_WORK_STEP carried a
+   * `toolCalls` array that no surface ever rendered).
+   */
   #emitStep(runCtx: SessionRunContext, sessionId: string, text: string, calls: ChatToolCall[]): void {
+    // 400 chars amputated a step's reasoning mid-sentence — the operator saw a
+    // stub, not a thought. This is one event per model step (not per token), so
+    // a generous cap costs little and is what makes the run terminal legible.
+    const reasoning = clip(text, 4000);
+    if (this.deps.notifyActivity) {
+      if (reasoning.trim()) {
+        this.deps.notifyActivity({
+          runId: runCtx.runId,
+          agentId: runCtx.agentId,
+          ...(runCtx.nodeId ? { taskId: runCtx.nodeId } : {}),
+          kind: 'thinking',
+          text: reasoning,
+        });
+      }
+      for (const call of calls) {
+        this.deps.notifyActivity({
+          runId: runCtx.runId,
+          agentId: runCtx.agentId,
+          ...(runCtx.nodeId ? { taskId: runCtx.nodeId } : {}),
+          kind: 'tool_call',
+          tool: call.name,
+          toolInput: call.arguments,
+        });
+      }
+      return;
+    }
+    // No engine bridge wired (standalone/test construction) — stay live-only.
     this.deps.bus.publish(REALTIME_ROOMS.run(runCtx.runId), REALTIME_EVENTS.AGENT_WORK_STEP, {
       runId: runCtx.runId,
       nodeId: runCtx.nodeId,
       agentId: runCtx.agentId,
       sessionId,
-      text: clip(text, 400),
+      text: reasoning,
       toolCalls: calls.map((c) => c.name),
     });
   }

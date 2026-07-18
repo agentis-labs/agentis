@@ -324,10 +324,20 @@ describe('WorkflowEngine — agent_task agentic-by-default', () => {
     } as WorkflowGraph;
 
     const events: string[] = [];
+    // The settle signal is RUN_PAUSED, not RUN_RUNNING. A run parked on a
+    // recoverable blocker used to fall through to RUN_RUNNING (WAITING had no
+    // branch in the event mapping), so it announced "running" and then went
+    // permanently silent — indistinguishable from a freeze to an operator
+    // watching the canvas. This test previously asserted that lie.
+    const pausedPayloads: Array<Record<string, unknown>> = [];
+    const offPaused = ctx.bus.subscribe((m) => {
+      if (m.envelope.event === REALTIME_EVENTS.RUN_PAUSED) pausedPayloads.push(m.envelope.payload as Record<string, unknown>);
+    });
     const runId = await runGraph(graph, events, (message) => {
       const payload = message.envelope.payload as { status?: string };
-      return message.envelope.event === REALTIME_EVENTS.RUN_RUNNING && payload.status === 'WAITING';
+      return message.envelope.event === REALTIME_EVENTS.RUN_PAUSED && payload.status === 'WAITING';
     });
+    offPaused();
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     expect(run.status).toBe('WAITING');
     const state = run.runState as {
@@ -338,6 +348,12 @@ describe('WorkflowEngine — agent_task agentic-by-default', () => {
     expect(state.nodeStates.A?.blockedReason).toMatch(/credits|billing/i);
     expect(state.failedNodeIds).toEqual([]);
     expect(events).toContain(REALTIME_EVENTS.NODE_WAITING_FOR_INPUT);
+    // The run-level signal must say PAUSED and carry WHY, so the operator sees
+    // "out of credits" rather than a bare status change (or nothing at all).
+    expect(events).toContain(REALTIME_EVENTS.RUN_PAUSED);
+    expect(events).not.toContain(REALTIME_EVENTS.RUN_FAILED);
+    expect(pausedPayloads.length).toBeGreaterThan(0);
+    expect(String(pausedPayloads[0]!.blockedReason)).toMatch(/credits|billing/i);
   });
 
   it('accepts a final output object and satisfies declared agent output keys', async () => {

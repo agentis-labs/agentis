@@ -13,5 +13,16 @@ export default defineConfig({
     // the cause of the "flaky in the full suite, green in isolation" failures.
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // The memory analogue of the timeout note above. A worker that drives real
+    // Chromium (the browser-node test) alongside the engine's large graph
+    // fixtures exhausts the default V8 old-space and dies with "Fatal JavaScript
+    // out of memory: MemoryChunk allocation failed during deserialization" —
+    // but ONLY in the full suite, since standalone it has the heap to itself.
+    // That reads as a mysterious failing test rather than a resource limit.
+    poolOptions: {
+      forks: {
+        execArgv: ['--max-old-space-size=4096'],
+      },
+    },
   },
 });
