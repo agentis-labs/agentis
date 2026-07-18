@@ -30,6 +30,7 @@ import {
   type EmbeddingProvider,
   cosineSimilarity,
   embedText,
+  isEmbeddingModelUnavailable,
   selectEmbeddingProvider,
   vectorIsComparable,
 } from './embedding/embeddingProvider.js';
@@ -1222,6 +1223,17 @@ export class SharedIntelligenceService {
         reembedded += 1;
       } catch (err) {
         failed += 1;
+        // The model being unavailable is a WHOLE-SWEEP condition, not a per-row
+        // one: every remaining row would fail identically. Log once and stop —
+        // logging per row is what flooded operators' consoles endlessly.
+        if (isEmbeddingModelUnavailable(err)) {
+          this.logger.warn('brain.reembed_paused', {
+            workspaceId,
+            pending: rows.length - reembedded,
+            message: (err as Error).message,
+          });
+          break;
+        }
         this.logger.warn('brain.reembed_pending_failed', { workspaceId, atomId: row.id, message: (err as Error).message });
       }
     }

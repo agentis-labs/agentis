@@ -5,7 +5,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { cosineSimilarity, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
+import { cosineSimilarity, isEmbeddingModelUnavailable, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
 import type { EmbeddingProviderResolver } from './embedding/embeddingProviderRegistry.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 
@@ -202,6 +202,15 @@ export class SessionMomentService {
           .run();
         embedded += 1;
       } catch (err) {
+        // Whole-sweep condition — see the matching guard in sharedIntelligence.
+        if (isEmbeddingModelUnavailable(err)) {
+          this.logger.warn('session_moments.reembed_paused', {
+            workspaceId,
+            pending: rows.length - embedded,
+            message: (err as Error).message,
+          });
+          break;
+        }
         this.logger.warn('session_moments.reembed_failed', { workspaceId, id: row.id, message: (err as Error).message });
       }
     }

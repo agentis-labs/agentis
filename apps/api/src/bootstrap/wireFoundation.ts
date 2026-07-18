@@ -91,6 +91,13 @@ function realtimeAllowedOrigins(env: AgentisEnv): string[] {
 
 export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   const env = loadEnv(envSource);
+  // `loadEnv` resolves AGENTIS_DATA_DIR to a concrete path, but low-level modules
+  // that must not depend on the env object (e.g. the embedding provider choosing
+  // its model cache) read `process.env`. Publish it here, at the composition
+  // root, so "where does this install keep its data" has ONE answer everywhere.
+  // Without this the embedding cache fell back to the transformers default —
+  // which on a global npm install is inside node_modules and failed to load.
+  process.env.AGENTIS_DATA_DIR = env.AGENTIS_DATA_DIR;
   const logger = createLogger({ level: env.NODE_ENV === 'production' ? 'info' : 'debug' });
   logger.info('agentis.bootstrap.start', { mode: env.AGENTIS_MODE ?? 'auto' });
 

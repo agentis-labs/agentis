@@ -188,6 +188,37 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
 /** One loaded pipeline per model id, shared across all provider instances. */
 const localPipelines = new Map<string, Promise<unknown>>();
 
+/**
+ * Raised whenever the local model cannot be loaded. Callers that sweep many rows
+ * (re-embed backfills) MUST detect this and stop the whole cycle rather than
+ * retrying per row — see `isEmbeddingModelUnavailable`.
+ */
+export class EmbeddingModelUnavailableError extends Error {
+  readonly code = 'EMBEDDING_MODEL_UNAVAILABLE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmbeddingModelUnavailableError';
+  }
+}
+
+/** True when an error means "the embedding model isn't loadable right now". */
+export function isEmbeddingModelUnavailable(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === 'EMBEDDING_MODEL_UNAVAILABLE';
+}
+
+/**
+ * Circuit breaker for model loading.
+ *
+ * Not memoising failures (so a transient blip can recover) is right, but on its
+ * own it is a trap: a genuinely missing model then re-attempts a ~450 MB load on
+ * EVERY call, and every background sweep re-prints the full multi-line remedy.
+ * Observed in the wild as an endless console flood that made the product look
+ * hung. So: remember the failure, fail fast and QUIETLY for a cooldown, then let
+ * exactly one attempt through to recover on its own if the cause was temporary.
+ */
+const MODEL_FAILURE_COOLDOWN_MS = 60_000;
+let lastModelFailure: { at: number } | null = null;
+
 /** Default model — kept here so the warmer and the provider can never diverge. */
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
 
@@ -259,10 +290,10 @@ function configureTransformersEnv(mod: Record<string, unknown>): void {
  * deliberately no lexical fallback (that would silently degrade recall), so this
  * message is the operator's only signal — make it carry the remedy.
  */
-function describeModelLoadFailure(model: string, err: unknown): Error {
+function describeModelLoadFailure(model: string, err: unknown): EmbeddingModelUnavailableError {
   const cacheDir = embeddingCacheDir() ?? '(transformers default)';
   const detail = err instanceof Error ? err.message : String(err);
-  return new Error(
+  return new EmbeddingModelUnavailableError(
     `Could not load the local embedding model "${model}" — the Brain cannot store or recall memories until it loads.\n` +
       `  cache dir: ${cacheDir}\n` +
       `  cause: ${detail}\n` +
@@ -300,24 +331,41 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
   }
 
   #pipeline(): Promise<unknown> {
-    let pipe = localPipelines.get(this.#model);
-    if (!pipe) {
-      pipe = import('@huggingface/transformers')
-        .then((mod) => {
-          // Must happen before the first pipeline() call — cacheDir/localModelPath
-          // are read at load time.
-          configureTransformersEnv(mod as unknown as Record<string, unknown>);
-          const dtype = configuredDtype();
-          return mod.pipeline('feature-extraction', this.#model, ...(dtype ? [{ dtype } as never] : []));
-        })
-        .catch((err) => {
-          // Don't memoise a failure: a transient network blip would otherwise
-          // poison the model for the rest of the process lifetime.
-          localPipelines.delete(this.#model);
-          throw describeModelLoadFailure(this.#model, err);
-        });
-      localPipelines.set(this.#model, pipe);
+    const cached = localPipelines.get(this.#model);
+    if (cached) return cached;
+
+    // Inside the cooldown, fail fast with a ONE-LINE error. The full remedy was
+    // already logged when the breaker tripped; repeating it per row is the flood.
+    const failure = lastModelFailure;
+    if (failure && Date.now() - failure.at < MODEL_FAILURE_COOLDOWN_MS) {
+      const retryInSec = Math.ceil((MODEL_FAILURE_COOLDOWN_MS - (Date.now() - failure.at)) / 1000);
+      return Promise.reject(
+        new EmbeddingModelUnavailableError(
+          `Embedding model unavailable — retrying in ${retryInSec}s (see the earlier embedding model error for how to fix it).`,
+        ),
+      );
     }
+
+    const pipe = import('@huggingface/transformers')
+      .then((mod) => {
+        // Must happen before the first pipeline() call — cacheDir/localModelPath
+        // are read at load time.
+        configureTransformersEnv(mod as unknown as Record<string, unknown>);
+        const dtype = configuredDtype();
+        return mod.pipeline('feature-extraction', this.#model, ...(dtype ? [{ dtype } as never] : []));
+      })
+      .then((loaded) => {
+        lastModelFailure = null; // recovered — reset the breaker
+        return loaded;
+      })
+      .catch((err) => {
+        // Don't memoise the PIPELINE (a transient blip must be able to recover),
+        // but do trip the breaker so the retry storm is bounded.
+        localPipelines.delete(this.#model);
+        lastModelFailure = { at: Date.now() };
+        throw describeModelLoadFailure(this.#model, err);
+      });
+    localPipelines.set(this.#model, pipe);
     return pipe;
   }
 
