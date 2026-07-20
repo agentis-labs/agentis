@@ -14,7 +14,7 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type WorkflowGraph, type WorkflowGraphPatch } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AgentisRuntimeHandle, AgentisRuntimeStartResult } from '@agentis/runtime';
@@ -175,7 +175,7 @@ import { GroundingDiscoveryService } from './grounding/discovery.js';
 import { GroundingExtractionService } from './grounding/extractionService.js';
 import { GroundingRuntime } from './grounding/groundingRuntime.js';
 // Brain — knowledge graph + memory subsystem.
-import { LocalEmbeddingProvider } from './services/embedding/embeddingProvider.js';
+import { LocalEmbeddingProvider, ensureDtypeDefault, setEmbeddingProgressSink } from './services/embedding/embeddingProvider.js';
 import { EmbeddingProviderRegistry } from './services/embedding/embeddingProviderRegistry.js';
 import { KnowledgeStore } from './services/knowledge/knowledgeStore.js';
 import { MemoryStore } from './services/memory/memoryStore.js';
@@ -199,6 +199,8 @@ import { BrainDiscourseService } from './services/brain/brainDiscourseService.js
 import { BrainCompressionService } from './services/brain/brainCompressionService.js';
 import { BrainMaintenanceService } from './services/brain/brainMaintenanceService.js';
 import { BrainHealthService } from './services/brain/brainHealthService.js';
+import { MemoryDropLog } from './services/brain/memoryDropLog.js';
+import { bootProfileSnapshot, markBootPhase, markBootReady } from './services/bootProfile.js';
 import { KnowledgeAutoLinker } from './services/knowledge/knowledgeAutoLinker.js';
 import { EmbeddingBackfillService } from './services/embedding/embeddingBackfill.js';
 import { ConfiguredBrainEnrichmentProvider, EnrichedKnowledgeGraphWriter } from './services/brain/brainEnrichment.js';
@@ -387,7 +389,40 @@ import { wireFoundation } from './bootstrap/wireFoundation.js';
 import { wireRoutes } from './bootstrap/wireRoutes.js';
 
 export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Promise<BootstrapResult> {
+  // performance.now() origin = process start, so this first mark's atMs IS the
+  // module-graph load cost (measured 7–10s under tsx — invisible to log diffs).
+  markBootPhase('modules_loaded');
   const foundation = await wireFoundation(envSource);
+  markBootPhase('foundation_wired');
+
+  // §PERF-BOOT — identical code measured 2.5–8× slower with the data dir inside
+  // a sync client's folder (OneDrive rewrites/locks the SQLite WAL under us).
+  // Warn once with the remedy; never block.
+  if (/OneDrive|Dropbox|Google Drive|iCloudDrive/i.test(foundation.env.AGENTIS_DATA_DIR)) {
+    foundation.logger.warn('agentis.data_dir_in_sync_folder', {
+      dataDir: foundation.env.AGENTIS_DATA_DIR,
+      remedy: 'Move AGENTIS_DATA_DIR outside synced folders (or exclude it from sync) — measured 2.5-8x faster on every DB and model operation.',
+    });
+  }
+
+  // §PERF-BOOT — decide the embedding weight precision once, before any
+  // pipeline load: fresh installs (no vectors, no downloaded fp32 weights) pin
+  // to q8 (~115 MB first run instead of ~449 MB); existing installs pin to
+  // their current behavior. Persisted so the choice survives restarts.
+  try {
+    const hasVectors = Boolean(
+      foundation.sqlite.select({ id: schema.memoryEpisodes.id }).from(schema.memoryEpisodes)
+        .where(sql`${schema.memoryEpisodes.embedding} IS NOT NULL`).limit(1).get()
+      ?? foundation.sqlite.select({ id: schema.knowledgeChunks.id }).from(schema.knowledgeChunks)
+        .where(sql`${schema.knowledgeChunks.embedding} IS NOT NULL`).limit(1).get(),
+    );
+    ensureDtypeDefault(hasVectors);
+  } catch (err) {
+    foundation.logger.warn('embedding.dtype_default_failed', { message: (err as Error).message });
+  }
+  // Model download progress goes through the structured logger (throttled to
+  // 25% steps inside the provider — never per-chunk).
+  setEmbeddingProgressSink((message) => foundation.logger.info('embedding.model_download', { message }));
   const {
     env,
     logger,
@@ -772,6 +807,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const rollingBaselineStore = new RollingBaselineStore(sqlite);
   const SharedIntelligence = new SharedIntelligenceService(sqlite, bus, episodicMemoryStore, logger, embeddingRegistry);
   SharedIntelligence.setModelAssistedRuntimeEnabled(modelAssistedRuntimeEnabled);
+  // §B7 — record candidates that did NOT become memory, with the reason, so
+  // "why isn't this in my brain?" is answerable from stored data instead of
+  // being the invisible default it was at ~40 drop sites.
+  const memoryDropLog = new MemoryDropLog(sqlite, logger);
+  SharedIntelligence.setDropLog(memoryDropLog);
   // A configured endpoint wins, otherwise each call resolves its workspace's
   // connected orchestrator harness. This keeps brain features available on a
   // zero-config Codex/Claude workspace as well as HTTP model deployments.
@@ -855,14 +895,20 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const brainMaintenance = new BrainMaintenanceService(sqlite, bus, logger, brainCompression, SessionMoments, (ws) => SharedIntelligence.reembedPending(ws), (ws) => {
     brainQueue.enqueue({ workspaceId: ws, itemType: 'memory_reflection', priority: 'low', payload: { workspaceId: ws, trigger: 'scheduled' } });
   });
-  const brainHealth = new BrainHealthService(sqlite);
+  const brainHealth = new BrainHealthService(sqlite, memoryDropLog);
   const knowledgeAutoLinker = new KnowledgeAutoLinker(
     SharedIntelligence,
     logger,
     (workspaceId) => SharedIntelligence.embeddingProvider(workspaceId),
     (args) => brainEnrichment.classifyRelation(args),
   );
-  knowledgeBaseService.setAutoLinker(knowledgeAutoLinker, true);
+  // §PERF-BOOT (GAP A) — repairExisting stays FALSE here. Passing true ran
+  // repairOrphanedDocumentLinks synchronously inside bootstrap(): a full scan
+  // of every kb_document + chunk + link table, measured 3.2s (NVMe) to ~8s
+  // (real 732 MB workspace) on EVERY boot, before the port could bind. It is
+  // idempotent housekeeping, not a first-request dependency — start() schedules
+  // it after hydration instead.
+  knowledgeBaseService.setAutoLinker(knowledgeAutoLinker, false);
 
   void rollingBaselineStore; void brainDiscourse; void brainQueue;
   const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations, adapters, logger });
@@ -1426,6 +1472,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     requestApproval: (a) => requestOutboundApproval(a),
   });
   scheduler.registerSweep('proactive_followup', 60_000, async (now) => (await proactiveFollowups.sweep(now.toISOString())).fired);
+  // Deferred conversation enrolments (a staggered batch's first touches). The
+  // contact rests as a `scheduled` datastore row until due, so this survives a
+  // restart with no timer to rehydrate — the sweep simply finds it next tick.
+  scheduler.registerSweep('scheduled_conversation_touches', 30_000, (now) => conversationService.sweepScheduled(now));
   scheduler.registerSweep('abandoned_contacts', 3_600_000, async (now) => (await appLearning.sweepAbandoned(now.toISOString())).swept);
   // COMMAND-MODEL Layer C — proactive heartbeat. SURFACE-only by default (logs the
   // attention signal + de-dupes; the manager's next chat turn already leads with the
@@ -1570,10 +1620,13 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     extractDocument: (bytes, mime, fileName) => documentExtraction.extract({ bytes, mimeType: mime, ...(fileName ? { fileName } : {}) }),
   });
   channelBridge.setPersistentTransport(channelSupervisor);
-  // Re-link any already-authenticated WhatsApp connections on boot (best-effort).
-  void channelSupervisor.startAll().catch((err) => {
-    logger.warn('channel.supervisor.start_all_failed', { err: (err as Error).message });
-  });
+  // §PERF-BOOT (GAP B) — startAll() is NOT called here any more. Despite the
+  // old `void`, its prelude ran inline in bootstrap(): a full channel_connections
+  // scan plus the first session's `await import('baileys')`, which under tsx
+  // compiles the whole baileys graph synchronously on the main thread (~7.7s of
+  // the measured pre-bind window). start() launches it after agent hydration —
+  // channel re-link is explicitly best-effort, so arriving a few seconds later
+  // costs nothing, and it no longer competes with the hydrator for the loop.
 
   const orchestratorBridge = new OrchestratorEventBridge({ db: sqlite, bus, logger });
   orchestratorBridge.start();
@@ -1694,6 +1747,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   let httpServer: HttpServer | undefined;
   let realtime: RealtimeServer | undefined;
 
+  markBootPhase('services_wired');
+
   return {
     env,
     secrets,
@@ -1712,6 +1767,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         port: env.AGENTIS_HTTP_PORT,
         hostname: env.AGENTIS_HTTP_HOST,
       });
+      // §PERF-BOOT — logged AT THE BIND, where it is true. This line used to
+      // fire at the very end of start(), ~31s after the socket began accepting,
+      // so every boot diagnosis started from a false timeline.
+      markBootPhase('port_bound');
+      logger.info('agentis.listening', { url: `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}` });
       // Harness-native MCP: CLI harnesses mount Agentis's own MCP server and run
       // their own tool loop in ONE invocation (no marker re-spawn). Zero-config —
       // URL auto-derived (loopback) + token auto-minted. ON by default; opt out
@@ -1722,6 +1782,26 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       } catch (err) {
         logger.error('agentis.agent_runtime_hydrate_failed', { err: (err as Error).message });
       }
+      markBootPhase('agents_hydrated');
+      // §PERF-BOOT (GAP B, deferred) — channel re-link runs AFTER hydration so
+      // the baileys module graph and WhatsApp handshakes never race the
+      // hydrator (the measured pile-up: ~23s of the old 28.5s window was this
+      // contention, not hydrator work).
+      void channelSupervisor.startAll().catch((err) => {
+        logger.warn('channel.supervisor.start_all_failed', { err: (err as Error).message });
+      });
+      // §PERF-BOOT (GAP A, deferred) — orphan-link repair is sync CPU work
+      // (3–8s); stagger it well past the contention window. Unref'd: never
+      // holds the process open.
+      const repairTimer = setTimeout(() => {
+        try {
+          const repaired = knowledgeBaseService.repairOrphanedLinks();
+          if (repaired > 0) logger.info('knowledge.orphan_links_repaired', { repaired });
+        } catch (err) {
+          logger.warn('knowledge.orphan_link_repair_failed', { message: (err as Error).message });
+        }
+      }, 15_000);
+      repairTimer.unref();
       const harnessDefaults = [...new Set(
         sqlite.select({ workspaceId: schema.agents.workspaceId }).from(schema.agents).all().map((agent) => agent.workspaceId),
       )].flatMap((workspaceId) => {
@@ -1814,7 +1894,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       // still hydrate above, but RUNNING/WAITING runs remain visible through
       // /v1/runs/interrupted until the operator resumes or cancels them.
       const url = `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`;
-      logger.info('agentis.listening', { url });
+      // `agentis.listening` fired at the actual bind above; this is the full
+      // warm-up milestone, with the phase profile (also served on /healthz).
+      markBootReady();
+      logger.info('agentis.ready', { url, boot: bootProfileSnapshot().phases });
       return { url, httpServer };
     },
     async stop() {

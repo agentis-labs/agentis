@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, lte, or } from 'drizzle-orm';
 import {
   CONSTANTS,
   AgentisError,
@@ -1460,13 +1460,22 @@ export class WorkflowEngine {
    * Start every pending run buffered in `workflow_run_queue` for a workflow.
    * Drains the concurrency-overflow queue; called by SchedulerService.tick().
    */
-  async drainWorkflowQueue(workflowId: string): Promise<number> {
+  async drainWorkflowQueue(workflowId: string, now = new Date()): Promise<number> {
+    // `scheduledAt` gates the ROW, not just the sweep. processDueQueue picks
+    // workflows that have something due; without this filter, draining one due
+    // row would start every deferred row for the same workflow alongside it —
+    // collapsing a staggered fan-out into a single burst.
+    const nowIso = now.toISOString();
     const pending = this.deps.db
       .select()
       .from(schema.workflowRunQueue)
       .where(and(
         eq(schema.workflowRunQueue.workflowId, workflowId),
         eq(schema.workflowRunQueue.status, 'pending'),
+        or(
+          isNull(schema.workflowRunQueue.scheduledAt),
+          lte(schema.workflowRunQueue.scheduledAt, nowIso),
+        ),
       ))
       .all();
     let started = 0;

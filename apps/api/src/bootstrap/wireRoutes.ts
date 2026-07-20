@@ -6,6 +6,7 @@
  * deps it needs), so it runs near the end of the composition root.
  */
 import path from 'node:path';
+import { bootProfileSnapshot } from '../services/bootProfile.js';
 import { ClaimService } from '../grounding/claimService.js';
 import { GroundingContextComposer } from '../grounding/contextComposer.js';
 import { GroundingDiscoveryService } from '../grounding/discovery.js';
@@ -298,6 +299,10 @@ export function wireRoutes(deps: WireRoutesDeps) {
     mode: db.mode,
     runtime: 'local-first',
     standardMode: 'unsupported-in-v1',
+    // §PERF-BOOT — phase timings since process start + a ready flag, so "why is
+    // boot slow?" and "is it warm yet?" are answerable with one curl. Additive:
+    // the web app's reachability probe only reads `ok`.
+    boot: bootProfileSnapshot(),
   }));
   app.route('/.well-known', buildJwksRoutes({ auth }));
   mountOpenApi(app);

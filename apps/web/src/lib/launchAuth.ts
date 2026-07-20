@@ -23,6 +23,38 @@ export async function loginWithLaunchToken(token: string): Promise<LaunchAuthSes
   return json;
 }
 
+/**
+ * §PERF-BOOT — is the API actually up?
+ *
+ * Auth failures and an API that is still booting used to be indistinguishable:
+ * both surfaced as a rejected fetch, and the caller's catch logged the operator
+ * out — destroying VALID tokens — and dumped them on the login form whenever
+ * the server was merely starting (the API binds its port late, so this window
+ * is long on big workspaces). `/healthz` is unauthenticated and dependency-free,
+ * and the probe behaves identically behind the dev proxy (ECONNREFUSED → 500)
+ * and in production (fetch TypeError): not ok = not reachable.
+ */
+export async function probeServerReachable(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    try {
+      const res = await fetch('/healthz', { signal: controller.signal, cache: 'no-store' });
+      if (!res.ok) return false;
+      // A 200 alone is not proof: any SPA-fallback (dev server, reverse proxy)
+      // answers unknown paths with index.html 200. Only the API's own JSON
+      // body counts as "reachable" — verified live when exactly this misread
+      // caused the probe to bless a downed API and destroy valid tokens.
+      const body = await res.json().catch(() => null) as { ok?: boolean } | null;
+      return body?.ok === true;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+}
+
 export function getLaunchTokenFromUrl(): string | null {
   const token = new URLSearchParams(window.location.search).get('token');
   return token?.trim() || null;

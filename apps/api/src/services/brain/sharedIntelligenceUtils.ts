@@ -1,20 +1,20 @@
-const STOP_WORDS = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from', 'has', 'have',
-  'i', 'in', 'into', 'is', 'it', 'its', 'of', 'on', 'or', 'that', 'the', 'their', 'this',
-  'to', 'was', 'were', 'will', 'with', 'you', 'your', 'we', 'our', 'they', 'them', 'these',
-  'those', 'do', 'does', 'did', 'if', 'then', 'than', 'so', 'too', 'can', 'could', 'would',
-  'should', 'about', 'after', 'before', 'between', 'during', 'over', 'under', 'out', 'off',
-]);
+// §B5.4 — ONE tokenizer for the whole brain.
+//
+// This module used to carry its own `[^a-z0-9_\s]` tokenizer, and because
+// sharedIntelligence.ts (the main write/recall spine) imports from here, that
+// ASCII filter silently governed every lexical dedup key, similarity score and
+// working-set backfill in the system. Measured consequences: "部署前请务必备份"
+// and "Никогда не деплой в пятницу" tokenized to [], and "configuração de
+// segurança" to ["configura","de","seguran"] — so non-Latin memory was
+// unreachable and Portuguese memory deduped against mangled stems.
+//
+// `brainText.tokenize` is the Unicode-aware implementation (\p{L}/\p{N} plus
+// per-character CJK segmentation) and is ASCII-byte-identical for English
+// input. Re-exported rather than copied so a future fix can never again land in
+// one tokenizer and miss the other.
+export { tokenize } from './brainText.js';
 
-export function tokenize(input: string): string[] {
-  const out: string[] = [];
-  const cleaned = input.toLowerCase().replace(/[^a-z0-9_\s]+/g, ' ');
-  for (const raw of cleaned.split(/\s+/)) {
-    if (!raw || raw.length < 2 || STOP_WORDS.has(raw)) continue;
-    out.push(raw);
-  }
-  return out;
-}
+import { tokenize } from './brainText.js';
 
 export function similarity(a: string, b: string): number {
   const aTokens = new Set(tokenize(a));

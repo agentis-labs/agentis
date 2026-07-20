@@ -12,6 +12,10 @@
  *     after clean COMPLETED for legacy workflows, and only after an ACCOMPLISHED
  *     world verdict when the upstream carries a definition-of-done spec;
  *     `always` fires on any terminal settle for explicit finally/failure paths.
+ *     `dependsOn` is a CONJUNCTION, not a list of independent triggers: a
+ *     dependent on [A, C] fires once, when the last of A and C is satisfied —
+ *     never once per upstream. The settling run only opens the question; the
+ *     join answers it by reading every other dependency's current-graph run.
  *  2. **Schedules** — `binding.schedule.cron` fires on the SchedulerService sweep
  *     seam. Graph-authored triggers stay authoritative where present; this is the
  *     App-level "run this at…" layer for workflows without their own trigger.
@@ -41,6 +45,9 @@ import { queueWorkflowRun, type SchedulerDeps } from '../scheduler.js';
 import { nextCronFire } from '../cronNextFire.js';
 import { readWorkflowSpec } from '../workflow/workflowSpec.js';
 import { evaluateRunOutcome } from '../workflow/runOutcome.js';
+import { resolveStartAt } from '../workflow/deferredStart.js';
+import { readRunTerminalOutput } from '../workflow/runOutput.js';
+import { evalCondition } from '../../engine/SafeConditionParser.js';
 import { graphContentHash } from '../workflow/workflowCompass.js';
 
 /** Statuses that mean "a run is still in flight" (concurrency guard). */
@@ -139,23 +146,34 @@ export class AppOrchestratorService {
       hasDefinitionOfDone: sourceHasDefinitionOfDone,
     });
     const siblings = this.appWorkflows(source.workspaceId, source.appId);
+    // Read the upstream's terminal output ONCE for all dependents — both the
+    // `when` predicate and the passed inputs need it.
+    const chained = readRunTerminalOutput(run.graphSnapshot, run.runState);
     let fired = 0;
     for (const sibling of siblings) {
       if (sibling.id === source.id) continue;
       if (sibling.binding.enabled === false) continue;
       if (!(sibling.binding.dependsOn ?? []).includes(source.id)) continue;
-      const chainOn = sibling.binding.chainOn ?? 'success';
-      if (chainOn === 'success' && !outcome.canAdvanceOnSuccess) {
-        this.deps.logger.info('app_orchestrator.chain_blocked_outcome', {
-          appId: source.appId,
-          from: source.id,
-          to: sibling.id,
-          runId,
-          status: run.status,
-          verdict: outcome.verdict ?? outcome.reason,
-        });
+      const join = this.dependenciesSatisfied(sibling, siblings, { workflowId: source.id, outcome });
+      if (!join.ok) {
+        // Blocked by the upstream that just settled = the classic outcome gate.
+        // Blocked by anything else = a real fan-in wait, worth a distinct event.
+        const onlySettled = join.pending.length === 1 && join.pending[0] === source.id;
+        this.deps.logger.info(
+          onlySettled ? 'app_orchestrator.chain_blocked_outcome' : 'app_orchestrator.chain_join_pending',
+          {
+            appId: source.appId,
+            from: source.id,
+            to: sibling.id,
+            runId,
+            status: run.status,
+            verdict: outcome.verdict ?? outcome.reason,
+            pending: join.pending,
+          },
+        );
         continue;
       }
+      if (!this.whenHolds(sibling, source, run, outcome, chained)) continue;
       if (this.skipForConcurrency(sibling)) continue;
       try {
         const queued = await queueWorkflowRun(this.schedulerDeps(), {
@@ -171,10 +189,22 @@ export class AppOrchestratorService {
             upstreamRunId: runId,
             upstreamStatus: run.status,
             upstreamOutcome: outcome.verdict ?? outcome.reason,
+            // The upstream's actual result, not just a pointer to it. Bounded —
+            // an oversized/absent output falls back to the id-only shape, which
+            // is what every dependent handled before.
+            ...(chained.output ? { upstreamOutput: chained.output } : {}),
+            ...(chained.omitted ? { upstreamOutputOmitted: chained.omitted } : {}),
           },
           reason: 'app_chain',
           parentRunId: runId,
           chainDepth: depth + 1,
+          // Link-level wait. Null (no delay configured) preserves the immediate
+          // start every existing chain has today.
+          scheduledAt: resolveStartAt(
+            sibling.binding.delay
+              ? { delayMs: sibling.binding.delay.ms, jitterMs: sibling.binding.delay.jitterMs }
+              : null,
+          ),
         });
         fired += 1;
         this.deps.bus.publish(REALTIME_ROOMS.workflow(sibling.id), REALTIME_EVENTS.RUN_QUEUED, {
@@ -279,6 +309,10 @@ export class AppOrchestratorService {
     const latest = mode === 'continue'
       ? new Map(enabled.map((row) => [row.id, this.latestCurrentGraphRun(row)] as const))
       : new Map<string, ReturnType<AppOrchestratorService['latestCurrentGraphRun']>>();
+    // `satisfied` = this row is itself already done (reported as reused).
+    // `outcomes` keeps the raw verdict so a DEPENDENT can judge its upstreams by
+    // its own chainOn — the same rule the reactive chain applies.
+    const outcomes = new Map<string, ReturnType<typeof evaluateRunOutcome>>();
     const satisfied = new Set<string>();
     if (mode === 'continue') {
       for (const row of enabled) {
@@ -289,9 +323,8 @@ export class AppOrchestratorService {
           runState: run.runState,
           hasDefinitionOfDone: Boolean(readWorkflowSpec(row.settings)),
         });
-        if ((row.binding.chainOn ?? 'success') === 'always' ? outcome.terminal : outcome.canAdvanceOnSuccess) {
-          satisfied.add(row.id);
-        }
+        outcomes.set(row.id, outcome);
+        if (this.outcomeAccepts(outcome, row.binding.chainOn ?? 'success')) satisfied.add(row.id);
       }
     }
     const rows = enabled.filter((row) => {
@@ -299,7 +332,10 @@ export class AppOrchestratorService {
       if (satisfied.has(row.id)) return true; // reported as reused below
       const dependencies = row.binding.dependsOn ?? [];
       if (dependencies.length === 0 && row.binding.operatorEntrypoint === false) return false;
-      return dependencies.every((dependencyId) => satisfied.has(dependencyId));
+      return dependencies.every((dependencyId) => {
+        const outcome = outcomes.get(dependencyId);
+        return outcome ? this.outcomeAccepts(outcome, row.binding.chainOn ?? 'success') : false;
+      });
     });
     const results: Array<{ workflowId: string; runId: string | null; skipped?: string; reusedRunId?: string }> = [];
     for (const row of rows) {
@@ -462,6 +498,118 @@ export class AppOrchestratorService {
         return false;
       }
     });
+  }
+
+  /**
+   * Does this outcome satisfy a dependent whose policy is `chainOn`? `success`
+   * demands the world verdict (ACCOMPLISHED where the upstream carries a
+   * definition-of-done spec, clean COMPLETED otherwise); `always` accepts any
+   * terminal settle so explicit finally/failure paths still join. Single
+   * definition — the reactive chain and the operator run-all path share it.
+   */
+  private outcomeAccepts(
+    outcome: ReturnType<typeof evaluateRunOutcome>,
+    chainOn: 'success' | 'failure' | 'always',
+  ): boolean {
+    if (chainOn === 'always') return outcome.terminal;
+    // A true error branch: settled AND did not succeed. Distinct from `always`,
+    // which also fires on success — the difference between "cleanup" and
+    // "handle the failure".
+    if (chainOn === 'failure') return outcome.terminal && !outcome.canAdvanceOnSuccess;
+    return outcome.canAdvanceOnSuccess;
+  }
+
+  /**
+   * Evaluate a link's `when` predicate against the upstream result. Absent =
+   * always true.
+   *
+   * Fails CLOSED: a malformed expression holds the link rather than firing it.
+   * A chain that silently ignores its own guard is worse than one that does not
+   * fire — the guard is usually there to stop unwanted outward side effects.
+   */
+  private whenHolds(
+    dependent: WorkflowBindingRow,
+    source: { id: string; appId: string | null },
+    run: { status: string },
+    outcome: ReturnType<typeof evaluateRunOutcome>,
+    chained: ReturnType<typeof readRunTerminalOutput>,
+  ): boolean {
+    const expression = dependent.binding.when?.trim();
+    if (!expression) return true;
+    const scope = {
+      upstream: {
+        workflowId: source.id,
+        status: run.status,
+        verdict: outcome.verdict ?? outcome.reason ?? null,
+        output: chained.output ?? {},
+      },
+      app: { id: source.appId },
+    };
+    try {
+      const holds = Boolean(evalCondition(expression, scope));
+      if (!holds) {
+        this.deps.logger.info('app_orchestrator.chain_blocked_when', {
+          appId: source.appId, from: source.id, to: dependent.id, when: expression,
+        });
+      }
+      return holds;
+    } catch (err) {
+      this.deps.logger.warn('app_orchestrator.chain_when_invalid', {
+        appId: source.appId,
+        from: source.id,
+        to: dependent.id,
+        when: expression,
+        err: (err as Error).message,
+      });
+      return false;
+    }
+  }
+
+  /** Outcome of a workflow's latest current-graph run, or null when it has none. */
+  private outcomeFor(row: WorkflowBindingRow): ReturnType<typeof evaluateRunOutcome> | null {
+    const run = this.latestCurrentGraphRun(row);
+    if (!run) return null;
+    return evaluateRunOutcome({
+      status: run.status,
+      runState: run.runState,
+      hasDefinitionOfDone: Boolean(readWorkflowSpec(row.settings)),
+    });
+  }
+
+  /**
+   * Fan-in join: `dependsOn` is a conjunction, so EVERY dependency must be
+   * satisfied before the dependent starts. Without this a dependent on [A, C]
+   * fires twice — once per upstream settle.
+   *
+   * The dependent's `chainOn` governs every dependency, matching the rule that
+   * the dependent decides its own eligibility. The upstream that just settled is
+   * passed in rather than re-read: the bus event already carries its outcome, and
+   * re-querying could pick up a newer run that started after it.
+   */
+  private dependenciesSatisfied(
+    dependent: WorkflowBindingRow,
+    siblings: WorkflowBindingRow[],
+    settled: { workflowId: string; outcome: ReturnType<typeof evaluateRunOutcome> },
+  ): { ok: true } | { ok: false; pending: string[] } {
+    const chainOn = dependent.binding.chainOn ?? 'success';
+    const pending: string[] = [];
+    for (const dependencyId of dependent.binding.dependsOn ?? []) {
+      if (dependencyId === settled.workflowId) {
+        if (!this.outcomeAccepts(settled.outcome, chainOn)) pending.push(dependencyId);
+        continue;
+      }
+      const dependency = siblings.find((row) => row.id === dependencyId);
+      // A dependency that left the App (or was deleted) can never report
+      // satisfaction. Hold the join rather than silently dropping it from the
+      // conjunction — a vanished upstream must not look like a met one.
+      if (!dependency) {
+        pending.push(dependencyId);
+        continue;
+      }
+      const outcome = this.outcomeFor(dependency);
+      if (!outcome || !this.outcomeAccepts(outcome, chainOn)) pending.push(dependencyId);
+    }
+    return pending.length === 0 ? { ok: true } : { ok: false, pending };
   }
 
   private workflowBindingRow(workflowId: string): WorkflowBindingRow | null {

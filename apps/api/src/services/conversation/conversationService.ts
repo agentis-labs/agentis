@@ -133,9 +133,76 @@ export class ConversationService {
     return { ok: true, stages: script.stages.length, contactCollection: script.contactCollection };
   }
 
-  /** Start a fresh contact at the script's initial stage (the outbound first touch). */
-  enroll(ctx: ConversationContext, address: string, connectionId: string, facts?: Record<string, unknown>): Promise<AdvanceResult> {
-    return this.runtime.enroll(ctx, address, connectionId, facts);
+  /**
+   * Start a fresh contact at the script's initial stage (the outbound first
+   * touch). `options.startAt` defers that touch: the contact is persisted as
+   * `scheduled` and {@link sweepScheduled} performs it when due.
+   */
+  enroll(
+    ctx: ConversationContext,
+    address: string,
+    connectionId: string,
+    facts?: Record<string, unknown>,
+    options?: { startAt?: string | null },
+  ): Promise<AdvanceResult> {
+    return this.runtime.enroll(ctx, address, connectionId, facts, options);
+  }
+
+  /**
+   * Perform every deferred first touch that has come due, across all Apps with a
+   * script. Registered as a SchedulerService sweep — the same seam the App
+   * schedules and follow-ups use, so a deferred enrolment survives restarts with
+   * no timer to rehydrate.
+   *
+   * Each contact is isolated: one undeliverable first touch must not stall the
+   * rest of a staggered batch.
+   */
+  async sweepScheduled(now: Date = new Date()): Promise<number> {
+    const nowIso = now.toISOString();
+    let started = 0;
+    for (const app of this.#appsWithScripts()) {
+      const ctx: ConversationContext = { workspaceId: app.workspaceId, appId: app.appId };
+      const script = this.#loadScript(ctx);
+      if (!script) continue;
+      let due: ConversationContactState[];
+      try {
+        due = this.data
+          .query(app.workspaceId, app.appId, script.contactCollection, { filter: { status: 'scheduled' }, limit: 500 })
+          .rows.map((row) => row.data as unknown as ConversationContactState)
+          .filter((contact) => typeof contact.scheduledAt === 'string' && contact.scheduledAt <= nowIso);
+      } catch {
+        continue; // collection not defined yet → nothing scheduled on this App
+      }
+      for (const contact of due) {
+        try {
+          const result = await this.runtime.startScheduled(ctx, contact.address);
+          if (result.handled && result.reason !== 'not_scheduled') started += 1;
+        } catch (err) {
+          this.deps.logger?.warn('conversation.scheduled_touch_failed', {
+            appId: app.appId,
+            address: contact.address,
+            err: (err as Error).message,
+          });
+        }
+      }
+    }
+    return started;
+  }
+
+  /** Apps that have installed a conversation script (the only ones worth sweeping). */
+  #appsWithScripts(): Array<{ workspaceId: string; appId: string }> {
+    return this.deps.db
+      .select({ id: schema.apps.id, workspaceId: schema.apps.workspaceId })
+      .from(schema.apps)
+      .all()
+      .filter((app) => {
+        try {
+          return this.data.listCollections(app.workspaceId, app.id).some((c) => c.name === SCRIPT_COLLECTION);
+        } catch {
+          return false;
+        }
+      })
+      .map((app) => ({ workspaceId: app.workspaceId, appId: app.id }));
   }
 
   /**

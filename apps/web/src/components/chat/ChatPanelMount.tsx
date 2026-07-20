@@ -1,4 +1,4 @@
-﻿import { lazy, Suspense, useEffect } from 'react';
+﻿import { lazy, Suspense, useEffect, useState } from 'react';
 import type { ViewportContext } from '@agentis/core';
 import { useChatPanelStore } from './ChatPanelStore';
 import { FloatingTaskProgress } from './FloatingTaskProgress';
@@ -20,6 +20,20 @@ export function ChatPanelMount() {
   const state = useChatPanelStore((store) => store.state);
   const dockedWidth = useChatPanelStore((store) => store.dockedWidth);
   const openChat = useChatPanelStore((store) => store.openChat);
+
+  // §PERF-BOOT — defer the FIRST mount until the panel is actually opened.
+  //
+  // `LazyChatPanel` was rendered unconditionally, so its chunk — ChatPanel plus
+  // ChatPlanCanvas's @xyflow/react graph library, ~140 KB gz — downloaded on
+  // every cold boot even with the panel closed (measured: the single largest
+  // avoidable item on the boot payload). Once opened it STAYS mounted: hiding
+  // renders as a zero-width aside, deliberately, so an in-flight agent reply
+  // keeps streaming when the user closes the panel mid-conversation. Only the
+  // never-opened-this-session case skips the mount.
+  const [everOpened, setEverOpened] = useState(state !== 'hidden');
+  useEffect(() => {
+    if (state !== 'hidden') setEverOpened(true);
+  }, [state]);
 
   useEffect(() => {
     function onOpen(event: Event) {
@@ -54,9 +68,11 @@ export function ChatPanelMount() {
   return (
     <>
       {state === 'hidden' && <FloatingTaskProgress />}
-      <Suspense fallback={<ChatPanelFallback width={dockedWidth} fullscreen={state === 'fullscreen'} />}>
-        <LazyChatPanel />
-      </Suspense>
+      {everOpened && (
+        <Suspense fallback={<ChatPanelFallback width={dockedWidth} fullscreen={state === 'fullscreen'} />}>
+          <LazyChatPanel />
+        </Suspense>
+      )}
     </>
   );
 }

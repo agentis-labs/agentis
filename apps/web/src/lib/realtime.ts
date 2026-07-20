@@ -8,7 +8,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
-import { REALTIME_EVENTS } from '@agentis/core';
+// §PERF-BOOT — subpath import. The core barrel re-exports `schemas`, whose zod
+// schema construction runs at import time, so importing one constant through it
+// dragged zod (~55 KB) + core (~51 KB) into the entry chunk. Applies to every
+// EAGER shell file; lazy route chunks may keep the barrel.
+import { REALTIME_EVENTS } from '@agentis/core/events';
 import { streamSse, tokens, workspace as workspaceStore } from './api';
 
 let sharedSocket: Socket | null = null;

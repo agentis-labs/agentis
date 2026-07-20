@@ -1,4 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* §PERF-BOOT — Inter is loaded from index.html with a non-blocking link, NOT
+   from here. A CSS `@import` survives into the built stylesheet as its FIRST
+   statement, which chains a render-blocking, cross-origin fetch in front of
+   every paint (2 extra RTTs) — and on an offline self-hosted box it stalls
+   first render until the network call times out. `font-display: swap` in the
+   URL only helps after the fonts CSS itself arrives; the @import is the block. */
 
 @tailwind base;
 @tailwind components;

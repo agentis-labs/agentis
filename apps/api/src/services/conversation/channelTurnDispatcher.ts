@@ -598,6 +598,16 @@ export class ChannelTurnDispatcher {
           userMessage: runtimeText,
           assistantMessage: body,
           finishReason,
+          // §B6.1 — `input.userId` is the CONNECTION OWNER's account id (channel
+          // ingress passes `userId: row.userId`), NOT the person who sent this
+          // message. Without the two fields below, a stranger's words were
+          // captured as if the operator had typed them: labelled `operator_chat`,
+          // written to the workspace scope, and — when the text happened to match
+          // the correction regex — committed as a `governing` constitutional rule
+          // injected into every agent forever. `access` already knew the answer
+          // here; it just wasn't being handed over.
+          senderTrust: access.isOwner ? 'owner' : 'external',
+          ...(access.isOwner ? {} : { senderPeerId: this.#senderPeerScope(input) }),
         }).catch((err: unknown) => {
           this.deps.logger.warn('channel.turn.memory_capture_failed', {
             conversationId: input.conversationId,
@@ -952,6 +962,22 @@ export class ChannelTurnDispatcher {
    * recall summary for the channel context. Uses the most stable per-channel
    * handle: the sender id for Slack/Discord, the chat address for DM channels.
    */
+  /**
+   * §B6.1 — a stable per-counterparty scope key for memory formed from an
+   * EXTERNAL sender, so their knowledge lands in its own bucket instead of the
+   * workspace mind. Uses the same handle derivation as `#recordIdentity` so the
+   * scope lines up with the cross-channel identity row.
+   *
+   * Prefixed rather than raw so a channel handle can never collide with an
+   * agent/app/workflow id in the shared `scopeId` column.
+   */
+  #senderPeerScope(input: ChannelTurnInput): string {
+    const handle = (input.kind === 'slack' || input.kind === 'discord')
+      ? (input.from ?? input.chatId)
+      : input.chatId;
+    return `contact:${input.kind}:${handle}`;
+  }
+
   #recordIdentity(input: ChannelTurnInput): string | null {
     if (!this.deps.identity) return null;
     try {

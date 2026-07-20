@@ -1,5 +1,7 @@
 ﻿import {
   Children,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -90,7 +92,10 @@ import type {
   WorkspaceUser,
 } from '../../lib/workspaceData';
 import { useChatPanelStore, type ChatPanelState } from '../chat/ChatPanelStore';
-import { AgentCreateWizard } from '../agents/AgentCreateWizard';
+// §PERF-BOOT — modal-only code, mounted only when the wizard opens. Statically
+// imported, this chained RuntimePicker into the home route's chunk (~89 KB raw
+// for UI nobody sees on landing).
+const AgentCreateWizard = lazy(() => import('../agents/AgentCreateWizard').then((m) => ({ default: m.AgentCreateWizard })));
 import { RoleGlyph } from '../agents/AgentRoleGlyphs';
 import { captureFlip, type FlipSnapshot } from '../shared/flip';
 import { CanvasActivityPopover } from './CanvasActivityPopover';
@@ -1118,6 +1123,8 @@ export function WorkspaceEcosystemCanvas({
         />
       )}
 
+      {createPreset && (
+      <Suspense fallback={null}>
       <AgentCreateWizard
         open={Boolean(createPreset)}
         initialRole={createPreset?.role}
@@ -1139,6 +1146,8 @@ export function WorkspaceEcosystemCanvas({
           });
         }}
       />
+      </Suspense>
+      )}
 
       {bootLoading && <CanvasLoadingOverlay />}
     </section>

@@ -90,14 +90,41 @@ describe('AppStore', () => {
     expect(store.listMembers(ctx.workspace.id, a.id)).toHaveLength(0);
   });
 
-  it('deleting an app releases its workflows (ON DELETE SET NULL), not cascades', () => {
+  it('deleting an app deletes its workflows with it', () => {
     const wfId = seedWorkflow();
     const a = store.create(ctx.workspace.id, ctx.user.id, { name: 'Disposable', entryWorkflowId: wfId });
-    store.delete(ctx.workspace.id, a.id);
 
+    const result = store.delete(ctx.workspace.id, a.id);
+
+    expect(result).toEqual({ deletedWorkflowIds: [wfId], keptWorkflowIds: [] });
+    // Previously this only nulled app_id, leaving an orphan with no owning App
+    // page — and therefore no way to delete it from the UI at all.
+    const wf = ctx.db.select({ id: schema.workflows.id }).from(schema.workflows).where(eq(schema.workflows.id, wfId)).get();
+    expect(wf).toBeUndefined();
+  });
+
+  it('keepWorkflows retires the app but leaves its workflows standalone', () => {
+    const wfId = seedWorkflow();
+    const a = store.create(ctx.workspace.id, ctx.user.id, { name: 'Retire me', entryWorkflowId: wfId });
+
+    const result = store.delete(ctx.workspace.id, a.id, { keepWorkflows: true });
+
+    expect(result).toEqual({ deletedWorkflowIds: [], keptWorkflowIds: [wfId] });
     const wf = ctx.db.select({ id: schema.workflows.id, appId: schema.workflows.appId }).from(schema.workflows).where(eq(schema.workflows.id, wfId)).get();
-    expect(wf?.id).toBe(wfId); // workflow survives
-    expect(wf?.appId).toBeNull(); // released back to bare workflow
+    expect(wf?.id).toBe(wfId);
+    expect(wf?.appId).toBeNull(); // released back to a bare workflow
+  });
+
+  it('previews the blast radius before anything is destroyed', () => {
+    const wfId = seedWorkflow();
+    const a = store.create(ctx.workspace.id, ctx.user.id, { name: 'Preview me', entryWorkflowId: wfId });
+
+    const preview = store.deletionPreview(ctx.workspace.id, a.id);
+
+    expect(preview.appId).toBe(a.id);
+    expect(preview.workflows).toEqual([{ workflowId: wfId, title: expect.any(String), runCount: 0 }]);
+    // Preview must not mutate — the App and its workflow are still here.
+    expect(store.listWorkflowIds(ctx.workspace.id, a.id)).toEqual([wfId]);
   });
 
   it('throws RESOURCE_NOT_FOUND for a missing app', () => {

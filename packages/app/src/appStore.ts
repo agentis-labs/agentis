@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   AgentisError,
   appIdentitySchema,
@@ -220,11 +220,80 @@ export class AppStore {
     return this.get(workspaceId, appId);
   }
 
-  delete(workspaceId: string, appId: string): void {
+  /**
+   * What a delete would remove. Callers show this BEFORE destroying anything —
+   * an App's workflows are usually the whole point of the App, so the blast
+   * radius has to be visible, not implied.
+   */
+  deletionPreview(workspaceId: string, appId: string): {
+    appId: string;
+    name: string;
+    workflows: Array<{ workflowId: string; title: string; runCount: number }>;
+  } {
+    const app = this.get(workspaceId, appId);
+    const workflows = this.db
+      .select({ id: schema.workflows.id, title: schema.workflows.title })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
+      .all()
+      .map((row) => ({
+        workflowId: row.id,
+        title: row.title,
+        runCount: this.db
+          .select({ c: sql<number>`count(*)` })
+          .from(schema.workflowRuns)
+          .where(eq(schema.workflowRuns.workflowId, row.id))
+          .get()?.c ?? 0,
+      }));
+    return { appId: app.id, name: app.name, workflows };
+  }
+
+  /**
+   * Delete an App. Its workflows go WITH it by default.
+   *
+   * This used to delete only the `apps` row and let `workflows.app_id`'s
+   * `ON DELETE SET NULL` orphan them — so deleting an App silently left its
+   * workflows behind as bare rows with no owning App page, and therefore no
+   * delete affordance anywhere in the UI. Debris accumulated with every rebuild.
+   * Deleting X now removes X.
+   *
+   * `keepWorkflows` is the explicit escape hatch for "retire the App, keep the
+   * logic". It is opt-IN precisely because it used to be the silent default.
+   *
+   * `onWorkflowDeleting` lets an API-layer caller cancel in-flight runs first —
+   * the FK cascade would otherwise delete a run row out from under a live
+   * execution. Best-effort: a throwing hook never blocks the delete.
+   */
+  delete(
+    workspaceId: string,
+    appId: string,
+    options: { keepWorkflows?: boolean; onWorkflowDeleting?: (workflowId: string) => void } = {},
+  ): { deletedWorkflowIds: string[]; keptWorkflowIds: string[] } {
     this.get(workspaceId, appId); // throws NOT_FOUND if absent
-    // workflows.app_id is ON DELETE SET NULL → adopted workflows survive as bare.
+    const workflowIds = this.listWorkflowIds(workspaceId, appId);
+
+    if (options.keepWorkflows) {
+      // workflows.app_id is ON DELETE SET NULL → they survive as bare workflows.
+      this.db.delete(schema.apps).where(eq(schema.apps.id, appId)).run();
+      this.#emit(workspaceId, appId, 'deleted');
+      return { deletedWorkflowIds: [], keptWorkflowIds: workflowIds };
+    }
+
+    for (const workflowId of workflowIds) {
+      try {
+        options.onWorkflowDeleting?.(workflowId);
+      } catch {
+        /* cancelling a run is best-effort; the cascade removes it regardless */
+      }
+    }
+    if (workflowIds.length > 0) {
+      // Runs, snapshots, triggers, queue rows and chain links all cascade off
+      // workflows.id — no manual cleanup needed here.
+      this.db.delete(schema.workflows).where(inArray(schema.workflows.id, workflowIds)).run();
+    }
     this.db.delete(schema.apps).where(eq(schema.apps.id, appId)).run();
     this.#emit(workspaceId, appId, 'deleted');
+    return { deletedWorkflowIds: workflowIds, keptWorkflowIds: [] };
   }
 
   // ── Membership ──────────────────────────────────────────────

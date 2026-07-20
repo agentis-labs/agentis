@@ -18,7 +18,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { EventBus } from '../event-bus.js';
 import type { EpisodicMemoryStore } from './episodicMemoryStore.js';
-import { EMBED_HIGH_SIMILARITY, bestCosine, bestLexical, type EpisodeVector } from './util/brainDedup.js';
+import { EMBED_HIGH_SIMILARITY, bestCosine, bestLexical, resolveDuplicate, type EpisodeVector } from './util/brainDedup.js';
 import { directivePolarity, directiveTopicSignature, jaccard } from './memory/memoryReflectionService.js';
 import { SKILL_LIBRARY_PLANE } from './memory/memoryStore.js';
 
@@ -32,6 +32,7 @@ import {
   embedText,
   isEmbeddingModelCoolingDown,
   isEmbeddingModelUnavailable,
+  providerIdentity,
   selectEmbeddingProvider,
   vectorIsComparable,
 } from './embedding/embeddingProvider.js';
@@ -55,6 +56,9 @@ import {
   type PacerClass,
   type SourceSurface,
 } from './brain/brainPacer.js';
+import { segment } from './brain/brainText.js';
+import { resolveMemoryFormationTier, type MemoryFormationTier } from './brain/memoryFormationTier.js';
+import type { MemoryDropLog } from './brain/memoryDropLog.js';
 import {
   clamp01,
   compactValue,
@@ -139,6 +143,29 @@ export interface BrainGraphOptions {
    * to disable RLS (graph/admin views).
    */
   requesterScopeId?: string | null;
+  /**
+   * §B5.6 — include staged (`unconsolidated`) traces.
+   *
+   * Staging and VISIBILITY were conflated: everything the no-model mining path
+   * writes is tagged `unconsolidated`, and this query dropped that tag, so an
+   * operator without a Formation Judge model saw a permanently empty Brain
+   * canvas no matter how much their agents learned. The web UI was already
+   * built for the other behaviour — `BrainDetailRail` renders a
+   * "Staged (decays unless reused)" badge for exactly these atoms, dead code
+   * because the API could never send one.
+   *
+   * The graph opts in (an operator should see everything their brain holds);
+   * RECALL deliberately does not, so low-confidence staged traces never leak
+   * into dispatch context. Staged atoms still carry their TTL and are still
+   * expired by maintenance, so "visible" does not mean "permanent".
+   */
+  includeStaged?: boolean;
+  /**
+   * §B5.7 — override the per-kind candidate pool. Retrieval passes
+   * RETRIEVAL_CANDIDATE_CAP so scoring sees coverage rather than the last
+   * `limit/4` rows by recency. See RETRIEVAL_CANDIDATE_CAP.
+   */
+  perKind?: number;
 }
 
 export interface KnowledgeLinkInput {
@@ -220,6 +247,23 @@ const MAX_GRAPH_LIMIT = 500;
 // payload stays light regardless of count. This is only a query sanity valve
 // (matches the quarantine cap), NOT a "show fewer of your notes" limit.
 const GRAPH_RENDER_CAP = 20_000;
+
+/**
+ * §B5.7 — how many rows PER KIND retrieval may consider before scoring.
+ *
+ * `loadAtoms` derives `perKind` from the requested result limit
+ * (`max(12, ceil(limit/4))`). Search asked for MAX_GRAPH_LIMIT (500), so the
+ * pool was 125 episodes ordered by `updatedAt DESC` — meaning semantic search
+ * was not searching the brain, it was searching the *recent* brain. A rule
+ * stated four months ago could not be retrieved at any similarity score, and
+ * the Formation Judge's ADD/UPDATE context was drawn from the same window, so
+ * it could not see the atom it should have been updating.
+ *
+ * Scoring happens in memory, so the pool must be sized for COVERAGE, not for
+ * the result count. Bounded (rather than unbounded) because an earlier
+ * full-workspace scan had to be removed for performance.
+ */
+const RETRIEVAL_CANDIDATE_CAP = 2_000;
 const HIGH_SIMILARITY = 0.86;
 const RELATED_SIMILARITY = 0.52;
 const GLOBAL_CONFIDENCE_THRESHOLD = 0.7;
@@ -292,6 +336,17 @@ export class SharedIntelligenceService {
   #modelAssistedRuntimeEnabled: (workspaceId: string) => boolean = () => true;
 
   /**
+   * §B7 — optional recorder for candidates that did NOT become memory. Optional
+   * so every existing construction site keeps working; when unset, behaviour is
+   * exactly as before (silent), so wiring it can never change formation.
+   */
+  #drops: MemoryDropLog | null = null;
+
+  setDropLog(log: MemoryDropLog | null): void {
+    this.#drops = log;
+  }
+
+  /**
    * Optional Grounding layer (the Workspace Brain's organizational reasoning
    * engine). When set, buildDispatchContext appends grant-gated, audited
    * organizational claims after the existing Brain tiers. Same extension
@@ -316,6 +371,22 @@ export class SharedIntelligenceService {
 
   setModelAssistedRuntimeEnabled(resolver: (workspaceId: string) => boolean): void {
     this.#modelAssistedRuntimeEnabled = resolver;
+  }
+
+  /**
+   * §B5.9 — the operator's formation tier, read fresh from the workspace row.
+   *
+   * Deliberately NOT injected as a resolver at bootstrap like
+   * `#modelAssistedRuntimeEnabled`: this service already owns `db`, and an
+   * injected resolver is one more place a future change could capture a value
+   * once and turn a live setting into a silent restart requirement.
+   */
+  #memoryFormationTier(workspaceId: string): MemoryFormationTier {
+    try {
+      return resolveMemoryFormationTier(this.db, workspaceId);
+    } catch {
+      return 'model_assisted';
+    }
   }
 
   /**
@@ -426,6 +497,21 @@ export class SharedIntelligenceService {
     const policy: MemoryWritePolicy = input.memoryPolicy ?? 'form';
     if (policy === 'none') return ZERO;
 
+    // §B5.9 — operator-chosen formation tier. Resolved per call (never captured
+    // at bootstrap) so a settings change takes effect on the next pass rather
+    // than the next restart.
+    const tier = this.#memoryFormationTier(input.workspaceId);
+    if (tier === 'off') {
+      this.#drops?.record({
+        workspaceId: input.workspaceId,
+        gate: 'policy_none',
+        detail: 'memory formation tier is off',
+        ...(input.runId ? { runId: input.runId } : {}),
+        ...(input.originSurface ? { originSurface: input.originSurface } : {}),
+      });
+      return ZERO;
+    }
+
     const provider = this.#resolveEmbeddingProvider(input.workspaceId);
     const resolvedAgent = input.agentId ? this.resolveAgent(input.workspaceId, input.agentId) : null;
     const adapterType = input.adapterType ?? resolvedAgent?.adapterType ?? null;
@@ -438,19 +524,56 @@ export class SharedIntelligenceService {
     // Authoritative operator chat is mined permissively (terse/first-person
     // statements survive) and merged with any strict candidates from the
     // assistant side; everything else uses the strict agent-output gate.
+    // §B6.1 — `operator_chat` is the AUTHORITATIVE surface: it is mined
+    // permissively and commits durable, consolidated memory without a judge.
+    // The check is deliberately an exact match on the one trusted surface
+    // rather than a list of untrusted ones, so a future surface is untrusted by
+    // default. `external_contact` (a customer on a channel) must never satisfy
+    // it — its statements stage and decay like any other unverified evidence.
     const operatorChat = input.originSurface === 'operator_chat';
-    const candidates: ScoredStatement[] = operatorChat
+
+    // §B6.1 — READING a counterparty and TRUSTING them are separate decisions.
+    //
+    // These were previously the same flag, so mining the inbound human message
+    // was coupled to granting it operator authority. The consequence was an
+    // either/or with no correct setting: label a channel turn `operator_chat`
+    // and a stranger could write workspace constitution; label it anything else
+    // and the agent learned NOTHING from the conversation, because only the
+    // agent's own reply was mined and the customer's words were discarded.
+    //
+    // Split: `minesInboundText` decides what is READ (an external contact is
+    // worth learning from — their questions, constraints, and objections are
+    // the whole point of a support channel), while `operatorChat` alone decides
+    // what is BELIEVED. External statements flow to the staging path, where
+    // they decay unless reinforced, and stay in the counterparty's own scope.
+    const externalContact = input.originSurface === 'external_contact';
+    const minesInboundText = operatorChat || externalContact;
+    const candidates: ScoredStatement[] = minesInboundText
       ? dedupeCandidates([
         ...extractOperatorCandidates(typeof input.operatorText === 'string' ? input.operatorText : ''),
         ...extractCandidateStatements(input.taskOutput),
       ])
       : extractCandidateStatements(input.taskOutput);
-    if (candidates.length === 0) return ZERO;
+    if (candidates.length === 0) {
+      // §B7 — the most common invisible outcome: text arrived, nothing survived
+      // the deterministic gate, and the operator was told nothing at all.
+      this.#drops?.record({
+        workspaceId: input.workspaceId,
+        gate: 'below_score',
+        text: typeof input.operatorText === 'string' ? input.operatorText : null,
+        detail: 'no candidate cleared extraction',
+        ...(input.scopeId ? { scopeId: input.scopeId } : {}),
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.runId ? { runId: input.runId } : {}),
+        ...(input.originSurface ? { originSurface: input.originSurface } : {}),
+      });
+      return ZERO;
+    }
 
     const existing = this.#loadEpisodeVectors(input.workspaceId, input.scopeId ?? null);
 
     // Preferred path: a Formation Judge model forms typed, durable memory.
-    if (this.#formationCompleter && this.#modelAssistedRuntimeEnabled(input.workspaceId)) {
+    if (tier === 'model_assisted' && this.#formationCompleter && this.#modelAssistedRuntimeEnabled(input.workspaceId)) {
       try {
         const neighbors = await this.#formationNeighbors(input, candidates);
         const judge = new FormationJudge(this.#formationCompleter);
@@ -600,17 +723,15 @@ export class SharedIntelligenceService {
         vec = await embedText(provider, mem.statement);
       } catch { /* embedding optional */ }
 
-      // Deterministic backstop: the Judge decided ADD by comparing against a
-      // fresh semantic-search neighbor set, which is a probabilistic judgment
-      // call, not a guarantee. Mirror the hard cosine/lexical dedup every OTHER
-      // write path in this file already applies (#stageOrReinforce,
-      // #commitOperatorMemory, commitDurableAtom) — without it, this is the one
-      // write path where a repeatedly-re-extracted fact (e.g. a hallucination
-      // that keeps getting surfaced back into context) could compound into
-      // duplicate atoms indefinitely instead of reinforcing one.
-      const dupe = vec ? bestCosine(existing, vec) : bestLexical(existing, mem.statement);
-      if (dupe && dupe.score >= EMBED_HIGH_SIMILARITY) {
-        const node = this.reinforceAtom(input.workspaceId, 'episode', dupe.entry.id, {
+      // Deterministic backstop against a repeatedly re-extracted fact compounding
+      // into N duplicate atoms. §B5.5 — this only collapses a PROVABLE duplicate
+      // (identical after segmentation). The Judge already compared this statement
+      // against a fresh neighbour set and chose ADD; when the backstop is merely
+      // "contested" the Judge's decision stands and the atom is written, because
+      // no cosine score can distinguish a refinement from a contradiction.
+      const verdict = resolveDuplicate({ text: mem.statement, vec, existing });
+      if (verdict.kind === 'duplicate') {
+        const node = this.reinforceAtom(input.workspaceId, 'episode', verdict.entry.id, {
           agentId: input.agentId ?? null,
           adapterType,
           runId: input.runId ?? null,
@@ -622,6 +743,7 @@ export class SharedIntelligenceService {
         }
         continue;
       }
+      const contestedNeighbor = verdict.kind === 'contested' ? verdict : null;
 
       // PACER (Phase 1+2): classify the formed memory using the judge's type as
       // a prior plus the source surface and the (un-stripped) statement text.
@@ -664,9 +786,20 @@ export class SharedIntelligenceService {
         },
       });
       created += 1;
-      if (vec) this.#applyEmbedding(episode.id, vec);
+      if (vec) this.#applyEmbedding(episode.id, vec, provider);
       this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
       existing.push({ id: episode.id, vec, text: `${episode.title}\n${episode.summary}` });
+      // Preserved-but-conflicting: surface the pair for resolution instead of
+      // letting two near-identical atoms sit in the graph unreconciled.
+      if (contestedNeighbor) {
+        this.flagDispute({
+          workspaceId: input.workspaceId,
+          atomIdA: episode.id,
+          atomIdB: contestedNeighbor.entry.id,
+          reason: `Formation judge added a statement ${contestedNeighbor.score.toFixed(3)} similar to an existing atom (${contestedNeighbor.reason}).`,
+          scopeId: input.scopeId ?? null,
+        });
+      }
     }
     return { created, reinforced, linked };
   }
@@ -688,9 +821,13 @@ export class SharedIntelligenceService {
       vec = await embedText(provider, cand.text);
     } catch { /* embedding optional */ }
 
-    const best = vec ? bestCosine(existing, vec) : bestLexical(existing, cand.text);
-    if (best && best.score >= EMBED_HIGH_SIMILARITY) {
-      const node = this.reinforceAtom(input.workspaceId, 'episode', best.entry.id, {
+    // §B5.5 — reinforce only a PROVABLE duplicate. Anything merely similar is
+    // preserved and flagged after the write below; with no Formation Judge in
+    // this path there is nothing here able to tell a refinement from a
+    // contradiction, and guessing loses the operator's newer statement.
+    const verdict = resolveDuplicate({ text: cand.text, vec, existing });
+    if (verdict.kind === 'duplicate') {
+      const node = this.reinforceAtom(input.workspaceId, 'episode', verdict.entry.id, {
         agentId: input.agentId ?? null,
         adapterType,
         runId: input.runId ?? null,
@@ -743,9 +880,18 @@ export class SharedIntelligenceService {
         embeddingProvider: provider.dimension,
       },
     });
-    if (vec) this.#applyEmbedding(episode.id, vec);
+    if (vec) this.#applyEmbedding(episode.id, vec, provider);
     this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
     existing.push({ id: episode.id, vec, text: `${episode.title}\n${episode.summary}` });
+    if (verdict.kind === 'contested') {
+      this.flagDispute({
+        workspaceId: input.workspaceId,
+        atomIdA: episode.id,
+        atomIdB: verdict.entry.id,
+        reason: `Staged a statement ${verdict.score.toFixed(3)} similar to an existing atom (${verdict.reason}); no judge available to reconcile.`,
+        scopeId: input.scopeId ?? null,
+      });
+    }
     return { created: 1, reinforced: 0, linked: 0 };
   }
 
@@ -766,21 +912,14 @@ export class SharedIntelligenceService {
   ): Promise<{ created: number; reinforced: number; linked: number }> {
     let vec: number[] | null = null;
     try { vec = await embedText(provider, cand.text); } catch { /* embedding optional */ }
-    const best = vec ? bestCosine(existing, vec) : bestLexical(existing, cand.text);
-    // Semantic embeddings intentionally place "always X" and "never X" very
-    // close because their topic is identical. Polarity must therefore be
-    // checked BEFORE cosine dedup: reinforcing the earlier rule would erase an
-    // operator correction and prevent the dispute gate below from ever seeing
-    // two atoms.
-    const candidatePolarity = directivePolarity(cand.text);
-    const opposingDirective = best && candidatePolarity !== 0
-      && directivePolarity(best.entry.text) === -candidatePolarity
-      && jaccard(
-        directiveTopicSignature(cand.text),
-        directiveTopicSignature(best.entry.text),
-      ) >= 0.4;
-    if (best && best.score >= EMBED_HIGH_SIMILARITY && !opposingDirective) {
-      const node = this.reinforceAtom(input.workspaceId, 'episode', best.entry.id, {
+    // §B5.5 — the operator is the source of truth, so this path is the most
+    // damaging place to guess. Embeddings place "always X" and "never X" at the
+    // TOP of the similarity range (measured 0.9763, above every true duplicate),
+    // so polarity is checked before any merge and anything not provably
+    // identical is preserved rather than folded into the older statement.
+    const verdict = resolveDuplicate({ text: cand.text, vec, existing });
+    if (verdict.kind === 'duplicate') {
+      const node = this.reinforceAtom(input.workspaceId, 'episode', verdict.entry.id, {
         agentId: input.agentId ?? null, adapterType, runId: input.runId ?? null, scopeId: input.scopeId ?? null,
       });
       if (node) {
@@ -810,7 +949,7 @@ export class SharedIntelligenceService {
         embeddingProvider: provider.dimension,
       },
     });
-    if (vec) this.#applyEmbedding(episode.id, vec);
+    if (vec) this.#applyEmbedding(episode.id, vec, provider);
     this.publishAtom(input.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
     existing.push({ id: episode.id, vec, text: `${episode.title}\n${episode.summary}` });
     // §Mem0-teardown-followup — an operator correction is exactly the
@@ -861,9 +1000,26 @@ export class SharedIntelligenceService {
     } catch { /* best effort — the weekly sweep still covers this */ }
   }
 
-  #applyEmbedding(episodeId: string, vec: number[]): void {
+  /**
+   * Attach an inline-awaited vector to a just-written episode.
+   *
+   * §B5.11 — must stamp the FULL embedding identity and clear `needsReembed`.
+   * It used to write only the `embedding` column: the local provider is async,
+   * so `episodes.write` had already set `needsReembed=true` with null
+   * model/dims — which meant (a) the 15s sweep re-embedded every atom a second
+   * time (double cost on every addAtom/commitMemory), and (b) worse, the inline
+   * vector was DEAD until then, because `vectorIsComparable` rejects a vector
+   * with no stamped model.
+   */
+  #applyEmbedding(episodeId: string, vec: number[], provider: EmbeddingProvider): void {
+    const identity = providerIdentity(provider);
     this.db.update(schema.memoryEpisodes)
-      .set({ embedding: vec as unknown as null })
+      .set({
+        embedding: vec as unknown as null,
+        embeddingModel: identity.model,
+        embeddingDims: identity.dims,
+        needsReembed: false,
+      })
       .where(eq(schema.memoryEpisodes.id, episodeId))
       .run();
   }
@@ -1524,6 +1680,8 @@ export class SharedIntelligenceService {
       scopeId,
       includeWorkspace: args.scope === 'both' || graphScope === 'workspace',
       limit: MAX_GRAPH_LIMIT,
+      // §B5.7 — score against coverage, not against the most recent 125 rows.
+      perKind: RETRIEVAL_CANDIDATE_CAP,
       minConfidence: args.minConfidence ?? 0,
       ...(args.kinds ? { kinds: args.kinds } : {}),
       excludeKinds,
@@ -1655,16 +1813,20 @@ export class SharedIntelligenceService {
     try { vec = await embedText(provider, args.content); } catch { /* embedding optional */ }
 
     const existing = this.#loadEpisodeVectors(args.workspaceId, args.scopeId, true);
-    const best = vec ? bestCosine(existing, vec) : bestLexical(existing, text);
-    if (best && best.score >= EMBED_HIGH_SIMILARITY) {
-      const node = this.reinforceAtom(args.workspaceId, 'episode', best.entry.id, {
+    // §B5.5 — scope-strict resolution. Only a provably identical statement
+    // collapses into a reinforcement; a merely-similar one is written and
+    // flagged, because an App that changes a rule between runs must not have
+    // the new rule absorbed into the old one.
+    const verdict = resolveDuplicate({ text, vec, existing });
+    if (verdict.kind === 'duplicate') {
+      const node = this.reinforceAtom(args.workspaceId, 'episode', verdict.entry.id, {
         agentId: args.agentId ?? null,
         runId: args.runId ?? null,
         scopeId: args.scopeId,
       });
       if (node) {
         this.publishAtom(args.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_REINFORCED, node);
-        return { atomId: best.entry.id, created: false, reinforced: true };
+        return { atomId: verdict.entry.id, created: false, reinforced: true };
       }
     }
 
@@ -1694,7 +1856,7 @@ export class SharedIntelligenceService {
         embeddingProvider: provider.dimension,
       },
     });
-    if (vec) this.#applyEmbedding(episode.id, vec);
+    if (vec) this.#applyEmbedding(episode.id, vec, provider);
     this.publishAtom(args.workspaceId, REALTIME_EVENTS.BRAIN_ATOM_CREATED, episodeToGraphNode(episode, 1));
     return { atomId: episode.id, created: true, reinforced: false };
   }
@@ -2125,7 +2287,11 @@ export class SharedIntelligenceService {
           : []),
       ))
       .orderBy(desc(schema.memoryEpisodes.updatedAt))
-      .limit(MAX_GRAPH_LIMIT)
+      // §B5.7 — dedup candidates were capped at the 500 most recent atoms, so
+      // past that size duplicate detection silently stopped working and copies
+      // accumulated. Sized for coverage like retrieval; this runs once per
+      // promote() call, not per candidate.
+      .limit(RETRIEVAL_CANDIDATE_CAP)
       .all();
     return rows
       .filter((row) => row.status !== 'archived')
@@ -2333,7 +2499,7 @@ export class SharedIntelligenceService {
     const minConfidence = clamp01(options.minConfidence ?? 0);
     const kindFilter = options.kinds && options.kinds.length > 0 ? new Set(options.kinds) : null;
 
-    const atoms = this.loadAtoms(workspaceId, { scope, scopeId, includeWorkspace, limit, maxLimit: GRAPH_RENDER_CAP, kinds: options.kinds, minConfidence });
+    const atoms = this.loadAtoms(workspaceId, { scope, scopeId, includeWorkspace, limit, maxLimit: GRAPH_RENDER_CAP, kinds: options.kinds, minConfidence, includeStaged: true });
     const atomByKey = new Map(atoms.map((atom) => [atomKey(atom.kind, atom.id), atom] as const));
 
     const linkRows = this.db.select().from(schema.knowledgeLinks)
@@ -2796,7 +2962,7 @@ export class SharedIntelligenceService {
 
   private loadAtoms(workspaceId: string, options: BrainGraphOptions): AtomCandidate[] {
     const limit = Math.min(Math.max(options.limit ?? DEFAULT_GRAPH_LIMIT, 1), options.maxLimit ?? MAX_GRAPH_LIMIT);
-    const perKind = Math.max(12, Math.ceil(limit / 4));
+    const perKind = options.perKind ?? Math.max(12, Math.ceil(limit / 4));
     const scopeId = options.scopeId ?? null;
     const scope = options.scope ?? 'workspace';
     const includeWorkspace = options.includeWorkspace ?? scope !== 'scoped';
@@ -2811,9 +2977,10 @@ export class SharedIntelligenceService {
         .where(and(
           eq(schema.memoryEpisodes.workspaceId, workspaceId),
           isNull(schema.memoryEpisodes.archivedAt),
-          // Hide unconsolidated episodic traces (staged run output + outcome
-          // markers) from the graph — only formed/durable memory is shown.
-          sql`${schema.memoryEpisodes.tags} NOT LIKE '%unconsolidated%'`,
+          // §B5.6 — staged traces are hidden from RECALL (they are low-confidence
+          // and would dilute dispatch context) but shown on the GRAPH, which opts
+          // in via `includeStaged`. See BrainGraphOptions.includeStaged.
+          ...(options.includeStaged ? [] : [sql`${schema.memoryEpisodes.tags} NOT LIKE '%unconsolidated%'`]),
           // Skill-library atoms (skill/example) ride this table on a separate
           // plane; keep them OUT of the generic episode surface (and thus the
           // always-inject dispatch tier). They have dedicated branches below.
@@ -3325,11 +3492,22 @@ function titleFromFact(fact: string): string {
   return truncate(clean, 92);
 }
 
-/** Dedupe scored statements by normalized text, keeping the highest score. */
+/**
+ * Dedupe scored statements by normalized text, keeping the highest score.
+ *
+ * §B5.4 — this used to key on `[^a-z0-9]` and `continue` on an empty key, which
+ * meant a statement written in Russian, Greek, Arabic, Hebrew, Thai, Chinese,
+ * Japanese or Korean normalized to "" and was DELETED here — before the
+ * Formation Judge, before any scoring gate, with no log. Shared Unicode
+ * segmentation fixes the key; the empty-key case now falls back to the raw
+ * trimmed text so a statement can never be dropped merely for being
+ * unsegmentable. Only genuinely empty input is skipped.
+ */
 function dedupeCandidates(candidates: ScoredStatement[]): ScoredStatement[] {
   const byKey = new Map<string, ScoredStatement>();
   for (const candidate of candidates) {
-    const key = candidate.text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const segmented = segment(candidate.text).join(' ');
+    const key = segmented || candidate.text.trim().toLowerCase();
     if (!key) continue;
     const prev = byKey.get(key);
     if (!prev || candidate.score > prev.score) byKey.set(key, candidate);

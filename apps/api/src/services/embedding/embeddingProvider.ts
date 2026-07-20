@@ -19,6 +19,7 @@
  */
 
 import { resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 // ────────────────────────────────────────────────────────────
 // Interface
@@ -249,6 +250,31 @@ export function isEmbeddingModelCoolingDown(provider?: EmbeddingProvider): boole
 /** Default model — kept here so the warmer and the provider can never diverge. */
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
 
+/**
+ * §PERF-BOOT — model-download progress sink. Defaults to stdout (the CLI's
+ * first-run surface); bootstrap redirects it into the structured logger.
+ * Deliberately NOT per-chunk logging — a prior shipped regression flooded logs
+ * from this exact subsystem, so the reporter below throttles to 25% steps.
+ */
+let progressSink: (message: string) => void = (message) => process.stdout.write(`${message}\n`);
+
+export function setEmbeddingProgressSink(sink: (message: string) => void): void {
+  progressSink = sink;
+}
+
+const progressLastStep = new Map<string, number>();
+
+function reportModelDownloadProgress(event: unknown): void {
+  const e = event as { status?: string; file?: string; progress?: number; total?: number };
+  if (e?.status !== 'progress' || typeof e.progress !== 'number' || !e.file) return;
+  if ((e.total ?? 0) < 5_000_000) return; // config/tokenizer files — noise
+  const step = Math.floor(e.progress / 25); // 0,25,50,75,100
+  if ((progressLastStep.get(e.file) ?? -1) >= step) return;
+  progressLastStep.set(e.file, step);
+  const totalMb = e.total ? ` of ${Math.round(e.total / 1_048_576)} MB` : '';
+  progressSink(`[embedding] downloading ${e.file}: ${Math.round(e.progress)}%${totalMb}`);
+}
+
 /** True only after transformers has fully loaded the requested model. */
 export function isLocalEmbeddingModelReady(model = DEFAULT_LOCAL_EMBEDDING_MODEL): boolean {
   return loadedLocalModels.has(model);
@@ -286,14 +312,67 @@ function offlineOnly(): boolean {
  * fp32, which for multilingual-e5-small is a **449 MB** download. `q8` cuts that
  * to roughly a quarter and speeds up CPU inference, at a negligible recall cost.
  *
- * NOT changed by default: existing installs already hold fp32 vectors, and
- * quietly switching precision would mix two slightly different vector spaces.
- * When it IS set, the precision is folded into `modelId` (below) so stored
- * vectors stay self-describing and the existing (model, dims) comparability +
- * re-embed machinery handles the transition instead of silently mismatching.
+ * Resolution order: env `AGENTIS_EMBEDDING_DTYPE` → the persisted `.dtype`
+ * marker (written once by `ensureDtypeDefault`) → library default (fp32).
+ *
+ * §PERF-BOOT — FRESH installs now default to q8 via the marker: the "don't mix
+ * vector spaces" objection only ever applied to installs already holding fp32
+ * vectors, and dtype is folded into `modelId` (below) so the existing
+ * (model, dims) comparability + re-embed machinery fences any straggler.
+ * CRITICAL invariant: an fp32 lock maps to `undefined`, never the string
+ * 'fp32' — existing vectors carry a modelId with NO dtype suffix, and making
+ * fp32 explicit would change the modelId and re-embed the whole brain.
  */
 function configuredDtype(): string | undefined {
-  return process.env.AGENTIS_EMBEDDING_DTYPE?.trim() || undefined;
+  const env = process.env.AGENTIS_EMBEDDING_DTYPE?.trim();
+  if (env) return env;
+  const marker = readDtypeMarker();
+  return marker && marker !== 'fp32' ? marker : undefined;
+}
+
+let dtypeMarkerCache: string | null | undefined;
+
+function dtypeMarkerPath(): string | undefined {
+  const dir = embeddingCacheDir();
+  return dir ? resolve(dir, '.dtype') : undefined;
+}
+
+function readDtypeMarker(): string | null {
+  if (dtypeMarkerCache !== undefined) return dtypeMarkerCache;
+  try {
+    const path = dtypeMarkerPath();
+    dtypeMarkerCache = path ? readFileSync(path, 'utf8').trim() || null : null;
+  } catch {
+    dtypeMarkerCache = null;
+  }
+  return dtypeMarkerCache;
+}
+
+/**
+ * §PERF-BOOT — decide this install's default weight precision, ONCE, persisted.
+ *
+ * Called at bootstrap before any pipeline load. A fresh install (no stored
+ * vectors anywhere AND no already-downloaded fp32 weights) is pinned to q8 —
+ * a ~115 MB first-run download instead of ~449 MB, and faster CPU inference.
+ * Every other install is pinned to what it already runs ('fp32' marker →
+ * `configuredDtype` returns undefined, preserving the exact current modelId).
+ * The marker makes the choice durable: without it, a q8 install would silently
+ * flip back to fp32 on the boot after its first vectors were written.
+ */
+export function ensureDtypeDefault(hasExistingVectors: boolean): void {
+  try {
+    const path = dtypeMarkerPath();
+    if (!path || readDtypeMarker()) return; // no data dir yet, or already decided
+    const envChoice = process.env.AGENTIS_EMBEDDING_DTYPE?.trim();
+    const fp32WeightsPresent = existsSync(resolve(embeddingCacheDir()!, DEFAULT_LOCAL_EMBEDDING_MODEL, 'onnx', 'model.onnx'));
+    const choice = envChoice || (!hasExistingVectors && !fp32WeightsPresent ? 'q8' : 'fp32');
+    mkdirSync(embeddingCacheDir()!, { recursive: true });
+    writeFileSync(path, `${choice}\n`, 'utf8');
+    dtypeMarkerCache = choice;
+  } catch {
+    // Best-effort: an unwritable marker just means library-default behavior.
+    dtypeMarkerCache = dtypeMarkerCache ?? null;
+  }
 }
 
 /**
@@ -413,7 +492,13 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
         // are read at load time.
         configureTransformersEnv(mod as unknown as Record<string, unknown>);
         const dtype = configuredDtype();
-        return mod.pipeline('feature-extraction', this.#model, ...(dtype ? [{ dtype } as never] : []));
+        // §PERF-BOOT — surface download progress. The first-run fetch (115 MB
+        // q8 / 449 MB fp32) used to emit one "model_warming" line and then
+        // silence for minutes; an operator cannot tell "downloading" from
+        // "hung". Throttled to 25% steps per file inside the reporter.
+        const options: Record<string, unknown> = { progress_callback: reportModelDownloadProgress };
+        if (dtype) options.dtype = dtype;
+        return mod.pipeline('feature-extraction', this.#model, options as never);
       })
       .then((loaded) => {
         loadedLocalModels.add(this.#model);
@@ -499,7 +584,105 @@ export function vectorIsComparable(
 }
 
 /** Normalise any provider return value (sync or async) to a resolved vector. */
+/**
+ * §B5.10 — embed latency instrumentation.
+ *
+ * Every brain write awaits an embedding inline, and until now NOTHING in any
+ * write path measured it: nobody could say what storing a memory actually
+ * costs, so "is the brain slow?" was unanswerable and any regression in model
+ * load, dtype, or provider would surface only as vague sluggishness. The local
+ * model also runs in-process on the main thread, so a slow embed is not just a
+ * slow write — it blocks the event loop serving every other request.
+ *
+ * Deliberately a ring buffer plus cumulative counters rather than a metrics
+ * dependency: this must be free enough to sit in the hot path unconditionally.
+ */
+const LATENCY_WINDOW = 512;
+const SLOW_EMBED_MS = 250;
+
+const latencyWindow: number[] = [];
+let latencyCursor = 0;
+let embedCount = 0;
+let embedTotalMs = 0;
+let embedMaxMs = 0;
+let embedSlowCount = 0;
+let embedErrorCount = 0;
+/** First observed embed is the cold path (model load); reported separately so it never skews p95. */
+let coldStartMs: number | null = null;
+
+function recordEmbedLatency(ms: number): void {
+  if (coldStartMs === null) {
+    coldStartMs = ms;
+    return; // model load, not a representative write cost
+  }
+  embedCount += 1;
+  embedTotalMs += ms;
+  if (ms > embedMaxMs) embedMaxMs = ms;
+  if (ms >= SLOW_EMBED_MS) embedSlowCount += 1;
+  if (latencyWindow.length < LATENCY_WINDOW) latencyWindow.push(ms);
+  else {
+    latencyWindow[latencyCursor] = ms;
+    latencyCursor = (latencyCursor + 1) % LATENCY_WINDOW;
+  }
+}
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return Math.round(sorted[index]!);
+}
+
+export interface EmbeddingLatencyStats {
+  /** Embeds observed since boot, EXCLUDING the cold-start model load. */
+  count: number;
+  meanMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  maxMs: number;
+  /** Embeds at or above SLOW_EMBED_MS — each one also stalls the event loop. */
+  slowCount: number;
+  slowThresholdMs: number;
+  /** Cost of the first embed (model load + inference), or null if none yet. */
+  coldStartMs: number | null;
+  errorCount: number;
+}
+
+export function embeddingLatencyStats(): EmbeddingLatencyStats {
+  const sorted = [...latencyWindow].sort((a, b) => a - b);
+  return {
+    count: embedCount,
+    meanMs: embedCount === 0 ? 0 : Math.round(embedTotalMs / embedCount),
+    p50Ms: percentile(sorted, 50),
+    p95Ms: percentile(sorted, 95),
+    maxMs: Math.round(embedMaxMs),
+    slowCount: embedSlowCount,
+    slowThresholdMs: SLOW_EMBED_MS,
+    coldStartMs: coldStartMs === null ? null : Math.round(coldStartMs),
+    errorCount: embedErrorCount,
+  };
+}
+
+/** Test-only reset so suites don't inherit each other's timings. */
+export function resetEmbeddingLatencyStats(): void {
+  latencyWindow.length = 0;
+  latencyCursor = 0;
+  embedCount = 0;
+  embedTotalMs = 0;
+  embedMaxMs = 0;
+  embedSlowCount = 0;
+  embedErrorCount = 0;
+  coldStartMs = null;
+}
+
 export async function embedText(provider: EmbeddingProvider, text: string): Promise<number[]> {
-  const raw = provider.embed(text);
-  return Array.isArray(raw) ? raw : await raw;
+  const startedAt = performance.now();
+  try {
+    const raw = provider.embed(text);
+    const value = Array.isArray(raw) ? raw : await raw;
+    recordEmbedLatency(performance.now() - startedAt);
+    return value;
+  } catch (err) {
+    embedErrorCount += 1;
+    throw err;
+  }
 }

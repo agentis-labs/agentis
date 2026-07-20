@@ -13,6 +13,10 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/v1': apiTarget,
+      // §PERF-BOOT — the "is the server up?" probe. Without this entry the SPA
+      // fallback answered /healthz with index.html 200 in dev, so the probe
+      // reported a downed API as reachable and the app logged the operator out.
+      '/healthz': apiTarget,
       '/socket.io': {
         target: socketTarget,
         ws: true,

@@ -25,11 +25,12 @@ import {
   viewNodeSchema,
   REALTIME_EVENTS,
   REALTIME_ROOMS,
+  CONSTANTS,
   type AgentisToolContext,
   type AppSurface,
 } from '@agentis/core';
 import { z } from 'zod';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql as sqlOp } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
@@ -175,10 +176,18 @@ const chainItemSchema = z.object({
   order: z.number().int().min(0).optional(),
   operatorEntrypoint: z.boolean().optional(),
   dependsOn: z.array(z.string()).optional(),
-  chainOn: z.enum(['success', 'always']).optional(),
+  chainOn: z.enum(['success', 'failure', 'always']).optional(),
   concurrency: z.enum(['parallel', 'exclusive']).optional(),
   enabled: z.boolean().optional(),
   purpose: z.string().max(400).optional(),
+  when: z.string().max(2000).nullable().optional(),
+  delay: z
+    .object({
+      ms: z.number().int().min(0).max(CONSTANTS.MAX_START_DELAY_MS).optional(),
+      jitterMs: z.number().int().min(0).max(CONSTANTS.MAX_START_DELAY_MS).optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -299,27 +308,67 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.app.delete',
         family: 'app',
-        description: 'PERMANENTLY delete an App and its collections/records/surfaces (adopted workflows survive as bare, un-owned). Destructive and irreversible. Called WITHOUT confirm:true it returns a preview of exactly what will be removed and what survives — review it, then call again with confirm:true. Prefer agentis.app.archive unless the App must truly be erased.',
-        inputSchema: { type: 'object', properties: { ...appIdProp, confirm: { type: 'boolean', description: 'Must be true to actually delete. Omit/false to get a preview first.' } } },
+        description: 'PERMANENTLY delete an App, its collections/records/surfaces, AND its workflows with their run history. Destructive and irreversible. Called WITHOUT confirm:true it returns a preview of exactly what will be removed — review it, then call again with confirm:true. Pass keepWorkflows:true to retire the App but keep its workflows as standalone ones. Prefer agentis.app.archive unless the App must truly be erased.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            confirm: { type: 'boolean', description: 'Must be true to actually delete. Omit/false to get a preview first.' },
+            keepWorkflows: { type: 'boolean', description: 'Keep this App\'s workflows as standalone workflows instead of deleting them with it. Default false — workflows go with the App.' },
+          },
+        },
         mutating: true,
         mcpExposed: true,
       },
       handler: (args, ctx) => {
         const appId = resolveAppId(args, ctx);
         const app = store.get(ctx.workspaceId, appId);
-        const workflowIds = store.listWorkflowIds(ctx.workspaceId, appId);
+        const keepWorkflows = args.keepWorkflows === true;
+        const preview = store.deletionPreview(ctx.workspaceId, appId);
+        const totalRuns = preview.workflows.reduce((sum, wf) => sum + wf.runCount, 0);
         if (args.confirm !== true) {
           return {
             deleted: false,
             preview: true,
             app: { appId: app.id, name: app.name, status: app.status },
-            willRemove: 'this App, its collections/records and surfaces',
-            willSurviveAsBare: { workflows: workflowIds },
-            next: `Call agentis.app.delete again with { appId: "${appId}", confirm: true } to proceed, or agentis.app.archive to retire it reversibly instead.`,
+            willRemove: keepWorkflows
+              ? 'this App, its collections/records and surfaces'
+              : `this App, its collections/records and surfaces, and ${preview.workflows.length} workflow(s) with ${totalRuns} run(s)`,
+            workflows: preview.workflows,
+            ...(keepWorkflows
+              ? { willSurviveAsStandalone: preview.workflows.map((wf) => wf.workflowId) }
+              : {}),
+            next:
+              `Call agentis.app.delete again with { appId: "${appId}", confirm: true } to proceed`
+              + (keepWorkflows
+                ? '.'
+                : `, or add keepWorkflows:true to retire the App but keep its ${preview.workflows.length} workflow(s).`)
+              + ' agentis.app.archive retires it reversibly instead.',
           };
         }
-        store.delete(ctx.workspaceId, appId);
-        return { deleted: true, appId, name: app.name, workflowsNowBare: workflowIds };
+        const result = store.delete(ctx.workspaceId, appId, {
+          keepWorkflows,
+          onWorkflowDeleting: (workflowId) => {
+            for (const run of deps.db
+              .select({ id: schema.workflowRuns.id })
+              .from(schema.workflowRuns)
+              .where(and(
+                eq(schema.workflowRuns.workflowId, workflowId),
+                sqlOp`${schema.workflowRuns.status} NOT IN ('COMPLETED','FAILED','CANCELLED','COMPLETED_WITH_CONTRACT_VIOLATION')`,
+              ))
+              .all()) {
+              void deps.engine.cancelRun(run.id).catch(() => { /* the cascade removes it anyway */ });
+            }
+          },
+        });
+        return {
+          deleted: true,
+          appId,
+          name: app.name,
+          workflowsDeleted: result.deletedWorkflowIds,
+          workflowsKeptAsStandalone: result.keptWorkflowIds,
+          runsRemoved: keepWorkflows ? 0 : totalRuns,
+        };
       },
     },
     {
@@ -377,14 +426,24 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
     {
       definition: {
         id: 'agentis.workflow.chain',
-        family: 'app',
+        // `build`, not `app`: composing workflows IS authoring. Under `app` an
+        // agent filtering to the build family never saw the only tool that can
+        // link what it just built.
+        family: 'build',
         description:
           'Wire the App-level RUN ORDER and DEPENDENCIES between workflows — the "runs after" chaining the App Orchestrator executes. ' +
           'CRITICAL DISTINCTION: `order` is ONLY a display/tie-break sort number — it does NOT make workflows run one-after-another. To actually chain them (B waits for A), you MUST set `dependsOn`. ' +
           'To make workflows run in SEQUENCE (the usual intent of "put them in order" / "run them one after another"), pass `sequence`: an ordered list of workflow IDs — this sets BOTH order AND the dependsOn chain (each depends on the previous) in one call. That is what shows up as ticked "runs after" boxes. ' +
-          'Use `workflows` instead (or as well) for fine-grained per-workflow control: dependsOn (workflow IDs that must finish first), chainOn ("success" default = ACCOMPLISHED verdict when the upstream has a spec; "always" = explicit finally/failure handling), concurrency ("parallel" | "exclusive" = skip an orchestrated start while a run is still active), enabled, purpose, order. ' +
+          'dependsOn is a CONJUNCTION: a workflow depending on [A, C] runs ONCE, when the last of A and C is satisfied — never once per upstream. ' +
+          'Use `workflows` instead (or as well) for fine-grained per-workflow control. A link expresses FIVE things: ' +
+          'WHEN — chainOn ("success" default = ACCOMPLISHED verdict when the upstream has a spec; "failure" = a true error branch that fires only when it settled WITHOUT succeeding; "always" = any terminal settle, for finally/cleanup); ' +
+          'WHETHER — `when`, a predicate over the upstream result (e.g. "upstream.output.leadCount > 0"), so B runs after A only if A produced something worth running B for; ' +
+          'HOW LONG AFTER — `delay: { ms, jitterMs }`, a link-level wait without needing a wait node (jitterMs spreads dependents that share a rate-limited downstream); ' +
+          'HOW MANY — the conjunction above; and ' +
+          'WITH WHAT — the dependent receives `upstreamOutput` (the upstream\'s real terminal output), plus upstreamRunId/Status/Outcome. ' +
+          'Also: concurrency ("parallel" | "exclusive" = skip an orchestrated start while a run is still active), enabled, purpose, order. ' +
           '`operatorEntrypoint:false` keeps an event/channel/schedule-driven root out of Run Pipeline while leaving it enabled for its real persisted trigger. ' +
-          'Omitted fields are preserved. Rejects self-dependencies and cycles.',
+          'Omitted fields are preserved. Rejects self-dependencies and cycles (including cycles formed together with event rules).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -394,18 +453,27 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
               items: { type: 'string' },
               description: 'Ordered workflow IDs to run one-after-another. Sets order AND wires dependsOn as a linear chain (2nd runs after 1st, 3rd after 2nd, …). The simplest way to fulfill "run these in order".',
             },
-            chainOn: { type: 'string', enum: ['success', 'always'], description: 'Applied to every link when using `sequence`. "success" requires an ACCOMPLISHED verdict when the upstream has a definition-of-done spec; "always" is for explicit finally/failure handling.' },
+            chainOn: { type: 'string', enum: ['success', 'failure', 'always'], description: 'Applied to every link when using `sequence`. "success" requires an ACCOMPLISHED verdict when the upstream has a definition-of-done spec; "failure" fires only when it settled without succeeding; "always" fires on any terminal settle.' },
             workflows: {
               type: 'array',
-              description: 'Per-workflow bindings for fine control. Each: { workflowId, order?, dependsOn?: [workflowId], chainOn?: "success"|"always", concurrency?: "parallel"|"exclusive", enabled?, purpose? }.',
+              description: 'Per-workflow bindings for fine control. Each: { workflowId, order?, dependsOn?: [workflowId], chainOn?, when?, delay?, concurrency?, enabled?, purpose? }.',
               items: {
                 type: 'object',
                 properties: {
                   workflowId: { type: 'string' },
                   order: { type: 'number' },
                   operatorEntrypoint: { type: 'boolean', description: 'False for roots started only by a channel, event rule, webhook, listener, or schedule; they stay enabled but Run Pipeline will not start them.' },
-                  dependsOn: { type: 'array', items: { type: 'string' }, description: 'Workflow IDs that must run before this one (the real "runs after").' },
-                  chainOn: { type: 'string', enum: ['success', 'always'] },
+                  dependsOn: { type: 'array', items: { type: 'string' }, description: 'Workflow IDs that must ALL finish before this one starts (a conjunction — it fires once, when the last is satisfied).' },
+                  chainOn: { type: 'string', enum: ['success', 'failure', 'always'] },
+                  when: {
+                    type: 'string',
+                    description: 'Predicate over the upstream result; the link fires only when true. Scope: { upstream: { workflowId, status, verdict, output }, app: { id } }. Example: "upstream.output.leadCount > 0". An invalid expression HOLDS the link rather than firing it.',
+                  },
+                  delay: {
+                    type: 'object',
+                    description: 'Wait after the dependencies are satisfied, before starting. { ms, jitterMs } — jitterMs adds a random extra in [0, jitterMs) so simultaneous dependents do not all fire on the same instant.',
+                    properties: { ms: { type: 'number' }, jitterMs: { type: 'number' } },
+                  },
                   concurrency: { type: 'string', enum: ['parallel', 'exclusive'] },
                   enabled: { type: 'boolean' },
                   purpose: { type: 'string' },
@@ -426,7 +494,9 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         const sequenceItems: z.infer<typeof chainItemSchema>[] = [];
         if (Array.isArray(args.sequence)) {
           const seq = z.array(z.string().min(1)).min(1).parse(args.sequence);
-          const seqChainOn = args.chainOn === 'always' ? 'always' as const : 'success' as const;
+          const seqChainOn = args.chainOn === 'always' || args.chainOn === 'failure'
+            ? args.chainOn
+            : 'success' as const;
           seq.forEach((workflowId, i) => {
             sequenceItems.push({ workflowId, order: i, dependsOn: i === 0 ? [] : [seq[i - 1]!], chainOn: seqChainOn });
           });
@@ -467,11 +537,43 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           changed.add(workflowId);
         }
 
-        // Reject cycles across the FULL post-patch dependency graph.
+        // Reject cycles across the FULL post-patch dependency graph — including
+        // links made by the OTHER mechanism. A dependsOn chain and an event rule
+        // could previously form a loop that neither validator saw on its own,
+        // caught only by a runtime depth cap after the damage was done.
         const graph = new Map([...bindings].map(([id, b]) => [id, (b.dependsOn ?? []).filter((d) => memberSet.has(d))]));
+        const eventRules = deps.db
+          .select({
+            source: schema.workflowEventSubscriptions.sourceWorkflowId,
+            target: schema.workflowEventSubscriptions.targetWorkflowId,
+          })
+          .from(schema.workflowEventSubscriptions)
+          .where(and(
+            eq(schema.workflowEventSubscriptions.workspaceId, ctx.workspaceId),
+            eq(schema.workflowEventSubscriptions.enabled, true),
+          ))
+          .all();
+        const viaEventRule = new Set<string>();
+        for (const rule of eventRules) {
+          if (!memberSet.has(rule.source) || !memberSet.has(rule.target)) continue;
+          // An event rule source→target is the same "target runs after source"
+          // edge dependsOn expresses, so it belongs in the same graph.
+          const existing = graph.get(rule.target) ?? [];
+          if (!existing.includes(rule.source)) {
+            graph.set(rule.target, [...existing, rule.source]);
+            viaEventRule.add(`${rule.source}->${rule.target}`);
+          }
+        }
         const cycle = firstDependencyCycle(graph);
         if (cycle) {
-          throw new AgentisError('VALIDATION_FAILED', `dependsOn would form a cycle: ${cycle.join(' → ')}. Workflows cannot depend on each other in a loop.`);
+          const crossesMechanism = cycle.some((id, i) => viaEventRule.has(`${cycle[i + 1] ?? cycle[0]}->${id}`));
+          throw new AgentisError(
+            'VALIDATION_FAILED',
+            `this would form a cycle: ${cycle.join(' → ')}. Workflows cannot depend on each other in a loop.`
+            + (crossesMechanism
+              ? ' Note: part of this loop is an existing EVENT RULE (agentis.workflow.rule), not a dependsOn link — inspect both before rewiring.'
+              : ''),
+          );
         }
 
         // Commit only the changed workflows, then publish realtime.

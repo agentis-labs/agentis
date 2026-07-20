@@ -1,6 +1,7 @@
 ﻿
 
 import { z } from 'zod';
+import { CONSTANTS } from '../constants.js';
 
 // Local, single-operator lifecycle: an app either exists and is usable (`active`)
 // or is retired (`archived`). Publishing ("draft"→"published") is a Hub concept
@@ -188,9 +189,35 @@ export const appWorkflowBindingSchema = z.object({
   /**
    * When dependents fire. `success` means clean completion for legacy unscoped
    * workflows and an ACCOMPLISHED world verdict whenever the upstream has a spec.
-   * `always` is explicit failure/finally handling after any terminal settle.
+   * `failure` is the inverse — a true error branch that fires ONLY when the
+   * upstream settled without succeeding. `always` fires after any terminal
+   * settle (finally handling, cleanup, notification regardless of outcome).
    */
-  chainOn: z.enum(['success', 'always']).optional(),
+  chainOn: z.enum(['success', 'failure', 'always']).optional(),
+  /**
+   * Extra predicate on the upstream's result — the link fires only when this is
+   * true. Evaluated against `{ upstream: { status, verdict, output }, app }` with
+   * the same safe expression parser routers use (e.g.
+   * `upstream.output.leadCount > 0`). Absent = no extra condition.
+   *
+   * This is what turns a chain from "B runs after A" into "B runs after A, if A
+   * actually produced something worth running B for".
+   */
+  when: z.string().max(2000).nullable().optional(),
+  /**
+   * Wait before starting once every dependency is satisfied — a chain-link
+   * `wait` without needing a node for it. `jitterMs` spreads dependents that
+   * would otherwise all fire on the same instant (rate-limited downstreams,
+   * shared APIs, staggered outreach); the delay itself covers settling time
+   * for eventually-consistent upstream writes.
+   */
+  delay: z
+    .object({
+      ms: z.number().int().min(0).max(CONSTANTS.MAX_START_DELAY_MS).optional(),
+      jitterMs: z.number().int().min(0).max(CONSTANTS.MAX_START_DELAY_MS).optional(),
+    })
+    .nullable()
+    .optional(),
 });
 export type AppWorkflowBinding = z.infer<typeof appWorkflowBindingSchema>;
 
@@ -229,7 +256,11 @@ export interface AppWorkflowSummary {
   /** Orchestrated-start concurrency policy. */
   concurrency: 'parallel' | 'exclusive';
   /** When dependents of this workflow fire. */
-  chainOn: 'success' | 'always';
+  chainOn: 'success' | 'failure' | 'always';
+  /** Extra predicate gating this workflow's own start, when the link declares one. */
+  when?: string | null;
+  /** Link-level wait before this workflow starts once its dependencies are met. */
+  delay?: { ms?: number; jitterMs?: number } | null;
   /**
    * Trigger activation (arming) state — distinct from a single run. `null` for a
    * manual-run workflow (nothing to arm; use Run). For an unattended trigger

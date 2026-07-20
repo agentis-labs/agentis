@@ -178,6 +178,18 @@ export const CONSTANTS = {
   SESSION_MAX_DELEGATION_DEPTH: 4,
   /** Cap on retained messages per run-scoped agent channel. */
   CHANNEL_MAX_MESSAGES: 200,
+
+  // ────────────────────────────────────────────────────────────
+  // Deferred start — "when should this run begin?"
+  // ────────────────────────────────────────────────────────────
+
+  /**
+   * Ceiling on any declared start delay (one year). Beyond this a value is far
+   * likelier to be a unit mistake — seconds passed as milliseconds, or a
+   * far-future timestamp — than a real intention, and a run parked past the
+   * horizon is indistinguishable from one silently lost.
+   */
+  MAX_START_DELAY_MS: 31_536_000_000,
 } as const;
 
 export type AgentColor = (typeof CONSTANTS.AGENT_COLOR_PALETTE)[number];

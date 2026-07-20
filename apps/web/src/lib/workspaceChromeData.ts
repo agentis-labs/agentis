@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { REALTIME_EVENTS } from '@agentis/core';
+// §PERF-BOOT — subpath import; see lib/realtime.ts.
+import { REALTIME_EVENTS } from '@agentis/core/events';
 import { api, workspace as workspaceStore } from './api';
 import { useRealtime } from './realtime';
 import type {

@@ -357,6 +357,11 @@ describe('durable scheduler recovery', () => {
     }).run();
     const scheduler = new SchedulerService({ db: ctx.db, bus: ctx.bus, engine: engine as unknown as WorkflowEngine, logger: ctx.logger });
     expect((await scheduler.tick(new Date('2026-01-01T01:00:00.000Z'))).queues).toBe(1);
-    expect(engine.drainWorkflowQueue).toHaveBeenCalledWith(workflow.id);
+    // The sweep's own clock is threaded into the drain so a row that is not yet
+    // due cannot slip in on a later timestamp mid-sweep.
+    expect(engine.drainWorkflowQueue).toHaveBeenCalledWith(
+      workflow.id,
+      new Date('2026-01-01T01:00:00.000Z'),
+    );
   });
 });

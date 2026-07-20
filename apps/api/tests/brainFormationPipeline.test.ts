@@ -41,6 +41,21 @@ function visibleEpisodeSummaries(): string[] {
   return graph.nodes.filter((n) => n.atomKind === 'episode').map((n) => `${n.label} ${n.summary}`);
 }
 
+/**
+ * Atoms the RECALL path would consider. §B5.6 separated staging from
+ * visibility: staged traces render on the operator's canvas but must never be
+ * injected into an agent's dispatch context, so this must stay empty for them.
+ */
+function recallableEpisodeCount(): number {
+  return brain.getGraph(ctx.workspace.id, { limit: 200 }).nodes
+    .filter((n) => {
+      if (n.atomKind !== 'episode') return false;
+      const tags = (n.metadata as { tags?: string[] } | undefined)?.tags ?? [];
+      return !tags.includes('unconsolidated');
+    })
+    .length;
+}
+
 function allEpisodes() {
   return episodes.list({ workspaceId: ctx.workspace.id, includeArchived: true, limit: 500 });
 }
@@ -64,8 +79,11 @@ describe('promote() — write-policy gate', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.type).toBe('observation');
     expect(rows[0]!.tags).toContain('unconsolidated');
-    // Hidden from the graph — no pattern/episode node leaks the digest.
-    expect(visibleEpisodeSummaries()).toHaveLength(0);
+    // §B5.6 — the marker IS shown on the operator's canvas (staging is a
+    // lifecycle, not a reason to hide what the brain holds), but it stays
+    // `unconsolidated`, so it never enters recall and still decays on its TTL.
+    expect(visibleEpisodeSummaries()).toHaveLength(1);
+    expect(recallableEpisodeCount()).toBe(0);
   });
 });
 
@@ -87,8 +105,13 @@ describe('promote() — form policy without a Formation Judge model (staging)', 
     const summaries = rows.map((e) => e.summary).join(' | ');
     expect(summaries).not.toMatch(/hn:48446141|Link:|I selected|No fresh/i);
 
-    // Staged traces are hidden from the graph.
-    expect(visibleEpisodeSummaries()).toHaveLength(0);
+    // §B5.6 — the staged lesson is VISIBLE to the operator. Hiding it was the
+    // reason a brain with no Formation Judge model rendered an empty canvas no
+    // matter how much its agents learned. It remains `unconsolidated`, so it is
+    // still excluded from recall and still expires on its TTL.
+    expect(visibleEpisodeSummaries()).toHaveLength(1);
+    expect(visibleEpisodeSummaries()[0]).toMatch(/validate healthcare AI outputs/i);
+    expect(recallableEpisodeCount()).toBe(0);
   });
 });
 

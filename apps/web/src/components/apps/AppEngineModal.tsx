@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import clsx from 'clsx';
+import { AppExportModal } from './AppExportModal';
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -187,25 +188,10 @@ export function AppEngineModal({
       setDeleting(false);
     }
   }, [app, confirm, onDeleted]);
-  const [exporting, setExporting] = useState(false);
-  const exportApp = useCallback(async () => {
-    if (!app) return;
-    setExporting(true);
-    try {
-      const envelope = await api<{ data: unknown }>(`/v1/apps/${app.id}/export`).then((r) => r.data);
-      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${app.slug || 'app'}.agentisapp`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to export app');
-    } finally {
-      setExporting(false);
-    }
-  }, [app]);
+  // Export opens a preview of the App's full dependency closure so the operator
+  // sees (and can adjust) what actually travels — it used to download a skeleton
+  // silently, leaving agents, memory, knowledge and data behind with no signal.
+  const [exportOpen, setExportOpen] = useState(false);
   const loadAnalytics = useCallback(async () => {
     if (!appId) return;
     setAnalyticsLoading(true);
@@ -394,15 +380,14 @@ export function AppEngineModal({
                 <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
                   <div className="min-w-0">
                     <div className="text-[12px] font-medium text-text-primary">Export app</div>
-                    <div className="text-[11px] text-text-muted">Download a portable .agentisapp package.</div>
+                    <div className="text-[11px] text-text-muted">Choose what travels — agents, memory, knowledge and data.</div>
                   </div>
                   <button
                     type="button"
-                    onClick={() => void exportApp()}
-                    disabled={exporting}
-                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary disabled:opacity-50"
+                    onClick={() => setExportOpen(true)}
+                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface-2 px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
                   >
-                    {exporting ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Export
+                    <Upload size={13} /> Export
                   </button>
                 </div>
                 <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft/20 p-3">
@@ -476,6 +461,14 @@ export function AppEngineModal({
           </footer>
         </section>
       </form>
+      {exportOpen && app && (
+        <AppExportModal
+          appId={app.id}
+          appName={app.name}
+          appSlug={app.slug}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
     </div>
   );
 }

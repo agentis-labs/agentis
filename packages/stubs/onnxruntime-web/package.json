@@ -1,0 +1,6 @@
+{
+  "name": "onnxruntime-web",
+  "version": "0.0.0-stub",
+  "description": "Install-size stub. @huggingface/transformers hard-depends on onnxruntime-web (129 MB), but the Node runtime only ever executes onnxruntime-node — the web backend is pure dead disk on a server install. Wired via pnpm.overrides in the workspace root. If anything ever actually imports this in a Node process, the loud throw below is the correct outcome.",
+  "main": "index.js"
+}

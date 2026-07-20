@@ -848,7 +848,12 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           + 'newWorkflow=true to deliberately create a separate workflow. '
           + 'The result includes `readiness`: if `readiness.ready` is false, tell the operator in plain, '
           + 'natural language what to connect/configure (from `readiness.requirements`) before it can run — '
-          + 'never ask them for rigid formats; ask like a helpful assistant.',
+          + 'never ask them for rigid formats; ask like a helpful assistant. '
+          + 'DECLARE THE TRIGGER: pass `trigger` whenever the work is not started by hand. Without it the trigger is '
+          + 'GUESSED from keywords in `description` and defaults to manual — so a recurring job phrased without the '
+          + 'word "every"/"daily"/"schedule" silently becomes a workflow nobody ever starts. '
+          + 'MULTIPLE JOBS: if the request names more than one job ("find leads AND message them AND build their store"), '
+          + 'do NOT collapse it into one workflow — use agentis.app.plan, then agentis.workflow.chain to wire the order.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -868,6 +873,23 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             confirmIntentChange: {
               type: 'boolean',
               description: 'Acknowledge a DELIBERATE capability change. Required to save an edit that removes load-bearing work (agent workers / fetch steps / integrations / persistence) — otherwise the edit is rejected as green-washing.',
+            },
+            trigger: {
+              type: 'object',
+              description:
+                'DECLARE how this workflow starts, instead of leaving it to keyword inference (which defaults to manual). '
+                + 'Set this whenever the work is unattended.',
+              properties: {
+                type: {
+                  type: 'string',
+                  enum: ['manual', 'cron', 'webhook', 'persistent_listener'],
+                  description: 'manual = a person starts it; cron = recurring; webhook = an inbound HTTP call; persistent_listener = a continuously watched source.',
+                },
+                cron: {
+                  type: 'string',
+                  description: '5-field UTC cron for type "cron" (e.g. "0 9 * * *" daily 09:00, "*/5 * * * *" every 5 minutes). Implies type cron when given alone.',
+                },
+              },
             },
           },
           required: ['description'],
@@ -913,6 +935,9 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             graphDraft: args.graphDraft,
             patchDraft: args.patchDraft,
             confirmIntentChange: args.confirmIntentChange === true,
+            ...(args.trigger && typeof args.trigger === 'object'
+              ? { trigger: args.trigger as ExplicitTriggerSpec }
+              : {}),
             stream: true,
             ...(ctx.signal ? { signal: ctx.signal } : {}),
           });
@@ -1711,6 +1736,12 @@ export interface CreateWorkflowArgs {
    * round-trip: edit a card → rebuild from the plan.
    */
   plan?: WorkflowPlan;
+  /**
+   * Caller-DECLARED trigger. Wins over keyword inference, which defaults to
+   * manual and therefore turns any unattended intent phrased outside its keyword
+   * list into a workflow nobody ever starts.
+   */
+  trigger?: ExplicitTriggerSpec | null;
   /** Cancellation signal from the calling chat turn. Aborts model spend mid-build
    *  when the operator disconnects or the turn deadline fires. */
   signal?: AbortSignal;
@@ -1839,7 +1870,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   let rawGraphBase: WorkflowGraph;
   let synthesis: 'plan' | 'llm' | 'agent_draft' | 'agent_patch';
   if (args.plan && args.plan.phases.length > 0) {
-    rawGraphBase = assembleGraphFromPlan(args.plan, description);
+    rawGraphBase = assembleGraphFromPlan(args.plan, description, args.trigger);
     synthesis = 'plan';
   } else if (args.patchDraft !== undefined) {
     if (!existingWorkflow) {
@@ -2423,9 +2454,13 @@ function wantsPhaseOrganization(description: string): boolean {
  * linearly: trigger → phase nodes → return_output. Credential binding + the
  * terminal-output guarantee are handled downstream by `preflightAndEnrich`.
  */
-export function assembleGraphFromPlan(plan: WorkflowPlan, description: string): WorkflowGraph {
+export function assembleGraphFromPlan(
+  plan: WorkflowPlan,
+  description: string,
+  explicitTrigger?: ExplicitTriggerSpec | null,
+): WorkflowGraph {
   const lower = description.toLowerCase();
-  const trigger = inferTriggerConfig(lower);
+  const trigger = resolveTriggerConfig(lower, explicitTrigger);
   const nodes: WorkflowNode[] = [
     { id: 'trigger', type: 'trigger', title: triggerTitle(trigger), position: { x: 0, y: 80 }, config: trigger },
   ];
@@ -3518,6 +3553,40 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
 
 function capitalize(value: string): string {
   return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+/** A trigger the CALLER declared, rather than one inferred from prose. */
+export interface ExplicitTriggerSpec {
+  type?: 'manual' | 'cron' | 'webhook' | 'persistent_listener';
+  cron?: string;
+}
+
+/**
+ * Declared trigger wins over inference. Inference reads keywords out of a
+ * description, so an intent phrased any other way ("produce the digest each
+ * morning" — no `every`/`daily`) silently fell through to `manual`, and the
+ * workflow was built unattended-by-accident. A caller that KNOWS the trigger
+ * should never have to phrase its way past a regex.
+ */
+function resolveTriggerConfig(
+  lower: string,
+  explicit?: ExplicitTriggerSpec | null,
+): ReturnType<typeof inferTriggerConfig> {
+  if (!explicit?.type) {
+    // No declared type, but a declared cron still means "this recurs".
+    if (explicit?.cron) return { kind: 'trigger', triggerType: 'cron', schedule: explicit.cron };
+    return inferTriggerConfig(lower);
+  }
+  if (explicit.type === 'cron') {
+    return {
+      kind: 'trigger',
+      triggerType: 'cron',
+      // Fall back to the inferred cadence when the type is declared but the
+      // expression is not, rather than inventing a schedule.
+      schedule: explicit.cron ?? inferTriggerConfig(lower).schedule ?? '0 9 * * *',
+    };
+  }
+  return { kind: 'trigger', triggerType: explicit.type };
 }
 
 /** Deterministic trigger inference from the prompt (Step 2 — intent extraction). */

@@ -1135,8 +1135,11 @@ async function runConversationTurn(
           agentId: args.agentId,
           phase: 'complete',
           status: 'success',
-          label: `Storing ${stored} ${stored === 1 ? 'memory' : 'memories'}`,
-          detail: 'Learnings from this turn were queued into the Brain — the formation judge reconciles duplicates and rejects junk.',
+          // §B7 — honest tense: `stored` counts candidates ENQUEUED, measured
+          // before the judge runs — and the judge is prompted to drop most.
+          // "Storing N memories" promised a result nothing ever confirmed.
+          label: `Reviewing ${stored} ${stored === 1 ? 'memory candidate' : 'memory candidates'}`,
+          detail: 'Queued into the Brain’s formation pipeline — the judge keeps what is durable, reconciles duplicates, and drops the rest. Kept atoms appear on the Brain canvas.',
           suffix: 'memory-store',
           startedAt: storedAt,
           completedAt: storedAt,

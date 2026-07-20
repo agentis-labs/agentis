@@ -39,6 +39,8 @@ import { AppStore } from './appStore.js';
 import { AppDatastore } from './appDatastore.js';
 import { AppSurfaceStore } from './appSurfaceStore.js';
 import type { BrainReader, BrainWriter } from './brainPort.js';
+import { rewriteNodeRefs, type RefIdMap } from './appRefs.js';
+import { computeAppClosure, type AppClosure } from './appClosure.js';
 
 /** Options controlling how much learned intelligence an App export carries. */
 export interface AppExportOptions {
@@ -51,6 +53,13 @@ export interface AppExportOptions {
   includeCollectionData?: boolean;
   /** Per-collection row cap. */
   collectionRowCap?: number;
+  /**
+   * Closure items the operator chose to leave out, as `"<kind>:<id>"` (e.g.
+   * `"agent:abc"`). Unticking a required dependency is ALLOWED — the operator
+   * owns this call — and surfaces as a warning here and in the import preview
+   * rather than being silently blocked.
+   */
+  exclude?: string[];
   /** Collected non-fatal notes (e.g. truncated collections) appended here. */
   warnings?: string[];
 }
@@ -182,14 +191,46 @@ export class AppPackager {
       }
       return { name: col.name, schema: col.schema, seed };
     });
-    const workflows = this.#exportWorkflows(workspaceId, appId, opts.warnings);
+    // The App's full dependency CLOSURE — what it needs to run, not merely what
+    // it owns. An `agent_task` agent seated elsewhere, a bare sub-workflow, a
+    // workspace-scoped knowledge base: all previously dropped, producing a package
+    // that installed cleanly and failed at run time.
+    const closure = computeAppClosure(this.db, workspaceId, appId);
+    if (opts.warnings) opts.warnings.push(...closure.warnings);
+    const excluded = new Set(opts.exclude ?? []);
+    const keep = (kind: string, id: string) => !excluded.has(`${kind}:${id}`);
 
-    // Team (Team facet): the owning agent + seated members travel WITH the App so
-    // it installs self-contained. Definitions always travel; brains only in `full`.
-    const agents = this.#exportAgents(workspaceId, appId, app.ownerAgentId, withAgentBrains ? opts.brain : undefined);
+    const workflows = this.#exportWorkflows(
+      workspaceId,
+      closure.workflowIds.filter((id) => keep('workflow', id)),
+      opts.warnings,
+    );
+    const agents = this.#exportAgents(
+      workspaceId,
+      appId,
+      closure.agentIds.filter((id) => keep('agent', id)),
+      app.ownerAgentId,
+      withAgentBrains ? opts.brain : undefined,
+    );
+    const knowledge = this.#exportKnowledge(workspaceId, closure.knowledgeBaseIds.filter((id) => keep('knowledgeBase', id)));
+    const extensions = this.#exportExtensions(workspaceId, closure.extensionIds.filter((id) => keep('extension', id)));
+    // Secrets and code-resident connectors are DECLARED, never copied.
+    const requirements = closure.items
+      .filter((item) => !item.transportable)
+      .map((item) => ({
+        kind: item.kind === 'credential' ? ('credential' as const)
+          : item.kind === 'connection' ? ('connection' as const)
+          : item.kind === 'connector' ? ('connector' as const)
+          : ('plugin' as const),
+        key: item.id,
+        label: item.label,
+        detail: item.reason,
+      }));
 
     return appManifestSchema.parse({
       manifestVersion: 1,
+      // Rebinding keys for the App's own data_query/data_mutate self-references.
+      exportAppId: appId,
       identity: appIdentitySchema.parse({
         ...app.manifest,
         slug: app.slug,
@@ -203,9 +244,65 @@ export class AppPackager {
       surfaces,
       collections,
       agents,
+      knowledge,
+      extensions,
+      requirements,
       ...(withAppBrain ? { brain: { atoms: opts.brain!.exportScope(workspaceId, appId) } } : {}),
       source: app.source,
     });
+  }
+
+  /**
+   * Knowledge as portable seed documents: chunks are re-joined into their source
+   * document text and re-chunked/re-embedded on install, so no embeddings travel
+   * (mirrors the workspace bundle's knowledge handling).
+   */
+  #exportKnowledge(workspaceId: string, knowledgeBaseIds: string[]): AppManifest['knowledge'] {
+    if (knowledgeBaseIds.length === 0) return [];
+    const bases = this.db
+      .select({ id: schema.knowledgeBases.id, name: schema.knowledgeBases.name, description: schema.knowledgeBases.description })
+      .from(schema.knowledgeBases)
+      .where(and(eq(schema.knowledgeBases.workspaceId, workspaceId), inArray(schema.knowledgeBases.id, knowledgeBaseIds)))
+      .all();
+    return bases.map((base) => {
+      const docs = this.db
+        .select({ id: schema.kbDocuments.id, name: schema.kbDocuments.name })
+        .from(schema.kbDocuments)
+        .where(and(eq(schema.kbDocuments.knowledgeBaseId, base.id), eq(schema.kbDocuments.workspaceId, workspaceId)))
+        .all();
+      const documents = docs.flatMap((doc) => {
+        const content = this.db
+          .select({ content: schema.kbChunks.content, chunkIndex: schema.kbChunks.chunkIndex })
+          .from(schema.kbChunks)
+          .where(eq(schema.kbChunks.documentId, doc.id))
+          .all()
+          .sort((a, b) => a.chunkIndex - b.chunkIndex)
+          .map((c) => c.content)
+          .join('\n')
+          .trim();
+        return content ? [{ title: doc.name, content, tags: [], metadata: {} }] : [];
+      });
+      return { exportId: base.id, name: base.name, description: base.description ?? null, documents };
+    });
+  }
+
+  /** Non-builtin extensions the App's steps invoke (builtins ship with the host). */
+  #exportExtensions(workspaceId: string, extensionIds: string[]): AppManifest['extensions'] {
+    if (extensionIds.length === 0) return [];
+    return this.db
+      .select()
+      .from(schema.extensions)
+      .where(and(eq(schema.extensions.workspaceId, workspaceId), inArray(schema.extensions.id, extensionIds)))
+      .all()
+      .filter((row) => row.runtime !== 'builtin')
+      .map((row) => ({
+        exportId: row.id,
+        name: row.name,
+        slug: row.slug,
+        version: row.version,
+        runtime: row.runtime as 'node_worker' | 'docker_sandbox',
+        manifest: objectRecord(row.manifest),
+      }));
   }
 
   /**
@@ -218,34 +315,15 @@ export class AppPackager {
    * referenced a workflow that did not exist in the target workspace. Each entry
    * carries `exportId` (its source id) so install can rebind the references.
    */
-  #exportWorkflows(workspaceId: string, appId: string, warnings?: string[]): AppManifest['workflows'] {
-    const owned = this.db
+  #exportWorkflows(workspaceId: string, workflowIds: string[], warnings?: string[]): AppManifest['workflows'] {
+    void warnings; // missing children are reported by the closure pass
+    if (workflowIds.length === 0) return [];
+    const rows = this.db
       .select({ id: schema.workflows.id, title: schema.workflows.title, description: schema.workflows.description, graph: schema.workflows.graph })
       .from(schema.workflows)
-      .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
+      .where(and(eq(schema.workflows.workspaceId, workspaceId), inArray(schema.workflows.id, workflowIds)))
       .all();
-
-    const byId = new Map(owned.map((w) => [w.id, w]));
-    const queue = owned.flatMap((w) => referencedWorkflowIds(w.graph));
-    const seen = new Set(owned.map((w) => w.id));
-    while (queue.length > 0) {
-      const refId = queue.shift()!;
-      if (seen.has(refId)) continue;
-      seen.add(refId);
-      const child = this.db
-        .select({ id: schema.workflows.id, title: schema.workflows.title, description: schema.workflows.description, graph: schema.workflows.graph })
-        .from(schema.workflows)
-        .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, refId)))
-        .get();
-      if (!child) {
-        warnings?.push(`A subflow references workflow ${refId}, which no longer exists — that step will not run after import.`);
-        continue;
-      }
-      byId.set(child.id, child);
-      queue.push(...referencedWorkflowIds(child.graph));
-    }
-
-    return [...byId.values()].map((w) => ({
+    return rows.map((w) => ({
       title: w.title,
       description: w.description ?? null,
       graph: w.graph,
@@ -253,13 +331,23 @@ export class AppPackager {
     }));
   }
 
-  /** The App's cast (owner + members) as portable manifest agents, name-sorted. */
-  #exportAgents(workspaceId: string, appId: string, ownerAgentId: string | null, brain: BrainReader | undefined): ManifestAgent[] {
-    const members = this.apps.listMembers(workspaceId, appId);
-    const roleByAgent = new Map(members.map((m) => [m.agentId, m.role]));
-    const ids = new Set<string>(members.map((m) => m.agentId));
-    if (ownerAgentId) ids.add(ownerAgentId);
+  /**
+   * The App's cast as portable manifest agents, name-sorted.
+   *
+   * Sourced from the CLOSURE, not just `listMembers` + owner: an agent invoked by
+   * an `agent_task` step may not be seated on the App at all, and dropping it was
+   * the reason an exported App arrived with none of its agents.
+   */
+  #exportAgents(
+    workspaceId: string,
+    appId: string,
+    agentIds: string[],
+    ownerAgentId: string | null,
+    brain: BrainReader | undefined,
+  ): ManifestAgent[] {
+    const ids = new Set<string>(agentIds);
     if (ids.size === 0) return [];
+    const roleByAgent = new Map(this.apps.listMembers(workspaceId, appId).map((m) => [m.agentId, m.role]));
     const rows = this.db
       .select()
       .from(schema.agents)
@@ -270,6 +358,7 @@ export class AppPackager {
         const memberRole = roleByAgent.get(a.id);
         const agent: ManifestAgent = {
           name: a.name,
+          exportId: a.id,
           role: memberRole === 'operator' ? 'operator' : 'worker',
           adapterType: a.adapterType,
           instructions: a.instructions ?? null,
@@ -287,14 +376,89 @@ export class AppPackager {
   }
 
   /** canonical AppManifest IR → rows (creates a fresh App). Collections come back EMPTY. */
-  preview(envelope: RawAppEnvelope): AppInstallPreview {
+  /**
+   * Non-mutating install summary. `workspaceId` enables reuse detection — with it,
+   * an agent that already exists here is reported as `reuse` rather than `create`,
+   * which is the difference between "this will add 5 agents" and the truth.
+   */
+  preview(envelope: RawAppEnvelope, workspaceId?: string): AppInstallPreview {
     const manifest = this.deserialize(envelope);
     const warnings: string[] = [];
-    const seedRows = manifest.collections.reduce((count, collection) => count + (collection.seed?.length ?? 0), 0);
-    if (seedRows > 0) warnings.push('Seed rows are not installed; only collection schemas travel in V1.');
     if (manifest.migrations.length > 0) warnings.push('Migrations are declared but fresh installs do not apply upgrade migrations.');
     if (manifest.policy.customCode === 'allowed') warnings.push('This app enables CustomView code; review before installing into shared workspaces.');
-    if (manifest.requiredPlugins.length > 0) warnings.push('Required plugins must already be available in this Agentis instance.');
+
+    const seedRows = manifest.collections.reduce((count, collection) => count + (collection.seed?.length ?? 0), 0);
+    const brainAtoms = (manifest.brain?.atoms.length ?? 0)
+      + manifest.agents.reduce((n, a) => n + (a.brain?.atoms.length ?? 0), 0);
+    const knowledgeDocs = manifest.knowledge.reduce((n, k) => n + k.documents.length, 0);
+    if (brainAtoms > 0 || seedRows > 0) {
+      warnings.push(`This package carries learned state: ${brainAtoms} memor${brainAtoms === 1 ? 'y' : 'ies'} and ${seedRows} data row(s).`);
+    }
+
+    // Itemise EVERYTHING, with what will happen to it. "How many" is not enough
+    // for an operator deciding whether to let a package into their workspace —
+    // they need to see which agents arrive, which are reused, and what they will
+    // have to reconnect themselves.
+    const contents: AppInstallPreview['contents'] = [
+      ...manifest.workflows.map((w) => ({ kind: 'workflow' as const, label: w.title, required: true, action: 'create' as const })),
+      ...manifest.agents.map((a) => {
+        // Agents match by NAME on install: an existing one is reused (and keeps
+        // its own memory) rather than duplicated.
+        const existing = workspaceId ? this.#findAgentByName(this.db, workspaceId, a.name) : null;
+        return {
+          kind: 'agent' as const,
+          label: a.name,
+          required: true,
+          action: existing ? ('reuse' as const) : ('create' as const),
+          detail: existing
+            ? 'Already exists here — will be reused and seated on this App'
+            : a.brain && a.brain.atoms.length > 0
+              ? `Arrives with ${a.brain.atoms.length} learned memor${a.brain.atoms.length === 1 ? 'y' : 'ies'}`
+              : undefined,
+        };
+      }),
+      ...manifest.knowledge.map((k) => ({
+        kind: 'knowledgeBase' as const,
+        label: k.name,
+        required: false,
+        action: 'create' as const,
+        detail: `${k.documents.length} document(s)`,
+      })),
+      ...manifest.extensions.map((e) => ({
+        kind: 'extension' as const,
+        label: e.name,
+        required: true,
+        action: 'create' as const,
+        detail: `${e.slug} · ${e.runtime}`,
+      })),
+      ...manifest.collections.map((c) => ({
+        kind: 'collection' as const,
+        label: c.name,
+        required: true,
+        action: 'create' as const,
+        detail: c.seed && c.seed.length > 0 ? `${c.seed.length} row(s)` : 'schema only',
+      })),
+      // Requirements can never be copied — they are always the operator's to supply.
+      ...manifest.requirements.map((r) => ({
+        kind: r.kind === 'plugin' ? ('extension' as const) : (r.kind as 'credential' | 'connection' | 'connector'),
+        label: r.label,
+        required: true,
+        action: 'setup' as const,
+        detail: r.detail,
+      })),
+    ];
+
+    const requirementsOf = (kind: string) => manifest.requirements.filter((r) => r.kind === kind);
+    const setup = {
+      credentials: requirementsOf('credential').map((r) => ({ key: r.key, label: r.label })),
+      connections: requirementsOf('connection').map((r) => ({ key: r.key, label: r.label })),
+      connectors: requirementsOf('connector').map((r) => r.label),
+      plugins: [...new Set([...manifest.requiredPlugins, ...requirementsOf('plugin').map((r) => r.label)])],
+    };
+    if (setup.plugins.length > 0) warnings.push('Required plugins must already be available in this Agentis instance.');
+    if (setup.credentials.length + setup.connections.length + setup.connectors.length > 0) {
+      warnings.push('Some connections must be reconnected after install — no secrets travel in a package.');
+    }
 
     return appInstallPreviewSchema.parse({
       format: envelope.format,
@@ -311,12 +475,21 @@ export class AppPackager {
         capabilities: manifest.capabilities.length,
         dependencies: manifest.dependencies.length,
         migrations: manifest.migrations.length,
+        knowledgeDocs,
+        brainAtoms,
+        collectionRows: seedRows,
+        extensions: manifest.extensions.length,
       },
       facets: {
         workflows: manifest.workflows.map((workflow) => workflow.title),
         surfaces: manifest.surfaces.map((surface) => surface.name),
         collections: manifest.collections.map((collection) => collection.name),
+        agents: manifest.agents.map((agent) => agent.name),
+        knowledge: manifest.knowledge.map((k) => k.name),
+        extensions: manifest.extensions.map((e) => e.name),
       },
+      contents,
+      setup,
       requiredPlugins: manifest.requiredPlugins,
       permissions: permissionSummary(manifest),
       scanWarnings: [],
@@ -349,17 +522,53 @@ export class AppPackager {
       installedChecksum: checksum(parsed),
     });
 
-    // Two passes so subflow references survive the id change: mint every new id
-    // FIRST, then rewrite each graph's `subflow.workflowId` / `loop.bodyWorkflowId`
-    // through the old→new map before inserting. A single pass would write graphs
-    // still pointing at the exporter's workflow ids — syntactically valid UUIDs
-    // that resolve to nothing here, so the App imports "fine" and fails at run time.
+    // ── Team FIRST, then workflows. ──────────────────────────────────────────
+    // Ordering is load-bearing: workflows used to be inserted before agents
+    // existed, which made rebinding `agent_task.agentId` impossible — every
+    // imported workflow pointed at an agent id from the EXPORTER's workspace.
+    // Resolve each agent by name against already-installed workspace agents
+    // (nameMap) so a whole-workspace bundle does not duplicate them; create a
+    // minimal agent only for a standalone App import. Owner relink touches ONLY
+    // apps.ownerAgentId — it must never clear the agent's reportsTo/spaceId
+    // (that org-chart detach is the staffApp side effect, which install never runs).
+    const agentIdByExportId = new Map<string, string>();
+    for (const magent of parsed.agents) {
+      let agentId = opts.agentNameToId?.get(magent.name) ?? this.#findAgentByName(db, workspaceId, magent.name);
+      if (!agentId) {
+        agentId = this.#createAgent(db, workspaceId, userId, magent);
+        opts.agentNameToId?.set(magent.name, agentId);
+      }
+      if (magent.exportId) agentIdByExportId.set(magent.exportId, agentId);
+      apps.addMember(workspaceId, app.id, agentId, magent.memberRole ?? (magent.owner ? 'operator' : 'worker'));
+      if (magent.owner) apps.update(workspaceId, app.id, { ownerAgentId: agentId });
+      if (withAgentBrains && magent.brain && magent.brain.atoms.length > 0) {
+        opts.brain!.importScope(workspaceId, agentId, magent.brain.atoms, 'agent');
+      }
+    }
+
+    // Mint every workflow id BEFORE inserting, so sibling sub-workflow references
+    // resolve, then rewrite ALL entity refs in one pass through the shared table
+    // (see appRefs.ts) — workflows, agents, and the App's own data_query/
+    // data_mutate self-references. An unrewritten ref is a syntactically valid
+    // UUID pointing at another workspace: the App imports "fine" and fails at run.
     const workflowIdByExportId = new Map<string, string>();
     const minted = parsed.workflows.map((wf) => {
       const id = randomUUID();
       if (wf.exportId) workflowIdByExportId.set(wf.exportId, id);
       return { id, wf };
     });
+    // Knowledge + extensions must exist before workflows too, for the same reason
+    // agents do: their ids appear inside node configs.
+    const knowledgeIdByExportId = this.#installKnowledge(db, workspaceId, app.id, parsed.knowledge ?? []);
+    const extensionIdByExportId = this.#installExtensions(db, workspaceId, userId, parsed.extensions ?? []);
+
+    const refIdMap: RefIdMap = {
+      workflow: workflowIdByExportId,
+      agent: agentIdByExportId,
+      knowledgeBase: knowledgeIdByExportId,
+      extension: extensionIdByExportId,
+      ...(parsed.exportAppId ? { app: new Map([[parsed.exportAppId, app.id]]) } : {}),
+    };
     for (const { id, wf } of minted) {
       const now = new Date().toISOString();
       db
@@ -371,7 +580,7 @@ export class AppPackager {
           appId: app.id,
           title: wf.title,
           description: wf.description ?? null,
-          graph: rebindWorkflowRefs(wf.graph, workflowIdByExportId) as WorkflowGraph,
+          graph: rewriteNodeRefs(wf.graph, refIdMap) as WorkflowGraph,
           createdAt: now,
           updatedAt: now,
         })
@@ -393,31 +602,116 @@ export class AppPackager {
       apps.update(workspaceId, app.id, { entrySurfaceId: parsed.surfaces[0].name });
     }
 
-    // Team (Team facet): seat the App's cast and relink its owner. Resolve each
-    // agent by name against already-installed workspace agents (nameMap) so a
-    // whole-workspace bundle does not duplicate them; create a minimal agent only
-    // for a standalone App import. Owner relink touches ONLY apps.ownerAgentId —
-    // it must never clear the agent's reportsTo/spaceId (that org-chart detach is
-    // the staffApp side effect, which install never runs).
-    for (const magent of parsed.agents) {
-      let agentId = opts.agentNameToId?.get(magent.name) ?? this.#findAgentByName(db, workspaceId, magent.name);
-      if (!agentId) {
-        agentId = this.#createAgent(db, workspaceId, userId, magent);
-        opts.agentNameToId?.set(magent.name, agentId);
-      }
-      apps.addMember(workspaceId, app.id, agentId, magent.memberRole ?? (magent.owner ? 'operator' : 'worker'));
-      if (magent.owner) apps.update(workspaceId, app.id, { ownerAgentId: agentId });
-      if (withAgentBrains && magent.brain && magent.brain.atoms.length > 0) {
-        opts.brain!.importScope(workspaceId, agentId, magent.brain.atoms, 'agent');
-      }
-    }
-
     // App-scoped Brain memory (scope_id = appId).
     if (withAppBrain && parsed.brain && parsed.brain.atoms.length > 0) {
       opts.brain!.importScope(workspaceId, app.id, parsed.brain.atoms, 'app');
     }
 
     return { appId: app.id };
+  }
+
+  /**
+   * Recreate the App's knowledge, scoped to the NEW app, returning old→new ids so
+   * `knowledge.knowledgeBaseId` can be rebound.
+   *
+   * Documents are re-chunked here rather than shipping chunk boundaries, and no
+   * embeddings travel — the re-embed sweep vectorises them with the target
+   * workspace's own provider, so vectors are always comparable by construction.
+   */
+  #installKnowledge(
+    db: AgentisSqliteDb,
+    workspaceId: string,
+    appId: string,
+    bases: AppManifest['knowledge'],
+  ): Map<string, string> {
+    const idMap = new Map<string, string>();
+    for (const base of bases) {
+      const kbId = randomUUID();
+      const now = new Date().toISOString();
+      db.insert(schema.knowledgeBases).values({
+        id: kbId,
+        workspaceId,
+        // Scope to the importing App so its knowledge travels WITH it and is not
+        // silently shared back into the workspace.
+        scopeId: appId,
+        name: base.name,
+        description: base.description ?? null,
+        embeddingModel: 'lexical-v1',
+        embeddingDimension: 0,
+        chunkingConfig: { maxTokens: 240, overlapTokens: 40 },
+        createdAt: now,
+        updatedAt: now,
+      }).run();
+      for (const doc of base.documents) {
+        const docId = randomUUID();
+        db.insert(schema.kbDocuments).values({
+          id: docId,
+          knowledgeBaseId: kbId,
+          workspaceId,
+          name: doc.title,
+          mimeType: 'text/plain',
+          status: 'ready',
+          tokenCount: 0,
+          createdAt: now,
+          updatedAt: now,
+        }).run();
+        chunkDocument(doc.content).forEach((content, index) => {
+          db.insert(schema.kbChunks).values({
+            id: randomUUID(),
+            documentId: docId,
+            knowledgeBaseId: kbId,
+            workspaceId,
+            chunkIndex: index,
+            content,
+            metadata: { kind: 'agentis_seed' },
+            tokenCount: 0,
+            createdAt: now,
+          }).run();
+        });
+      }
+      if (base.exportId) idMap.set(base.exportId, kbId);
+    }
+    return idMap;
+  }
+
+  /**
+   * Resolve extensions against the target workspace by slug, creating one only
+   * when absent. Extensions are shared infrastructure — duplicating a slug the
+   * workspace already runs would fork behaviour rather than reuse it.
+   */
+  #installExtensions(
+    db: AgentisSqliteDb,
+    workspaceId: string,
+    userId: string,
+    extensions: AppManifest['extensions'],
+  ): Map<string, string> {
+    const idMap = new Map<string, string>();
+    for (const ext of extensions) {
+      const existing = db
+        .select({ id: schema.extensions.id })
+        .from(schema.extensions)
+        .where(and(eq(schema.extensions.workspaceId, workspaceId), eq(schema.extensions.slug, ext.slug)))
+        .get();
+      let id = existing?.id;
+      if (!id) {
+        id = randomUUID();
+        const now = new Date().toISOString();
+        db.insert(schema.extensions).values({
+          id,
+          workspaceId,
+          userId,
+          name: ext.name,
+          slug: ext.slug,
+          version: ext.version,
+          runtime: ext.runtime,
+          manifest: ext.manifest as never,
+          createdAt: now,
+          updatedAt: now,
+        }).run();
+      }
+      if (ext.exportId) idMap.set(ext.exportId, id);
+    }
+    return idMap;
   }
 
   #findAgentByName(db: AgentisSqliteDb, workspaceId: string, name: string): string | null {
@@ -487,46 +781,34 @@ export class AppPackager {
 }
 
 /**
- * The workflow ids a graph reaches through sub-workflow nodes.
- * `subflow.workflowId` and `loop.bodyWorkflowId` are the two ways one workflow
- * invokes another (both run via SubflowExecutor).
+ * Split a seed document into retrievable chunks on paragraph boundaries.
+ *
+ * Chunk BOUNDARIES are deliberately not shipped in the manifest — only the
+ * document text — so the importing workspace re-chunks with its own settings.
+ * Roughly mirrors the packager's 240-token budget (~4 chars/token).
  */
-function referencedWorkflowIds(graph: unknown): string[] {
-  const nodes = Array.isArray((graph as { nodes?: unknown } | null)?.nodes) ? (graph as { nodes: unknown[] }).nodes : [];
-  const out: string[] = [];
-  for (const node of nodes) {
-    const config = (node as { config?: Record<string, unknown> } | null)?.config;
-    if (!config) continue;
-    if (config.kind === 'subflow' && typeof config.workflowId === 'string') out.push(config.workflowId);
-    else if (config.kind === 'loop' && typeof config.bodyWorkflowId === 'string') out.push(config.bodyWorkflowId);
+function chunkDocument(content: string, maxChars = 960): string[] {
+  const text = content.trim();
+  if (text.length <= maxChars) return text ? [text] : [];
+  const chunks: string[] = [];
+  let current = '';
+  for (const paragraph of text.split(/\n{2,}/)) {
+    const block = paragraph.trim();
+    if (!block) continue;
+    if (current && current.length + block.length + 2 > maxChars) {
+      chunks.push(current);
+      current = '';
+    }
+    // A single oversized paragraph still has to be broken up.
+    if (block.length > maxChars) {
+      if (current) { chunks.push(current); current = ''; }
+      for (let i = 0; i < block.length; i += maxChars) chunks.push(block.slice(i, i + maxChars));
+      continue;
+    }
+    current = current ? `${current}\n\n${block}` : block;
   }
-  return out;
-}
-
-/**
- * Rewrite sub-workflow references through an old-id → new-id map. Ids with no
- * mapping are left untouched (the child genuinely wasn't part of this bundle),
- * which keeps the rewrite lossless rather than nulling unknown refs.
- */
-function rebindWorkflowRefs(graph: unknown, idMap: Map<string, string>): unknown {
-  if (idMap.size === 0) return graph;
-  const g = graph as { nodes?: unknown[] } | null;
-  if (!g || !Array.isArray(g.nodes)) return graph;
-  return {
-    ...g,
-    nodes: g.nodes.map((node) => {
-      const config = (node as { config?: Record<string, unknown> } | null)?.config;
-      if (!config) return node;
-      if (config.kind === 'subflow' && typeof config.workflowId === 'string') {
-        const next = idMap.get(config.workflowId);
-        if (next) return { ...(node as object), config: { ...config, workflowId: next } };
-      } else if (config.kind === 'loop' && typeof config.bodyWorkflowId === 'string') {
-        const next = idMap.get(config.bodyWorkflowId);
-        if (next) return { ...(node as object), config: { ...config, bodyWorkflowId: next } };
-      }
-      return node;
-    }),
-  };
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 function stringArray(value: unknown): string[] {

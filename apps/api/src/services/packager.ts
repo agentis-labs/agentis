@@ -404,6 +404,23 @@ export class PackagerService {
     throw new AgentisError('VALIDATION_FAILED', 'package kind cannot be used yet');
   }
 
+  /**
+   * Remove a workflow's mirrored library package. The workflow delete path used
+   * to call `mirrorWorkflow` AFTER removing the row — which always threw
+   * RESOURCE_NOT_FOUND into a swallowing catch, leaving the mirror behind so a
+   * deleted workflow kept showing up in Packages forever. Returns rows removed.
+   */
+  dropWorkflowMirror(workspaceId: string, workflowId: string): number {
+    return this.deps.db
+      .delete(schema.libraryPackages)
+      .where(and(
+        eq(schema.libraryPackages.workspaceId, workspaceId),
+        eq(schema.libraryPackages.sourceId, workflowId),
+        eq(schema.libraryPackages.sourceKind, 'workflow'),
+      ))
+      .run().changes;
+  }
+
   deletePackage(packageId: string, workspaceId: string) {
     const result = this.deps.db
       .delete(schema.libraryPackages)

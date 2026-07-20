@@ -31,7 +31,7 @@
  */
 
 import type { RuntimeEpisodeType } from '@agentis/core';
-import { tokenize, looksSensitive } from './brainText.js';
+import { tokenize, looksSensitive, directivePolarity } from './brainText.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';
 
 // ────────────────────────────────────────────────────────────
@@ -175,6 +175,37 @@ function isOperatorQuestion(text: string): boolean {
 }
 
 /**
+ * Standing modality — the signal that an imperative is a recurring RULE rather
+ * than a one-off job.
+ *
+ * The previous version matched a closed list of English phrases, so
+ * "Configure retries to 3 every deploy" was discarded as a task: `configure`
+ * matched the verb list and "every deploy" was not among `every time|each time|
+ * by default|…`. Two fixes: recognise the productive "every/each/any + noun"
+ * construction instead of enumerating instances of it, and cover the other
+ * languages the product ships in.
+ */
+const STANDING_MODALITY = new RegExp(
+  [
+    // Productive construction: every/each/any <noun>, all <noun>s.
+    String.raw`\b(every|each|any)\s+\w+`,
+    String.raw`\ball\s+\w+s\b`,
+    // English closed-class.
+    String.raw`\b(always|never|whenever|by default|going forward|from now on)\b`,
+    // Portuguese / Spanish.
+    String.raw`\b(sempre|siempre|nunca|jamais|cada|todo|toda|todos|todas|a cada|por padrão|por defecto|de agora em diante)\b`,
+    // French / Italian / German.
+    String.raw`\b(toujours|chaque|par défaut|désormais|sempre|ogni|per impostazione|immer|jede[srmn]?|standardmäßig|ab sofort)\b`,
+    // Russian.
+    String.raw`(всегда|никогда|каждый|каждую|по умолчанию)`,
+  ].join('|'),
+  'iu',
+);
+
+/** CJK standing markers — no word boundaries exist, so matched as substrings. */
+const STANDING_MODALITY_CJK = /(每次|每个|总是|始终|务必|默认|今后|必ず|常に|毎回|デフォルト|항상|매번|기본적으로)/u;
+
+/**
  * A one-off task command ("create a workflow that…", "send the report") is work
  * to DO now, not a durable memory — UNLESS it carries standing modality
  * ("always create a backup before deploy"), which is a recurring rule and kept.
@@ -184,7 +215,7 @@ function isPureTaskCommand(text: string): boolean {
     .replace(/^(please|kindly|can you|could you|now|go ahead and|i need you to|i want you to)\s+/i, '');
   const TASK_VERB = /^(create|build|make|set ?up|add|generate|watch|monitor|schedule|draft|write|design|deploy|run|fetch|scrape|email|send|post|publish|find|search|look up|check|update|delete|remove|configure|connect|integrate|summari[sz]e|analy[sz]e|review|compile|export|import|download|upload)\b/;
   if (!TASK_VERB.test(t)) return false;
-  return !/\b(always|never|every time|whenever|each time|by default|going forward|from now on|any time)\b/.test(t);
+  return !STANDING_MODALITY.test(t) && !STANDING_MODALITY_CJK.test(t);
 }
 
 /**
@@ -263,6 +294,18 @@ export function scoreStatement(text: string): number {
   // is unchanged.
   if (/\b(siempre|sempre|toujours|immer|nunca|jamais|niemals|debe|deve|doit|muss|evitar|vermeiden|porque|weil|portanto|donc|deshalb)\b/i.test(lower)
     || /(parce que|por lo tanto|éviter)/i.test(lower)) score += 0.2;
+
+  // §B5.8 — language-independent directive signal.
+  //
+  // The cue lists above are, unavoidably, enumerations of phrasings, and every
+  // enumeration has an outside. A statement carrying directive POLARITY is a
+  // rule by construction, in any of the scripts `directivePolarity` covers, so
+  // it earns the same standing a matched English cue does. This is what lets
+  // "部署前请务必备份数据库" or "Configure retries to 3 every deploy" clear the
+  // threshold without an English cue and without a classifier — measured: e5
+  // prototype-argmax scores 48% on this decision, i.e. worse than chance, so a
+  // deterministic polarity signal is strictly better than a semantic one here.
+  if (directivePolarity(text) !== 0) score += 0.2;
 
   // Specificity: concrete identifiers, paths, code refs, numbers-in-context.
   if (/[`/]\w|\.\w{1,4}\b|--?\w|\b\w+\(\)/.test(text)) score += 0.08;

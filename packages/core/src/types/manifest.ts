@@ -110,8 +110,65 @@ export const manifestAgentSchema = z.object({
   runtimeModel: z.string().nullable().optional(),
   /** Agent-private Brain memory (full fidelity only). */
   brain: portableBrainSchema.optional(),
+  /**
+   * The agent's id IN THE SOURCE workspace. Not an identity here — purely a
+   * rebinding key, so `agent_task.agentId` (and the other agent-referencing node
+   * kinds) can be rewritten to the newly created agent on install. Without it an
+   * imported workflow points at an agent that exists only in the exporter's
+   * workspace: a valid-looking UUID that resolves to nothing at run time.
+   */
+  exportId: z.string().min(1).optional(),
 });
 export type ManifestAgent = z.infer<typeof manifestAgentSchema>;
+
+/**
+ * A knowledge document carried with the App. Same seed shape the workspace bundle
+ * uses: chunks are re-derived and re-embedded on install, so no embeddings travel.
+ * Grouped by source base so an App with several bases installs them separately
+ * rather than collapsing everything into one.
+ */
+export const manifestKnowledgeBaseSchema = z.object({
+  /** Source-workspace id — the rebinding key for `knowledge.knowledgeBaseId`. */
+  exportId: z.string().min(1).optional(),
+  name: z.string().min(1),
+  description: z.string().nullable().optional(),
+  documents: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        content: z.string().min(1),
+        tags: z.array(z.string()).default([]),
+        metadata: z.record(z.unknown()).default({}),
+      }),
+    )
+    .default([]),
+});
+export type ManifestKnowledgeBase = z.infer<typeof manifestKnowledgeBaseSchema>;
+
+/** A non-builtin extension the App's `extension_task` steps invoke. */
+export const manifestExtensionSchema = z.object({
+  exportId: z.string().min(1).optional(),
+  name: z.string().min(1),
+  slug: z.string().min(1),
+  version: z.string().min(1),
+  runtime: z.enum(['node_worker', 'docker_sandbox']),
+  manifest: z.record(z.unknown()).default({}),
+});
+export type ManifestExtension = z.infer<typeof manifestExtensionSchema>;
+
+/**
+ * Something the installer must supply — NEVER a copied artifact. Credential
+ * values and channel tokens must not travel, and connector slugs resolve against
+ * the target's in-process registry (they are code, not rows).
+ */
+export const manifestRequirementSchema = z.object({
+  kind: z.enum(['credential', 'connection', 'connector', 'plugin']),
+  /** Stable key: credential name, channel kind, or connector slug. */
+  key: z.string().min(1),
+  label: z.string().min(1),
+  detail: z.string().optional(),
+});
+export type ManifestRequirement = z.infer<typeof manifestRequirementSchema>;
 
 /** An ordered, forward-only collection migration applied on upgrade (§9.2). */
 export const collectionMigrationSchema = z.object({
@@ -137,6 +194,13 @@ export type AppDependency = z.infer<typeof appDependencySchema>;
 export const appManifestSchema = z.object({
   manifestVersion: z.literal(1).default(1),
   agentisVersion: z.string().min(1).default('1.0.0'),
+  /**
+   * The App's id IN THE SOURCE workspace — the rebinding key for the App's own
+   * `data_query.appId` / `data_mutate.appId` nodes. Those are self-references:
+   * without remapping them to the newly minted app id, an imported App queries
+   * the exporter's collections and silently reads nothing.
+   */
+  exportAppId: z.string().min(1).optional(),
   identity: appIdentitySchema,
   policy: appPolicySchema,
   // facets — present only when used
@@ -148,6 +212,12 @@ export const appManifestSchema = z.object({
   memory: z.object({ brainScope: z.boolean() }).optional(),
   /** App-scoped Brain memory (`scope_id = appId`) — carried in full fidelity only. */
   brain: portableBrainSchema.optional(),
+  /** Knowledge the App reads — its own bases plus any a `knowledge` step reaches. */
+  knowledge: z.array(manifestKnowledgeBaseSchema).default([]),
+  /** Non-builtin extensions the App's steps invoke. */
+  extensions: z.array(manifestExtensionSchema).default([]),
+  /** Credentials / connections / connectors the installer must supply. */
+  requirements: z.array(manifestRequirementSchema).default([]),
   // contracts & lifecycle
   capabilities: z.array(capabilityDeclSchema).default([]),
   requiredPlugins: z.array(z.string()).default([]),
@@ -183,12 +253,48 @@ export const appInstallPreviewSchema = z.object({
     capabilities: z.number().int().nonnegative(),
     dependencies: z.number().int().nonnegative(),
     migrations: z.number().int().nonnegative(),
+    /** Learned intelligence + data carried (full fidelity only). */
+    knowledgeDocs: z.number().int().nonnegative().default(0),
+    brainAtoms: z.number().int().nonnegative().default(0),
+    collectionRows: z.number().int().nonnegative().default(0),
+    extensions: z.number().int().nonnegative().default(0),
   }),
   facets: z.object({
     workflows: z.array(z.string()),
     surfaces: z.array(z.string()),
     collections: z.array(z.string()),
+    /** Named so the operator can see WHICH agents/knowledge arrive, not just how many. */
+    agents: z.array(z.string()).default([]),
+    knowledge: z.array(z.string()).default([]),
+    extensions: z.array(z.string()).default([]),
   }),
+  /**
+   * Everything the package contains, itemised. The flat `facets` above answer
+   * "how many"; this answers "what exactly, and why is it here" — which is what
+   * an operator needs before letting a package into their workspace.
+   */
+  contents: z
+    .array(
+      z.object({
+        kind: z.enum(['workflow', 'agent', 'knowledgeBase', 'extension', 'collection', 'credential', 'connection', 'connector']),
+        label: z.string(),
+        required: z.boolean().default(false),
+        /** `create` = new here, `reuse` = matched an existing entity by name,
+         *  `setup` = cannot be copied; the operator must supply it. */
+        action: z.enum(['create', 'reuse', 'setup']).default('create'),
+        detail: z.string().optional(),
+      }),
+    )
+    .default([]),
+  /** What must be configured before the imported App can run. */
+  setup: z
+    .object({
+      credentials: z.array(z.object({ key: z.string(), label: z.string() })).default([]),
+      connections: z.array(z.object({ key: z.string(), label: z.string() })).default([]),
+      connectors: z.array(z.string()).default([]),
+      plugins: z.array(z.string()).default([]),
+    })
+    .default({ credentials: [], connections: [], connectors: [], plugins: [] }),
   requiredPlugins: z.array(z.string()),
   permissions: z.array(z.string()),
   scanWarnings: z.array(z.string()).default([]),

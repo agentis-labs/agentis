@@ -1,5 +1,7 @@
 ﻿import { useEffect, useSyncExternalStore } from 'react';
-import { REALTIME_EVENTS, type ActiveWorkflowSummary } from '@agentis/core';
+// §PERF-BOOT — subpath imports keep zod-laden `schemas` out of the entry chunk.
+import { REALTIME_EVENTS } from '@agentis/core/events';
+import type { ActiveWorkflowSummary } from '@agentis/core/types';
 import { api, workspace as workspaceStore } from './api';
 import { useRealtime } from './realtime';
 

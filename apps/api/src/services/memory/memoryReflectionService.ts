@@ -35,7 +35,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../../logger.js';
 import type { SharedIntelligenceService } from '../sharedIntelligence.js';
 import type { StructuredCompleter } from '../structuredCompleter.js';
-import { tokenize } from '../brain/brainText.js';
+import { tokenize, directivePolarity, directiveTopicSignature } from '../brain/brainText.js';
 import { classifyPacer } from '../brain/brainPacer.js';
 
 /** §C6 — propose compiling a reinforced procedural rule into an Ability. */
@@ -442,37 +442,12 @@ export class MemoryReflectionService {
 
 // ── Helpers ───────────────────────────────────────────────────
 
-/**
- * §C3 — directive polarity of a rule: +1 = positive directive (always/must/do/
- * prefer/ensure), −1 = prohibition (never/avoid/do not/don't/stop), 0 = none or
- * mixed (ambiguous). Two same-topic rules with opposite polarity contradict.
- */
-export function directivePolarity(text: string): -1 | 0 | 1 {
-  const lower = text.toLowerCase();
-  // Prohibitions first (so "do not"/"must not" aren't double-counted as positive).
-  const neg = (lower.match(/\b(never|avoid|do not|don't|dont|must not|should not|stop|disallow|forbid)\b/g) ?? []).length;
-  // Positive directives — deliberately NOT the generic "do"/"use" (too noisy:
-  // "do it off-peak" is not a positive directive about the subject).
-  const pos = (lower.match(/\b(always|must|ensure|require|prefer|should)\b/g) ?? []).length
-    - (lower.match(/\b(must not|should not)\b/g) ?? []).length;
-  if (pos > neg) return 1;
-  if (neg > pos) return -1;
-  return 0;
-}
-
-/**
- * Topic signature for comparing directives after polarity has been classified.
- * Modal/prohibition tokens describe whether a rule permits or forbids an action;
- * retaining them in the topic signature makes opposite rules look artificially
- * unrelated (for example, "always escalate" versus "do not escalate").
- */
-export function directiveTopicSignature(text: string): Set<string> {
-  const polarityTokens = new Set([
-    'always', 'never', 'avoid', 'not', 'dont', 'must', 'should', 'ensure',
-    'require', 'prefer', 'stop', 'disallow', 'forbid',
-  ]);
-  return new Set(tokenize(text).filter((token) => !polarityTokens.has(token)).slice(0, 24));
-}
+// §B5.5 — `directivePolarity` / `directiveTopicSignature` now live in
+// brain/brainText.ts. They are pure text primitives and the formation and dedup
+// layers need them too; importing this whole service from a primitive would
+// have inverted the dependency direction. Re-exported so existing importers are
+// unaffected.
+export { directivePolarity, directiveTopicSignature } from '../brain/brainText.js';
 
 export function jaccard(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 || b.size === 0) return 0;

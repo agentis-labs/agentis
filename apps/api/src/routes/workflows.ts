@@ -611,36 +611,41 @@ export function buildWorkflowRoutes(deps: {
   app.delete('/:id', async (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
+    // Existence is the ONLY 404. This used to wrap the whole handler in a catch
+    // that reported every failure as "Workflow not found", hiding the real cause.
+    const row = deps.db
+      .select({ id: schema.workflows.id })
+      .from(schema.workflows)
+      .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, ws.workspaceId)))
+      .get();
+    if (!row) return c.json({ error: 'Workflow not found' }, 404);
+
+    // Snapshot for /restore — best-effort. A workflow whose graph no longer
+    // normalizes must still be DELETABLE; losing its undo is the lesser cost.
     try {
-      const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-      deletedWorkflowsCache.set(id, wf);
-      deps.db
-        .delete(schema.workflows)
-        .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, ws.workspaceId)))
-        .run();
-
-      try {
-        deps.packager?.mirrorWorkflow(
-          {
-            workspaceId: ws.workspaceId,
-            ambientId: ws.ambientId ?? null,
-            userId: ws.user.id,
-          },
-          id,
-        );
-      } catch {
-        /* best-effort */
-      }
-
-      deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.WORKFLOW_DELETED, {
-        workflowId: id,
-        workspaceId: ws.workspaceId,
-      });
-
-      return c.json({ ok: true });
-    } catch (e) {
-      return c.json({ error: String(e) }, 404);
+      deletedWorkflowsCache.set(id, loadWorkflow(deps.db, ws.workspaceId, id));
+    } catch {
+      deletedWorkflowsCache.delete(id);
     }
+
+    deps.db
+      .delete(schema.workflows)
+      .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, ws.workspaceId)))
+      .run();
+
+    // Drop the library mirror, or the deleted workflow keeps appearing in Packages.
+    try {
+      deps.packager?.dropWorkflowMirror(ws.workspaceId, id);
+    } catch {
+      /* best-effort — a stale mirror must never fail the delete */
+    }
+
+    deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.WORKFLOW_DELETED, {
+      workflowId: id,
+      workspaceId: ws.workspaceId,
+    });
+
+    return c.json({ ok: true });
   });
 
   app.post('/:id/restore', async (c) => {

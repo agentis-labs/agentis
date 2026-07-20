@@ -15,7 +15,8 @@ import { useToast } from './Toast';
 import { openRunModal } from '../../lib/runModal';
 import { openApprovalModal } from '../../lib/approvalModal';
 import { useRealtime } from '../../lib/realtime';
-import { REALTIME_EVENTS } from '@agentis/core';
+// §PERF-BOOT — subpath import; see lib/realtime.ts.
+import { REALTIME_EVENTS } from '@agentis/core/events';
 
 export interface AgentisNotification {
   id: string;

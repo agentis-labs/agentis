@@ -146,8 +146,17 @@ export interface ConversationContactState {
   address: string;
   /** Current stage id. */
   stage: string;
-  /** `active` = advancing; `blocked` = entry side effect lacks proof; `stopped` = terminal. */
-  status: 'active' | 'blocked' | 'stopped';
+  /**
+   * `scheduled` = enrolled but the first touch is deferred until {@link scheduledAt};
+   * `active` = advancing; `blocked` = entry side effect lacks proof; `stopped` = terminal.
+   */
+  status: 'scheduled' | 'active' | 'blocked' | 'stopped';
+  /**
+   * When the deferred first touch becomes due (ISO-8601). Only meaningful while
+   * `status === 'scheduled'`; the sweep clears it on entry. A scheduled contact
+   * costs nothing while it waits — it is a datastore row, not a timer.
+   */
+  scheduledAt?: string | null;
   /** Durable reason an entry action could not be proven; retry uses the same idempotency key. */
   blocker?: { code: string; message: string; at: string };
   /** Channel connection this contact is reached on. */

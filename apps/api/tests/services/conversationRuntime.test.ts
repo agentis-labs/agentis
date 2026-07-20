@@ -72,6 +72,77 @@ describe('timeGreeting (localized, zero tokens — no language assumed)', () => 
   });
 });
 
+describe('ConversationRuntime — deferred first touch', () => {
+  // The harness clock is fixed at 09:00 local; derive both instants from it so
+  // these assertions hold in any timezone.
+  const NOW = new Date('2026-07-06T09:00:00').getTime();
+  const LATER = new Date(NOW + 60 * 60_000).toISOString();
+  const EARLIER = new Date(NOW - 60 * 60_000).toISOString();
+
+  let h: ReturnType<typeof harness>;
+  beforeEach(() => { h = harness(); });
+
+  it('parks a contact as scheduled without sending anything', async () => {
+    const r = await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: LATER });
+
+    expect(r).toMatchObject({ handled: true, stage: 'greet', reason: 'scheduled' });
+    expect(h.sends).toEqual([]);
+    expect(h.stats.completeCalls).toBe(0);
+    expect(h.contacts.get('+5511999')).toMatchObject({
+      stage: 'greet',
+      status: 'scheduled',
+      scheduledAt: LATER,
+      connectionId: 'conn1',
+    });
+  });
+
+  it('sends the first touch when the scheduled moment is swept', async () => {
+    await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: LATER });
+    const r = await h.runtime.startScheduled(CTX, '+5511999');
+
+    expect(r).toMatchObject({ handled: true, stage: 'greet', sent: true });
+    expect(h.sends).toEqual([{ address: '+5511999', body: 'Oi, bom dia' }]);
+    expect(h.contacts.get('+5511999')).toMatchObject({ status: 'active', scheduledAt: null });
+  });
+
+  it('is idempotent — a second sweep of the same contact never re-sends', async () => {
+    await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: LATER });
+    await h.runtime.startScheduled(CTX, '+5511999');
+    const again = await h.runtime.startScheduled(CTX, '+5511999');
+
+    expect(again).toMatchObject({ handled: true, reason: 'not_scheduled' });
+    expect(h.sends).toHaveLength(1);
+  });
+
+  it('starts immediately when the instant has already passed', async () => {
+    const r = await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: EARLIER });
+
+    expect(r).toMatchObject({ handled: true, stage: 'greet', sent: true });
+    expect(h.contacts.get('+5511999')?.status).toBe('active');
+  });
+
+  it('promotes a scheduled contact who reaches out first, consuming the schedule', async () => {
+    await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: LATER });
+    const r = await h.runtime.onInbound(CTX, '+5511999', 'oi, vi seu perfil');
+
+    expect(r).toMatchObject({ handled: true, stage: 'greet', sent: true });
+    const contact = h.contacts.get('+5511999');
+    expect(contact).toMatchObject({ status: 'active', scheduledAt: null });
+    // Their message is retained, and the now-consumed schedule cannot fire again.
+    expect(contact?.history?.some((entry) => entry.role === 'in')).toBe(true);
+    expect(await h.runtime.startScheduled(CTX, '+5511999')).toMatchObject({ reason: 'not_scheduled' });
+    expect(h.sends).toHaveLength(1);
+  });
+
+  it('does not re-enroll a contact already waiting on a scheduled touch', async () => {
+    await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: LATER });
+    const second = await h.runtime.enroll(CTX, '+5511999', 'conn1', undefined, { startAt: LATER });
+
+    expect(second).toMatchObject({ handled: true, reason: 'already_enrolled' });
+    expect(h.sends).toEqual([]);
+  });
+});
+
 describe('ConversationRuntime', () => {
   let h: ReturnType<typeof harness>;
   beforeEach(() => { h = harness(); });

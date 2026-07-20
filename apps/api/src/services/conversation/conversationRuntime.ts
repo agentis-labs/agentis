@@ -107,11 +107,17 @@ export class ConversationRuntime {
    * Enroll a fresh contact and start the script at its initial stage — the
    * outbound-initiated first touch (e.g. the deterministic greeting).
    */
-  async enroll(ctx: ConversationContext, address: string, connectionId: string, facts?: Record<string, unknown>): Promise<AdvanceResult> {
+  async enroll(
+    ctx: ConversationContext,
+    address: string,
+    connectionId: string,
+    facts?: Record<string, unknown>,
+    options?: { startAt?: string | null },
+  ): Promise<AdvanceResult> {
     const script = await this.deps.loadScript(ctx);
     if (!script) return { handled: false, reason: 'no_script' };
     const existing = await this.deps.contacts.get(ctx, script, address);
-    if (existing && existing.status === 'active') {
+    if (existing && (existing.status === 'active' || existing.status === 'scheduled')) {
       return { handled: true, stage: existing.stage, reason: 'already_enrolled' };
     }
     const state: ConversationContactState = {
@@ -122,7 +128,34 @@ export class ConversationRuntime {
       ...(facts ? { facts } : {}),
       history: existing?.history ?? [],
     };
+    // Deferred first touch: persist the intent and stop. The contact rests as a
+    // datastore row — no timer, no process — until the sweep finds it due. Only
+    // a FUTURE instant defers; a past/now one enrolls immediately, so a caller
+    // that computes a stagger offset of zero behaves exactly like today.
+    const startAt = options?.startAt;
+    if (startAt && new Date(startAt).getTime() > this.now().getTime()) {
+      state.status = 'scheduled';
+      state.scheduledAt = startAt;
+      await this.deps.contacts.save(ctx, script, state);
+      return { handled: true, stage: state.stage, reason: 'scheduled' };
+    }
     return this.#enterStage(ctx, script, state, script.initialStage);
+  }
+
+  /**
+   * The scheduled moment arrived — perform the first touch. Called by the sweep;
+   * idempotent against a contact that already left `scheduled` (a concurrent
+   * sweep, or an early inbound that promoted them).
+   */
+  async startScheduled(ctx: ConversationContext, address: string): Promise<AdvanceResult> {
+    const script = await this.deps.loadScript(ctx);
+    if (!script) return { handled: false, reason: 'no_script' };
+    const contact = await this.deps.contacts.get(ctx, script, address);
+    if (!contact) return { handled: false, reason: 'not_enrolled' };
+    if (contact.status !== 'scheduled') return { handled: true, stage: contact.stage, reason: 'not_scheduled' };
+    contact.status = 'active';
+    contact.scheduledAt = null;
+    return this.#enterStage(ctx, script, contact, script.initialStage);
   }
 
   /** The contact replied while resting — advance per the current stage's `onReply`. */
@@ -131,6 +164,16 @@ export class ConversationRuntime {
     if (!script) return { handled: false, reason: 'no_script' };
     const contact = await this.deps.contacts.get(ctx, script, address);
     if (!contact) return { handled: false, reason: 'not_enrolled' };
+    // They reached us BEFORE our deferred first touch. Start the script now
+    // rather than staying silent and then interrupting a live conversation with
+    // a canned greeting later; promoting also consumes the schedule so the
+    // sweep cannot fire it a second time.
+    if (contact.status === 'scheduled') {
+      this.#recordHistory(contact, 'in', text);
+      contact.status = 'active';
+      contact.scheduledAt = null;
+      return this.#enterStage(ctx, script, contact, script.initialStage);
+    }
     // A stopped contact is OWNED by the script but silent — it must not fall
     // through to a normal agent turn (the operator asked it to stop sending).
     if (contact.status === 'stopped') return { handled: true, stage: contact.stage, reason: 'stopped' };

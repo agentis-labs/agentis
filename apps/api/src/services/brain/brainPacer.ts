@@ -47,7 +47,18 @@ export type SourceSurface =
   | 'operator_chat'         // a human stating a rule/preference/fact in chat
   | 'session_conversation'  // session-local conversational trace
   | 'knowledge_ingest'      // uploaded/imported document chunk
-  | 'agent_reflection';     // a reflective/repair job (Feynman) output
+  | 'agent_reflection'      // a reflective/repair job (Feynman) output
+  // §B6.1 — an external counterparty on a channel (customer, prospect, stranger
+  // with the number). Distinct from `operator_chat` because it is EVIDENCE about
+  // a contact, never AUTHORITY over the workspace: it must not be able to state
+  // a governing rule. Before this existed, every channel turn was labelled
+  // `operator_chat` and inherited the operator's full authority.
+  | 'external_contact'
+  // The agent's own discovery inside a chat turn. Was already being emitted by
+  // chatMemoryCapture without being a member of this union — it type-checked
+  // only because the queue widens the field to `string` and casts back, so it
+  // silently fell through to the default and never got its PACER prior.
+  | 'agent_chat_learning';
 
 export interface PacerSignals {
   /** Pre-strip candidate text — keep code refs/paths/identifiers intact. */
@@ -126,6 +137,10 @@ const SURFACE_PRIOR: Record<SourceSurface, { cls: PacerClass; weight: number }> 
   run_completion: { cls: 'conceptual', weight: 0.2 },
   operator_chat: { cls: 'procedural', weight: 0.25 },
   agent_reflection: { cls: 'procedural', weight: 0.45 },
+  // What a customer says is an observation about the world, not a procedure the
+  // workspace adopts — so it leans evidence, the opposite of `operator_chat`.
+  external_contact: { cls: 'evidence', weight: 0.45 },
+  agent_chat_learning: { cls: 'conceptual', weight: 0.3 },
 };
 
 // ────────────────────────────────────────────────────────────

@@ -27,13 +27,29 @@ import {
   getStoredLaunchToken,
   isLocalLaunchOrigin,
   loginWithLaunchToken,
+  probeServerReachable,
   removeLaunchTokenFromUrl,
   setStoredLaunchToken,
 } from './lib/launchAuth';
 import { useAgentisStore } from './store/agentisStore';
 // Initialize theme on app boot
 import './components/shared/ThemeToggle';
-import { SettingsModal } from './components/settings/SettingsModal';
+
+// §PERF-BOOT — the settings modal and its ~10 panels were statically imported,
+// putting ~100 KB raw of settings UI into the entry chunk for a surface nobody
+// sees at boot. It already renders null while closed; the cost was purely the
+// import. Mounted lazily on first open instead.
+const LazySettingsModal = lazy(() => import('./components/settings/SettingsModal').then((m) => ({ default: m.SettingsModal })));
+
+function SettingsModalMount() {
+  const settingsOpen = useAgentisStore((s) => s.settingsOpen);
+  if (!settingsOpen) return null;
+  return (
+    <Suspense fallback={null}>
+      <LazySettingsModal />
+    </Suspense>
+  );
+}
 
 /** Full-screen brand boot/loading state — the mark breathes above a quiet label. */
 function BootScreen({ label }: { label: string }) {
@@ -86,6 +102,10 @@ async function tryLaunchTokenAuth(token: string, options: { removeUrlToken?: boo
   }
 }
 
+/** Shown while polling /healthz — the API binds its port late on big workspaces. */
+const SERVER_WAIT_LABEL = 'Waiting for the Agentis server…';
+const SERVER_RETRY_MS = 1_500;
+
 export function App() {
   const location = useLocation();
   const [authed, setAuthed] = useState<boolean>(false);
@@ -94,8 +114,25 @@ export function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [wsReady, setWsReady] = useState<boolean>(false);
   const [me, setMe] = useState<OperatorMe | null>(null);
+  // §PERF-BOOT — bumping these re-runs the auth / workspace effects while the
+  // server is still coming up, instead of treating "not up yet" as "rejected".
+  const [initRetry, setInitRetry] = useState(0);
+  const [wsRetry, setWsRetry] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    // §PERF-BOOT — a failed launch while the server is UNREACHABLE is not an
+    // invalid token. The old path treated them identically, so opening the app
+    // while the API was still booting cleared the stored launch token and
+    // stranded the operator on the login form. Now: probe /healthz, keep the
+    // token, keep the BootScreen, and retry until the server answers.
+    const waitForServer = () => {
+      if (cancelled) return;
+      setInitializingLabel(SERVER_WAIT_LABEL);
+      setTimeout(() => {
+        if (!cancelled) setInitRetry((n) => n + 1);
+      }, SERVER_RETRY_MS);
+    };
     void (async () => {
       const urlToken = getLaunchTokenFromUrl();
       const hasAccessToken = Boolean(tokens.access());
@@ -109,10 +146,15 @@ export function App() {
         try { logout(); } catch { /* noop */ }
         setInitializingLabel('Opening Agentis...');
         const launched = await tryLaunchTokenAuth(launchToken, { removeUrlToken: Boolean(urlToken) });
+        if (cancelled) return;
         if (launched) {
           setStoredLaunchToken(launchToken);
           setAuthed(true);
           setInitializing(false);
+          return;
+        }
+        if (!(await probeServerReachable())) {
+          waitForServer();
           return;
         }
         clearStoredLaunchToken();
@@ -122,9 +164,14 @@ export function App() {
         try { logout(); } catch { /* noop */ }
         setInitializingLabel('Opening Agentis...');
         const launched = await tryLaunchTokenAuth(LOCAL_BYPASS_LAUNCH_TOKEN);
+        if (cancelled) return;
         if (launched) {
           setAuthed(true);
           setInitializing(false);
+          return;
+        }
+        if (!(await probeServerReachable())) {
+          waitForServer();
           return;
         }
       }
@@ -134,19 +181,23 @@ export function App() {
         setInitializing(false);
         return;
       }
+      if (cancelled) return;
       setInitializingLabel('Loading...');
       setInitializing(false);
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [initRetry]);
 
   useEffect(() => {
     if (!authed) return;
+    let cancelled = false;
     void (async () => {
       try {
         const [data, meData] = await Promise.all([
           api<{ workspaces: Workspace[] }>('/v1/workspaces'),
           api<{ user: OperatorMe }>('/v1/auth/me').catch(() => null),
         ]);
+        if (cancelled) return;
         const current = wsStore.get();
         const picked = data.workspaces.find((w) => w.id === current) ?? data.workspaces[0] ?? null;
         if (picked) {
@@ -163,7 +214,22 @@ export function App() {
             avatarUrl: user.avatarUrl,
           });
         }
+        setWsReady(true);
       } catch {
+        if (cancelled) return;
+        // §PERF-BOOT — this catch used to treat EVERY failure as an auth
+        // rejection: logout() destroyed valid tokens and the operator landed on
+        // the login form whenever the API was merely still booting or briefly
+        // restarting. Probe first; only a REACHABLE server that rejects us is
+        // an auth problem.
+        if (!(await probeServerReachable())) {
+          if (cancelled) return;
+          setInitializingLabel(SERVER_WAIT_LABEL);
+          setTimeout(() => {
+            if (!cancelled) setWsRetry((n) => n + 1);
+          }, SERVER_RETRY_MS);
+          return; // wsReady stays false → BootScreen keeps showing, tokens survive
+        }
         logout();
         const launchToken = getStoredLaunchToken();
         if (launchToken) {
@@ -175,12 +241,13 @@ export function App() {
           }
           clearStoredLaunchToken();
         }
+        if (cancelled) return;
         setAuthed(false);
-      } finally {
         setWsReady(true);
       }
     })();
-  }, [authed]);
+    return () => { cancelled = true; };
+  }, [authed, wsRetry]);
 
   if (location.pathname.startsWith('/public/apps/')) {
     return (
@@ -218,7 +285,8 @@ export function App() {
   }
 
   if (!wsReady) {
-    return <BootScreen label="Loading…" />;
+    // Shows the "waiting for server" message while /healthz polling is active.
+    return <BootScreen label={initializingLabel === SERVER_WAIT_LABEL ? SERVER_WAIT_LABEL : 'Loading…'} />;
   }
 
   return (
@@ -288,7 +356,7 @@ export function App() {
           </Suspense>
           </ErrorBoundary>
           <CommandPalette />
-          <SettingsModal />
+          <SettingsModalMount />
           </Shell>
           </ApprovalModalProvider>
         </RunModalProvider>

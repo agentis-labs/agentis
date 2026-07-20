@@ -264,7 +264,9 @@ export class SchedulerService {
         .map((item) => item.workflowId),
     );
     for (const workflowId of workflowIds) {
-      await this.deps.engine.drainWorkflowQueue(workflowId);
+      // Same clock the due-filter used, so a row that is not yet due cannot slip
+      // in on a later timestamp mid-sweep.
+      await this.deps.engine.drainWorkflowQueue(workflowId, now);
     }
     return workflowIds.size;
   }

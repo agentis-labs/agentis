@@ -26,7 +26,8 @@ import {
   ArrowUpRight,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { REALTIME_EVENTS } from '@agentis/core';
+// §PERF-BOOT — subpath import; see lib/realtime.ts.
+import { REALTIME_EVENTS } from '@agentis/core/events';
 import { api, apiErrorMessage } from '../../lib/api';
 import {
   closeRunModal,

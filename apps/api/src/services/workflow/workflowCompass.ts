@@ -318,6 +318,43 @@ export interface WorkflowCompassArgs {
 }
 
 /**
+ * Composition steps — how this workflow STARTS, and what runs after it.
+ *
+ * The build loop proves one workflow in isolation and then stopped talking. The
+ * agent is told to follow the compass, so anything the compass never mentions
+ * effectively does not exist: a proven workflow stayed manual and unlinked
+ * because nothing ever asked "what starts this, and what depends on it?".
+ *
+ * Only offered once a workflow is PROVEN — arming or chaining an unverified
+ * graph is the failure mode the build loop exists to prevent.
+ */
+function compositionSteps(args: WorkflowCompassArgs): CompassStep[] {
+  const steps: CompassStep[] = [];
+  const triggerNode = args.graph.nodes.find((node) => node.type === 'trigger');
+  const triggerType = (triggerNode?.config as { triggerType?: string } | undefined)?.triggerType;
+  if (!triggerType || triggerType === 'manual') {
+    steps.push({
+      tool: 'agentis.build_workflow',
+      args: { workflowId: args.workflowId, description: 'set how this workflow starts', trigger: { type: 'cron', cron: '0 9 * * *' } },
+      why:
+        'This workflow is MANUAL — nothing starts it but a person. If it is meant to run on its own, declare the '
+        + 'trigger (cron / webhook / persistent_listener). Skip only if a human really is meant to start it every time.',
+    });
+  }
+  if (args.appId) {
+    steps.push({
+      tool: 'agentis.workflow.chain',
+      args: { appId: args.appId },
+      why:
+        'Wire what runs AFTER this (or what it runs after) — dependsOn is a real join, not a display order. A link '
+        + 'can also carry a condition (`when`), an error branch (chainOn:"failure"), and a delay, and hands the '
+        + 'dependent this workflow\'s actual output. Skip if it genuinely stands alone.',
+    });
+  }
+  return steps;
+}
+
+/**
  * The workflow-level compass: where this workflow stands on the Paved Road and
  * the exact next call. Attach to build/patch/dry_run/loop_status results.
  */
@@ -447,6 +484,7 @@ export function compassForWorkflow(args: WorkflowCompassArgs): Compass {
             args: wf,
             why: 'Production run (self-heal + outcome-rework ON). Scheduled/listener workflows: activate the trigger — the arming gate passes now.',
           },
+          ...compositionSteps(args),
         ],
       };
     case 'production':
@@ -459,6 +497,7 @@ export function compassForWorkflow(args: WorkflowCompassArgs): Compass {
             args: { workflowId: args.workflowId, limit: 5 },
             why: 'Watch recent runs. To change the workflow, patch with agentis.build_workflow { workflowId, patchDraft } — the loop (dry-run → debug-run) restarts at the new graph hash.',
           },
+          ...compositionSteps(args),
         ],
       };
   }

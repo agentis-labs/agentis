@@ -35,7 +35,7 @@ import {
   type AppWorkflowBinding,
   type AppWorkflowSummary,
 } from '@agentis/core';
-import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowGraph, AgentTool } from '@agentis/core';
@@ -44,7 +44,7 @@ import type { EventBus } from '../event-bus.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentToolRuntime } from '../services/agent/agentToolRuntime.js';
 import { runPublishedWorkflow, startPublishedWorkflow } from '../engine/runPublishedWorkflow.js';
-import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness } from '@agentis/app';
+import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness, computeAppClosure } from '@agentis/app';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { EpisodicBrainPort } from '../services/brain/brainExport.js';
 import { bundleFidelitySchema } from '@agentis/core';
@@ -773,21 +773,32 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
 
   app.get('/:id/export', (c) => {
     const ws = getWorkspace(c);
-    // `?fidelity=full` carries the App's owning agent(s) + their Brain + the App
-    // Brain + collection rows so a single App travels self-contained.
-    const fidelity = bundleFidelitySchema.catch('shareable').parse(c.req.query('fidelity'));
+    // Defaults to FULL: exporting an App should carry what it needs to actually
+    // run elsewhere — its agents and their memory, the App Brain, knowledge and
+    // data. `?fidelity=shareable` opts down to structure-only for public sharing.
+    // `?exclude=agent:<id>,knowledgeBase:<id>` drops individual closure items.
+    const fidelity = bundleFidelitySchema.catch('full').parse(c.req.query('fidelity'));
+    const exclude = (c.req.query('exclude') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     return c.json({
       data: packager.export(ws.workspaceId, c.req.param('id'), {
         fidelity,
+        ...(exclude.length > 0 ? { exclude } : {}),
         ...(brainPort ? { brain: brainPort } : {}),
       }),
     });
   });
 
+  /** What an App export contains, before exporting — powers the selection tree. */
+  app.get('/:id/export/preview', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: computeAppClosure(deps.db, ws.workspaceId, c.req.param('id')) });
+  });
+
   app.post('/import/preview', async (c) => {
+    const ws = getWorkspace(c);
     const envelope = rawAppEnvelopeSchema.parse(await c.req.json());
     const warnings = scanAppEnvelope(envelope);
-    return c.json({ data: appendScanWarnings(packager.preview(envelope), warnings) });
+    return c.json({ data: appendScanWarnings(packager.preview(envelope, ws.workspaceId), warnings) });
   });
 
   app.post('/import', async (c) => {
@@ -795,7 +806,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const user = c.get('user');
     const body = importAppSchema.parse(await c.req.json());
     const warnings = scanAppEnvelope(body.envelope);
-    const preview = appendScanWarnings(packager.preview(body.envelope), warnings);
+    const preview = appendScanWarnings(packager.preview(body.envelope, ws.workspaceId), warnings);
     assertAppPermissionsAcknowledged(preview, body.permissionsAcknowledged);
     return c.json({
       data: packager.import(ws.workspaceId, user.id, body.envelope, {
@@ -873,10 +884,38 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     return c.json({ data: store.update(ws.workspaceId, c.req.param('id'), parsed.data) });
   });
 
+  /** What deleting this App would remove — render before confirming. */
+  app.get('/:id/deletion-preview', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: store.deletionPreview(ws.workspaceId, c.req.param('id')) });
+  });
+
   app.delete('/:id', (c) => {
     const ws = getWorkspace(c);
-    store.delete(ws.workspaceId, c.req.param('id'));
-    return c.json({ data: { ok: true } });
+    // Workflows go with the App unless the caller explicitly keeps them. Opt-IN
+    // because silently orphaning them was the old behaviour, and the orphans had
+    // no owning App page left to delete them from.
+    const keepWorkflows = ['1', 'true', 'yes'].includes(
+      (c.req.query('keepWorkflows') ?? '').toLowerCase(),
+    );
+    const result = store.delete(ws.workspaceId, c.req.param('id'), {
+      keepWorkflows,
+      // Cancel in-flight runs first so the FK cascade never pulls a run row out
+      // from under a live execution.
+      onWorkflowDeleting: (workflowId) => {
+        for (const run of deps.db
+          .select({ id: schema.workflowRuns.id })
+          .from(schema.workflowRuns)
+          .where(and(
+            eq(schema.workflowRuns.workflowId, workflowId),
+            sql`${schema.workflowRuns.status} NOT IN ('COMPLETED','FAILED','CANCELLED','COMPLETED_WITH_CONTRACT_VIOLATION')`,
+          ))
+          .all()) {
+          void deps.engine?.cancelRun(run.id).catch(() => { /* cascade removes it anyway */ });
+        }
+      },
+    });
+    return c.json({ data: { ok: true, ...result } });
   });
 
   // ── Membership ──────────────────────────────────────────────

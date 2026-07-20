@@ -19,6 +19,7 @@ import {
   Puzzle,
   Search,
   Settings,
+  Trash2,
   Upload,
   Users,
   Workflow,
@@ -291,6 +292,25 @@ export function AppsPage() {
     }
   }
 
+  /**
+   * Delete a standalone workflow. Only reachable for `kind: 'logic'` items —
+   * an App's workflows are managed from the App editor and go with the App.
+   */
+  async function deleteWorkflow(workflowId: string, title: string) {
+    if (!window.confirm(
+      `Delete "${title}" permanently?\n\nThis also removes its run history. This cannot be undone.`,
+    )) return;
+    setError(null);
+    try {
+      await api(`/v1/workflows/${workflowId}`, { method: 'DELETE' });
+      // Drop it locally so the card disappears immediately; the realtime
+      // WORKFLOW_DELETED subscription reconciles anything this misses.
+      setWorkflows((rows) => rows.filter((row) => row.id !== workflowId));
+    } catch (e) {
+      setError(apiErrorMessage(e));
+    }
+  }
+
   async function openAppEngine(appId: string) {
     setEngineAppId(appId);
     setEngineSurfaces([]);
@@ -466,6 +486,7 @@ export function AppsPage() {
                       opening={openingId === item.id}
                       onOpen={() => void open(item)}
                       onOpenSettings={item.kind === 'app' ? () => void openAppEngine(item.id) : undefined}
+                      onDelete={item.kind === 'logic' ? () => void deleteWorkflow(item.id, item.name) : undefined}
                     />
                   ))}
                 </div>
@@ -573,11 +594,13 @@ function AppCard({
   opening,
   onOpen,
   onOpenSettings,
+  onDelete,
 }: {
   item: AppIndexItem;
   opening: boolean;
   onOpen: () => void;
   onOpenSettings?: () => void;
+  onDelete?: () => void;
 }) {
   const isLogic = item.kind === 'logic';
   return (
@@ -618,6 +641,23 @@ function AppCard({
                 aria-label={`App engine ${item.name}`}
               >
                 <Settings size={13} />
+              </button>
+            ) : null}
+            {/* A standalone workflow has no owning App page, so this card is the
+                only place it can be removed from. Without it, a workflow left
+                behind by a deleted App is undeletable from the UI entirely. */}
+            {onDelete ? (
+              <button
+                type="button"
+                onClick={onDelete}
+                className={clsx(
+                  'relative z-10 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted opacity-0 transition-colors hover:bg-danger-soft hover:text-danger focus-visible:opacity-100 group-hover:opacity-100',
+                  !onOpenSettings && 'ml-auto',
+                )}
+                title="Delete workflow"
+                aria-label={`Delete workflow ${item.name}`}
+              >
+                <Trash2 size={13} />
               </button>
             ) : null}
           </div>
@@ -780,10 +820,41 @@ function ImportDialog({
               </div>
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                 <Metric label="Logic" value={preview.counts.workflows} />
+                <Metric label="Agents" value={preview.counts.agents} />
                 <Metric label="Surfaces" value={preview.counts.surfaces} />
                 <Metric label="Collections" value={preview.counts.collections} />
+                <Metric label="Knowledge" value={preview.counts.knowledgeDocs} />
+                <Metric label="Memories" value={preview.counts.brainAtoms} />
+                <Metric label="Data rows" value={preview.counts.collectionRows} />
                 <Metric label="Capabilities" value={preview.counts.capabilities} />
               </div>
+
+              {/* What is actually in the package, itemised. Counts alone don't tell
+                  an operator which agents arrive, which are reused, or what they
+                  will have to reconnect themselves. */}
+              {preview.contents.length > 0 && (
+                <div className="rounded-card border border-line bg-canvas/45 p-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">What this package contains</div>
+                  <div className="max-h-56 space-y-1 overflow-auto">
+                    {preview.contents.map((item, i) => (
+                      <div key={`${item.kind}-${item.label}-${i}`} className="flex items-start gap-2 text-[12px]">
+                        <span className={`mt-0.5 shrink-0 rounded-pill px-1.5 py-0.5 text-[10px] font-medium ${
+                          item.action === 'setup' ? 'bg-warn-soft text-warn'
+                            : item.action === 'reuse' ? 'bg-surface-2 text-text-muted'
+                            : 'bg-accent-soft text-accent'
+                        }`}>
+                          {item.action === 'setup' ? 'set up' : item.action}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="text-text-primary">{item.label}</span>
+                          <span className="ml-1.5 text-[11px] text-text-muted">{item.kind}</span>
+                          {item.detail && <span className="block text-[11px] text-text-muted">{item.detail}</span>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <Chips title="Permissions" items={preview.permissions} empty="No elevated permissions" />
               {preview.requiredPlugins.length > 0 && <Chips title="Required plugins" items={preview.requiredPlugins} empty="" />}
               {preview.warnings.length > 0 && (

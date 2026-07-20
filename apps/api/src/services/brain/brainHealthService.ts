@@ -1,6 +1,8 @@
 import { and, desc, eq, gte, isNull } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { embeddingLatencyStats, type EmbeddingLatencyStats } from '../embedding/embeddingProvider.js';
+import type { MemoryDropLog } from './memoryDropLog.js';
 
 export interface BrainHealthSnapshot {
   healthScore: number;
@@ -19,6 +21,13 @@ export interface BrainHealthSnapshot {
     unconsolidatedAtoms: number;
     /** consolidated / (consolidated + unconsolidated); 1 = no raw backlog. */
     formationPrecision: number;
+    /**
+     * §B7 — candidates that did NOT become memory this process, by gate. The
+     * counterpart to `formationPrecision`: precision says how much of what was
+     * kept is durable, this says how much never got in and why. Empty means
+     * nothing was dropped (or the drop log isn't wired).
+     */
+    dropsByGate: Record<string, number>;
   };
   topAtoms: Array<{ id: string; title: string; content: string; confidence: number; updatedAt: string }>;
   staleAtoms: Array<{ id: string; title: string; content: string; confidence: number; updatedAt: string }>;
@@ -28,12 +37,23 @@ export interface BrainHealthSnapshot {
     embeddingProviderType: string;
     degraded: boolean;
     migration: unknown;
+    /**
+     * §B5.10 — what a brain write actually costs. Process-wide (the embedding
+     * pipeline is a single in-process singleton), not per-workspace. Until this
+     * existed, no write path measured its own embedding, so nobody could answer
+     * "is the Brain slow?" or notice a model/dtype/provider regression.
+     */
+    embedLatency: EmbeddingLatencyStats;
   };
   recentActivity: Array<{ id: string; eventType: string; atomId: string | null; abilityId: string | null; delta: number | null; createdAt: string; metadata: unknown }>;
 }
 
 export class BrainHealthService {
-  constructor(private readonly db: AgentisSqliteDb) {}
+  constructor(
+    private readonly db: AgentisSqliteDb,
+    /** §B7 — optional so existing constructions (incl. tests) keep working. */
+    private readonly drops?: MemoryDropLog,
+  ) {}
 
   snapshot(workspaceId: string, scopeId?: string | null): BrainHealthSnapshot {
     const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -125,6 +145,7 @@ export class BrainHealthService {
         consolidatedAtoms,
         unconsolidatedAtoms,
         formationPrecision,
+        dropsByGate: this.drops?.counts() ?? {},
       },
       topAtoms,
       staleAtoms,
@@ -138,6 +159,7 @@ export class BrainHealthService {
         embeddingProviderType: workspace?.embeddingProviderType ?? 'local',
         degraded: false,
         migration: workspaceSettings.embeddingMigration ?? null,
+        embedLatency: embeddingLatencyStats(),
       },
       recentActivity: events.slice(0, 20).map((event) => ({
         id: event.id,

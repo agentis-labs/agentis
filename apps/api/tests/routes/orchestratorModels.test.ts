@@ -45,6 +45,60 @@ describe('/v1/orchestrator/models', () => {
     expect(conversation.override).toBeNull();
   });
 
+  it('GET defaults the memory-formation tier from the model-assist flag', async () => {
+    const res = await app().request('/v1/orchestrator/models', { headers: ctx.authHeaders });
+    const body = await res.json() as { memoryFormation: { tier: string; explicit: boolean } };
+    // Never chosen → inherits the model-assist default rather than silently
+    // changing an existing workspace's behaviour.
+    expect(body.memoryFormation).toEqual({ tier: 'model_assisted', explicit: false });
+  });
+
+  it('PATCH sets the memory-formation tier and reports it as an explicit choice', async () => {
+    const patch = await app().request('/v1/orchestrator/models/memory-formation-tier', {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ tier: 'on_device' }),
+    });
+    expect(patch.status).toBe(200);
+    expect(await patch.json()).toEqual({ memoryFormation: { tier: 'on_device' } });
+
+    const res = await app().request('/v1/orchestrator/models', { headers: ctx.authHeaders });
+    const body = await res.json() as { memoryFormation: { tier: string; explicit: boolean } };
+    expect(body.memoryFormation).toEqual({ tier: 'on_device', explicit: true });
+  });
+
+  it('rejects an unknown tier', async () => {
+    const res = await app().request('/v1/orchestrator/models/memory-formation-tier', {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ tier: 'turbo' }),
+    });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('preserves sibling brainSettings keys when writing the tier', async () => {
+    // brainSettings is one shared JSON blob written by several routes; a
+    // non-merging write would silently clear the operator's other choices.
+    await app().request('/v1/orchestrator/models/model-assisted-runtime', {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ enabled: false }),
+    });
+    await app().request('/v1/orchestrator/models/memory-formation-tier', {
+      method: 'PATCH',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ tier: 'model_assisted' }),
+    });
+
+    const res = await app().request('/v1/orchestrator/models', { headers: ctx.authHeaders });
+    const body = await res.json() as {
+      memoryFormation: { tier: string };
+      modelAssistedRuntime: { enabled: boolean };
+    };
+    expect(body.memoryFormation.tier).toBe('model_assisted');
+    expect(body.modelAssistedRuntime.enabled).toBe(false);
+  });
+
   it('PUT sets an override that the router then resolves; key is never returned', async () => {
     const res = await app().request('/v1/orchestrator/models/conversation', {
       method: 'PUT',

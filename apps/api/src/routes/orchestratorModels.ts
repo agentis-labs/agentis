@@ -21,6 +21,7 @@ import { ORCHESTRATOR_MODEL_ROLES, type OrchestratorModelRole } from '../service
 import type { WorkspaceHarnessRuntimeResolver } from '../services/workspace/workspaceHarnessRuntime.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
+import { memoryFormationConfig, workspaceBrainSettings } from '../services/brain/memoryFormationTier.js';
 
 const roleSchema = z.enum(ORCHESTRATOR_MODEL_ROLES as unknown as [string, ...string[]]);
 const setSchema = z.object({
@@ -31,6 +32,9 @@ const setSchema = z.object({
 });
 const modelAssistedRuntimeSchema = z.object({
   enabled: z.boolean(),
+});
+const memoryFormationTierSchema = z.object({
+  tier: z.enum(['off', 'on_device', 'model_assisted']),
 });
 
 export function buildOrchestratorModelRoutes(deps: {
@@ -69,7 +73,7 @@ export function buildOrchestratorModelRoutes(deps: {
       source: autonomyProfile ? 'configured_model' : harness ? 'agent_harness' : 'none',
       ...(harness ? { agentName: harness.agentName, adapterType: harness.adapterType } : {}),
     };
-    return c.json({ roles, autonomy, modelAssistedRuntime });
+    return c.json({ roles, autonomy, modelAssistedRuntime, memoryFormation: memoryFormationConfig(deps.db, ws.workspaceId) });
   });
 
   app.patch('/model-assisted-runtime', async (c) => {
@@ -87,6 +91,23 @@ export function buildOrchestratorModelRoutes(deps: {
       .where(eq(schema.workspaces.id, ws.workspaceId))
       .run();
     return c.json({ modelAssistedRuntime: { enabled: body.enabled } });
+  });
+
+  app.patch('/memory-formation-tier', async (c) => {
+    const ws = getWorkspace(c);
+    const body = memoryFormationTierSchema.parse(await c.req.json());
+    const current = workspaceBrainSettings(deps.db, ws.workspaceId);
+    // Spread-merge: `brainSettings` is one shared JSON blob also written by
+    // /model-assisted-runtime and /v1/workspace/intelligence. Replacing it
+    // wholesale would silently clear the operator's other choices.
+    deps.db.update(schema.workspaces)
+      .set({
+        brainSettings: { ...current, memoryFormationTier: body.tier },
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.workspaces.id, ws.workspaceId))
+      .run();
+    return c.json({ memoryFormation: { tier: body.tier } });
   });
 
   app.put('/:role', async (c) => {
@@ -127,18 +148,5 @@ function modelAssistedRuntimeConfig(db: AgentisSqliteDb, workspaceId: string): {
   return { enabled: settings.modelAssistedRuntimeEnabled !== false };
 }
 
-function workspaceBrainSettings(db: AgentisSqliteDb, workspaceId: string): Record<string, unknown> {
-  const row = db.select({ brainSettings: schema.workspaces.brainSettings })
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, workspaceId))
-    .get();
-  const value = row?.brainSettings;
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
-  if (typeof value !== 'string') return {};
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch {
-    return {};
-  }
-}
+// `workspaceBrainSettings` moved to services/brain/memoryFormationTier.ts so the
+// route and the formation path read the same blob through one parser.

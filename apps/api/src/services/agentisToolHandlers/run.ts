@@ -17,6 +17,8 @@ import { recordWorkflowLesson, recallWorkflowLessons } from '../workflow/workflo
 import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop, type CompassStep } from '../workflow/workflowCompass.js';
 import { collectReplayFrontierNodeIds } from '../partialReplay.js';
 import { compileAppReadiness } from '../app/appCompiler.js';
+import { resolveStartAt } from '../workflow/deferredStart.js';
+import { queueWorkflowRun } from '../scheduler.js';
 import type { ToolHandlerDeps } from './deps.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
@@ -46,6 +48,24 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
               type: 'string',
               enum: ['auto', 'fresh', 'failed_frontier'],
               description: 'Debug-run restart policy. auto (default) resumes the latest same-graph failed/deficient frontier; fresh explicitly starts at the root.',
+            },
+            startAt: {
+              type: 'string',
+              description:
+                'DEFER the start to this ISO-8601 instant instead of now. The run becomes a queue row and begins when due — '
+                + 'it holds no process and spends no tokens while it waits.',
+            },
+            delayMs: {
+              type: 'number',
+              description:
+                'Defer the start by this many milliseconds (adds to startAt when both are given). Use for staggered fan-out '
+                + '(call once per item with an increasing delay), backoff, and rate-limited downstreams.',
+            },
+            jitterMs: {
+              type: 'number',
+              description:
+                'Random extra wait in [0, jitterMs). Spreads starts that would otherwise land on the same instant — '
+                + 'prefer this over exact spacing when many runs share a downstream.',
             },
           },
           required: ['workflowId'],
@@ -96,6 +116,47 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           );
         }
         const inputs = parseInputs(args.inputs ?? args.input);
+        // DEFERRED START — the run queue already gates on `scheduledAt`; this is
+        // the agent's way to set it. Route through the queue rather than
+        // startRun: a deferred run must be a row until it is due, not a timer
+        // held in this process (which a restart would lose).
+        const scheduledAt = resolveStartAt({
+          startAt: typeof args.startAt === 'string' ? args.startAt : null,
+          delayMs: typeof args.delayMs === 'number' ? args.delayMs : null,
+          jitterMs: typeof args.jitterMs === 'number' ? args.jitterMs : null,
+        });
+        if (scheduledAt) {
+          if (debugRun) {
+            throw new AgentisError(
+              'VALIDATION_FAILED',
+              'a debug run is an interactive verification step and cannot be deferred — drop startAt/delayMs/jitterMs, or drop debugRun',
+            );
+          }
+          const queued = await queueWorkflowRun(
+            { db: deps.db, bus: deps.bus, engine: deps.engine, logger: deps.logger },
+            {
+              workflowId: wf.id,
+              workspaceId: ctx.workspaceId,
+              ambientId: ctx.ambientId ?? null,
+              userId: ctx.userId,
+              triggerId: null,
+              inputs,
+              reason: 'agent_scheduled',
+              scheduledAt,
+            },
+          );
+          return {
+            runId: queued.runId,
+            workflowId: wf.id,
+            status: 'scheduled',
+            scheduledAt,
+            // Deliberately NOT compass→run.await: blocking on a run that starts
+            // hours from now is the wrong next move. Check back, or chain off it.
+            next:
+              `Queued to start at ${scheduledAt}. Until then it is a queue row — no process, no tokens. `
+              + 'Use agentis.run.status to check it, or agentis.workflow.chain to make downstream work depend on it.',
+          };
+        }
         const activeDebugRun = debugRun && restartMode !== 'fresh' && !hasExplicitInputs
           ? latestSameGraphActiveRun(deps, ctx.workspaceId, wf.id, graph)
           : null;

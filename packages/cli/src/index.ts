@@ -200,7 +200,7 @@ async function runUp(): Promise<void> {
   // them only after the server is listening and the dashboard has been opened.
   // The API's local embedding pipeline is memoised in-process, so this joins any
   // warm already started by bootstrap instead of racing a second cache writer.
-  void prepareRuntime({ showOfflineHint: false, background: true }).then((code) => {
+  void prepareRuntime({ showOfflineHint: false, background: true, includeChromium: false }).then((code) => {
     if (code === 0) process.stdout.write('Background runtime setup complete.\n');
   });
 }
@@ -315,12 +315,18 @@ async function prepareChromium(options: { background?: boolean } = {}): Promise<
   }
 }
 
-async function prepareRuntime(options: { showOfflineHint?: boolean; background?: boolean } = {}): Promise<number> {
-  const [embedding, chromium] = await Promise.all([
+async function prepareRuntime(options: { showOfflineHint?: boolean; background?: boolean; includeChromium?: boolean } = {}): Promise<number> {
+  // §PERF-BOOT — Chromium (~250 MB) is opt-in here, not automatic. `agentis up`
+  // used to trigger the download on every fresh host whether or not browser
+  // tools were ever used; browserPool already self-installs on the first real
+  // browser action, so `up` now warms only the embedding model. The explicit
+  // `agentis setup` path still prepares everything up front.
+  const jobs: Array<Promise<number>> = [
     runWarmupCmd({ showOfflineHint: options.showOfflineHint, background: options.background }),
-    prepareChromium({ background: options.background }),
-  ]);
-  return embedding === 0 && chromium === 0 ? 0 : 1;
+  ];
+  if (options.includeChromium !== false) jobs.push(prepareChromium({ background: options.background }));
+  const results = await Promise.all(jobs);
+  return results.every((code) => code === 0) ? 0 : 1;
 }
 
 async function runBackupCmd(argv: string[]): Promise<number> {

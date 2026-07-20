@@ -1,4 +1,5 @@
-﻿import { REALTIME_EVENTS } from '@agentis/core';
+﻿// §PERF-BOOT — subpath import; see lib/realtime.ts.
+import { REALTIME_EVENTS } from '@agentis/core/events';
 import type { RealtimeEnvelope } from './realtime';
 
 export type RealtimeActivityKind =

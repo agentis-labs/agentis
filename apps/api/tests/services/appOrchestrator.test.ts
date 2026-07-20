@@ -86,6 +86,27 @@ function seedRun(workflowId: string, status: string, parentRunId?: string | null
   return id;
 }
 
+/**
+ * A settled run carrying real terminal output. trivialGraph declares no explicit
+ * output node, so the surface is its last node — the same rule the chain reader
+ * and the dry-run trace use.
+ */
+function seedRunWithOutput(workflowId: string, status: string, output: Record<string, unknown>) {
+  const id = randomUUID();
+  ctx.db.insert(schema.workflowRuns).values({
+    id,
+    workspaceId: ctx.workspace.id,
+    ambientId: ctx.ambient.id,
+    workflowId,
+    userId: ctx.user.id,
+    status,
+    runState: { runId: id, workflowId, status, nodeStates: { start: { output } }, completedNodeIds: ['start'] },
+    graphSnapshot: trivialGraph(),
+    replanCount: 0,
+  }).run();
+  return id;
+}
+
 function orchestrator() {
   return new AppOrchestratorService({ db: ctx.db, bus: ctx.bus, engine: engine as unknown as WorkflowEngine, logger: ctx.logger });
 }
@@ -171,6 +192,131 @@ describe('AppOrchestratorService — dependsOn chains', () => {
 
     const { fired } = await orchestrator().handleRunSettled(parent!);
     expect(fired).toBe(0);
+    expect(queuedFor(b)).toHaveLength(0);
+  });
+
+  it('waits for EVERY dependency before firing a fan-in dependent, then fires once', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const c = seedWorkflow(appId, 'C');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a, c] });
+
+    // A settles first — C has not run at all, so the join must hold.
+    const aRun = seedRun(a, 'COMPLETED');
+    expect((await orchestrator().handleRunSettled(aRun)).fired).toBe(0);
+    expect(queuedFor(b)).toHaveLength(0);
+
+    // C settles — the last dependency lands, so B starts exactly once.
+    const cRun = seedRun(c, 'COMPLETED');
+    expect((await orchestrator().handleRunSettled(cRun)).fired).toBe(1);
+    expect(queuedFor(b)).toHaveLength(1);
+    expect(queuedFor(b)[0]?.parentRunId).toBe(cRun);
+  });
+
+  it('holds a fan-in join when one dependency failed under the default success policy', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const c = seedWorkflow(appId, 'C');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a, c] });
+
+    seedRun(a, 'FAILED');
+    const cRun = seedRun(c, 'COMPLETED');
+
+    expect((await orchestrator().handleRunSettled(cRun)).fired).toBe(0);
+    expect(queuedFor(b)).toHaveLength(0);
+  });
+
+  it('joins a failed dependency when the dependent opts into chainOn always', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const c = seedWorkflow(appId, 'C');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a, c], chainOn: 'always' });
+
+    seedRun(a, 'FAILED');
+    const cRun = seedRun(c, 'COMPLETED');
+
+    expect((await orchestrator().handleRunSettled(cRun)).fired).toBe(1);
+    expect(queuedFor(b)).toHaveLength(1);
+  });
+
+  it('never treats a vanished dependency as satisfied', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a, randomUUID()] });
+    const aRun = seedRun(a, 'COMPLETED');
+
+    expect((await orchestrator().handleRunSettled(aRun)).fired).toBe(0);
+    expect(queuedFor(b)).toHaveLength(0);
+  });
+
+  it('defers a chain link by its configured delay, and starts immediately without one', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const delayed = seedWorkflow(appId, 'delayed', { dependsOn: [a], delay: { ms: 5 * 60_000 } });
+    const immediate = seedWorkflow(appId, 'immediate', { dependsOn: [a] });
+    const runId = seedRun(a, 'COMPLETED');
+
+    expect((await orchestrator().handleRunSettled(runId)).fired).toBe(2);
+
+    const scheduledAt = queuedFor(delayed)[0]?.scheduledAt;
+    expect(scheduledAt).toBeTruthy();
+    const waitMs = new Date(scheduledAt!).getTime() - Date.now();
+    expect(waitMs).toBeGreaterThan(4 * 60_000);
+    expect(waitMs).toBeLessThanOrEqual(5 * 60_000);
+
+    // Absent delay must stay null — the queue treats null as "due now", so this
+    // is what keeps every pre-existing chain starting immediately.
+    expect(queuedFor(immediate)[0]?.scheduledAt).toBeNull();
+  });
+
+  it('fires a failure branch ONLY when the upstream settled without succeeding', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const onFailure = seedWorkflow(appId, 'handle failure', { dependsOn: [a], chainOn: 'failure' });
+    const onSuccess = seedWorkflow(appId, 'continue', { dependsOn: [a] });
+
+    expect((await orchestrator().handleRunSettled(seedRun(a, 'FAILED'))).fired).toBe(1);
+    expect(queuedFor(onFailure)).toHaveLength(1);
+    expect(queuedFor(onSuccess)).toHaveLength(0);
+
+    // ...and stays quiet on success, unlike `always`.
+    expect((await orchestrator().handleRunSettled(seedRun(a, 'COMPLETED'))).fired).toBe(1);
+    expect(queuedFor(onFailure)).toHaveLength(1);
+    expect(queuedFor(onSuccess)).toHaveLength(1);
+  });
+
+  it('passes the upstream terminal output to the dependent instead of ids alone', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a] });
+    const runId = seedRunWithOutput(a, 'COMPLETED', { leadCount: 7, brand: 'acme' });
+
+    await orchestrator().handleRunSettled(runId);
+
+    expect(queuedFor(b)[0]?.inputs).toMatchObject({
+      upstreamRunId: runId,
+      upstreamOutput: { leadCount: 7, brand: 'acme' },
+    });
+  });
+
+  it('gates a link on its `when` predicate over the upstream output', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a], when: 'upstream.output.leadCount > 0' });
+
+    expect((await orchestrator().handleRunSettled(seedRunWithOutput(a, 'COMPLETED', { leadCount: 0 }))).fired).toBe(0);
+    expect(queuedFor(b)).toHaveLength(0);
+
+    expect((await orchestrator().handleRunSettled(seedRunWithOutput(a, 'COMPLETED', { leadCount: 3 }))).fired).toBe(1);
+    expect(queuedFor(b)).toHaveLength(1);
+  });
+
+  it('fails closed on an invalid `when` rather than firing the link', async () => {
+    const appId = seedApp();
+    const a = seedWorkflow(appId, 'A');
+    const b = seedWorkflow(appId, 'B', { dependsOn: [a], when: 'this is not <<< an expression' });
+
+    expect((await orchestrator().handleRunSettled(seedRunWithOutput(a, 'COMPLETED', { ok: true }))).fired).toBe(0);
     expect(queuedFor(b)).toHaveLength(0);
   });
 

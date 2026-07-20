@@ -81,6 +81,39 @@ describe('ConversationService (integration)', () => {
 
   const context = () => ({ workspaceId: ctx.workspace.id, appId, userId: ctx.user.id, ambientId: ctx.ambient.id });
 
+  it('staggers a batch: the first contact goes now, the rest are touched as each comes due', async () => {
+    service.define({ workspaceId: ctx.workspace.id, appId }, SCRIPT);
+    const now = new Date();
+    const at = (minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString();
+
+    // Three contacts spaced five minutes apart — the shape a paced outreach uses.
+    // Offset 0 is "now", so the first contact is touched during enrolment itself;
+    // only the later two park as scheduled rows.
+    await service.enroll(context(), '+5511001', 'conn1', undefined, { startAt: at(0) });
+    await service.enroll(context(), '+5511002', 'conn1', undefined, { startAt: at(5) });
+    await service.enroll(context(), '+5511003', 'conn1', undefined, { startAt: at(10) });
+    expect(sends.map((s) => s.chatId)).toEqual(['+5511001']);
+
+    // A sweep before the next moment releases nothing.
+    expect(await service.sweepScheduled(new Date(now.getTime() + 60_000))).toBe(0);
+    expect(sends).toHaveLength(1);
+
+    // Each sweep then releases only the contact whose moment has arrived.
+    expect(await service.sweepScheduled(new Date(now.getTime() + 6 * 60_000))).toBe(1);
+    expect(sends.map((s) => s.chatId)).toEqual(['+5511001', '+5511002']);
+
+    expect(await service.sweepScheduled(new Date(now.getTime() + 11 * 60_000))).toBe(1);
+    expect(sends.map((s) => s.chatId)).toEqual(['+5511001', '+5511002', '+5511003']);
+
+    // Drained: a further sweep finds nothing and sends nothing.
+    expect(await service.sweepScheduled(new Date(now.getTime() + 60 * 60_000))).toBe(0);
+    expect(sends).toHaveLength(3);
+
+    // Each contact is now an ordinary resting contact, advancing on its own reply.
+    const r = await service.handleInbound({ ...context(), address: '+5511002', text: 'oi' });
+    expect(r).toMatchObject({ handled: true, stage: 'pitch' });
+  });
+
   it('define auto-creates the collections and persists the script (reload roundtrip)', () => {
     const r = service.define({ workspaceId: ctx.workspace.id, appId }, SCRIPT);
     expect(r).toMatchObject({ ok: true, stages: 5, contactCollection: 'contacts' });

@@ -32,6 +32,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { KnowledgeChunk, KnowledgeHit } from '@agentis/core';
 import type { Logger } from '../../logger.js';
 import { type EmbeddingProvider, cosineSimilarity } from '../embedding/embeddingProvider.js';
+import { isCjkToken, segment } from '../brain/brainText.js';
 
 export interface KnowledgeWriteInput {
   workspaceId: string;
@@ -98,15 +99,9 @@ export class KnowledgeStore {
   /** Tokenise text for indexing or for a query. Pure, deterministic. */
   static tokenize(input: string): string[] {
     if (!input) return [];
-    const out: string[] = [];
-    const cleaned = input.toLowerCase().replace(/[^a-z0-9_\s]+/g, ' ');
-    for (const raw of cleaned.split(/\s+/)) {
-      if (!raw) continue;
-      if (raw.length < 2) continue;
-      if (STOP_WORDS.has(raw)) continue;
-      out.push(raw);
-    }
-    return out;
+    // Shared Unicode segmentation (§B5.4); this store's own length/stop-word
+    // policy is preserved so index and query keep matching as before for ASCII.
+    return segment(input).filter((token) => isCjkToken(token) || (token.length >= 2 && !STOP_WORDS.has(token)));
   }
 
   /** Write one chunk. Returns the persisted row's id. */

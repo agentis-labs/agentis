@@ -29,7 +29,12 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
 
   app.get('/chrome', (c) => {
     const ws = getWorkspace(c);
+    // readFleetOverview's gateways.{total,connected} already folds in
+    // messaging channel connections (see readFleetOverview below) — do not
+    // re-count schema.channelConnections here, or every channel gets counted
+    // twice.
     const fleetOverview = readFleetOverview(deps.db, ws.workspaceId, getUser(c), { includeRecentRuns: false });
+
     const fleet = {
       runs: {
         active: fleetOverview.runs.active,
@@ -132,6 +137,16 @@ function readFleetOverview(
     .from(schema.openclawGateways)
     .where(and(eq(schema.openclawGateways.workspaceId, workspaceId), eq(schema.openclawGateways.status, 'connected')))
     .get());
+  const channelConnectionsTotal = countRows(db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.channelConnections)
+    .where(eq(schema.channelConnections.workspaceId, workspaceId))
+    .get());
+  const channelConnectionsActive = countRows(db
+    .select({ count: sql<number>`count(*)` })
+    .from(schema.channelConnections)
+    .where(and(eq(schema.channelConnections.workspaceId, workspaceId), eq(schema.channelConnections.status, 'active')))
+    .get());
   const runsTotal = countRows(db
     .select({ count: sql<number>`count(*)` })
     .from(schema.workflowRuns)
@@ -182,7 +197,7 @@ function readFleetOverview(
 
   return {
     agents: { total: agentsTotal, online: agentsOnline },
-    gateways: { total: gatewaysTotal, connected: gatewaysConnected },
+    gateways: { total: gatewaysTotal + channelConnectionsTotal, connected: gatewaysConnected + channelConnectionsActive },
     workflows: { total: workflowsTotal },
     runs: { active: activeRuns, total: runsTotal, recent: recentRuns, totalTokens },
     approvals: { pending: approvalsPending },

@@ -23,6 +23,7 @@ import { GovernancePanel } from './GovernancePanel';
 import { McpConnectionsPanel } from './McpConnectionsPanel';
 import { ChannelIdentitiesPanel } from './ChannelIdentitiesPanel';
 import { OrchestratorModelsPanel } from './OrchestratorModelsPanel';
+import { BrainMemoryTierPanel } from './BrainMemoryTierPanel';
 import { SelfHealingPanel } from './SelfHealingPanel';
 import { AutonomyPanel } from './AutonomyPanel';
 import { IntegrationsPanel } from './IntegrationsPanel';
@@ -123,6 +124,7 @@ export function SettingsModal() {
               {settingsTab === 'runtimes' && (
                 <div className="space-y-10">
                   <OrchestratorModelsPanel />
+                  <BrainMemoryTierPanel />
                   <RuntimesTab />
                 </div>
               )}

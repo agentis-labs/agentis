@@ -6,6 +6,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { KnowledgeAutoLinker } from './knowledgeAutoLinker.js';
 import { cosineSimilarity, embedText, selectEmbeddingProvider, type EmbeddingProvider } from '../embedding/embeddingProvider.js';
 import type { BrainEnrichmentProvider, ChunkEnrichment, EnrichedKnowledgeGraphWriter } from '../brain/brainEnrichment.js';
+import { isCjkToken, segment } from '../brain/brainText.js';
 
 export interface CreateKnowledgeBaseArgs {
   workspaceId: string;
@@ -94,6 +95,18 @@ export class KnowledgeBaseService {
   setAutoLinker(linker: Pick<KnowledgeAutoLinker, 'autoLink' | 'autoLinkSemantic'>, repairExisting = false): number {
     this.autoLinker = linker;
     return repairExisting ? this.repairOrphanedDocumentLinks() : 0;
+  }
+
+  /**
+   * §PERF-BOOT — public entry for the orphan-link repair so bootstrap can DEFER
+   * it. Passing `repairExisting: true` above ran the full scan synchronously
+   * inside `bootstrap()` — measured 3.2s on local NVMe and ~8s on a real 732 MB
+   * workspace — every boot, before the port could bind. The scan is idempotent
+   * housekeeping over existing rows; nothing about first-request correctness
+   * depends on it having run.
+   */
+  repairOrphanedLinks(): number {
+    return this.repairOrphanedDocumentLinks();
   }
 
   setEmbeddingProviderResolver(resolver: (workspaceId: string) => EmbeddingProvider): void {
@@ -957,11 +970,9 @@ function scoreChunk(queryTokens: Set<string>, content: string): number {
 }
 
 function tokenize(value: string): string[] {
-  return value
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length > 1);
+  // Segmentation is shared (§B5.4) so non-Latin text survives; the length
+  // policy stays local because chunk scoring deliberately keeps stop-words.
+  return segment(value).filter((token) => isCjkToken(token) || token.length > 1);
 }
 
 async function extractImageText(bytes: Buffer, fileName: string): Promise<string> {

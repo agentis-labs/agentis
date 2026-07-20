@@ -22,7 +22,8 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError, type BrainGraph } from '@agentis/core';
 import type { EpisodicMemoryStore } from '../episodicMemoryStore.js';
 import { isRejectable } from '../brain/brainFormation.js';
-import { EMBED_HIGH_SIMILARITY, bestLexical, type EpisodeVector } from '../util/brainDedup.js';
+import { resolveDuplicate, type EpisodeVector } from '../util/brainDedup.js';
+import { isCjkToken, segment } from '../brain/brainText.js';
 
 export interface AgentMemoryEntry {
   id: string;
@@ -73,9 +74,13 @@ export class AgentMemoryService {
     }
     const existing: EpisodeVector[] = this.list(args.agentId, args.workspaceId, 200)
       .map((e) => ({ id: e.id, vec: null, text: `${e.section}\n${e.content}` }));
-    const dupe = bestLexical(existing, `${section}\n${content}`);
-    if (dupe && dupe.score >= EMBED_HIGH_SIMILARITY) {
-      const row = this.#rows(args.agentId, args.workspaceId, 200).find((r) => r.id === dupe.entry.id);
+    // §B5.5 — this compared a LEXICAL score against a threshold calibrated for
+    // COSINE, a scale error that made it fire almost never. It now uses the
+    // shared resolver, which collapses only a provably identical note and
+    // otherwise lets the agent keep its newer wording.
+    const verdict = resolveDuplicate({ text: `${section}\n${content}`, vec: null, existing });
+    if (verdict.kind === 'duplicate') {
+      const row = this.#rows(args.agentId, args.workspaceId, 200).find((r) => r.id === verdict.entry.id);
       if (row) return toEntry(row, args.agentId, args.workspaceId);
     }
     const episode = this.episodes.write({
@@ -329,12 +334,9 @@ function parseRecord(raw: unknown): Record<string, unknown> {
 }
 
 function tokenize(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((t) => t.length > 1 && !STOPWORDS.has(t)),
-  );
+  // Shared Unicode segmentation (§B5.4) — this used to be an ASCII split, so an
+  // agent's own non-Latin memories scored 0 against every query.
+  return new Set(segment(text).filter((t) => isCjkToken(t) || (t.length > 1 && !STOPWORDS.has(t))));
 }
 
 /** Token-overlap score, length-normalised so long entries don't dominate. */

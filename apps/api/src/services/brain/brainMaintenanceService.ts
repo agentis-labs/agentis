@@ -4,6 +4,7 @@ import { REALTIME_EVENTS, REALTIME_ROOMS, type RuntimeEpisodeType } from '@agent
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../../event-bus.js';
+import { tokenize } from './brainText.js';
 import type { Logger } from '../../logger.js';
 import type { BrainCompressionService, BrainCompressionSettings } from './brainCompressionService.js';
 import type { SessionMomentService } from '../sessionMomentService.js';
@@ -556,7 +557,9 @@ function hygieneVerdict(row: {
   const text = `${row.title} ${row.summary}`.trim();
   const reasons: string[] = [];
   let score = 0;
-  const words = text.split(/\s+/).filter(Boolean);
+  // §B5.12 — Unicode-aware word count. `split(/\s+/)` made ANY CJK paragraph
+  // one "word" → instant +2 → every CJK memory drifted toward auto-archive.
+  const words = tokenize(text);
   if (row.summary.trim().length < 48 || words.length < 9) {
     score += 2;
     reasons.push('incomplete_fragment');
@@ -570,7 +573,11 @@ function hygieneVerdict(row: {
     score += 1;
     reasons.push('code_heavy');
   }
-  if (/\b(?:masterplan|implementation plan|added after user feedback|root cause|services\/[\w/-]+\.ts|§[A-Z0-9])/i.test(text)) {
+  // §B5.12 — "root cause" removed from this list: it is the exact phrase the
+  // chat-capture gate REQUIRES to recognise an agent learning, so hygiene was
+  // penalising (+2, auto-archive at 4) the very memories capture demanded. A
+  // lesson's phrasing must never be simultaneously mandatory and forbidden.
+  if (/\b(?:masterplan|implementation plan|added after user feedback|services\/[\w/-]+\.ts|§[A-Z0-9])/i.test(text)) {
     score += 2;
     reasons.push('internal_implementation_residue');
   }
