@@ -41,12 +41,14 @@
  * recurrence-reinforcement — it never fabricates a rule or a skill.
  */
 
-import { and, desc, eq, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, lte, or, sql } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import type { BaselineWindow } from '@agentis/core';
 import type { Logger } from '../../logger.js';
 import type { SharedIntelligenceService } from '../sharedIntelligence.js';
 import type { MemoryReflectionService } from '../memory/memoryReflectionService.js';
+import type { RollingBaselineStore } from '../rollingBaselineStore.js';
 
 export type AppOutcome = 'won' | 'lost' | 'abandoned';
 
@@ -72,6 +74,8 @@ export interface AppLearningDeps {
   logger: Logger;
   /** Optional — triggers a scoped reflection pass so graduation is prompt. */
   reflection?: Pick<MemoryReflectionService, 'run'>;
+  /** Optional — captures rolling performance baselines per workflow on settle (Evolution Loop MEASURE). */
+  baselines?: Pick<RollingBaselineStore, 'capture' | 'latest'>;
 }
 
 /** A terminal run, as the engine reports it to the learning loop. */
@@ -124,6 +128,11 @@ export interface RecentLearnings {
   lessons: LearnedLesson[];
 }
 
+const TERMINAL_RUN_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'COMPLETED_WITH_ERRORS']);
+function isTerminalRunStatus(status: string): boolean {
+  return TERMINAL_RUN_STATUSES.has(status);
+}
+
 export class AppLearningService {
   constructor(private readonly deps: AppLearningDeps) {}
 
@@ -148,6 +157,9 @@ export class AppLearningService {
       const scopeId = this.#runScopeId(input.workspaceId, input.workflowId);
       if (!scopeId) return null;
       const appId = this.#appIdForWorkflow(input.workspaceId, input.workflowId);
+      // Evolution Loop MEASURE — capture rolling performance baselines for this
+      // workflow (throttled, best-effort; never blocks or breaks the run).
+      this.#captureBaseline(input.workspaceId, input.workflowId, scopeId);
       const lesson = this.#composeRunLesson(input);
       if (!lesson) return null;
 
@@ -191,6 +203,83 @@ export class AppLearningService {
       });
       return null;
     }
+  }
+
+  /**
+   * Capture rolling performance baselines (7d/30d/90d) for a workflow. Throttled
+   * per window so a busy workflow doesn't re-snapshot on every settle, and fully
+   * best-effort — a baseline failure must never affect the run's terminal path.
+   */
+  #captureBaseline(workspaceId: string, workflowId: string, scopeId: string): void {
+    const store = this.deps.baselines;
+    if (!store) return;
+    try {
+      const now = Date.now();
+      const windows: Array<{ window: BaselineWindow; days: number; throttleMs: number }> = [
+        { window: 'rolling_7d', days: 7, throttleMs: 60 * 60 * 1000 },
+        { window: 'rolling_30d', days: 30, throttleMs: 6 * 60 * 60 * 1000 },
+        { window: 'rolling_90d', days: 90, throttleMs: 24 * 60 * 60 * 1000 },
+      ];
+      const latest = store.latest(workspaceId, workflowId);
+      for (const w of windows) {
+        const last = latest[w.window];
+        if (last && now - new Date(last.capturedAt).getTime() < w.throttleMs) continue;
+        const m = this.#aggregateWindow(workspaceId, workflowId, w.days);
+        if (m.sampleSize === 0) continue;
+        store.capture({
+          workspaceId,
+          scopeId,
+          workflowId,
+          window: w.window,
+          successRate: m.successRate,
+          p50LatencyMs: m.p50LatencyMs,
+          p95LatencyMs: m.p95LatencyMs,
+          avgCostMicros: 0, // cost/replay/approval/evaluator not derived here — left 0 (anomaly checks skip 0-baselines)
+          avgReplayCount: 0,
+          avgApprovalCount: 0,
+          evaluatorPassRate: 0,
+          sampleSize: m.sampleSize,
+          windowStart: new Date(now - w.days * 86_400_000).toISOString(),
+          windowEnd: new Date(now).toISOString(),
+        });
+      }
+    } catch (err) {
+      this.deps.logger.warn('app.learning.baseline_capture_failed', { workflowId, err: (err as Error).message });
+    }
+  }
+
+  /** Aggregate terminal-run success rate + latency percentiles over the last N days. */
+  #aggregateWindow(workspaceId: string, workflowId: string, days: number): { sampleSize: number; successRate: number; p50LatencyMs: number; p95LatencyMs: number } {
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    const rows = this.deps.db
+      .select({ status: schema.workflowRuns.status, startedAt: schema.workflowRuns.startedAt, completedAt: schema.workflowRuns.completedAt })
+      .from(schema.workflowRuns)
+      .where(and(
+        eq(schema.workflowRuns.workspaceId, workspaceId),
+        eq(schema.workflowRuns.workflowId, workflowId),
+        gte(schema.workflowRuns.createdAt, since),
+      ))
+      .all();
+    let terminal = 0;
+    let succeeded = 0;
+    const durations: number[] = [];
+    for (const r of rows) {
+      if (!isTerminalRunStatus(r.status)) continue;
+      terminal += 1;
+      if (r.status === 'COMPLETED') succeeded += 1;
+      if (r.startedAt && r.completedAt) {
+        const d = new Date(r.completedAt).getTime() - new Date(r.startedAt).getTime();
+        if (Number.isFinite(d) && d >= 0) durations.push(d);
+      }
+    }
+    durations.sort((a, b) => a - b);
+    const pct = (p: number) => (durations.length ? durations[Math.min(durations.length - 1, Math.floor(p * durations.length))]! : 0);
+    return {
+      sampleSize: terminal,
+      successRate: terminal > 0 ? succeeded / terminal : 0,
+      p50LatencyMs: pct(0.5),
+      p95LatencyMs: pct(0.95),
+    };
   }
 
   /**

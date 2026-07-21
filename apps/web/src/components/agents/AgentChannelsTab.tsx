@@ -44,6 +44,22 @@ interface ChannelAccess {
   unknownReply?: 'ignore' | 'decline';
 }
 
+export type ChannelPersona = 'instant' | 'human' | 'warm';
+
+export interface ChannelCapabilities {
+  mediaKinds: string[];
+  supportsReactions: boolean;
+  supportsPresence: boolean;
+  supportsReadReceipts: boolean;
+  supportsLocation: boolean;
+  supportsContacts: boolean;
+  supportsPoll: boolean;
+  supportsReplyQuote: boolean;
+  supportsMentions: boolean;
+  supportsBurst: boolean;
+  supportsHumanize: boolean;
+}
+
 interface ChannelConnection {
   id: string;
   agentId: string | null;
@@ -56,6 +72,11 @@ interface ChannelConnection {
   transport?: string | null;
   mode?: string | null;
   transportStatus?: string | null;
+  persona?: ChannelPersona;
+  rateLimit?: { perMinute?: number; perDay?: number } | null;
+  requireOptIn?: boolean;
+  warmupStartedAt?: string | null;
+  capabilities?: ChannelCapabilities;
   health: ChannelHealth;
   lastError?: string | null;
 }
@@ -440,6 +461,7 @@ function ProviderCard({
             onAccessChange={setAccess}
           />
           <HealthDetails health={health} />
+          <ChannelBehaviorControls connection={connection} onChanged={onChanged} toast={toast} />
           <div className="mt-3 flex flex-wrap gap-2">
             <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void checkHealth()}>
               {busy === 'health' ? <Loader2 size={12} className="animate-spin" /> : 'Check health'}
@@ -607,6 +629,164 @@ function StatusBadge({ status }: { status: ChannelStatus }) {
     <span className={clsx('flex items-center gap-1 text-[12px]', tone)}>
       <span className={clsx('h-1.5 w-1.5 rounded-full', dot)} /> {label}
     </span>
+  );
+}
+
+const PERSONA_OPTIONS: { value: ChannelPersona; label: string; detail: string }[] = [
+  { value: 'instant', label: 'Instant', detail: 'Reply immediately (default)' },
+  { value: 'human', label: 'Human', detail: 'Types, splits long replies, natural pace' },
+  { value: 'warm', label: 'Warm', detail: 'Slower, concierge-style cadence' },
+];
+
+/**
+ * Per-connection human-like pacing (§6) + anti-ban rails (§7). Sends land on the
+ * new PATCH /v1/channels/:id/behavior endpoint. All controls are opt-in — the
+ * defaults (instant persona, no caps, opt-in off) preserve existing behaviour.
+ */
+function ChannelBehaviorControls({
+  connection,
+  onChanged,
+  toast,
+}: {
+  connection: ChannelConnection;
+  onChanged: () => Promise<void>;
+  toast: ReturnType<typeof useToast>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const caps = connection.capabilities;
+  const supportsPacing = caps ? caps.supportsHumanize : true;
+
+  async function patch(body: Record<string, unknown>, note: string) {
+    setSaving(true);
+    try {
+      await api(`/v1/channels/${connection.id}/behavior`, { method: 'PATCH', body: JSON.stringify(body) });
+      toast.success(note);
+      await onChanged();
+    } catch (err) {
+      toast.error('Could not update channel behavior', String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const persona = connection.persona ?? 'instant';
+  const perMinute = connection.rateLimit?.perMinute ?? '';
+  const perDay = connection.rateLimit?.perDay ?? '';
+  const warming = Boolean(connection.warmupStartedAt);
+
+  return (
+    <div className="mt-3 rounded-card border border-line bg-surface-2/40">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2 text-[12px] font-medium text-text-secondary"
+      >
+        <span>Behavior &amp; safety</span>
+        <span className="text-text-muted">
+          {persona !== 'instant' ? persona : 'instant'}
+          {connection.rateLimit ? ' · rate-limited' : ''}
+          {connection.requireOptIn ? ' · opt-in' : ''}
+          {warming ? ' · warmup' : ''}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-line px-3 py-3">
+          {/* Persona */}
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wide text-text-muted">Human-like pacing</div>
+            {supportsPacing ? (
+              <div className="grid grid-cols-3 gap-1.5">
+                {PERSONA_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void patch({ persona: opt.value }, `Persona set to ${opt.label}`)}
+                    className={clsx(
+                      'rounded-input border px-2 py-1.5 text-left text-[11px] transition',
+                      persona === opt.value ? 'border-accent bg-accent-soft text-text-primary' : 'border-line text-text-secondary hover:border-accent/40',
+                    )}
+                    title={opt.detail}
+                  >
+                    <div className="font-medium">{opt.label}</div>
+                    <div className="text-[10px] text-text-muted">{opt.detail}</div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[11px] text-text-muted">This channel has no typing indicator, so pacing is not applied.</div>
+            )}
+          </div>
+
+          {/* Rate limits */}
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wide text-text-muted">Rate limits (anti-ban)</div>
+            <div className="flex items-end gap-2">
+              <label className="flex-1 text-[11px] text-text-secondary">
+                Per minute
+                <input
+                  type="number" min={0} defaultValue={perMinute} disabled={saving}
+                  id={`rl-min-${connection.id}`}
+                  className={clsx(INPUT_CLS, 'mt-0.5')}
+                  placeholder="∞"
+                />
+              </label>
+              <label className="flex-1 text-[11px] text-text-secondary">
+                Per day
+                <input
+                  type="number" min={0} defaultValue={perDay} disabled={saving}
+                  id={`rl-day-${connection.id}`}
+                  className={clsx(INPUT_CLS, 'mt-0.5')}
+                  placeholder="∞"
+                />
+              </label>
+              <Button
+                size="sm" variant="secondary" disabled={saving}
+                onClick={() => {
+                  const minEl = document.getElementById(`rl-min-${connection.id}`) as HTMLInputElement | null;
+                  const dayEl = document.getElementById(`rl-day-${connection.id}`) as HTMLInputElement | null;
+                  const m = Number(minEl?.value); const d = Number(dayEl?.value);
+                  const rateLimit = (m > 0 || d > 0)
+                    ? { perMinute: m > 0 ? m : null, perDay: d > 0 ? d : null }
+                    : null;
+                  void patch({ rateLimit }, rateLimit ? 'Rate limits saved' : 'Rate limits cleared');
+                }}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+
+          {/* Opt-in + warmup */}
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+              <input
+                type="checkbox" checked={Boolean(connection.requireOptIn)} disabled={saving}
+                onChange={(e) => void patch({ requireOptIn: e.target.checked }, e.target.checked ? 'Opt-in gate enabled' : 'Opt-in gate disabled')}
+              />
+              Require opt-in (block cold outreach to new contacts)
+            </label>
+            <Button
+              size="sm" variant={warming ? 'ghost' : 'secondary'} disabled={saving}
+              onClick={() => void patch({ startWarmup: !warming }, warming ? 'Warmup cleared' : 'Warmup started')}
+            >
+              {warming ? 'Stop warmup' : 'Start warmup'}
+            </Button>
+          </div>
+
+          {caps && (
+            <div className="text-[10px] text-text-muted">
+              Can send: {caps.mediaKinds.join(', ') || 'text only'}
+              {caps.supportsReactions ? ' · reactions' : ''}
+              {caps.supportsPresence ? ' · typing' : ''}
+              {caps.supportsLocation ? ' · location' : ''}
+              {caps.supportsPoll ? ' · polls' : ''}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

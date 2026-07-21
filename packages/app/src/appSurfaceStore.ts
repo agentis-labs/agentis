@@ -13,6 +13,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import {
   AgentisError,
   appPolicySchema,
+  applyUiPatchOps,
   ensureViewNodeIds,
   repairSurface,
   viewNodeSchema,
@@ -236,8 +237,7 @@ export class AppSurfaceStore {
   patch(workspaceId: string, appId: string, name: string, ops: UiPatchOp[]): AppSurface {
     const current = this.get(workspaceId, appId, name);
     if (current.view == null) throw new AgentisError('VALIDATION_FAILED', `surface ${name} has no view to patch; call ui_render first`);
-    let tree = structuredClone(current.view) as unknown;
-    for (const op of ops) tree = applyPatchOp(tree, op);
+    const tree = applyUiPatchOps(structuredClone(current.view) as unknown, ops);
     const parsed = viewNodeSchema.parse(tree);
     const repaired = repairSurface(parsed, {
       collections: this.collectionNames(appId),
@@ -374,74 +374,6 @@ export class AppSurfaceStore {
     }
     return this.get(workspaceId, appId, name);
   }
-}
-
-/**
- * Apply a single ui_patch op to a plain ViewNode tree. Paths are slash-separated
- * (e.g. "children/0/title"); numeric segments index arrays. Kept deliberately
- * small — the typed-tree tier is the default; deep mutation is the exception.
- */
-function applyPatchOp(root: unknown, op: UiPatchOp): unknown {
-  if (op.op === 'set') {
-    return setAtPath(root, splitPath(op.path), op.value);
-  }
-  if (op.op === 'remove') {
-    return removeAtPath(root, splitPath(op.path));
-  }
-  // insert into an array at path (path points at the array; index optional)
-  const segments = splitPath(op.path);
-  const target = getAtPath(root, segments);
-  if (!Array.isArray(target)) throw new AgentisError('VALIDATION_FAILED', `insert target is not an array: ${op.path}`);
-  const arr = target.slice();
-  const at = op.index ?? arr.length;
-  arr.splice(at, 0, op.node);
-  return setAtPath(root, segments, arr);
-}
-
-function splitPath(path: string): Array<string | number> {
-  return path
-    .split('/')
-    .filter((s) => s.length > 0)
-    .map((s) => (/^\d+$/.test(s) ? Number.parseInt(s, 10) : s));
-}
-
-function getAtPath(root: unknown, segments: Array<string | number>): unknown {
-  let cur: unknown = root;
-  for (const seg of segments) {
-    if (cur == null || typeof cur !== 'object') return undefined;
-    cur = (cur as Record<string | number, unknown>)[seg];
-  }
-  return cur;
-}
-
-function setAtPath(root: unknown, segments: Array<string | number>, value: unknown): unknown {
-  if (segments.length === 0) return value;
-  const [head, ...rest] = segments;
-  const clone: Record<string | number, unknown> = Array.isArray(root)
-    ? [...(root as unknown[])] as unknown as Record<string | number, unknown>
-    : { ...(root as Record<string | number, unknown>) };
-  clone[head!] = setAtPath(clone[head!], rest, value);
-  return clone;
-}
-
-function removeAtPath(root: unknown, segments: Array<string | number>): unknown {
-  if (segments.length === 0) return undefined;
-  const [head, ...rest] = segments;
-  if (rest.length === 0) {
-    if (Array.isArray(root)) {
-      const arr = [...(root as unknown[])];
-      arr.splice(Number(head), 1);
-      return arr;
-    }
-    const obj = { ...(root as Record<string | number, unknown>) };
-    delete obj[head!];
-    return obj;
-  }
-  const clone: Record<string | number, unknown> = Array.isArray(root)
-    ? [...(root as unknown[])] as unknown as Record<string | number, unknown>
-    : { ...(root as Record<string | number, unknown>) };
-  clone[head!] = removeAtPath(clone[head!], rest);
-  return clone;
 }
 
 function removeNodeById(node: ViewNode, nodeId: string): { node: ViewNode; removed: boolean } {

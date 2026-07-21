@@ -644,8 +644,12 @@ function AdapterConfigFields({
   if (adapterType === 'openclaw') {
     return (
       <div className="grid gap-3 md:grid-cols-4">
-        <Field label="Gateway ID"><input value={config.openclawGatewayId} onChange={(event) => setConfig('openclawGatewayId', event.target.value)} placeholder="Gateway ID" className={inputCls} /></Field>
-        <Field label="Gateway URL"><input value={config.openclawGatewayUrl} onChange={(event) => setConfig('openclawGatewayUrl', event.target.value)} placeholder="wss://gateway.example.com" className={inputCls} /></Field>
+        <Field label="Gateway">
+          {/* Pick a gateway paired in Settings → Connections. Selecting one fills
+              the id so registration resolves its URL — no UUID to type. */}
+          <GatewaySelect value={config.openclawGatewayId} onChange={(id) => setConfig('openclawGatewayId', id)} />
+        </Field>
+        <Field label="Gateway URL (or override)"><input value={config.openclawGatewayUrl} onChange={(event) => setConfig('openclawGatewayUrl', event.target.value)} placeholder="wss://gateway.example.com" className={inputCls} /></Field>
         <Field label="Device token credential ID"><input value={config.openclawDeviceTokenCredentialId} onChange={(event) => setConfig('openclawDeviceTokenCredentialId', event.target.value)} placeholder="Credential vault ID" className={inputCls} /></Field>
         <Field label="Agent Name"><input value={config.openclawAgentName} onChange={(event) => setConfig('openclawAgentName', event.target.value)} placeholder="Agent Name" className={inputCls} /></Field>
         <Field label="Session key strategy"><select value={config.openclawSessionKeyStrategy} onChange={(event) => setConfig('openclawSessionKeyStrategy', event.target.value)} className={inputCls}><option value="issue">Issue</option><option value="fixed">Fixed</option><option value="run">Run</option></select></Field>
@@ -888,6 +892,33 @@ function positiveNumber(value: string): number | undefined {
 }
 
 const inputCls = 'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
+
+/** Pick a gateway provisioned in Settings, so the agent references it by id. */
+function GatewaySelect({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+  const [gateways, setGateways] = useState<Array<{ id: string; name: string; gatewayUrl: string }>>([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api<{ gateways?: Array<{ id: string; name: string; gatewayUrl: string }> }>('/v1/gateways')
+      .then((r) => { if (!cancelled) setGateways(r.gateways ?? []); })
+      .catch(() => { /* none configured yet */ })
+      .finally(() => { if (!cancelled) setLoaded(true); });
+    return () => { cancelled = true; };
+  }, []);
+  if (loaded && gateways.length === 0) {
+    return (
+      <div className="rounded-md border border-line bg-canvas px-3 py-2 text-[12px] text-text-muted">
+        No gateways yet — pair one in Settings → Connections → OpenClaw Gateway.
+      </div>
+    );
+  }
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
+      <option value="">— Select a paired gateway —</option>
+      {gateways.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+    </select>
+  );
+}
 const textareaCls = `${inputCls} min-h-20 resize-y font-mono text-xs`;
 
 

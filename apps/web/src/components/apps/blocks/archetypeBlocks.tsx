@@ -181,6 +181,14 @@ function RecordContextMenu({ menu, actions, state, busy, onRun, onClose }: {
   );
 }
 
+/** A numeric order key strictly between two neighbours (or before-first / after-last). */
+function orderBetween(before?: number, after?: number): number {
+  if (before == null && after == null) return 0;
+  if (before == null) return (after as number) - 1;
+  if (after == null) return before + 1;
+  return (before + after) / 2;
+}
+
 function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
   const { rows, loading } = useBoundRows(node.bind);
   const invoke = useActionInvoker();
@@ -188,6 +196,8 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  // Insert position within the hovered column (drag-to-reorder). Null = append.
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [openCard, setOpenCard] = useState<Row | null>(null);
   const [menu, setMenu] = useState<RecordMenuState | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -206,6 +216,11 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
   if (order.length === 0) order.push('Unassigned');
   const byColumn = new Map<string, Row[]>(order.map((k) => [k, []]));
   for (const row of rows) byColumn.get(columnOf(row))?.push(row);
+  // Order cards within each column by the declared order field (drag-to-reorder).
+  if (node.orderField) {
+    const of = node.orderField;
+    for (const list of byColumn.values()) list.sort((a, b) => Number(a[of] ?? 0) - Number(b[of] ?? 0));
+  }
 
   const draggable = Boolean(node.update);
   const canMove = (row: Row, to: string): boolean => {
@@ -218,15 +233,35 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
       && matchesRecordPredicate(transition.when, row, uiState)
     ));
   };
-  const moveCard = async (id: string, to: string) => {
+  const moveCardTo = async (id: string, to: string, index: number) => {
     if (!node.update || !id) return;
     const current = rowsRef.current.find((r) => rowId(r) === id);
-    if (!current || !canMove(current, to)) return;
-    setOverrides((prev) => ({ ...prev, [id]: to }));
+    if (!current) return;
+    const from = columnOf(current);
+    const colChanged = from !== to;
+    if (colChanged && !canMove(current, to)) return;
+    const patch: Record<string, unknown> = {};
+    if (colChanged) patch[node.groupBy] = to;
+    // Compute a numeric order key between the drop position's neighbours.
+    if (node.orderField) {
+      const of = node.orderField;
+      const destFull = byColumn.get(to) ?? [];
+      const draggedPos = destFull.findIndex((r) => rowId(r) === id);
+      let idx = index;
+      // Same column: removing the dragged card shifts everything after it up one.
+      if (!colChanged && draggedPos >= 0 && draggedPos < index) idx -= 1;
+      const dest = destFull.filter((r) => rowId(r) !== id);
+      idx = Math.max(0, Math.min(idx, dest.length));
+      const before = idx > 0 ? Number(dest[idx - 1]?.[of] ?? 0) : undefined;
+      const after = idx < dest.length ? Number(dest[idx]?.[of] ?? 0) : undefined;
+      patch[of] = orderBetween(before, after);
+    }
+    if (Object.keys(patch).length === 0) return;
+    if (colChanged) setOverrides((prev) => ({ ...prev, [id]: to }));
     try {
-      await invoke(node.update.action, { ...resolveActionArgs(node.update.args, { row: current, state: uiState }), id, patch: { [node.groupBy]: to } });
+      await invoke(node.update.action, { ...resolveActionArgs(node.update.args, { row: current, state: uiState }), id, patch });
     } catch {
-      setOverrides((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      if (colChanged) setOverrides((prev) => { const next = { ...prev }; delete next[id]; return next; });
     }
   };
   const runRecordAction = async (action: RecordActionRef, row: Row) => {
@@ -252,15 +287,24 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
             )}
             onDragOver={(e) => {
               const row = rows.find((candidate) => rowId(candidate) === draggingId);
-              if (draggable && row && canMove(row, key)) { e.preventDefault(); setDragOver(key); }
+              if (!draggable || !row) return;
+              const sameCol = columnOf(row) === key;
+              const allowed = sameCol ? Boolean(node.orderField) : canMove(row, key);
+              if (!allowed) return;
+              // Empty column space (not over a card) = append to the end.
+              e.preventDefault();
+              setDragOver(key);
+              setDropIndex(byColumn.get(key)?.length ?? 0);
             }}
             onDragLeave={() => setDragOver((cur) => (cur === key ? null : cur))}
             onDrop={(e) => {
               if (!draggable) return;
               e.preventDefault();
+              const index = dropIndex ?? (byColumn.get(key)?.length ?? 0);
               setDragOver(null);
+              setDropIndex(null);
               const id = e.dataTransfer.getData(DRAG_MIME);
-              if (id) void moveCard(id, key);
+              if (id) void moveCardTo(id, key, index);
             }}
           >
             <div className="flex items-center justify-between gap-2 px-3 py-2.5">
@@ -275,7 +319,7 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                 <div className={clsx('rounded-btn border border-dashed px-2 py-4 text-center text-[11px] text-text-muted', dragOver === key ? 'border-accent/50 text-accent' : 'border-line/70')}>
                   {dragOver === key ? 'Release to move' : (node.emptyLabel ?? (draggable ? 'Drop records here' : 'No records'))}
                 </div>
-              ) : cards.map((row) => {
+              ) : cards.map((row, cardPos) => {
                 const id = rowId(row);
                 const title = recordTitle(
                   row,
@@ -295,7 +339,22 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                     draggable={draggable}
                     aria-grabbed={draggingId === id}
                     onDragStart={(e) => { setDraggingId(id); e.dataTransfer.setData(DRAG_MIME, id); e.dataTransfer.effectAllowed = 'move'; }}
-                    onDragEnd={() => { setDraggingId(null); setDragOver(null); }}
+                    onDragEnd={() => { setDraggingId(null); setDragOver(null); setDropIndex(null); }}
+                    onDragOver={(e) => {
+                      if (!draggable || !draggingId) return;
+                      const dragged = rows.find((r) => rowId(r) === draggingId);
+                      if (!dragged) return;
+                      const sameCol = columnOf(dragged) === key;
+                      const allowed = sameCol ? Boolean(node.orderField) : canMove(dragged, key);
+                      if (!allowed) return;
+                      // Over a card: drop before/after it depending on the pointer half.
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const after = e.clientY > rect.top + rect.height / 2;
+                      setDragOver(key);
+                      setDropIndex(cardPos + (after ? 1 : 0));
+                    }}
                     onClick={() => setOpenCard(row)}
                     onContextMenu={(e) => { e.preventDefault(); setMenu({ row, x: e.clientX, y: e.clientY }); }}
                     onKeyDown={(e) => {
@@ -309,6 +368,9 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                     className={clsx(
                       's-panel s-panel-hover px-3 py-2.5 text-[13px]',
                       draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer',
+                      // Insertion line: a 2px accent rule on the edge the card will land against.
+                      dragOver === key && dropIndex === cardPos && draggingId !== id ? 'shadow-[inset_0_2px_0_0_var(--color-accent)]' : '',
+                      dragOver === key && dropIndex === cardPos + 1 && cardPos === cards.length - 1 && draggingId !== id ? 'shadow-[inset_0_-2px_0_0_var(--color-accent)]' : '',
                     )}
                   >
                     <div className="flex items-start justify-between gap-2">

@@ -69,6 +69,11 @@ list.
   evaluator verdicts, and operator annotations bootstrap durable patterns; confidence starts
   ~0.5 and grows with reinforcement (capped ~0.97). High-confidence patterns mirror into
   `workspace_memory`.
+- **App strategies** (`services/app/strategyService.ts`) — a proven App **Strategy** (App
+  Goal / Evolution Loop, see [Applications](./02-agentic-applications.md)) mirrors into the
+  App's Brain scope as a recallable `success_pattern` atom whose confidence is the
+  **outcome-weighted** win rate `(wins+1)/(trials+2)` — measured, not recurrence-driven — so a
+  winning approach is what future runs recall.
 - **Feynman repair** (`services/feynmanReflection.ts`) — after repeated failure, an
   explanation pass followed by a falsification pass produces a durable lesson **only if it
   survives**; weak explanations produce nothing.

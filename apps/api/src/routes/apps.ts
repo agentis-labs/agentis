@@ -61,6 +61,11 @@ import type { AppContactService } from '../services/app/appContacts.js';
 import type { ConversationParticipantService } from '../services/conversation/conversationParticipants.js';
 import type { AppPresenceService } from '../services/app/appPresence.js';
 import type { AppLearningService } from '../services/app/appLearning.js';
+import type { AppGoalService } from '../services/app/appGoal.js';
+import type { StrategyService } from '../services/app/strategyService.js';
+import type { StrategyEvolutionService } from '../services/app/strategyEvolution.js';
+import type { ExperimentService } from '../services/experiments.js';
+import type { RollingBaselineStore } from '../services/rollingBaselineStore.js';
 import { AppLearningService as AppLearningStatic } from '../services/app/appLearning.js';
 import type { ConversationSimulatorService } from '../services/conversation/conversationSimulator.js';
 import type { OutboundPolicyService } from '../services/outboundPolicy.js';
@@ -115,6 +120,16 @@ export interface AppRoutesDeps {
   triggerRuntime?: TriggerRuntime;
   /** Brain store — enables carrying/rehydrating App + agent memory on `.agentisapp` export/import. */
   episodes?: EpisodicMemoryStore;
+  /** Evolution Loop — the App's durable Goal (north-star). */
+  appGoal?: AppGoalService;
+  /** Evolution Loop — competing strategies + their measured stats. */
+  strategies?: StrategyService;
+  /** Evolution Loop — the controller (winner selection). */
+  evolution?: StrategyEvolutionService;
+  /** Evolution Loop — A/B experiment substrate (per-variant results). */
+  experiments?: ExperimentService;
+  /** Evolution Loop — rolling performance baselines. */
+  baselines?: RollingBaselineStore;
 }
 
 const addMemberSchema = z.object({
@@ -1328,6 +1343,23 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     store.get(ws.workspaceId, appId);
     if (!deps.learning) return c.json({ data: { appId, ownerAgentId: null, lessons: [] } });
     return c.json({ data: deps.learning.recentLearnings(ws.workspaceId, appId) });
+  });
+
+  // Evolution Loop — Mission Control: the App's Goal, its competing strategies +
+  // measured stats, live experiments, performance baselines, and the controller's
+  // current promote/retire/spawn recommendations. Computed on-demand from state.
+  app.get('/:id/mission-control', (c) => {
+    const ws = getWorkspace(c);
+    const appId = c.req.param('id');
+    const appRec = store.get(ws.workspaceId, appId); // authorize + 404 in-workspace
+    const goal = deps.appGoal?.get(ws.workspaceId, appId) ?? appRec.manifest.goal ?? null;
+    const strategies = deps.strategies?.list(ws.workspaceId, appId) ?? [];
+    const decisions = deps.evolution?.evaluate(ws.workspaceId, appId) ?? [];
+    const experiments = (deps.experiments?.listExperiments(ws.workspaceId) ?? [])
+      .filter((e) => e.appId === appId)
+      .map((e) => ({ key: e.key, status: e.status, variants: e.variantsJson, results: deps.experiments?.results(ws.workspaceId, e.key)?.variants ?? [] }));
+    const baselines = deps.baselines?.latestForScope(ws.workspaceId, appId) ?? [];
+    return c.json({ data: { appId, goal, strategies, decisions, experiments, baselines } });
   });
 
   app.post('/:id/simulate', async (c) => {

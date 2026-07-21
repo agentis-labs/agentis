@@ -17,6 +17,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AgentisError } from '@agentis/core';
 import type { AuthService } from '../services/auth.js';
 import type { ChannelBridge } from '../services/conversation/channelBridge.js';
+import { resolveAndSend } from '../services/conversation/channelSend.js';
 import type { ChannelConnectionSupervisor } from '../services/conversation/channelConnectionSupervisor.js';
 import type { ChannelIdentityService } from '../services/conversation/channelIdentityService.js';
 import type { ConnectionGrantService } from '../services/connectionGrants.js';
@@ -67,6 +68,31 @@ const blockSchema = z.object({
 });
 
 const defaultSchema = z.object({ default: z.boolean().optional() });
+
+const behaviorSchema = z.object({
+  persona: z.enum(['instant', 'human', 'warm']).optional(),
+  rateLimit: z
+    .object({ perMinute: z.number().nullable().optional(), perDay: z.number().nullable().optional() })
+    .nullable()
+    .optional(),
+  requireOptIn: z.boolean().optional(),
+  startWarmup: z.boolean().optional(),
+});
+
+const sendAttachmentSchema = z.object({
+  url: z.string().optional(),
+  artifactId: z.string().optional(),
+  filename: z.string().optional(),
+  mimeType: z.string().optional(),
+  kind: z.enum(['image', 'video', 'audio', 'voice', 'sticker', 'file']).optional(),
+  caption: z.string().optional(),
+});
+const operatorSendSchema = z.object({
+  to: z.string().optional(),
+  body: z.string().optional(),
+  attachments: z.array(sendAttachmentSchema).optional(),
+  messages: z.array(z.object({ body: z.string().optional(), attachments: z.array(sendAttachmentSchema).optional() })).optional(),
+});
 
 const grantSchema = z.object({
   agentId: z.string().min(1),
@@ -312,6 +338,48 @@ export function buildChannelRoutes(deps: {
     const id = c.req.param('id');
     const connection = deps.bridge.get(ws.workspaceId, id);
     return c.json({ connection, health: deps.bridge.health(ws.workspaceId, id) });
+  });
+
+  // What this channel can send (media kinds, reactions, presence, …) — drives
+  // the cockpit composer affordances and lets clients degrade gracefully.
+  app.get('/:id/capabilities', (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    deps.bridge.get(ws.workspaceId, id); // 404s if missing
+    const capabilities = deps.bridge.capabilitiesFor(id);
+    if (!capabilities) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${id} not found`);
+    return c.json({ capabilities });
+  });
+
+  // Human-like persona (§6) + anti-ban rails (§7) for a connection.
+  app.patch('/:id/behavior', async (c) => {
+    const ws = getWorkspace(c);
+    const body = behaviorSchema.parse(await c.req.json());
+    const connection = deps.bridge.updateBehavior(ws.workspaceId, c.req.param('id'), body);
+    return c.json({ connection });
+  });
+
+  // Operator composer — send AS this channel identity to an end-user from the
+  // cockpit. Bypasses the §7 rails because it is a deliberate, audited human send.
+  app.post('/:id/send', async (c) => {
+    const ws = getWorkspace(c);
+    const id = c.req.param('id');
+    deps.bridge.get(ws.workspaceId, id); // 404s if missing
+    const body = operatorSendSchema.parse(await c.req.json());
+    const result = await resolveAndSend(
+      { channels: deps.bridge, ...(deps.connectionGrants ? { connectionGrants: deps.connectionGrants } : {}) },
+      {
+        workspaceId: ws.workspaceId,
+        connectionId: id,
+        body: body.body ?? '',
+        to: body.to ?? null,
+        agentId: null,
+        bypassGuards: true,
+        ...(body.attachments ? { attachments: body.attachments } : {}),
+        ...(body.messages ? { messages: body.messages } : {}),
+      },
+    );
+    return c.json({ result }, result.sent ? 200 : 422);
   });
 
   app.get('/:id/webhook-info', (c) => {

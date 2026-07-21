@@ -2621,6 +2621,43 @@ export const experimentAssignments = sqliteTable('experiment_assignments', {
   byVariant: index('experiment_assignments_variant_idx').on(table.experimentId, table.variant),
 }));
 
+/**
+ * Evolution Loop — a Strategy is a competing, recalled approach an App runs to
+ * advance its Goal. `wins`/`trials` are the measured outcome; `confidence` is the
+ * outcome-weighted recall weight (not recurrence). Status: active | proven | retired.
+ */
+export const strategies = sqliteTable('strategies', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: text('app_id').notNull(),
+  /** Stable strategy key within (workspace, app). */
+  key: text('key').notNull(),
+  /** The approach this strategy embodies (the hypothesis being tested). */
+  hypothesis: text('hypothesis').notNull(),
+  /** Linked experiment key + the arm this strategy IS (optional). */
+  experimentKey: text('experiment_key'),
+  variant: text('variant'),
+  /** Generation number — spawned variants increment it. */
+  generation: integer('generation').notNull().default(0),
+  /** The strategy this was spawned from, if any. */
+  parentId: text('parent_id'),
+  /** North-star metric this strategy is measured on (denormalized from the Goal). */
+  metric: text('metric'),
+  /** active | proven | retired. */
+  status: text('status').notNull().default('active'),
+  wins: integer('wins').notNull().default(0),
+  trials: integer('trials').notNull().default(0),
+  /** Outcome-weighted recall confidence (Laplace-smoothed win rate, sample-aware). */
+  confidence: real('confidence').notNull().default(0.5),
+  /** The mirrored recall atom id, when a proven strategy has been written to the Brain. */
+  atomId: text('atom_id'),
+  ...baseTimestamps(),
+}, (table) => ({
+  keyUnique: uniqueIndex('strategies_key_uq').on(table.workspaceId, table.appId, table.key),
+  byApp: index('strategies_app_idx').on(table.workspaceId, table.appId, table.status),
+  byExperiment: index('strategies_experiment_idx').on(table.workspaceId, table.experimentKey, table.variant),
+}));
+
 export const groundingBehaviorInfluences = sqliteTable('grounding_behavior_influences', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')

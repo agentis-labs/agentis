@@ -211,6 +211,30 @@ export function isEmbeddingModelUnavailable(err: unknown): boolean {
 }
 
 /**
+ * Embed synchronously if the provider can, otherwise defer to the re-embed sweep.
+ *
+ * Write paths deliberately do not block on embedding: a sync provider returns a
+ * vector inline, an async one returns a Promise and the row is flagged
+ * `needsReembed` for the sweep to vectorise later. That means the promise is
+ * INTENTIONALLY discarded — and a discarded promise that rejects is an unhandled
+ * rejection. Importing one App with learned memory produced 161 of them, because
+ * every atom written while the model was unavailable dropped a rejecting promise
+ * on the floor. Swallow it here, in one place, so no call site has to remember.
+ *
+ * Returns the vector when available synchronously, else `null` (caller sets
+ * `needsReembed`).
+ */
+export function embedSyncOrDefer(provider: EmbeddingProvider, text: string): number[] | null {
+  const raw = provider.embed(text);
+  if (Array.isArray(raw)) return raw;
+  void Promise.resolve(raw).catch(() => {
+    // Deliberately ignored: the sweep retries, and the model's own failure is
+    // already reported once per cooldown by the circuit breaker.
+  });
+  return null;
+}
+
+/**
  * Circuit breaker for model loading.
  *
  * Not memoising failures (so a transient blip can recover) is right, but on its
@@ -445,6 +469,59 @@ function describeModelLoadFailure(model: string, err: unknown): EmbeddingModelUn
 }
 
 /**
+ * Backoff schedule for a model load that fails TRANSIENTLY. Short and few: enough
+ * to ride out a starvation blip, not so long that a genuinely dead model stalls
+ * boot before the (already bounded) breaker takes over. ~5s total across 3 tries.
+ */
+const MODEL_LOAD_RETRY_DELAYS_MS = [500, 1_500, 3_000];
+
+/** Node error codes that mean "the network/DNS blipped", not "the model is gone". */
+const TRANSIENT_LOAD_CODES = new Set([
+  'ENOTFOUND', // DNS lookup failed — on a busy boot this is usually libuv threadpool starvation, not a real DNS outage
+  'EAI_AGAIN', // transient DNS failure
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+/**
+ * True when a model-load error is a transient network/DNS blip worth retrying,
+ * as opposed to a permanent condition (model not found, offline with no cache).
+ *
+ * The signature failure this exists for: `getaddrinfo ENOTFOUND huggingface.co`
+ * logged at boot while `curl` and a standalone `node fetch` reach the same host
+ * fine. DNS runs on the libuv threadpool; boot work (ONNX/SQLite/KB repair)
+ * saturates it, so the lookup starves and surfaces a spurious ENOTFOUND. One such
+ * blip must not trip the 30-minute breaker — retry first.
+ *
+ * Walks the `cause` chain because Node's `fetch` buries the real code under a
+ * bare `TypeError: fetch failed`. A 404 / "could not locate file" has no
+ * transient code and no network-y message, so it is (correctly) not retried.
+ */
+export function isTransientLoadError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 6 && current != null; depth += 1) {
+    const code = (current as NodeJS.ErrnoException).code;
+    if (code && TRANSIENT_LOAD_CODES.has(code)) return true;
+    const message = current instanceof Error ? current.message : '';
+    if (/fetch failed|socket hang up|network (?:error|timeout)|timed? ?out/i.test(message)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** Sleep that never holds the process open (the warm path is a background task). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+}
+
+/**
  * Load (and cache) the local model ahead of first use.
  *
  * Called in the background at boot so the ~450 MB first fetch happens while the
@@ -486,35 +563,64 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
       );
     }
 
-    const pipe = import('@huggingface/transformers')
-      .then((mod) => {
-        // Must happen before the first pipeline() call — cacheDir/localModelPath
-        // are read at load time.
-        configureTransformersEnv(mod as unknown as Record<string, unknown>);
-        const dtype = configuredDtype();
-        // §PERF-BOOT — surface download progress. The first-run fetch (115 MB
-        // q8 / 449 MB fp32) used to emit one "model_warming" line and then
-        // silence for minutes; an operator cannot tell "downloading" from
-        // "hung". Throttled to 25% steps per file inside the reporter.
-        const options: Record<string, unknown> = { progress_callback: reportModelDownloadProgress };
-        if (dtype) options.dtype = dtype;
-        return mod.pipeline('feature-extraction', this.#model, options as never);
-      })
-      .then((loaded) => {
+    const pipe = this.#loadPipelineWithRetry().catch((err) => {
+      // Don't memoise the PIPELINE (a transient blip must be able to recover),
+      // but do trip the breaker so the retry storm is bounded.
+      localPipelines.delete(this.#model);
+      loadedLocalModels.delete(this.#model);
+      lastModelFailure = { at: Date.now(), streak: (lastModelFailure?.streak ?? 0) + 1 };
+      throw describeModelLoadFailure(this.#model, err);
+    });
+    localPipelines.set(this.#model, pipe);
+    return pipe;
+  }
+
+  /**
+   * Load the transformers pipeline, retrying TRANSIENT failures before giving up.
+   *
+   * A single starved DNS lookup (`getaddrinfo ENOTFOUND` from libuv threadpool
+   * saturation at boot — see `isTransientLoadError`) used to trip the breaker for
+   * up to 30 minutes even though the network was healthy, so the model never
+   * loaded on its own. Retry those a few times with short backoff. A permanent
+   * failure (model not found, or offline with no cache) is NOT retried — there is
+   * nothing to wait for — so it trips the breaker immediately as before.
+   */
+  async #loadPipelineWithRetry(): Promise<unknown> {
+    const mod = await import('@huggingface/transformers');
+    // Must happen before the first pipeline() call — cacheDir/localModelPath are
+    // read at load time.
+    configureTransformersEnv(mod as unknown as Record<string, unknown>);
+    const dtype = configuredDtype();
+    // §PERF-BOOT — surface download progress. The first-run fetch (115 MB q8 /
+    // 449 MB fp32) used to emit one "model_warming" line and then silence for
+    // minutes; an operator cannot tell "downloading" from "hung". Throttled to
+    // 25% steps per file inside the reporter.
+    const options: Record<string, unknown> = { progress_callback: reportModelDownloadProgress };
+    if (dtype) options.dtype = dtype;
+
+    // Offline installs have no network to wait for: a miss is permanent, so don't
+    // retry — fail straight through to the breaker with the actionable message.
+    const maxAttempts = offlineOnly() ? 1 : MODEL_LOAD_RETRY_DELAYS_MS.length + 1;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const loaded = await mod.pipeline('feature-extraction', this.#model, options as never);
         loadedLocalModels.add(this.#model);
         lastModelFailure = null; // recovered — reset the breaker
         return loaded;
-      })
-      .catch((err) => {
-        // Don't memoise the PIPELINE (a transient blip must be able to recover),
-        // but do trip the breaker so the retry storm is bounded.
-        localPipelines.delete(this.#model);
-        loadedLocalModels.delete(this.#model);
-        lastModelFailure = { at: Date.now(), streak: (lastModelFailure?.streak ?? 0) + 1 };
-        throw describeModelLoadFailure(this.#model, err);
-      });
-    localPipelines.set(this.#model, pipe);
-    return pipe;
+      } catch (err) {
+        lastErr = err;
+        const canRetry = attempt < maxAttempts - 1 && isTransientLoadError(err);
+        if (!canRetry) break;
+        const wait = MODEL_LOAD_RETRY_DELAYS_MS[attempt]!;
+        progressSink(
+          `[embedding] transient model-load error (${describeCauseChain(err)}); ` +
+            `retrying in ${Math.round(wait / 1000)}s (attempt ${attempt + 2}/${maxAttempts})`,
+        );
+        await delay(wait);
+      }
+    }
+    throw lastErr;
   }
 
   async embed(text: string): Promise<number[]> {

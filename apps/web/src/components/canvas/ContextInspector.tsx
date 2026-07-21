@@ -775,12 +775,19 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
         )}
       </Field>
       <CapabilityRequirements data={data} update={update} agents={agents} onAgentsChange={onAgentsChange} />
-      {agentId ? (
-        <Accordion title="Runtime & model" defaultOpen>
+      {/* This node's OWN model override — the engine honours it FIRST, before the
+          agent's global model, and it drives the fallback runtime router when the
+          bound agent's adapter isn't live. Previously a bound node (every imported
+          one) had no way to set it: the only control shown edited the shared agent,
+          so "pick a model on the node" did nothing. Now it always shows. */}
+      <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
+      {agentId && (
+        <Accordion title="Change this agent’s runtime everywhere">
+          <p className="mb-2 text-[10.5px] leading-relaxed text-text-muted">
+            Edits the agent itself — affects every workflow and chat that uses it, not just this node. Use this to switch an imported agent onto a runtime that exists on this machine.
+          </p>
           <SelectedAgentModelControl agentId={agentId} adapterType={adapterType} onUpdated={onAgentsChange} variant="rail" />
         </Accordion>
-      ) : (
-        <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
       )}
       {session && (
         <Field label="Session behavior" hint="Persistent sessions can pause for input and resume without losing context.">

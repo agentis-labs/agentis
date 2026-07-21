@@ -20,7 +20,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import { ChannelDeliveryRejectedError, type ChannelDeliveryReceipt, type ChannelHealthCheck } from './types.js';
+import { ChannelDeliveryRejectedError, type ChannelDeliveryReceipt, type ChannelHealthCheck, type OutboundAttachment } from './types.js';
 
 export type WhatsAppSessionStatus =
   | 'idle'
@@ -237,6 +237,34 @@ export class WhatsAppSession {
 
   /** Send a text message to a JID. Throws if the socket isn't open. */
   async sendText(jid: string, text: string): Promise<ChannelDeliveryReceipt> {
+    return this.#submit(jid, { text });
+  }
+
+  /**
+   * Send a single media attachment (image/video/audio/voice/sticker/document) to
+   * a JID, with an optional caption. Shares the same recipient-resolution and
+   * provider-acknowledgement path as `sendText` so delivery is equally verified.
+   */
+  async sendMedia(jid: string, attachment: OutboundAttachment, caption?: string): Promise<ChannelDeliveryReceipt> {
+    return this.#submit(jid, whatsappMediaContent(attachment, caption));
+  }
+
+  /** Add/clear a reaction on a prior message (best-effort; requires the message key). */
+  async sendReaction(jid: string, targetMessageId: string, emoji: string): Promise<void> {
+    if (!this.#sock || this.#status !== 'open') return;
+    try {
+      await this.#sock.sendMessage(jid, { react: { text: emoji, key: { remoteJid: jid, id: targetMessageId, fromMe: false } } });
+    } catch { /* reactions are best-effort */ }
+  }
+
+  /**
+   * Resolve the recipient, submit a baileys message content object, and verify
+   * provider acknowledgement. This is the single write path for every outbound
+   * shape (text and media), so delivery proof, rejection handling, and the
+   * recipient-mismatch guard are identical regardless of content.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async #submit(jid: string, content: any): Promise<ChannelDeliveryReceipt> {
     if (!this.#sock || this.#status !== 'open') {
       throw new Error(`whatsapp session ${this.opts.connectionId} is not open (status=${this.#status})`);
     }
@@ -255,7 +283,7 @@ export class WhatsAppSession {
       if (!match) throw new Error(`whatsapp recipient ${jid} is not registered or could not be resolved`);
       if (typeof match.jid === 'string' && match.jid) recipient = match.jid;
     }
-    const sent = await this.#sock.sendMessage(recipient, { text });
+    const sent = await this.#sock.sendMessage(recipient, content);
     const providerMessageId = typeof sent?.key?.id === 'string' ? sent.key.id.trim() : '';
     if (!providerMessageId) {
       throw new Error('whatsapp provider accepted no message id; outbound delivery is unverified');
@@ -724,6 +752,49 @@ export class WhatsAppSession {
       ...(this.#qr ? { qr: this.#qr } : {}),
       ...(this.#selfId ? { selfId: this.#selfId } : {}),
     });
+  }
+}
+
+/**
+ * Build a baileys message content object for one resolved attachment. baileys
+ * accepts a raw Buffer for every media field, so no upload plumbing is needed
+ * here — the socket encrypts + uploads on send. mimetype is passed explicitly
+ * for audio/voice/document where WhatsApp mis-renders without it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function whatsappMediaContent(att: OutboundAttachment, caption?: string): any {
+  const text = caption ?? att.caption;
+  const cap = typeof text === 'string' && text.trim() ? text : undefined;
+  switch (att.kind) {
+    case 'image':
+      return { image: att.data, ...(cap ? { caption: cap } : {}), ...(att.viewOnce ? { viewOnce: true } : {}) };
+    case 'video':
+      return {
+        video: att.data,
+        ...(cap ? { caption: cap } : {}),
+        ...(att.gifPlayback ? { gifPlayback: true } : {}),
+        ...(att.seconds ? { seconds: att.seconds } : {}),
+        ...(att.viewOnce ? { viewOnce: true } : {}),
+      };
+    case 'audio':
+      return { audio: att.data, mimetype: att.mimeType || 'audio/mp4', ...(att.seconds ? { seconds: att.seconds } : {}) };
+    case 'voice':
+      return {
+        audio: att.data,
+        ptt: true,
+        mimetype: att.mimeType || 'audio/ogg; codecs=opus',
+        ...(att.seconds ? { seconds: att.seconds } : {}),
+      };
+    case 'sticker':
+      return { sticker: att.data };
+    case 'file':
+    default:
+      return {
+        document: att.data,
+        mimetype: att.mimeType || 'application/octet-stream',
+        fileName: att.filename,
+        ...(cap ? { caption: cap } : {}),
+      };
   }
 }
 

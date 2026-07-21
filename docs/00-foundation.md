@@ -49,6 +49,7 @@ Every feature is one of these six or composes from them. There is deliberately n
 | **Orchestration** | `workflows`, `workflow_runs`, `workflow_run_snapshots`, `plans` | [Orchestration](./03-orchestration.md) |
 | **Experiment** | `experiments`, `experiment_assignments`; `services/experiments.ts` | [Sovereignty → Trust](./05-sovereignty.md) |
 | **Interface** | `apps`, `app_collections`, `app_records`, `app_surfaces`, `app_contacts` | [Applications](./02-agentic-applications.md) |
+| **App Goal / Evolution Loop** | `strategies` (+ reuses `experiments`, `rolling_baseline_snapshots`); `services/app/{appGoal,strategyService,strategyEvolution}.ts` | [Applications](./02-agentic-applications.md) |
 
 A **Subject** is worth calling out: it is a per-entity actor (a person, lead, or device)
 whose lifecycle is declarative — `send` (token-free), `agent` (a model step), `wait` (park

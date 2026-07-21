@@ -725,7 +725,9 @@ export interface ChannelSendNodeConfig {
   /** Message body / caption. May contain `{{variable}}` templates. */
   body: string;
   /** Attachment sources (artifact:<id>, data:, or http(s) URL). May contain templates. */
-  attachments?: Array<{ url?: string; artifactId?: string; filename?: string; mimeType?: string; kind?: 'image' | 'file' }>;
+  attachments?: Array<{ url?: string; artifactId?: string; filename?: string; mimeType?: string; kind?: 'image' | 'video' | 'audio' | 'voice' | 'sticker' | 'file'; caption?: string }>;
+  /** Send a natural burst of messages in order. When set, `body`/`attachments` are ignored. */
+  messages?: Array<{ body?: string; attachments?: Array<{ url?: string; artifactId?: string; filename?: string; mimeType?: string; kind?: 'image' | 'video' | 'audio' | 'voice' | 'sticker' | 'file'; caption?: string }> }>;
   /** Key under which the delivery receipt is stored. Defaults to `delivery`. */
   outputKey?: string;
 }

@@ -23,7 +23,31 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { referencedIds, walkNodeRefs } from './appRefs.js';
+import { referencedIds, walkNodeRefs, scriptRefs } from './appRefs.js';
+
+/** The reserved collection + key a conversation script is stored under. */
+export const CONVERSATION_SCRIPT_COLLECTION = 'conversation_script';
+export const CONVERSATION_SCRIPT_KEY = 'script';
+
+/** Read the App's conversation script (the `.script` payload), or null. */
+export function readConversationScript(db: AgentisSqliteDb, appId: string): unknown {
+  const collection = db
+    .select({ id: schema.appCollections.id })
+    .from(schema.appCollections)
+    .where(and(eq(schema.appCollections.appId, appId), eq(schema.appCollections.name, CONVERSATION_SCRIPT_COLLECTION)))
+    .get();
+  if (!collection) return null;
+  const row = db
+    .select({ dataJson: schema.appRecords.dataJson })
+    .from(schema.appRecords)
+    .where(and(eq(schema.appRecords.collectionId, collection.id), eq(schema.appRecords.appId, appId)))
+    .all();
+  for (const r of row) {
+    const data = r.dataJson as { key?: unknown; script?: unknown } | null;
+    if (data?.key === CONVERSATION_SCRIPT_KEY && data.script) return data.script;
+  }
+  return null;
+}
 
 export type ClosureKind =
   | 'workflow'
@@ -88,7 +112,15 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
     add({ kind: 'workflow', id: w.id, label: w.title, required: true, ownedByApp: true, reason: 'Belongs to this App', transportable: true });
   }
 
-  const queue = owned.flatMap((w) => referencedIds(w.graph, 'workflow'));
+  // The App's conversation script (a datastore row, not a graph) references
+  // workflows and agents too. Fold those in so a workflow a stage runs but no
+  // graph calls still travels — otherwise the imported script points at a
+  // "workflow outside this App".
+  const script = readConversationScript(db, appId);
+  const scriptWorkflowIds = scriptRefs(script).filter((r) => r.kind === 'workflow').map((r) => r.value);
+  const scriptAgentIds = scriptRefs(script).filter((r) => r.kind === 'agent').map((r) => r.value);
+
+  const queue = [...owned.flatMap((w) => referencedIds(w.graph, 'workflow')), ...scriptWorkflowIds];
   const seenWorkflows = new Set(owned.map((w) => w.id));
   // Depth guard: a workflow chain could otherwise drag in an unbounded graph.
   for (let guard = 0; queue.length > 0 && guard < 500; guard += 1) {
@@ -124,7 +156,7 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
   const appRow = db.select({ ownerAgentId: schema.apps.ownerAgentId }).from(schema.apps).where(eq(schema.apps.id, appId)).get();
   const seatedIds = new Set<string>(memberRows.map((m) => m.agentId));
   if (appRow?.ownerAgentId) seatedIds.add(appRow.ownerAgentId);
-  const referencedAgentIds = new Set(allGraphs.flatMap((w) => referencedIds(w.graph, 'agent')));
+  const referencedAgentIds = new Set([...allGraphs.flatMap((w) => referencedIds(w.graph, 'agent')), ...scriptAgentIds]);
   const agentIds = [...new Set([...seatedIds, ...referencedAgentIds])];
 
   if (agentIds.length > 0) {

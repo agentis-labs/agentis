@@ -72,6 +72,9 @@ export type AgentisErrorCode =
   | 'CHANNEL_CONNECTION_INACTIVE'
   | 'CHANNEL_BRIDGE_UNAVAILABLE'
   | 'CHANNEL_DISCORD_INBOUND_UNAVAILABLE'
+  | 'CHANNEL_RATE_LIMITED'
+  | 'CHANNEL_OPT_IN_REQUIRED'
+  | 'CHANNEL_SEND_BLOCKED'
   // Connection authority (Agent-Native Platform Plan §3.3)
   | 'CONNECTION_GRANTS_UNAVAILABLE'
   | 'CONNECTION_SCOPE_MISSING'
@@ -202,10 +205,13 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'CHANNEL_KIND_UNAVAILABLE':
     case 'CHANNEL_CONNECTION_INACTIVE':
     case 'CHANNEL_DISCORD_INBOUND_UNAVAILABLE':
+    case 'CHANNEL_OPT_IN_REQUIRED':
+    case 'CHANNEL_SEND_BLOCKED':
     case 'INTEGRATION_CREDENTIAL_MISSING':
     case 'BUDGET_LIMIT_EXCEEDED':
       return 422;
     case 'OPERATION_RATE_LIMITED':
+    case 'CHANNEL_RATE_LIMITED':
       return 429;
     case 'OPERATION_CANCELED':
       // Client closed the request before the operation finished (nginx 499).

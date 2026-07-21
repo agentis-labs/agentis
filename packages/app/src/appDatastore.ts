@@ -53,10 +53,14 @@ const FILTER_OPS = new Set(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'i
 export type DataChangeOp = 'insert' | 'update' | 'delete';
 
 export class AppDatastore {
-  /** Optional realtime sink — bound views refetch on DATA_CHANGED. */
+  /**
+   * Optional realtime sink. `record` carries the changed row for insert/update so
+   * bound views can apply a row-level DELTA in place (no full-query refetch);
+   * delete and bulk changes omit it (delete needs only the id; bulk → refetch).
+   */
   constructor(
     private readonly db: AgentisSqliteDb,
-    private readonly onChange?: (args: { workspaceId: string; appId: string; collection: string; op: DataChangeOp; id: string }) => void,
+    private readonly onChange?: (args: { workspaceId: string; appId: string; collection: string; op: DataChangeOp; id: string; record?: CollectionRecord }) => void,
   ) {}
 
   // ── Collections ─────────────────────────────────────────────
@@ -116,8 +120,9 @@ export class AppDatastore {
       .values({ id, collectionId: col.id, appId, workspaceId, dataJson: data, version: 1, createdBy: userId ?? null, createdAt: now, updatedAt: now })
       .run();
     this.writeIndexEntries(workspaceId, appId, col.id, id, col.schema, data);
-    this.onChange?.({ workspaceId, appId, collection, op: 'insert', id });
-    return this.getRecord(workspaceId, appId, collection, id);
+    const saved = this.getRecord(workspaceId, appId, collection, id);
+    this.onChange?.({ workspaceId, appId, collection, op: 'insert', id, record: saved });
+    return saved;
   }
 
   update(workspaceId: string, appId: string, collection: string, id: string, patch: Record<string, unknown>): CollectionRecord {
@@ -133,8 +138,9 @@ export class AppDatastore {
       .run();
     this.deleteIndexEntries(col.id, id);
     this.writeIndexEntries(workspaceId, appId, col.id, id, col.schema, data);
-    this.onChange?.({ workspaceId, appId, collection, op: 'update', id });
-    return this.getRecord(workspaceId, appId, collection, id);
+    const saved = this.getRecord(workspaceId, appId, collection, id);
+    this.onChange?.({ workspaceId, appId, collection, op: 'update', id, record: saved });
+    return saved;
   }
 
   upsert(workspaceId: string, appId: string, collection: string, match: Record<string, unknown>, record: Record<string, unknown>, userId?: string): CollectionRecord {

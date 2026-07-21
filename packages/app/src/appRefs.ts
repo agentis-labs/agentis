@@ -201,6 +201,69 @@ export function referencedIds(graph: unknown, kind: RefKind): string[] {
 /** old id → new id, per reference kind. */
 export type RefIdMap = Partial<Record<RefKind, Map<string, string>>>;
 
+// ── Conversation scripts ─────────────────────────────────────────────────────
+//
+// A conversation script is NOT a workflow graph — it is a datastore row that
+// travels as an opaque collection seed. But its stages carry foreign ids too:
+// `run_workflow.workflowId`, `send_agent.agentId`, `classify.agentId`. Because
+// they are invisible to walkNodeRefs (no `.nodes`), those ids used to import
+// still pointing at the SOURCE workspace, so a stage referenced a "workflow
+// outside this App" and never ran. Same rewrite discipline, script-shaped.
+
+/** Every foreign id a conversation script points at. */
+export function scriptRefs(script: unknown): NodeRef[] {
+  const stages = (script as { stages?: unknown } | null)?.stages;
+  if (!Array.isArray(stages)) return [];
+  const out: NodeRef[] = [];
+  for (const stage of stages) {
+    const id = typeof (stage as { id?: unknown })?.id === 'string' ? (stage as { id: string }).id : '';
+    const entry = (stage as { entry?: Record<string, unknown> })?.entry;
+    if (entry?.kind === 'run_workflow' && typeof entry.workflowId === 'string') {
+      out.push({ kind: 'workflow', value: entry.workflowId, nodeId: id, nodeKind: 'run_workflow', field: 'entry.workflowId', required: true, byName: false });
+    }
+    if (entry?.kind === 'send_agent' && typeof entry.agentId === 'string') {
+      out.push({ kind: 'agent', value: entry.agentId, nodeId: id, nodeKind: 'send_agent', field: 'entry.agentId', required: false, byName: false });
+    }
+    const onReply = (stage as { onReply?: Record<string, unknown> })?.onReply;
+    if (onReply?.kind === 'classify' && typeof onReply.agentId === 'string') {
+      out.push({ kind: 'agent', value: onReply.agentId, nodeId: id, nodeKind: 'classify', field: 'onReply.agentId', required: false, byName: false });
+    }
+  }
+  return out;
+}
+
+/** Rewrite a conversation script's foreign ids through `idMap` (lossless). */
+export function rewriteScriptRefs(script: unknown, idMap: RefIdMap): unknown {
+  const stages = (script as { stages?: unknown } | null)?.stages;
+  if (!Array.isArray(stages)) return script;
+  const workflows = idMap.workflow;
+  const agents = idMap.agent;
+  if ((!workflows || workflows.size === 0) && (!agents || agents.size === 0)) return script;
+  const remap = (map: Map<string, string> | undefined, value: unknown): unknown =>
+    typeof value === 'string' && map ? map.get(value) ?? value : value;
+
+  let changed = false;
+  const nextStages = stages.map((stage) => {
+    const s = stage as Record<string, unknown>;
+    let next = s;
+    const entry = s.entry as Record<string, unknown> | undefined;
+    if (entry?.kind === 'run_workflow') {
+      const mapped = remap(workflows, entry.workflowId);
+      if (mapped !== entry.workflowId) { next = { ...next, entry: { ...entry, workflowId: mapped } }; changed = true; }
+    } else if (entry?.kind === 'send_agent') {
+      const mapped = remap(agents, entry.agentId);
+      if (mapped !== entry.agentId) { next = { ...next, entry: { ...entry, agentId: mapped } }; changed = true; }
+    }
+    const onReply = (next.onReply ?? s.onReply) as Record<string, unknown> | undefined;
+    if (onReply?.kind === 'classify') {
+      const mapped = remap(agents, onReply.agentId);
+      if (mapped !== onReply.agentId) { next = { ...next, onReply: { ...onReply, agentId: mapped } }; changed = true; }
+    }
+    return next;
+  });
+  return changed ? { ...(script as Record<string, unknown>), stages: nextStages } : script;
+}
+
 /**
  * Rewrite every reference through `idMap`, returning a new graph.
  *

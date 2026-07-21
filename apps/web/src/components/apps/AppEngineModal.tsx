@@ -17,6 +17,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  Target,
   Boxes,
   FileText,
   Loader2,
@@ -36,6 +37,7 @@ import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { nestedDomainOptions } from '../shared/DomainToolbar';
+import { MissionControlPanel } from './MissionControlPanel';
 
 /** App-level run analytics — shape of `GET /v1/apps/:id/analytics`. */
 interface AppAnalytics {
@@ -99,11 +101,12 @@ export interface AppEngineAgent {
   role?: string | null;
 }
 
-type AppEnginePage = 'overview' | 'analytics' | 'advanced';
+type AppEnginePage = 'overview' | 'goal' | 'analytics' | 'advanced';
 type CapabilityGrant = AppRecord['policy']['grants'][number];
 
 const ENGINE_PAGES: Array<{ id: AppEnginePage; label: string; icon: ReactNode }> = [
   { id: 'overview', label: 'Overview', icon: <Settings size={13} /> },
+  { id: 'goal', label: 'Goal', icon: <Target size={13} /> },
   { id: 'analytics', label: 'Analytics', icon: <BarChart3 size={13} /> },
   { id: 'advanced', label: 'Advanced', icon: <SlidersHorizontal size={13} /> },
 ];
@@ -408,6 +411,8 @@ export function AppEngineModal({
                 </div>
               </div>
             )}
+
+            {page === 'goal' && appId && <MissionControlPanel appId={appId} />}
 
             {page === 'analytics' && (
               <AppAnalyticsPanel

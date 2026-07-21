@@ -293,15 +293,21 @@ export class NodeExecutorController {
     // in the engine dispatch), so use body/to/attachments directly.
     const body = typeof config.body === 'string' ? config.body : '';
     const to = typeof config.to === 'string' ? config.to : undefined;
-    const attachments = (config.attachments ?? [])
-      .map((a) => ({
-        ...(a.url ? { url: a.url } : {}),
-        ...(a.artifactId ? { artifactId: a.artifactId } : {}),
-        ...(a.filename ? { filename: a.filename } : {}),
-        ...(a.mimeType ? { mimeType: a.mimeType } : {}),
-        ...(a.kind ? { kind: a.kind } : {}),
+    const mapAttachment = (a: NonNullable<ChannelSendNodeConfig['attachments']>[number]) => ({
+      ...(a.url ? { url: a.url } : {}),
+      ...(a.artifactId ? { artifactId: a.artifactId } : {}),
+      ...(a.filename ? { filename: a.filename } : {}),
+      ...(a.mimeType ? { mimeType: a.mimeType } : {}),
+      ...(a.kind ? { kind: a.kind } : {}),
+      ...(a.caption ? { caption: a.caption } : {}),
+    });
+    const attachments = (config.attachments ?? []).map(mapAttachment).filter((a) => a.url || a.artifactId);
+    const messages = (config.messages ?? [])
+      .map((m) => ({
+        ...(typeof m.body === 'string' ? { body: m.body } : {}),
+        attachments: (m.attachments ?? []).map(mapAttachment).filter((a) => a.url || a.artifactId),
       }))
-      .filter((a) => a.url || a.artifactId);
+      .filter((m) => m.body || m.attachments.length > 0);
     // Spec constraint plane: a `channel:<kind>` scope gates which channels a
     // constrained run may reach.
     this.host.enforceSpecConstraints(ctx, 'channel', `channel:${config.channelKind ?? config.connectionId ?? 'any'}`, config.channelKind ? `channel:${config.channelKind}` : 'channel');
@@ -320,6 +326,7 @@ export class NodeExecutorController {
         ...(config.connectionId ? { connectionId: config.connectionId } : {}),
         ...(to ? { to } : {}),
         ...(attachments.length ? { attachments } : {}),
+        ...(messages.length ? { messages } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
         // Deterministic/system caller — the node runs with the workflow's authority,
         // not a specific agent's, so §3.3 grants don't gate it (the operator author

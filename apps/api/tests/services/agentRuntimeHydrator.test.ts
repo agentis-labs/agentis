@@ -15,7 +15,13 @@ beforeEach(async () => {
 afterEach(() => ctx.close());
 
 describe('hydrateAgentRuntimes', () => {
-  it('marks unavailable runtimes as error instead of leaving agents in setup', async () => {
+  it('parks a needs-config runtime offline (needs setup), never leaving it setting_up', async () => {
+    // An http agent with empty config is MISSING REQUIRED CONNECTION CONFIG (a
+    // baseUrl/dispatch the operator must supply), not broken at runtime. The
+    // hydrator classifies this as "needs setup" and parks it `offline` (with an
+    // info log) rather than `error` — so an imported App whose agents lack their
+    // connection details doesn't look catastrophically broken. A genuine runtime
+    // failure (non-config) still resolves to `error`.
     const agentId = randomUUID();
     const { events, stop } = ctx.captureBus();
     ctx.db.insert(schema.agents).values({
@@ -23,7 +29,7 @@ describe('hydrateAgentRuntimes', () => {
       workspaceId: ctx.workspace.id,
       ambientId: ctx.ambient.id,
       userId: ctx.user.id,
-      name: 'Broken HTTP Agent',
+      name: 'Unconfigured HTTP Agent',
       adapterType: 'http',
       capabilityTags: [],
       config: {},
@@ -47,7 +53,7 @@ describe('hydrateAgentRuntimes', () => {
       .from(schema.agents)
       .where(eq(schema.agents.id, agentId))
       .get();
-    expect(row?.status).toBe('error');
+    expect(row?.status).toBe('offline');
     expect(events
       .map((event) => event.payload && typeof event.payload === 'object'
         ? (event.payload as { status?: string }).status

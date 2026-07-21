@@ -377,6 +377,62 @@ describe('App packaging — knowledge and non-seated agents travel', () => {
   });
 });
 
+describe('App packaging — conversation scripts rebind', () => {
+  it('rewrites a run_workflow stage and a send_agent stage to the new ids', () => {
+    const ws = ctx.workspace.id;
+    const store = new AppStore(ctx.db);
+    const app = store.create(ws, ctx.user.id, { name: 'Script App' });
+
+    // The workflow the script runs, and the agent it sends through.
+    const buildWfId = randomUUID();
+    ctx.db.insert(schema.workflows).values({
+      id: buildWfId, workspaceId: ws, userId: ctx.user.id, appId: app.id, title: 'Build',
+      graph: { version: 1, nodes: [], edges: [] },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }).run();
+    const senderId = seedAgent(ws, 'Sender Bot');
+    store.addMember(ws, app.id, senderId, 'worker');
+
+    // Store a conversation script the way ConversationService.define does: a row
+    // in the reserved `conversation_script` collection under key 'script'.
+    const data = new AppDatastore(ctx.db);
+    data.defineCollection(ws, app.id, { name: 'conversation_script', schema: { fields: [{ key: 'key', type: 'string', required: true }, { key: 'script', type: 'json', required: true }] } });
+    data.insert(ws, app.id, 'conversation_script', {
+      key: 'script',
+      script: {
+        version: 1,
+        contactCollection: 'contacts',
+        initialStage: 'greet',
+        stages: [
+          { id: 'greet', entry: { kind: 'send_agent', brief: 'say hi', agentId: senderId, attachFrom: [] } },
+          { id: 'build_and_deliver', entry: { kind: 'run_workflow', workflowId: buildWfId, inputsFrom: {} } },
+        ],
+      },
+    });
+
+    const appPackager = new AppPackager(ctx.db);
+    const manifest = appPackager.toManifest(ws, app.id, { fidelity: 'full' });
+
+    const target = makeWorkspace('script-target');
+    const { appId: newAppId } = appPackager.fromManifest(target, ctx.user.id, manifest);
+
+    // Read back the imported script and assert BOTH refs point inside the new App.
+    const newData = new AppDatastore(ctx.db);
+    const rows = newData.query(target, newAppId, 'conversation_script', { limit: 10 }).rows;
+    const script = rows[0]!.data.script as { stages: Array<{ id: string; entry: Record<string, string> }> };
+    const runStage = script.stages.find((s) => s.id === 'build_and_deliver')!;
+    const sendStage = script.stages.find((s) => s.id === 'greet')!;
+
+    const newWf = ctx.db.select().from(schema.workflows).where(and(eq(schema.workflows.workspaceId, target), eq(schema.workflows.title, 'Build'))).get()!;
+    const newAgent = ctx.db.select().from(schema.agents).where(and(eq(schema.agents.workspaceId, target), eq(schema.agents.name, 'Sender Bot'))).get()!;
+
+    expect(runStage.entry.workflowId).toBe(newWf.id);
+    expect(runStage.entry.workflowId).not.toBe(buildWfId); // not the exporter's id
+    expect(sendStage.entry.agentId).toBe(newAgent.id);
+    expect(sendStage.entry.agentId).not.toBe(senderId);
+  });
+});
+
 describe('brainExport — lossless projection', () => {
   it('maps an episode to a portable atom without id/scope/embedding, and filters workspace scope by tag', () => {
     const agentId = seedAgent(ctx.workspace.id, 'Mapper Bot');

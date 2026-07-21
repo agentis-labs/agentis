@@ -43,6 +43,18 @@ export function useWorkspaceActivity(
     return () => unsubscribe();
   }, []);
 
+  // Also follow each active run's OWN room. Run-scoped reasoning (agent_task
+  // thinking, tool calls) is published to the run room only; without this the
+  // workspace feed saw it just once, on the mount back-fill, then went silent.
+  // Joining the run rooms streams it live — the "watch the agent think" spine
+  // now covers the workspace view, not only the per-run modal. (Dedup below
+  // collapses the copy an event gets from being in both rooms.)
+  useEffect(() => {
+    const ids = runKey.split(',').filter(Boolean);
+    const unsubs = ids.map((id) => rtSubscribe('run', { runId: id }));
+    return () => { for (const u of unsubs) u(); };
+  }, [runKey]);
+
   useEffect(() => {
     if (!runKey) return;
     let cancelled = false;
@@ -82,7 +94,11 @@ export function useWorkspaceActivity(
     if (!activity) return;
     seqRef.current += 1;
     setFeed((current) => {
-      // Dedup against the immediate previous head (back-to-back identical ids).
+      // The same logical event can arrive twice when this socket is joined to
+      // BOTH the workspace room and the event's run room (or via the dispatch
+      // path's workspace+run double-publish). `activity.id` is content-derived, so
+      // collapse a duplicate already near the head. (`:seq` is the render suffix.)
+      if (current.slice(0, 12).some((c) => c.id.replace(/:\d+$/, '') === activity.id)) return current;
       const next = { ...activity, id: `${activity.id}:${seqRef.current}` };
       return [next, ...current].slice(0, cap);
     });
@@ -138,11 +154,20 @@ function isTerminal(a: RealtimeActivity): boolean {
     || a.tone === 'danger';
 }
 
-/** Is the workspace mid-work, and what's the current focus? */
-export function workspaceRequestStatus(feed: RealtimeActivity[]): WorkspaceRequestStatus {
+/**
+ * Is the ORCHESTRATOR itself mid-work, and what's its current focus?
+ *
+ * `orchestratorAgentId` scopes this to activity actually attributed to the
+ * orchestrator's own agent id. Without it, any other agent's or workflow's
+ * work event (e.g. a manager's app run) would read as "the orchestrator is
+ * busy" and steal its label as the orchestrator's live caption — there was
+ * no such filter here before, which is exactly that bug.
+ */
+export function workspaceRequestStatus(feed: RealtimeActivity[], orchestratorAgentId?: string): WorkspaceRequestStatus {
   const cutoff = Date.now() - BUSY_WINDOW_MS;
-  // The newest WORK item decides — ambient agent/message chatter is ignored.
-  const latestWork = feed.find((a) => isWork(a)) ?? null;
+  // The newest WORK item FROM THE ORCHESTRATOR decides — ambient agent/message
+  // chatter, and work belonging to other agents, is ignored.
+  const latestWork = feed.find((a) => isWork(a) && (!orchestratorAgentId || a.agentId === orchestratorAgentId)) ?? null;
   if (!latestWork) return { busy: false, label: null, latest: null };
   const recent = new Date(latestWork.at).getTime() >= cutoff;
   return {

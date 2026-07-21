@@ -78,6 +78,23 @@ export function createRealtimeServer(deps: {
         socket.on('unsubscribe:workspace', (workspaceId: string) => {
           socket.leave(REALTIME_ROOMS.workspace(workspaceId));
         });
+        // Agentic App room — surface renders/patches + datastore changes for one
+        // app. First-class so an open App view follows its OWN live stream directly
+        // (surface renders, data changes, region pushes) instead of riding the
+        // noisy workspace room by side-effect. (LIVING-INTERFACES-COCKPIT-10X §4.1.)
+        socket.on('subscribe:app', (args: { workspaceId: string; appId: string }) => {
+          if (!args?.appId || !ownsWorkspace(deps.db, userId, args.workspaceId)) return;
+          const app = deps.db
+            .select({ workspaceId: schema.apps.workspaceId })
+            .from(schema.apps)
+            .where(eq(schema.apps.id, args.appId))
+            .get();
+          if (!app || app.workspaceId !== args.workspaceId) return;
+          socket.join(REALTIME_ROOMS.app(args.appId));
+        });
+        socket.on('unsubscribe:app', (args: { appId: string }) => {
+          if (args?.appId) socket.leave(REALTIME_ROOMS.app(args.appId));
+        });
         socket.on('subscribe:run', (args: { workspaceId: string; runId: string }) => {
           if (!ownsWorkspace(deps.db, userId, args.workspaceId)) return;
           // Cross-check: run belongs to workspace.

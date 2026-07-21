@@ -24,8 +24,30 @@ import { fileURLToPath } from 'node:url';
 import { exec, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { availableParallelism, cpus } from 'node:os';
 import type { AppTestOptions, AppManifestEnvelope } from '@agentis/sdk';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
+
+// ── libuv threadpool headroom ────────────────────────────────────────────────
+// DNS resolution (`getaddrinfo`) runs on libuv's threadpool, which defaults to
+// just 4 threads. At boot, synchronous work — ONNX runtime init, SQLite,
+// knowledge-base repair — saturates that pool, so the embedding model's DNS
+// lookup queues behind it and surfaces as a spurious `getaddrinfo ENOTFOUND
+// huggingface.co`, even though the network is perfectly healthy (curl and a
+// standalone `node fetch` reach the same host fine). That single blip then trips
+// the model breaker for up to 30 minutes. Giving the pool more threads keeps DNS
+// from starving. Must be set before the pool is first used — this runs before
+// `main()` and before any async FS/DNS/crypto — and an explicit operator value
+// is always respected.
+if (!process.env.UV_THREADPOOL_SIZE) {
+  let cores = 4;
+  try {
+    cores = availableParallelism();
+  } catch {
+    cores = cpus().length || 4;
+  }
+  process.env.UV_THREADPOOL_SIZE = String(Math.max(16, cores + 4));
+}
 
 // When the CLI is published to npm and run via `npx`, the bundled web SPA
 // ships at <pkg>/dist/web. We point AGENTIS_DASHBOARD_DIST at it so the

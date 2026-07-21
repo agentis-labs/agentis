@@ -21,7 +21,7 @@ let socketConnected = false;
 let socketConnecting = true;
 let fallbackOpenCount = 0;
 
-type RealtimeRoomKind = 'workspace' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room';
+type RealtimeRoomKind = 'workspace' | 'app' | 'run' | 'workflow' | 'gateway' | 'agent' | 'conversation' | 'room';
 
 interface ActiveSubscription {
   kind: RealtimeRoomKind;
@@ -231,6 +231,21 @@ export function useRealtime(events: string[], handler: (env: RealtimeEnvelope) =
       unsubs.forEach((unsubscribe) => unsubscribe());
     };
   }, [events.join('|')]);
+}
+
+/**
+ * Non-hook realtime subscription — the imperative twin of {@link useRealtime}.
+ * Lets non-React code (the in-process App client's `realtime.subscribe`, so an
+ * authored view / CodeSurface can follow live events) attach a listener for one
+ * or more event names. Returns an unsubscribe. Ensures the shared socket exists.
+ */
+export function subscribeRealtimeEvents(
+  events: string[],
+  handler: (env: RealtimeEnvelope) => void,
+): () => void {
+  getSocket();
+  const unsubs = events.map((ev) => addLocalListener(ev, handler));
+  return () => unsubs.forEach((unsubscribe) => unsubscribe());
 }
 
 export function rtSubscribe(

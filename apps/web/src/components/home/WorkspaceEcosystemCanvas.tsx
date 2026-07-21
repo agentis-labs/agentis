@@ -432,7 +432,13 @@ export function WorkspaceEcosystemCanvas({
   // only when a new event arrives. Without it, a session/orchestrator that goes
   // quiet stays "active" forever until the next event or a page refresh.
   const staleTick = Math.floor(now / 3000);
-  const requestStatus = useMemo(() => workspaceRequestStatus(workspaceActivity), [workspaceActivity, staleTick]);
+  // Raw agent id (strip the `agent-` node-id prefix) so requestStatus can be
+  // scoped to work the orchestrator itself did — see workspaceRequestStatus.
+  const orchestratorAgentId = model.orchestratorId?.startsWith('agent-') ? model.orchestratorId.slice('agent-'.length) : undefined;
+  const requestStatus = useMemo(
+    () => workspaceRequestStatus(workspaceActivity, orchestratorAgentId),
+    [workspaceActivity, staleTick, orchestratorAgentId],
+  );
   const commandCenter = useActivityStream({ type: 'workspace', limit: 160 });
   const workSessions = useMemo(() => buildWorkSessions({
     activity: workspaceActivity,

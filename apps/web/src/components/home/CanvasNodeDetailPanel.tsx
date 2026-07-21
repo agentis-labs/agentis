@@ -308,7 +308,13 @@ function NodeLiveFeed({ node }: { node: CanvasNode }) {
       (agentId && activity.agentId === agentId) || (workflowId && activity.workflowId === workflowId);
     if (!match) return;
     seqRef.current += 1;
-    setFeed((current) => [{ ...activity, id: `${activity.id}:${seqRef.current}` }, ...current].slice(0, 6));
+    setFeed((current) => {
+      // Run-scoped reasoning now reaches this listener (the workspace spine joins
+      // active run rooms); collapse the copy that arrives from being in both the
+      // workspace and run rooms, and keep a fuller trace than the old cap of 6.
+      if (current.slice(0, 12).some((c) => c.id.replace(/:\d+$/, '') === activity.id)) return current;
+      return [{ ...activity, id: `${activity.id}:${seqRef.current}` }, ...current].slice(0, 40);
+    });
   });
 
   if (feed.length === 0) return null;
@@ -417,7 +423,7 @@ function WorkflowRuntimeSection({ workflowId, onNavigate }: { workflowId: string
 
   // Live: while the selected run is active, stream its tail and refresh detail.
   const isActive = runStatusMeta(detail?.status).live ?? false;
-  const liveFeed = useRunActivity(isActive ? selectedRunId : null, { cap: 8 });
+  const liveFeed = useRunActivity(isActive ? selectedRunId : null, { cap: 40 });
   useEffect(() => {
     if (!isActive || !selectedRunId) return;
     loadDetail(selectedRunId);

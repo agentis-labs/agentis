@@ -2764,6 +2764,37 @@ CREATE TABLE IF NOT EXISTS agent_sync_runs (
 CREATE INDEX IF NOT EXISTS idx_agent_sync_runs_source ON agent_sync_runs(source_id, started_at);
 `,
   },
+  {
+    version: 115,
+    name: 'evolution_loop_strategies',
+    sql: `
+-- Evolution Loop — a Strategy is a competing, recalled approach an App runs to
+-- advance its Goal. Its confidence tracks MEASURED outcome (wins/trials), not
+-- recurrence; the winning strategy is promoted and spawns the next generation.
+CREATE TABLE IF NOT EXISTS strategies (
+  id             TEXT PRIMARY KEY,
+  workspace_id   TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id         TEXT NOT NULL,
+  key            TEXT NOT NULL,
+  hypothesis     TEXT NOT NULL,
+  experiment_key TEXT,
+  variant        TEXT,
+  generation     INTEGER NOT NULL DEFAULT 0,
+  parent_id      TEXT,
+  metric         TEXT,
+  status         TEXT NOT NULL DEFAULT 'active',
+  wins           INTEGER NOT NULL DEFAULT 0,
+  trials         INTEGER NOT NULL DEFAULT 0,
+  confidence     REAL NOT NULL DEFAULT 0.5,
+  atom_id        TEXT,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS strategies_key_uq ON strategies(workspace_id, app_id, key);
+CREATE INDEX IF NOT EXISTS strategies_app_idx ON strategies(workspace_id, app_id, status);
+CREATE INDEX IF NOT EXISTS strategies_experiment_idx ON strategies(workspace_id, experiment_key, variant);
+`,
+  },
 ];
 
 

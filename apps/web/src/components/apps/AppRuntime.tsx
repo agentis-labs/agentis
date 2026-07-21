@@ -20,13 +20,13 @@ import {
 import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 import { createInProcessAppClient } from '@agentis/app-client';
-import type { AppRecord, AppSurface, ViewNode } from '@agentis/core';
-import { REALTIME_EVENTS } from '@agentis/core';
+import type { AppRecord, AppSurface, UiPatchOp, ViewNode } from '@agentis/core';
+import { REALTIME_EVENTS, applyUiPatchOps } from '@agentis/core';
 import { appsApi } from '../../lib/appsApi';
 import { isActiveRunStatus, opsApi } from '../../lib/opsApi';
 import { apiErrorMessage } from '../../lib/api';
-import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
-import { RuntimeProvider, ViewRenderer, useDataRevision } from './ViewRenderer';
+import { useRealtime, rtSubscribe, subscribeRealtimeEvents, type RealtimeEnvelope } from '../../lib/realtime';
+import { RuntimeProvider, ViewRenderer, useDataRevision, useDataDeltas } from './ViewRenderer';
 import {
   AgentFeedView, ApprovalsInboxView, OrchestrationPanelView, RunMonitorView, useAppWorkflows,
 } from './blocks/opsBlocks';
@@ -48,6 +48,10 @@ export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const dataRevision = useDataRevision(appId);
+
+  // Follow this app's OWN live room (surface renders/patches, data changes,
+  // region pushes) directly — first-class, not by workspace-room side-effect.
+  useEffect(() => rtSubscribe('app', { appId }), [appId]);
 
   useEffect(() => {
     uiStateRef.current = uiState;
@@ -94,12 +98,26 @@ export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId
 
   const onSurfaceEvent = useCallback(
     (env: RealtimeEnvelope) => {
-      const payload = env.payload as { appId?: string; region?: string } | undefined;
+      const payload = env.payload as { appId?: string; region?: string; surfaceId?: string; revision?: number; ops?: UiPatchOp[] } | undefined;
       if (payload?.appId && payload.appId !== appId) return;
       // Performed-region pushes (Phase M3) carry a `region` and are handled in
       // place by the matching AgentRegion node — a full reload would wipe the
       // transient (un-pinned) content, so skip it here.
       if (payload?.region) return;
+      // Incremental SURFACE_PATCH: apply the ops to the matching surface's tree in
+      // place (same applier the server persists with) — no full re-fetch, no
+      // reload flicker, transient UI state preserved. The persisted tree stays
+      // authoritative; any divergence self-heals on the next full render/navigate.
+      if (env.event === REALTIME_EVENTS.SURFACE_PATCH && payload?.surfaceId && Array.isArray(payload.ops) && payload.ops.length > 0) {
+        const ops = payload.ops;
+        const surfaceId = payload.surfaceId;
+        setSurfaces((prev) => (prev
+          ? prev.map((s) => (s.id === surfaceId && s.view
+              ? { ...s, view: applyUiPatchOps(s.view, ops) as ViewNode, revision: payload.revision ?? s.revision + 1 }
+              : s))
+          : prev));
+        return;
+      }
       setReloadKey((k) => k + 1);
     },
     [appId],
@@ -141,9 +159,21 @@ export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId
         getState: (key) => (key ? getPath(uiStateRef.current, key) : uiStateRef.current),
         setState: setStateValue,
         navigate,
+        // Light the previously-dead realtime wire: an authored view / CodeSurface
+        // can subscribe to a live event name (e.g. app.data_changed, run/agent
+        // activity) and receive this app's payloads, filtered to this app.
+        subscribeRealtime: (event, handler) =>
+          subscribeRealtimeEvents([event], (env) => {
+            const payload = env.payload as { appId?: string } | undefined;
+            if (payload?.appId && payload.appId !== appId) return;
+            (handler as (value: unknown) => void)(env.payload);
+          }),
       }),
     [activeSurfaceName, appId, invokeAction, navigate, query, setStateValue, surface?.name],
   );
+
+  // Apply row-level datastore deltas to bound views in place (no full refetch).
+  useDataDeltas(client, appId);
 
   const ctx = useMemo(
     () =>

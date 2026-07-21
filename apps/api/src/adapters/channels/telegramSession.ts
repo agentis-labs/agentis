@@ -9,7 +9,7 @@
  */
 
 import type { Logger } from '../../logger.js';
-import type { ChannelDeliveryReceipt } from './types.js';
+import type { ChannelDeliveryReceipt, OutboundAttachment } from './types.js';
 
 export type TelegramSessionStatus = 'idle' | 'starting' | 'open' | 'closed' | 'error';
 
@@ -109,6 +109,34 @@ export class TelegramSession {
     const sent = await this.#bot.api.sendMessage(chatId, text);
     const providerMessageId = sent?.message_id == null ? '' : String(sent.message_id);
     if (!providerMessageId) throw new Error('telegram provider accepted no message id; outbound delivery is unverified');
+    return { provider: 'telegram', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
+  }
+
+  /**
+   * Send a single media attachment via the Bot API. grammy's InputFile wraps the
+   * resolved Buffer; each kind maps to its dedicated sendX method so Telegram
+   * renders it natively (photo/video/audio/voice/sticker/document).
+   */
+  async sendMedia(chatId: string, attachment: OutboundAttachment, caption?: string): Promise<ChannelDeliveryReceipt> {
+    if (!this.#bot) throw new Error(`telegram session ${this.opts.connectionId} is not started`);
+    const loaded = await loadGrammy();
+    if (!loaded.ok) throw new Error(`telegram media send unavailable: ${loaded.reason}`);
+    const file = new loaded.mod.InputFile(attachment.data, attachment.filename);
+    const cap = (caption ?? attachment.caption)?.trim();
+    const opts = cap ? { caption: cap } : {};
+    const api = this.#bot.api;
+    let sent: { message_id?: number } | undefined;
+    switch (attachment.kind) {
+      case 'image': sent = await api.sendPhoto(chatId, file, opts); break;
+      case 'video': sent = await api.sendVideo(chatId, file, opts); break;
+      case 'audio': sent = await api.sendAudio(chatId, file, opts); break;
+      case 'voice': sent = await api.sendVoice(chatId, file, opts); break;
+      case 'sticker': sent = await api.sendSticker(chatId, file); break;
+      case 'file':
+      default: sent = await api.sendDocument(chatId, file, opts); break;
+    }
+    const providerMessageId = sent?.message_id == null ? '' : String(sent.message_id);
+    if (!providerMessageId) throw new Error('telegram provider accepted no message id for media; outbound delivery is unverified');
     return { provider: 'telegram', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
   }
 

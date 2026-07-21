@@ -957,6 +957,7 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
   const [pickedKind, setPickedKind] = useState<typeof CONNECTION_KINDS[number]['kind'] | null>(null);
   const [name, setName] = useState('');
   const [token, setToken] = useState('');
+  const [gatewayUrl, setGatewayUrl] = useState('');
   const [busy, setBusy] = useState(false);
   // A channel connection is OWNED by an agent (inbound routes to it; outbound
   // sends as it), so messaging kinds must pick one.
@@ -1001,11 +1002,20 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
   async function connect(e: React.FormEvent) {
     e.preventDefault();
     if (!picked || !name.trim() || busy) return;
+    // The gateway flow needs a URL + device token to provision a reusable
+    // openclaw_gateways row — agents then reference it by id. Guard here so the
+    // submit doesn't fire an incomplete pairing.
+    if (picked.flow === 'gateway' && (!gatewayUrl.trim() || !token.trim())) return;
     setBusy(true);
     try {
       if (picked.flow === 'gateway') {
-        await api('/v1/gateways', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
-        toast.success('Connected', name.trim());
+        // Provision a reusable gateway via the pairing route (the old POST /v1/gateways
+        // with only {name} hit a non-existent handler and 404'd).
+        await api('/v1/gateways/pair', {
+          method: 'POST',
+          body: JSON.stringify({ name: name.trim(), gatewayUrl: gatewayUrl.trim(), deviceToken: token.trim() }),
+        });
+        toast.success('Gateway paired', name.trim());
         onCreated();
       } else if (picked.flow === 'qr') {
         // WhatsApp: create the connection (QR-local, no token) owned by the chosen
@@ -1113,6 +1123,22 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
                   <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token"
                     className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
                 </label>
+              )}
+              {picked?.flow === 'gateway' && (
+                <>
+                  <label className="block">
+                    <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Gateway URL</span>
+                    <input type="text" value={gatewayUrl} onChange={(e) => setGatewayUrl(e.target.value)} placeholder="wss://gateway.example.com/agent"
+                      className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
+                    <span className="mt-1 block text-[11px] text-text-muted">Your OpenClaw gateway’s WebSocket URL. Agents connect through this.</span>
+                  </label>
+                  <label className="block">
+                    <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Device token</span>
+                    <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste the gateway device token"
+                      className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
+                    <span className="mt-1 block text-[11px] text-text-muted">Stored encrypted; never leaves this workspace.</span>
+                  </label>
+                </>
               )}
               {picked?.flow === 'qr' && (
                 <p className="text-[12px] text-text-muted">No token needed — you'll scan a QR code with WhatsApp on the next step.</p>

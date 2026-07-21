@@ -5,7 +5,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { EventBus } from '../event-bus.js';
 import type { Logger } from '../logger.js';
-import { cosineSimilarity, isEmbeddingModelCoolingDown, isEmbeddingModelUnavailable, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
+import { cosineSimilarity, embedSyncOrDefer, isEmbeddingModelCoolingDown, isEmbeddingModelUnavailable, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
 import type { EmbeddingProviderResolver } from './embedding/embeddingProviderRegistry.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 
@@ -49,9 +49,9 @@ export class SessionMomentService {
     let embeddingDims: number | null = null;
     let needsReembed = false;
     if (provider) {
-      const raw = provider.embed(content);
-      if (Array.isArray(raw)) {
-        embedding = raw;
+      const vector = embedSyncOrDefer(provider, content);
+      if (vector) {
+        embedding = vector;
         const identity = providerIdentity(provider);
         embeddingModel = identity.model;
         embeddingDims = identity.dims;
@@ -95,9 +95,9 @@ export class SessionMomentService {
   query(args: { workspaceId: string; sessionId: string; query: string; limit?: number }): SessionMoment[] {
     const limit = Math.min(Math.max(args.limit ?? 5, 1), 20);
     const provider = this.resolveProvider?.(args.workspaceId);
-    // Sync-only on this path; an async provider degrades to lexical here.
-    const rawQ = provider?.embed(args.query);
-    const queryVec = Array.isArray(rawQ) ? rawQ : null;
+    // Sync-only on this path; an async provider degrades to lexical here (and its
+    // promise must be swallowed, not dropped — see embedSyncOrDefer).
+    const queryVec = provider ? embedSyncOrDefer(provider, args.query) : null;
     return this.list({ workspaceId: args.workspaceId, sessionId: args.sessionId, limit: 100 })
       .map((atom) => {
         const row = this.db.select({

@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, eq, isNull, lte, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte, or } from 'drizzle-orm';
 import {
   CONSTANTS,
   AgentisError,
@@ -970,6 +970,56 @@ export class WorkflowEngine {
   }
 
   /**
+   * Reap runs whose owning workflow no longer exists. A deleted workflow — or an
+   * app deletion that orphaned its workflows ([[project_app_lifecycle_side_effects]])
+   * — can leave runs in a non-terminal state that can NEVER resume or be
+   * controlled: uncontrollable zombies that inflate the "N running / N waiting"
+   * pill and the run monitor forever ([[project_phantom_running_pill]]). Mark them
+   * CANCELLED with an explaining reason and emit RUN_CANCELLED so every run surface
+   * drops them. This is the ONE safe reaping signal: a legitimately-parked run
+   * (sleep_until, paused-on-credits, awaiting approval) always has a LIVE workflow,
+   * so operator-owned parks are never touched — the human still controls those
+   * manually via the run monitor. (LIVING-INTERFACES-COCKPIT-10X §4.2.)
+   *
+   * Idempotent and cheap: only scans non-terminal runs, only acts on ones whose
+   * workflow row is gone. Runs at boot (after recovery) and is safe to call again.
+   */
+  reapOrphanedRuns(): { reaped: number } {
+    const nonTerminal = this.deps.db
+      .select()
+      .from(schema.workflowRuns)
+      .where(inArray(schema.workflowRuns.status, ['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']))
+      .all();
+    let reaped = 0;
+    for (const run of nonTerminal) {
+      // A live owning workflow → NOT an orphan, never touch it.
+      const workflow = run.workflowId
+        ? this.deps.db.select({ id: schema.workflows.id }).from(schema.workflows).where(eq(schema.workflows.id, run.workflowId)).get()
+        : undefined;
+      if (workflow) continue;
+      const now = new Date().toISOString();
+      const state = run.runState as unknown as WorkflowRunState | null;
+      if (state) {
+        // Defensive: a zombie may carry a partial/corrupt state — never let one
+        // malformed run abort the whole sweep.
+        if (state.nodeStates) markOpenNodesSkipped(state, 'Skipped: the owning workflow no longer exists');
+        state.status = 'CANCELLED';
+      }
+      this.deps.db
+        .update(schema.workflowRuns)
+        .set({ status: 'CANCELLED', ...(state ? { runState: state as unknown as object } : {}), completedAt: now, updatedAt: now })
+        .where(eq(schema.workflowRuns.id, run.id))
+        .run();
+      const payload = { runId: run.id, status: 'CANCELLED', workflowId: run.workflowId, workspaceId: run.workspaceId, reason: 'workflow no longer exists' };
+      this.deps.bus.publish(REALTIME_ROOMS.run(run.id), REALTIME_EVENTS.RUN_CANCELLED, payload);
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(run.workspaceId), REALTIME_EVENTS.RUN_CANCELLED, payload);
+      reaped += 1;
+    }
+    if (reaped > 0) this.deps.logger.info('engine.orphan_runs_reaped', { count: reaped });
+    return { reaped };
+  }
+
+  /**
    * Rehydrate and re-arm every parked agent session so suspensions survive a
    * restart. For each waiting session it rebuilds the run context (reusing an
    * already-recovered run when present), then re-registers the wake hook by kind:
@@ -1714,6 +1764,11 @@ export class WorkflowEngine {
     // the CORRECT node attribution (resolved via activeExecutions, not the taskId),
     // plus the replayable tail.
     this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), event, payload);
+    // Also fan out to the AGENT room so "click the agent → watch it think" works:
+    // the agent-detail view follows this one agent's reasoning across all its runs
+    // without needing to resolve run ids. No existing surface joins the agent room,
+    // so this adds no duplicate on the run/workspace views. (Reasoning parity.)
+    if (args.agentId) this.deps.bus.publish(REALTIME_ROOMS.agent(args.agentId), event, payload);
     this.#appendActivityTail(ctx.runId, event, payload);
   }
 

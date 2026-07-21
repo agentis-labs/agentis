@@ -36,9 +36,18 @@ import { TelegramSession } from '../../adapters/channels/telegramSession.js';
 import { resolveTelegramTransport } from '../../adapters/channels/telegram.js';
 import { DiscordSession } from '../../adapters/channels/discordSession.js';
 import { useVaultAuthState, clearVaultAuthState } from '../../adapters/channels/whatsappVaultAuthState.js';
-import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, ChannelStatus } from '../../adapters/channels/types.js';
+import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, ChannelStatus, OutboundAttachment } from '../../adapters/channels/types.js';
+import { chunkText, sleep, typingDelayMs, type HumanizeConfig } from './humanize.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
+
+/** Collapse a burst of per-message receipts into one, preserving every provider id. */
+function aggregateReceipts(receipts: ChannelDeliveryReceipt[]): ChannelDeliveryReceipt {
+  const first = receipts[0]!;
+  return receipts.length > 1
+    ? { ...first, providerMessageIds: receipts.map((r) => r.providerMessageId) }
+    : first;
+}
 
 interface PersistentRef {
   id: string;
@@ -199,16 +208,102 @@ export class ChannelConnectionSupervisor {
     return this.loginState(connectionId);
   }
 
-  /** Deliver an outbound message over the live session. */
-  async send(connectionId: string, chatId: string, body: string): Promise<ChannelDeliveryReceipt> {
+  /**
+   * Deliver an outbound message over the live session. When attachments are
+   * present, each is sent as its own native media message (the first carries the
+   * body as its caption), mirroring the WhatsApp Cloud + Telegram webhook paths.
+   * A session that cannot carry media still delivers the text so nothing is lost.
+   *
+   * When a human-like `humanize` config is supplied, long text is split into a
+   * natural burst and each message is preceded by a jittered "typing…" indicator
+   * (§6). Presence is best-effort — a session without `setTyping` still delivers.
+   */
+  async send(
+    connectionId: string,
+    chatId: string,
+    body: string,
+    attachments?: OutboundAttachment[],
+    humanize?: HumanizeConfig,
+  ): Promise<ChannelDeliveryReceipt> {
     const session = this.#sessions.get(connectionId);
     if (!session) throw new Error(`no live session for connection ${connectionId}`);
-    return session.sendText(chatId, body);
+    const media = attachments ?? [];
+    const cfg = humanize?.enabled ? humanize : undefined;
+    const typer = session as { setTyping?: (chatId: string, on: boolean) => Promise<void> };
+    const canType = Boolean(cfg && typeof typer.setTyping === 'function');
+
+    // Text-only: optionally chunk into a burst, typing before each piece.
+    if (media.length === 0) {
+      if (!cfg) return session.sendText(chatId, body);
+      const chunks = chunkText(body, cfg);
+      if (chunks.length <= 1) {
+        await this.#typingPause(typer, chatId, body.length, cfg, canType);
+        return session.sendText(chatId, chunks[0] ?? body);
+      }
+      const receipts: ChannelDeliveryReceipt[] = [];
+      for (let i = 0; i < chunks.length; i += 1) {
+        await this.#typingPause(typer, chatId, chunks[i]!.length, cfg, canType);
+        receipts.push(await session.sendText(chatId, chunks[i]!));
+        if (i < chunks.length - 1) await sleep(cfg.interMessageMs);
+      }
+      return aggregateReceipts(receipts);
+    }
+
+    const mediaSession = session as { sendMedia?: (chatId: string, attachment: OutboundAttachment, caption?: string) => Promise<ChannelDeliveryReceipt> };
+    if (typeof mediaSession.sendMedia !== 'function') {
+      // Session type has no media transport yet (e.g. Discord gateway). Deliver
+      // the text rather than silently dropping the whole message.
+      this.deps.logger.warn('channel.session_media_unsupported', { connectionId, kind: session.constructor.name, attachments: media.length });
+      return session.sendText(chatId, body);
+    }
+
+    const receipts: ChannelDeliveryReceipt[] = [];
+    for (let i = 0; i < media.length; i += 1) {
+      const caption = i === 0 && body.trim() ? body : undefined;
+      if (cfg) await this.#typingPause(typer, chatId, (caption ?? '').length + 120, cfg, canType);
+      receipts.push(await mediaSession.sendMedia(chatId, media[i]!, caption));
+      if (cfg && i < media.length - 1) await sleep(cfg.interMessageMs);
+    }
+    return aggregateReceipts(receipts);
+  }
+
+  /**
+   * Show a "typing…" indicator for a jittered, length-scaled duration before a
+   * message. Re-emits every ~8s because WhatsApp auto-clears composing at ~10s,
+   * so a long compose stays visibly "typing" the whole time.
+   */
+  async #typingPause(
+    typer: { setTyping?: (chatId: string, on: boolean) => Promise<void> },
+    chatId: string,
+    textLen: number,
+    cfg: HumanizeConfig,
+    canType: boolean,
+  ): Promise<void> {
+    const delay = typingDelayMs(textLen, cfg);
+    if (delay <= 0) return;
+    if (!canType || !typer.setTyping) { await sleep(delay); return; }
+    const REEMIT_MS = 8_000;
+    let waited = 0;
+    while (waited < delay) {
+      try { await typer.setTyping(chatId, true); } catch { /* presence is best-effort */ }
+      const step = Math.min(REEMIT_MS, delay - waited);
+      await sleep(step);
+      waited += step;
+    }
   }
 
   async outboundHealth(connectionId: string): Promise<ChannelHealthCheck | null> {
     const session = this.#sessions.get(connectionId);
     return session instanceof WhatsAppSession ? session.outboundHealthCheck() : null;
+  }
+
+  /** Add/clear a reaction on a prior message over the live session (best-effort). */
+  async react(connectionId: string, chatId: string, targetMessageId: string, emoji: string): Promise<void> {
+    const session = this.#sessions.get(connectionId);
+    const reactor = session as { sendReaction?: (chatId: string, targetMessageId: string, emoji: string) => Promise<void> };
+    if (typeof reactor.sendReaction === 'function') {
+      await reactor.sendReaction(chatId, targetMessageId, emoji);
+    }
   }
 
   async stop(connectionId: string): Promise<void> {

@@ -26,6 +26,8 @@ import { registerTaskSpineTools } from './taskSpine.js';
 import { registerChannelTools } from './channel.js';
 import { registerConversationTools } from './conversation.js';
 import { registerAppPlanTools } from './appPlan.js';
+import { registerAppGoalTools } from './appGoal.js';
+import { registerStrategyTools } from './strategyTools.js';
 import { registerOrchestrationRuleTools } from './orchestrationRules.js';
 import { registerMediaTools } from './media.js';
 import { registerBrowserTools } from './browser.js';
@@ -55,6 +57,8 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerChannelTools(registry, deps);
   registerConversationTools(registry, deps);
   registerAppPlanTools(registry, deps);
+  registerAppGoalTools(registry, deps);
+  registerStrategyTools(registry, deps);
   registerOrchestrationRuleTools(registry, deps);
   registerMediaTools(registry, deps);
   registerBrowserTools(registry, deps);

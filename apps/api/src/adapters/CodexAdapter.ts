@@ -327,6 +327,23 @@ export class CodexAdapter implements AgentAdapter {
               timestamp: timestamp(),
             });
           }
+          // Reasoning: the dispatch path historically surfaced only answer text +
+          // tools, never the agent's THINKING — so a dispatched (mcp_native) Codex
+          // agent_task was thinner than chat. Emit reasoning via the same
+          // interpreter chat uses (guarded to `reasoning` so it can't double with
+          // the text/tool emits above). (Reasoning parity, all harnesses.)
+          const interp = interpretCodexChatEvent(event);
+          if (interp.kind === 'reasoning' && interp.text) {
+            this.#emit({
+              eventType: 'agent.thinking',
+              agentId: this.opts.agentId,
+              runId: task.runId,
+              workflowId: task.workflowId,
+              taskId: task.taskId,
+              text: interp.text,
+              timestamp: timestamp(),
+            });
+          }
           if (isCompletionEvent(event)) {
             lastOutput = extractOutput(event, transcript);
           }
@@ -966,6 +983,14 @@ function formatCodexExitError(code: number | null, stderrText: string, stdoutErr
     // leaving the operator guessing.
     if (/model is not supported when using codex with a chatgpt account/i.test(detail)) {
       return `${detail} — switch this agent's model to "gpt-5.5" (the model picker in the chat header / agent settings), which works on both ChatGPT-account and API-key Codex auth.`;
+    }
+    // Codex caches its model catalogue on disk. When the CLI is upgraded (or
+    // downgraded) the cached JSON can lack a field the new parser requires, and
+    // Codex then fails to load ANY model — so every model change appears broken
+    // and looks like Agentis pinning the model. It is neither our cache nor our
+    // constraint; name the file so the operator can clear it.
+    if (/failed to (load models cache|renew cache TTL)|missing field `supports_\w+`/i.test(detail)) {
+      return `Codex could not read its own model cache (${detail}). This is a stale cache from a different Codex version, not an Agentis setting. Delete the cache files under ~/.codex (e.g. models-cache.json) and/or run \`npm install -g @openai/codex@latest\`, then retry — model selection will work again.`;
     }
     return `Codex exited with ${exit}: ${detail}`;
   }

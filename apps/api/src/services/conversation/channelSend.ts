@@ -16,6 +16,12 @@ import { ChannelDeliveryRejectedError, isAcknowledgedChannelDelivery, type Chann
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
+/** One message in a burst — its own body and/or attachments. */
+export interface ChannelSendMessage {
+  body?: string;
+  attachments?: OutboundAttachmentRef[];
+}
+
 export interface ChannelSendArgs {
   workspaceId: string;
   body: string;
@@ -28,13 +34,36 @@ export interface ChannelSendArgs {
   /** Calling agent — gates §3.3 authority. Null/undefined = deterministic/system caller (allowed). */
   agentId?: string | null;
   attachments?: OutboundAttachmentRef[];
+  /**
+   * Send a natural BURST of messages in order to the same destination (§3). When
+   * present, `body`/`attachments` are ignored. Each message is delivered as its
+   * own provider message with a derived idempotency sub-key.
+   */
+  messages?: ChannelSendMessage[];
   /** Stable run+node key for durable at-most-once workflow delivery. */
   idempotencyKey?: string;
+  /** Bypass §7 anti-ban rails (rate/warmup/opt-in). Operator-initiated sends only. */
+  bypassGuards?: boolean;
 }
 
 export type ChannelSendResult =
-  | { sent: true; verified: true; connectionId: string; kind: string; to: string; targetSource: string; status: string; attachments: number; providerMessageId: string; deliveryStatus: ChannelDeliveryReceipt['status']; acceptedAt: string; receipt: ChannelDeliveryReceipt }
+  | { sent: true; verified: true; connectionId: string; kind: string; to: string; targetSource: string; status: string; attachments: number; messages: number; providerMessageId: string; providerMessageIds?: string[]; deliveryStatus: ChannelDeliveryReceipt['status']; acceptedAt: string; receipt: ChannelDeliveryReceipt }
   | { sent: false; verified?: false; errorCode: string; error: string; remediation?: string; candidates?: unknown[]; connection?: unknown; receipt?: ChannelDeliveryReceipt };
+
+/** Flatten the request into an ordered list of messages to deliver. */
+function normalizeDeliveries(args: ChannelSendArgs): Array<{ body: string; attachments: OutboundAttachmentRef[] }> {
+  if (Array.isArray(args.messages) && args.messages.length > 0) {
+    return args.messages
+      .map((m) => ({
+        body: typeof m.body === 'string' ? m.body.trim() : '',
+        attachments: Array.isArray(m.attachments) ? m.attachments : [],
+      }))
+      .filter((d) => d.body || d.attachments.length > 0);
+  }
+  const body = typeof args.body === 'string' ? args.body.trim() : '';
+  const attachments = args.attachments ?? [];
+  return body || attachments.length > 0 ? [{ body, attachments }] : [];
+}
 
 /** What the flow needs from the bridge — structural so tests can fake it. */
 export interface ChannelSendDeps {
@@ -60,10 +89,9 @@ function resolveCandidate(
 /** Resolve → authorize → deliver. Never throws for an expected failure — returns
  *  a `{ sent:false, errorCode }` the caller (tool or node) can surface. */
 export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArgs): Promise<ChannelSendResult> {
-  const body = typeof args.body === 'string' ? args.body.trim() : '';
-  const attachments = args.attachments ?? [];
-  if (!body && attachments.length === 0) {
-    return { sent: false, errorCode: 'VALIDATION_FAILED', error: 'provide a body or at least one attachment' };
+  const deliveries = normalizeDeliveries(args);
+  if (deliveries.length === 0) {
+    return { sent: false, errorCode: 'VALIDATION_FAILED', error: 'provide a body, at least one attachment, or a non-empty messages[] burst' };
   }
   const kind = typeof args.kind === 'string' && CHANNEL_KINDS.has(args.kind as ChannelKind) ? (args.kind as ChannelKind) : null;
   const connectionId = typeof args.connectionId === 'string' && args.connectionId.trim() ? args.connectionId.trim() : null;
@@ -130,70 +158,88 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
     };
   }
 
-  let receipt: ChannelDeliveryReceipt;
-  try {
-    receipt = await deps.channels.deliverToConnection({
-      connectionId: candidate.id,
-      chatId,
-      body,
-      ...(attachments.length ? { attachments } : {}),
-      ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
-    });
-  } catch (err) {
-    if (err instanceof ChannelDeliveryRejectedError) {
+  const receipts: ChannelDeliveryReceipt[] = [];
+  let totalAttachments = 0;
+  for (let i = 0; i < deliveries.length; i += 1) {
+    const d = deliveries[i]!;
+    totalAttachments += d.attachments.length;
+    // A burst derives a per-message idempotency sub-key so a retry re-sends only
+    // the message that failed, never the ones already accepted.
+    const idempotencyKey = args.idempotencyKey
+      ? (deliveries.length > 1 ? `${args.idempotencyKey}#${i}` : args.idempotencyKey)
+      : undefined;
+    let receipt: ChannelDeliveryReceipt;
+    try {
+      receipt = await deps.channels.deliverToConnection({
+        connectionId: candidate.id,
+        chatId,
+        body: d.body,
+        ...(d.attachments.length ? { attachments: d.attachments } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(args.bypassGuards ? { bypassGuards: true } : {}),
+      });
+    } catch (err) {
+      if (err instanceof ChannelDeliveryRejectedError) {
+        return {
+          sent: false,
+          verified: false,
+          errorCode: 'CHANNEL_PROVIDER_REJECTED',
+          error: err.message,
+          ...(err.remediation ? { remediation: err.remediation } : {}),
+          connection: {
+            id: candidate.id,
+            kind: candidate.kind,
+            name: candidate.name,
+            providerMessageId: err.providerMessageId,
+            providerErrorCode: err.providerErrorCode,
+          },
+        };
+      }
+      throw err;
+    }
+    const providerMessageId = receipt?.providerMessageId?.trim() ?? '';
+    if (!providerMessageId) {
       return {
         sent: false,
         verified: false,
-        errorCode: 'CHANNEL_PROVIDER_REJECTED',
-        error: err.message,
-        ...(err.remediation ? { remediation: err.remediation } : {}),
-        connection: {
-          id: candidate.id,
-          kind: candidate.kind,
-          name: candidate.name,
-          providerMessageId: err.providerMessageId,
-          providerErrorCode: err.providerErrorCode,
-        },
+        errorCode: 'CHANNEL_DELIVERY_UNVERIFIED',
+        error: `${candidate.kind} transport returned without provider-issued message proof. The delivery outcome is unknown and must not advance downstream state.`,
+        remediation: 'Inspect the channel/provider before retrying; an unverified attempt may still have reached the recipient.',
+        connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
+        ...(receipt ? { receipt } : {}),
       };
     }
-    throw err;
+    if (!isAcknowledgedChannelDelivery(receipt)) {
+      return {
+        sent: false,
+        verified: false,
+        errorCode: 'CHANNEL_DELIVERY_PENDING',
+        error: `${candidate.kind} accepted the local submission but has not provided server acknowledgement. Downstream state was not advanced.`,
+        remediation: 'Wait for a provider acknowledgement and inspect the durable delivery receipt before retrying. Do not resend blindly: the original attempt may still be accepted later.',
+        connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
+        receipt,
+      };
+    }
+    receipts.push(receipt);
   }
-  const providerMessageId = receipt?.providerMessageId?.trim() ?? '';
-  if (!providerMessageId) {
-    return {
-      sent: false,
-      verified: false,
-      errorCode: 'CHANNEL_DELIVERY_UNVERIFIED',
-      error: `${candidate.kind} transport returned without provider-issued message proof. The delivery outcome is unknown and must not advance downstream state.`,
-      remediation: 'Inspect the channel/provider before retrying; an unverified attempt may still have reached the recipient.',
-      connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
-      ...(receipt ? { receipt } : {}),
-    };
-  }
-  if (!isAcknowledgedChannelDelivery(receipt)) {
-    return {
-      sent: false,
-      verified: false,
-      errorCode: 'CHANNEL_DELIVERY_PENDING',
-      error: `${candidate.kind} accepted the local submission but has not provided server acknowledgement. Downstream state was not advanced.`,
-      remediation: 'Wait for a provider acknowledgement and inspect the durable delivery receipt before retrying. Do not resend blindly: the original attempt may still be accepted later.',
-      connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
-      receipt,
-    };
-  }
+
+  const primary = receipts[0]!;
+  const providerMessageIds = receipts.flatMap((r) => r.providerMessageIds ?? [r.providerMessageId]);
   return {
     sent: true,
     verified: true,
     connectionId: candidate.id,
     kind: candidate.kind,
-    to: receipt.recipient ?? chatId,
+    to: primary.recipient ?? chatId,
     targetSource: resolved.source,
     status: candidate.status,
-    attachments: attachments.length,
-    providerMessageId,
-    deliveryStatus: receipt.status,
-    acceptedAt: receipt.acceptedAt,
-    receipt,
+    attachments: totalAttachments,
+    messages: receipts.length,
+    providerMessageId: primary.providerMessageId,
+    ...(providerMessageIds.length > 1 ? { providerMessageIds } : {}),
+    deliveryStatus: primary.status,
+    acceptedAt: primary.acceptedAt,
+    receipt: primary,
   };
 }
 

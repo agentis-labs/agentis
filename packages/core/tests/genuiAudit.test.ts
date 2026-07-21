@@ -144,6 +144,39 @@ describe('operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X)', 
     expect(fixes).toContain('added the orchestration panel (app drives workflows)');
   });
 
+  it('guarantees the realtime rail (RunMonitor + AgentFeed) on a workflow-driving app', () => {
+    // A workflow-driving app must always be FOLLOWABLE in realtime, not a static
+    // screen (LIVING-INTERFACES-COCKPIT-10X §5). The model authored neither a run
+    // monitor nor an agent feed → the gate adds both.
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Hero', title: 'App' }] },
+      { actions: [workflowAction] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).toContain('"RunMonitor"');
+    expect(json).toContain('"AgentFeed"');
+    expect(fixes).toContain('added the realtime rail (live run monitor + agent thought feed)');
+  });
+
+  it('does NOT double-insert the rail when the surface already surfaces run activity', () => {
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Hero', title: 'App' }, { type: 'RunMonitor' }] },
+      { actions: [workflowAction] },
+    );
+    // Exactly one RunMonitor (the authored one), no AgentFeed forced in.
+    expect((JSON.stringify(view).match(/"RunMonitor"/g) ?? []).length).toBe(1);
+    expect(fixes).not.toContain('added the realtime rail (live run monitor + agent thought feed)');
+  });
+
+  it('is idempotent after adding the live ops plane', () => {
+    const once = repairSurface(
+      { type: 'Stack', children: [{ type: 'Hero', title: 'App' }] },
+      { actions: [workflowAction] },
+    );
+    const twice = repairSurface(once.view, { actions: [workflowAction] });
+    expect(JSON.stringify(twice.view)).toBe(JSON.stringify(once.view));
+  });
+
   it('strips a button bound to an undeclared action (would 404 on click)', () => {
     const { view, fixes } = repairSurface(
       { type: 'Stack', children: [{ type: 'Button', label: 'Ghost', action: { action: 'not_declared' } }, { type: 'Heading', value: 'Keep' }] },
@@ -177,6 +210,17 @@ describe('operability gate — RENDERED ≠ OPERABLE (INTERFACE-OVERHAUL-10X)', 
     expect(json).not.toContain('ghost');
     expect(fixes).toContain('removed undeclared kanban context actions');
     expect(fixes.some((fix) => fix.includes('wired 1 workflow action'))).toBe(false);
+  });
+
+  it('wires a Kanban board drag to a declared update action (a board must be draggable)', () => {
+    const { view, fixes } = repairSurface(
+      { type: 'Stack', children: [{ type: 'Kanban', bind: { collection: 'deals', live: true }, groupBy: 'stage' }] },
+      { collections: ['deals'], actions: [{ name: 'move_deal', kind: 'data', target: 'deals.update' }] },
+    );
+    const json = JSON.stringify(view);
+    expect(json).toContain('"update"');
+    expect(json).toContain('"move_deal"');
+    expect(fixes.some((f) => f.includes('wired kanban drag'))).toBe(true);
   });
 
   it('keeps navigate/setState buttons (client built-ins need no declaration)', () => {

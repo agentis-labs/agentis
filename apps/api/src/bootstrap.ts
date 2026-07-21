@@ -126,6 +126,9 @@ import { ResidentAgentDriver } from './services/residentAgentDriver.js';
 import { ExperimentService } from './services/experiments.js';
 import { ProactiveFollowupService } from './services/proactiveFollowups.js';
 import { AppLearningService } from './services/app/appLearning.js';
+import { AppGoalService } from './services/app/appGoal.js';
+import { StrategyService } from './services/app/strategyService.js';
+import { StrategyEvolutionService } from './services/app/strategyEvolution.js';
 import { ConversationParticipantService } from './services/conversation/conversationParticipants.js';
 import { OutboundPolicyService } from './services/outboundPolicy.js';
 import { buildTaskRoutes } from './routes/tasks.js';
@@ -910,7 +913,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // it after hydration instead.
   knowledgeBaseService.setAutoLinker(knowledgeAutoLinker, false);
 
-  void rollingBaselineStore; void brainDiscourse; void brainQueue;
+  void brainDiscourse; void brainQueue;
   const issues = new IssueService({ db: sqlite, bus, engine, ledger, conversations, adapters, logger });
   // PAVED-ROAD P4 — the Sentinel: failed production runs file deduped,
   // actionable Issues (diagnosis + exact next calls) instead of dying silently.
@@ -1049,7 +1052,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // App-mind loop (G10) — constructed here (deps ready since §Brain) so the Command
   // Model can fuse each App's graded lessons into a manager's briefing. Referenced
   // later by the app routes + scheduler sweep.
-  const appLearning = new AppLearningService({ db: sqlite, shared: SharedIntelligence, logger, reflection: memoryReflection });
+  const appLearning = new AppLearningService({ db: sqlite, shared: SharedIntelligence, logger, reflection: memoryReflection, baselines: rollingBaselineStore });
   // Every terminal run deposits its graded outcome into the scope that owns it (the
   // App, else the workflow) — the writer that makes an App's Brain map fill.
   engineDeps.appBrain = appLearning;
@@ -1060,7 +1063,14 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // handlers, the dispatcher, AND the Mission Control read routes (§3.6).
   const durableEntities = new DurableEntityService(sqlite);
   const connectionGrants = new ConnectionGrantService(sqlite, process.env.AGENTIS_ENFORCE_CONNECTION_GRANTS === 'true');
-  const experiments = new ExperimentService(sqlite);
+  const appGoal = new AppGoalService({ db: sqlite, bus, shared: SharedIntelligence, logger });
+  const strategies = new StrategyService({ db: sqlite, shared: SharedIntelligence, logger });
+  const strategyEvolution = new StrategyEvolutionService({ strategies, logger, db: sqlite });
+  // Evolution Loop MEASURE→LEARN bridge — a recorded A/B outcome counts against
+  // the strategy for that arm (outcome-weighted, not recurrence-weighted).
+  const experiments = new ExperimentService(sqlite, (evt) => {
+    void strategies.recordExperimentOutcome(evt);
+  });
   const toolHandlerDeps = {
     db: sqlite,
     logger,
@@ -1119,6 +1129,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     sessionStore,
     // §3.5 — experiment/variant substrate (A/B of any decision + per-variant success rate).
     experiments,
+    // Evolution Loop — the App's durable Goal (north-star), backs agentis.app.goal.
+    appGoal,
+    // Evolution Loop — competing strategies (outcome-weighted), backs agentis.strategy.*.
+    strategies,
+    // Evolution Loop — the controller (winner selection + promote/retire), backs agentis.evolution.review.
+    evolution: strategyEvolution,
     // §3.0/§3.2 — the Durable Entity spine, backs agentis.subject.* (per-subject durable actors).
     durableEntities,
     modelAssistedRuntimeEnabled,
@@ -1477,6 +1493,13 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // restart with no timer to rehydrate — the sweep simply finds it next tick.
   scheduler.registerSweep('scheduled_conversation_touches', 30_000, (now) => conversationService.sweepScheduled(now));
   scheduler.registerSweep('abandoned_contacts', 3_600_000, async (now) => (await appLearning.sweepAbandoned(now.toISOString())).swept);
+  // Evolution Loop cadence — periodically review each App's strategies. ACT (auto
+  // promote winners + retire losers) is operator-gated via AGENTIS_EVOLUTION_AUTONOMY;
+  // otherwise it only evaluates (proposals are read live via Mission Control).
+  scheduler.registerSweep('evolution_loop', 6 * 3_600_000, async () => {
+    const mode = process.env.AGENTIS_EVOLUTION_AUTONOMY === 'true' ? 'act' : 'surface';
+    return (await strategyEvolution.sweep(mode)).applied;
+  });
   // COMMAND-MODEL Layer C — proactive heartbeat. SURFACE-only by default (logs the
   // attention signal + de-dupes; the manager's next chat turn already leads with the
   // same attention in its Command Briefing). Set AGENTIS_COMMAND_AUTONOMY=true to let
@@ -1638,6 +1661,15 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // (best-effort — a failure here must not block boot).
   void engine.recoverInterruptedRuns().then((summary) => {
     logger.info('engine.boot_recovery', summary);
+    // After recovery re-hydrates every legitimately-parked run, reap the ones
+    // whose owning workflow no longer exists — orphaned zombies that can never
+    // resume or be controlled and would otherwise inflate the run monitor forever.
+    try {
+      const { reaped } = engine.reapOrphanedRuns();
+      if (reaped > 0) logger.info('engine.boot_orphan_reap', { reaped });
+    } catch (err) {
+      logger.warn('engine.boot_orphan_reap_failed', { err: (err as Error).message });
+    }
   }).catch((err) => {
     logger.warn('engine.boot_recovery_failed', { err: (err as Error).message });
   });
@@ -1704,6 +1736,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     appContacts,
     appLearning,
     appOrchestrator,
+    appGoal,
+    strategies,
+    strategyEvolution,
+    experiments,
+    rollingBaselineStore,
     brainAsk,
     brainComposer,
     brainHealth,

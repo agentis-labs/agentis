@@ -8,6 +8,19 @@ import { resolveAndSend } from '../conversation/channelSend.js';
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
+/** One attachment item — shared by the top-level `attachments` and each `messages[]` entry. */
+const ATTACHMENT_ITEM_SCHEMA = {
+  type: 'object',
+  properties: {
+    url: { type: 'string', description: 'artifact:<id>, data: URL, or http(s) URL.' },
+    artifactId: { type: 'string', description: 'Artifact id (alternative to url).' },
+    filename: { type: 'string' },
+    mimeType: { type: 'string' },
+    kind: { type: 'string', enum: ['image', 'video', 'audio', 'voice', 'sticker', 'file'], description: 'Delivery hint; inferred from MIME type when omitted. "voice" = a push-to-talk voice note (OGG/Opus mono for WhatsApp); "sticker" = WebP.' },
+    caption: { type: 'string', description: 'Per-attachment caption.' },
+  },
+} as const;
+
 export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
     {
@@ -102,25 +115,27 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.channel.send',
         family: 'run',
-        description: 'Send a message — optionally with image/file attachments — through a native Agentis channel connection. WhatsApp accepts explicit phone numbers with country code (for example +12345678901) or WhatsApp JIDs; "default" uses the saved default target. To send a screenshot, first call agentis.browser.screenshot and pass its `ref` (e.g. "artifact:<id>") as an attachment url.',
+        description: 'Send a message — optionally with media attachments, or a natural burst of several messages — through a native Agentis channel connection. Media kinds: image, video, audio, voice note, sticker, file. WhatsApp accepts explicit phone numbers with country code (for example +12345678901) or WhatsApp JIDs; "default" uses the saved default target. To send a screenshot, first call agentis.browser.screenshot and pass its `ref` (e.g. "artifact:<id>") as an attachment url. Use `messages[]` to send several messages in sequence (e.g. a photo, then a follow-up line).',
         inputSchema: {
           type: 'object',
           properties: {
             connectionId: { type: 'string', description: 'Specific channel connection id. Optional when kind resolves to one active channel.' },
             kind: { type: 'string', enum: [...CHANNEL_KINDS], description: 'Channel kind to use when connectionId is omitted.' },
             to: { type: 'string', description: 'Channel destination. Use "default" or omit for the saved default target. WhatsApp may be a phone number, JID, or saved alias.' },
-            body: { type: 'string', description: 'Message body / caption. May be empty when sending attachments only.' },
+            body: { type: 'string', description: 'Message body / caption. May be empty when sending attachments only. Ignored when messages[] is provided.' },
             attachments: {
               type: 'array',
-              description: 'Images or files to deliver. Each item points at one source: an artifact ("artifact:<id>" or artifactId), a data: URL, or an http(s) URL.',
+              description: 'Media to deliver. Each item points at one source: an artifact ("artifact:<id>" or artifactId), a data: URL, or an http(s) URL.',
+              items: ATTACHMENT_ITEM_SCHEMA,
+            },
+            messages: {
+              type: 'array',
+              description: 'Send these as a natural burst, in order, to the same destination. Each item is its own message with an optional body and attachments. When set, top-level body/attachments are ignored.',
               items: {
                 type: 'object',
                 properties: {
-                  url: { type: 'string', description: 'artifact:<id>, data: URL, or http(s) URL.' },
-                  artifactId: { type: 'string', description: 'Artifact id (alternative to url).' },
-                  filename: { type: 'string' },
-                  mimeType: { type: 'string' },
-                  kind: { type: 'string', enum: ['image', 'file'], description: 'Delivery hint; inferred from MIME type when omitted.' },
+                  body: { type: 'string' },
+                  attachments: { type: 'array', items: ATTACHMENT_ITEM_SCHEMA },
                 },
               },
             },
@@ -143,8 +158,92 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             to: typeof args.to === 'string' ? args.to : null,
             agentId: ctx.agentId ?? null,
             attachments: parseAttachments(args.attachments),
+            ...(Array.isArray(args.messages) ? { messages: parseMessages(args.messages) } : {}),
           },
         );
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.channel.capabilities',
+        family: 'inspect',
+        description: 'Report what a channel connection can send (media kinds, reactions, typing/presence, location, contacts, polls, quoted replies, mentions, bursts, human-like pacing). Call before composing rich content so you only attempt what the channel supports.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'Connection to inspect. Optional when kind resolves to one active channel.' },
+            kind: { type: 'string', enum: [...CHANNEL_KINDS], description: 'Channel kind (used when connectionId is omitted).' },
+          },
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
+        const connectionId = resolveConnectionId(deps.channels, ctx.workspaceId, args);
+        if (!connectionId) throw new AgentisError('RESOURCE_NOT_FOUND', 'no matching channel connection; pass connectionId or a kind with exactly one active connection');
+        const capabilities = deps.channels.capabilitiesFor(connectionId);
+        if (!capabilities) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${connectionId} not found`);
+        return { connectionId, capabilities };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.channel.typing',
+        family: 'run',
+        description: 'Show or clear a "typing…" indicator in a channel chat (best-effort; supported on WhatsApp/Telegram live sessions). Use to make a reply feel human before sending.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string' },
+            kind: { type: 'string', enum: [...CHANNEL_KINDS] },
+            to: { type: 'string', description: 'Destination chat (phone/JID/chat id, or "default").' },
+            on: { type: 'boolean', description: 'true = show typing, false = clear. Defaults to true.' },
+          },
+          required: ['to'],
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
+        const connectionId = resolveConnectionId(deps.channels, ctx.workspaceId, args);
+        if (!connectionId) throw new AgentisError('RESOURCE_NOT_FOUND', 'no matching channel connection');
+        const resolved = deps.channels.resolveDestination({ connectionId, to: typeof args.to === 'string' ? args.to : null });
+        if (!resolved.chatId) throw new AgentisError('VALIDATION_FAILED', 'no destination chat resolved for typing');
+        await deps.channels.setTyping(connectionId, resolved.chatId, args.on !== false);
+        return { ok: true, connectionId, to: resolved.chatId, typing: args.on !== false };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.channel.react',
+        family: 'run',
+        description: 'Add or clear an emoji reaction on a prior message in a channel chat (best-effort; WhatsApp live sessions). Pass an empty emoji to clear.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string' },
+            kind: { type: 'string', enum: [...CHANNEL_KINDS] },
+            to: { type: 'string', description: 'Destination chat (phone/JID/chat id, or "default").' },
+            messageId: { type: 'string', description: 'Provider message id of the message to react to.' },
+            emoji: { type: 'string', description: 'Reaction emoji, or "" to clear.' },
+          },
+          required: ['to', 'messageId', 'emoji'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
+        const connectionId = resolveConnectionId(deps.channels, ctx.workspaceId, args);
+        if (!connectionId) throw new AgentisError('RESOURCE_NOT_FOUND', 'no matching channel connection');
+        const messageId = typeof args.messageId === 'string' ? args.messageId.trim() : '';
+        if (!messageId) throw new AgentisError('VALIDATION_FAILED', 'messageId is required');
+        const resolved = deps.channels.resolveDestination({ connectionId, to: typeof args.to === 'string' ? args.to : null });
+        if (!resolved.chatId) throw new AgentisError('VALIDATION_FAILED', 'no destination chat resolved for reaction');
+        await deps.channels.reactToMessage(connectionId, resolved.chatId, messageId, typeof args.emoji === 'string' ? args.emoji : '');
+        return { ok: true, connectionId, to: resolved.chatId, messageId };
       },
     },
     {
@@ -271,13 +370,47 @@ function parseAttachments(value: unknown): OutboundAttachmentRef[] {
     if (artifactId) ref.artifactId = artifactId;
     if (typeof obj.filename === 'string' && obj.filename.trim()) ref.filename = obj.filename.trim();
     if (typeof obj.mimeType === 'string' && obj.mimeType.trim()) ref.mimeType = obj.mimeType.trim();
-    if (obj.kind === 'image' || obj.kind === 'file') ref.kind = obj.kind;
+    if (obj.kind === 'image' || obj.kind === 'video' || obj.kind === 'audio' || obj.kind === 'voice' || obj.kind === 'sticker' || obj.kind === 'file') ref.kind = obj.kind;
+    if (typeof obj.caption === 'string' && obj.caption.trim()) ref.caption = obj.caption.trim();
     return ref;
+  });
+}
+
+/** Normalize a burst of loosely-typed messages into typed send messages. */
+function parseMessages(value: unknown): { body?: string; attachments?: OutboundAttachmentRef[] }[] {
+  if (!Array.isArray(value)) throw new AgentisError('VALIDATION_FAILED', 'messages must be an array');
+  return value.map((raw, i) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new AgentisError('VALIDATION_FAILED', `messages[${i}] must be an object`);
+    }
+    const obj = raw as Record<string, unknown>;
+    const message: { body?: string; attachments?: OutboundAttachmentRef[] } = {};
+    if (typeof obj.body === 'string') message.body = obj.body;
+    if (obj.attachments != null) message.attachments = parseAttachments(obj.attachments);
+    return message;
   });
 }
 
 function parseKind(value: unknown): ChannelKind | null {
   if (typeof value !== 'string') return null;
   return CHANNEL_KINDS.has(value as ChannelKind) ? value as ChannelKind : null;
+}
+
+/** Resolve a connection id from explicit id, or a kind that maps to one active/default connection. */
+function resolveConnectionId(
+  channels: NonNullable<ToolHandlerDeps['channels']>,
+  workspaceId: string,
+  args: { connectionId?: unknown; kind?: unknown },
+): string | null {
+  const explicit = typeof args.connectionId === 'string' && args.connectionId.trim() ? args.connectionId.trim() : '';
+  if (explicit) return explicit;
+  const kind = parseKind(args.kind);
+  const active = channels.list(workspaceId).filter((c) => c.status === 'active' && (!kind || c.kind === kind));
+  if (active.length === 1) return active[0]!.id;
+  if (kind) {
+    const defaultId = channels.defaultConnectionFor(workspaceId, kind);
+    if (defaultId) return defaultId;
+  }
+  return null;
 }
 

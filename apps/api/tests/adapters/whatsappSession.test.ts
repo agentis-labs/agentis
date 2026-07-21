@@ -4,7 +4,56 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { extractWhatsAppText, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage } from '../../src/adapters/channels/whatsappSession.js';
+import { extractWhatsAppText, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent } from '../../src/adapters/channels/whatsappSession.js';
+import type { OutboundAttachment } from '../../src/adapters/channels/types.js';
+
+describe('whatsappMediaContent', () => {
+  const base = (kind: OutboundAttachment['kind'], over: Partial<OutboundAttachment> = {}): OutboundAttachment => ({
+    kind, filename: `f.${kind}`, mimeType: over.mimeType ?? '', data: Buffer.from('x'), ...over,
+  });
+
+  it('builds an image with caption + viewOnce', () => {
+    const c = whatsappMediaContent(base('image', { viewOnce: true }), 'hi');
+    expect(c.image).toBeInstanceOf(Buffer);
+    expect(c.caption).toBe('hi');
+    expect(c.viewOnce).toBe(true);
+  });
+
+  it('builds a video with gifPlayback', () => {
+    const c = whatsappMediaContent(base('video', { gifPlayback: true, seconds: 3 }), 'clip');
+    expect(c.video).toBeInstanceOf(Buffer);
+    expect(c.gifPlayback).toBe(true);
+    expect(c.seconds).toBe(3);
+    expect(c.caption).toBe('clip');
+  });
+
+  it('builds a voice note as ptt audio with an opus default mimetype', () => {
+    const c = whatsappMediaContent(base('voice'));
+    expect(c.audio).toBeInstanceOf(Buffer);
+    expect(c.ptt).toBe(true);
+    expect(c.mimetype).toContain('opus');
+  });
+
+  it('builds an audio track (not ptt)', () => {
+    const c = whatsappMediaContent(base('audio', { mimeType: 'audio/mpeg' }));
+    expect(c.audio).toBeInstanceOf(Buffer);
+    expect(c.ptt).toBeUndefined();
+    expect(c.mimetype).toBe('audio/mpeg');
+  });
+
+  it('builds a sticker (no caption)', () => {
+    const c = whatsappMediaContent(base('sticker'), 'ignored');
+    expect(c.sticker).toBeInstanceOf(Buffer);
+    expect(c.caption).toBeUndefined();
+  });
+
+  it('builds a document with filename + caption, falling back to per-attachment caption', () => {
+    const c = whatsappMediaContent(base('file', { filename: 'report.pdf', mimeType: 'application/pdf', caption: 'q3' }));
+    expect(c.document).toBeInstanceOf(Buffer);
+    expect(c.fileName).toBe('report.pdf');
+    expect(c.caption).toBe('q3');
+  });
+});
 
 describe('extractWhatsAppText', () => {
   it('reads a plain conversation message', () => {

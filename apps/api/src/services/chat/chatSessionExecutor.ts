@@ -970,6 +970,7 @@ export class ChatSessionExecutor {
       }
       const toolCalls: ChatToolCall[] = [];
       let assistantText = '';
+      let reasoningSeg = '';
       const bufferedDeltas: ChatDelta[] = [];
       let surfacedConfirmation = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
@@ -1021,9 +1022,29 @@ export class ChatSessionExecutor {
           // "Waiting for runtime" card while the harness is actively working.
           if (delta.type === 'activity') {
             yield delta;
-          } else if (delta.type !== 'thinking') {
+          } else if (delta.type === 'thinking') {
+            // Surface harness reasoning as a streaming, replace-in-place reasoning
+            // row (the SAME `activity` shape adapters like Codex already emit)
+            // instead of DROPPING it. This is the root fix for "watch the agent
+            // think": every harness that yields raw thinking now streams live — in
+            // chat AND in agent_task (the run relay picks up these activity deltas
+            // run-scoped). Flush on a natural boundary / readable chunk so it flows
+            // like a thought stream without per-token event spam.
+            reasoningSeg += delta.delta;
+            if (/\n/.test(delta.delta) || reasoningSeg.length >= 80) {
+              const seg = reasoningSeg.replace(/\s+/g, ' ').trim();
+              reasoningSeg = '';
+              if (seg) yield this.#activity(ctx, 'runtime', seg.length > 600 ? `${seg.slice(0, 599)}…` : seg, '', 'reasoning');
+            }
+          } else {
             bufferedDeltas.push(delta);
           }
+        }
+        // Flush any trailing reasoning that didn't hit a boundary.
+        if (reasoningSeg.trim()) {
+          const seg = reasoningSeg.replace(/\s+/g, ' ').trim();
+          reasoningSeg = '';
+          yield this.#activity(ctx, 'runtime', seg.length > 600 ? `${seg.slice(0, 599)}…` : seg, '', 'reasoning');
         }
         timings.modelMs += Date.now() - roundStart;
         this.#recordModelUsage(ctx, roundUsage ?? estimateRoundUsage(messages, assistantText), turn + 1, options.adapterType);

@@ -111,6 +111,11 @@ import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
 import type { AppContactService } from '../services/app/appContacts.js';
 import type { AppLearningService } from '../services/app/appLearning.js';
 import type { AppOrchestratorService } from '../services/app/appOrchestrator.js';
+import type { AppGoalService } from '../services/app/appGoal.js';
+import type { StrategyService } from '../services/app/strategyService.js';
+import type { StrategyEvolutionService } from '../services/app/strategyEvolution.js';
+import type { ExperimentService } from '../services/experiments.js';
+import type { RollingBaselineStore } from '../services/rollingBaselineStore.js';
 import type { BrainAskService } from '../services/brain/brainAskService.js';
 import type { BrainComposer } from '../services/brain/brainComposer.js';
 import type { BrainHealthService } from '../services/brain/brainHealthService.js';
@@ -155,6 +160,11 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   appContacts: AppContactService;
   appLearning: AppLearningService;
   appOrchestrator: AppOrchestratorService;
+  appGoal: AppGoalService;
+  strategies: StrategyService;
+  strategyEvolution: StrategyEvolutionService;
+  experiments: ExperimentService;
+  rollingBaselineStore: RollingBaselineStore;
   brainAsk: BrainAskService;
   brainComposer: BrainComposer;
   brainHealth: BrainHealthService;
@@ -216,6 +226,11 @@ export function wireRoutes(deps: WireRoutesDeps) {
     appContacts,
     appLearning,
     appOrchestrator,
+    appGoal,
+    strategies,
+    strategyEvolution,
+    experiments,
+    rollingBaselineStore,
     appStores,
     approvals,
     artifactService,
@@ -477,7 +492,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
   const appPresence = new AppPresenceService({ bus, logger });
   appPresence.start();
-  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime, episodes: episodicMemoryStore }));
+  app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime, episodes: episodicMemoryStore, appGoal, strategies, evolution: strategyEvolution, experiments, baselines: rollingBaselineStore }));
   app.route('/v1/system', buildSystemRoutes({ db: sqlite, auth, currentVersion: env.AGENTIS_CLI_VERSION }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   const ownershipSync = new AgentOwnershipSyncService(sqlite, harnessMemoryIngestion, skillService, logger);

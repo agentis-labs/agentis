@@ -42,7 +42,11 @@ export function buildAppStores(deps: { db: AgentisSqliteDb; bus?: AppRealtimePub
   });
   const data = new AppDatastore(deps.db, (e) => {
     if (!bus) return;
-    const payload = { appId: e.appId, collection: e.collection, op: e.op, id: e.id };
+    // Carry the changed row (flattened to the client's `{id, ...data}` shape) so a
+    // bound view can apply a row-level DELTA in place instead of re-querying the
+    // whole collection. Delete/bulk omit it → the view falls back to a refetch.
+    const row = e.record ? { id: e.record.id, ...e.record.data } : undefined;
+    const payload = { appId: e.appId, collection: e.collection, op: e.op, id: e.id, ...(row ? { record: row } : {}) };
     bus.publish(REALTIME_ROOMS.app(e.appId), REALTIME_EVENTS.DATA_CHANGED, payload);
     bus.publish(REALTIME_ROOMS.workspace(e.workspaceId), REALTIME_EVENTS.DATA_CHANGED, payload);
   });

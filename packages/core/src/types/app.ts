@@ -38,6 +38,31 @@ const slugSchema = z
  * `apps.manifest_json`. This is the *identity* sub-part of the full portable
  * `AppManifest` IR (see `manifest.ts`, AGENTIC-SYSTEMS-ARCHITECTURE §2.1).
  */
+/**
+ * App **Goal** — the durable, cross-run north-star an App is trying to advance
+ * (the reserved long-term "Goal" tier; run-scoped work stays "Objective", and a
+ * Goal decomposes into Objectives pursued across runs). Optional `northStar`
+ * names the metric the Evolution Loop optimizes toward so competing Strategies
+ * can be compared. Rides in the App manifest — portable, no migration.
+ */
+export const appNorthStarSchema = z.object({
+  /** The metric name the App optimizes (e.g. "conversion_rate", "resolution_time"). */
+  metric: z.string().min(1).max(120),
+  direction: z.enum(['maximize', 'minimize']).default('maximize'),
+  /** Optional numeric target for the metric. */
+  target: z.number().optional(),
+});
+export type AppNorthStar = z.infer<typeof appNorthStarSchema>;
+
+export const appGoalSchema = z.object({
+  /** One or two sentences stating what this App is trying to achieve over time. */
+  statement: z.string().min(1).max(2000),
+  northStar: appNorthStarSchema.nullable().optional(),
+  /** Last time the goal was set/changed. */
+  updatedAt: z.string().optional(),
+});
+export type AppGoal = z.infer<typeof appGoalSchema>;
+
 export const appIdentitySchema = z.object({
   manifestVersion: z.literal(1).default(1),
   slug: slugSchema,
@@ -50,6 +75,8 @@ export const appIdentitySchema = z.object({
   capabilities: z.array(z.string()).default([]),
   /** Plugin/integration slugs the App needs the installing workspace to provide. */
   requiredPlugins: z.array(z.string()).default([]),
+  /** The App's durable, cross-run Goal (Evolution Loop north-star). */
+  goal: appGoalSchema.nullable().optional(),
 });
 export type AppIdentity = z.infer<typeof appIdentitySchema>;
 

@@ -319,6 +319,39 @@ function wireRowDeletes(node: ViewNode, deletesByCollection: Map<string, string>
   return node;
 }
 
+/**
+ * Wire a Kanban's drag to a declared "<collection>.update" data action when the
+ * agent left `update` off. A board you can't drag is the "static kanban" defect —
+ * `draggable = Boolean(node.update)` at the renderer, so an unwired board is inert.
+ * (LIVING-INTERFACES-COCKPIT-10X §6.) Only fills a MISSING update; a present-but-
+ * undeclared one was already stripped upstream, and this then re-wires it correctly.
+ */
+function wireKanbanUpdates(node: ViewNode, updatesByCollection: Map<string, string>, fixes: string[]): ViewNode {
+  if (node.type === 'Kanban') {
+    if (!node.update) {
+      const actionName = updatesByCollection.get(node.bind.collection);
+      if (actionName) {
+        fixes.push(`wired kanban drag (${actionName}) on ${node.bind.collection} board`);
+        return { ...node, update: { action: actionName } } as ViewNode;
+      }
+    }
+    return node;
+  }
+  if (node.type === 'Split') {
+    return { ...node, left: wireKanbanUpdates(node.left, updatesByCollection, fixes), right: wireKanbanUpdates(node.right, updatesByCollection, fixes) };
+  }
+  if (node.type === 'Tabs') {
+    return { ...node, tabs: node.tabs.map((t) => ({ ...t, children: t.children.map((c) => wireKanbanUpdates(c, updatesByCollection, fixes)) })) };
+  }
+  if (node.type === 'Accordion') {
+    return { ...node, sections: node.sections.map((s) => ({ ...s, children: s.children.map((c) => wireKanbanUpdates(c, updatesByCollection, fixes)) })) };
+  }
+  if (hasChildren(node)) {
+    return { ...node, children: node.children.map((c) => wireKanbanUpdates(c, updatesByCollection, fixes)) } as ViewNode;
+  }
+  return node;
+}
+
 function auditOperability(root: ViewNode, actions: SurfaceAction[], fixes: string[]): ViewNode {
   let out = root;
   const declared = new Set(actions.map((a) => a.name));
@@ -341,15 +374,49 @@ function auditOperability(root: ViewNode, actions: SurfaceAction[], fixes: strin
   }
   if (deletes.size > 0) out = wireRowDeletes(out, deletes, fixes);
 
-  // D) An app that drives workflows always exposes its control plane.
+  // C2) A Kanban over a collection with a declared "<collection>.update" gets its
+  //     drag wired — a board is meant to be dragged, so wire it by construction.
+  const updates = new Map<string, string>();
+  for (const a of actions) {
+    if (a.kind !== 'data') continue;
+    const [collection, op] = a.target.split('.');
+    if (collection && op === 'update') updates.set(collection, a.name);
+  }
+  if (updates.size > 0) out = wireKanbanUpdates(out, updates, fixes);
+
+  // D) An app that drives workflows always exposes its control plane AND its
+  //    LIVE rail. A workflow-driving app is an operational unit, not a static
+  //    screen — the operator must always be able to (1) control the workflows
+  //    and (2) FOLLOW them in realtime: watch runs pulse and cancel/pause them,
+  //    and watch the agent think. The control plane (OrchestrationPanel) was
+  //    already guaranteed; the live rail (RunMonitor + AgentFeed) was not, so an
+  //    app the model didn't explicitly wire with a rail rendered "dead" even
+  //    though the runtime blocks stream live. Guarantee both. (LIVING-INTERFACES-
+  //    COCKPIT-10X §5 — every app follows realtime by construction.)
   const drivesWorkflows = actions.some((a) => a.kind === 'workflow');
-  if (drivesWorkflows && !findFirst(out, 'OrchestrationPanel') && !findFirst(out, 'WorkflowControl') && !findFirst(out, 'RunMonitor')) {
-    if (hasChildren(out)) {
+  if (drivesWorkflows && hasChildren(out)) {
+    const additions: ViewNode[] = [];
+    const hasControl = findFirst(out, 'OrchestrationPanel') || findFirst(out, 'WorkflowControl') || findFirst(out, 'RunMonitor');
+    if (!hasControl) {
+      additions.push({ type: 'OrchestrationPanel' } as ViewNode);
+      fixes.push('added the orchestration panel (app drives workflows)');
+    }
+    // The realtime rail: live runs (with control) beside the agent's streamed
+    // reasoning. Skip only if the surface already surfaces run activity itself.
+    if (!findFirst(out, 'RunMonitor') && !findFirst(out, 'AgentFeed')) {
+      additions.push({
+        type: 'Grid',
+        columns: 2,
+        gap: 16,
+        children: [{ type: 'RunMonitor' } as ViewNode, { type: 'AgentFeed' } as ViewNode],
+      } as ViewNode);
+      fixes.push('added the realtime rail (live run monitor + agent thought feed)');
+    }
+    if (additions.length > 0) {
       const heroIdx = out.children.findIndex((c) => c.type === 'Hero');
       const children = [...out.children];
-      children.splice(heroIdx >= 0 ? heroIdx + 1 : 0, 0, { type: 'OrchestrationPanel' } as ViewNode);
+      children.splice(heroIdx >= 0 ? heroIdx + 1 : 0, 0, ...additions);
       out = { ...out, children } as ViewNode;
-      fixes.push('added the orchestration panel (app drives workflows)');
     }
   }
 

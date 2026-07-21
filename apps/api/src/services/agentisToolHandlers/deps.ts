@@ -43,6 +43,9 @@ import type { MediaService } from '../mediaService.js';
 import type { ConnectionGrantService } from '../connectionGrants.js';
 import type { AgentSessionService } from '../agent/agentSession.js';
 import type { ExperimentService } from '../experiments.js';
+import type { AppGoalService } from '../app/appGoal.js';
+import type { StrategyService } from '../app/strategyService.js';
+import type { StrategyEvolutionService } from '../app/strategyEvolution.js';
 import type { DurableEntityService } from '../durableEntities.js';
 
 export interface ToolHandlerDeps {
@@ -162,6 +165,12 @@ export interface ToolHandlerDeps {
   sessionStore?: Pick<AgentSessionService, 'rememberResident' | 'residentState'>;
   /** Experiment/variant substrate (§3.5) — backs agentis.experiment.define/assign/record/results. */
   experiments?: ExperimentService;
+  /** App Goal (Evolution Loop north-star) — backs agentis.app.goal. */
+  appGoal?: AppGoalService;
+  /** Competing strategies (Evolution Loop) — backs agentis.strategy.propose/list. */
+  strategies?: StrategyService;
+  /** Evolution controller — backs agentis.evolution.review (winner selection + promote/retire). */
+  evolution?: StrategyEvolutionService;
   /** Durable Entity spine (§3.0/§3.2) — backs agentis.subject.* (per-subject durable actors). */
   durableEntities?: DurableEntityService;
 }

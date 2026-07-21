@@ -257,13 +257,69 @@ export function useResolvedScope(row?: Record<string, unknown>): ResolveScope {
 // every bound view), and revision refetches keep the previous rows on screen
 // (live update without skeleton flicker).
 
+type BindSpec = { collection: string; filter: Record<string, unknown>; sort?: DataBind['sort']; limit?: number };
+
 interface BindEntry {
   rows: Record<string, unknown>[];
   hasLoaded: boolean;
   fetchedRevision: number;
   fetchingRevision: number;
+  spec?: BindSpec;
   subs: Set<() => void>;
   gc: ReturnType<typeof setTimeout> | null;
+}
+
+/** Client-side mirror of the datastore's filter ops, for applying a live delta. */
+function rowMatchesFilter(row: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+  for (const [key, raw] of Object.entries(filter ?? {})) {
+    const v = row[key];
+    if (raw !== null && typeof raw === 'object' && 'op' in (raw as object)) {
+      const { op, value } = raw as { op: string; value: unknown };
+      if (!matchFilterOp(op, v, value)) return false;
+    } else if (!looseScalarEq(v, raw)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function matchFilterOp(op: string, v: unknown, value: unknown): boolean {
+  switch (op) {
+    case 'eq': return looseScalarEq(v, value);
+    case 'ne': return !looseScalarEq(v, value);
+    case 'gt': return compareCellValues(v, value) > 0;
+    case 'gte': return compareCellValues(v, value) >= 0;
+    case 'lt': return compareCellValues(v, value) < 0;
+    case 'lte': return compareCellValues(v, value) <= 0;
+    case 'contains': return String(v ?? '').toLowerCase().includes(String(value ?? '').toLowerCase());
+    case 'in': return (Array.isArray(value) ? value : [value]).some((candidate) => looseScalarEq(v, candidate));
+    default: return true; // unknown op → don't exclude (server is the source of truth on refetch)
+  }
+}
+
+function looseScalarEq(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a === 'boolean' || typeof b === 'boolean') return Boolean(a) === Boolean(b);
+  return String(a ?? '') === String(b ?? '');
+}
+
+function compareCellValues(a: unknown, b: unknown): number {
+  const na = typeof a === 'number' ? a : Number(a);
+  const nb = typeof b === 'number' ? b : Number(b);
+  if (!Number.isNaN(na) && !Number.isNaN(nb)) return na === nb ? 0 : na < nb ? -1 : 1;
+  const sa = String(a ?? ''); const sb = String(b ?? '');
+  return sa === sb ? 0 : sa < sb ? -1 : 1;
+}
+
+function sortRowsBy(rows: Record<string, unknown>[], sort: DataBind['sort']): Record<string, unknown>[] {
+  if (!sort || sort.length === 0) return rows;
+  return [...rows].sort((a, b) => {
+    for (const s of sort) {
+      const c = compareCellValues(a[s.field], b[s.field]);
+      if (c !== 0) return s.dir === 'desc' ? -c : c;
+    }
+    return 0;
+  });
 }
 
 class BindStore {
@@ -297,8 +353,9 @@ class BindStore {
   }
 
   /** Fetch once per (key, revision) no matter how many blocks share the bind. */
-  fetch(key: string, spec: { collection: string; filter: Record<string, unknown>; sort?: DataBind['sort']; limit?: number }, revision: number): void {
+  fetch(key: string, spec: BindSpec, revision: number): void {
     const e = this.entry(key);
+    e.spec = spec;
     if (revision <= e.fetchedRevision || revision <= e.fetchingRevision) return;
     e.fetchingRevision = revision;
     this.client.data
@@ -310,6 +367,51 @@ class BindStore {
         e.hasLoaded = true;
         for (const notify of e.subs) notify();
       });
+  }
+
+  /**
+   * Apply a row-level datastore change IN PLACE (snapshot + delta, AG-UI shape) —
+   * no full-query refetch. Every loaded entry over the changed collection reduces
+   * the delta against its own filter/sort/limit: delete → drop by id; insert/update
+   * → upsert if the row matches the filter (re-sort + trim), else drop if it fell
+   * out of the filter. Entries not yet loaded are skipped (the pending fetch will
+   * include the row). Bulk/opaque changes (no `record`) fall back to a refetch via
+   * the data revision, handled by the caller.
+   */
+  applyChange(change: { collection: string; op: 'insert' | 'update' | 'delete'; id: string; record?: Record<string, unknown> }): void {
+    for (const e of this.entries.values()) {
+      const spec = e.spec;
+      if (!spec || spec.collection !== change.collection || !e.hasLoaded) continue;
+      if (change.op === 'delete') {
+        const next = e.rows.filter((r) => r.id !== change.id);
+        if (next.length !== e.rows.length) { e.rows = next; this.#notify(e); }
+        continue;
+      }
+      const record = change.record;
+      if (!record) continue; // no row payload (bulk) → revision refetch handles it
+      const idx = e.rows.findIndex((r) => r.id === change.id);
+      if (!rowMatchesFilter(record, spec.filter)) {
+        if (idx >= 0) { e.rows = e.rows.filter((r) => r.id !== change.id); this.#notify(e); }
+        continue;
+      }
+      let rows: Record<string, unknown>[];
+      if (idx >= 0) {
+        rows = e.rows.map((r, i) => (i === idx ? record : r));
+        // No explicit sort → mirror the datastore's updatedAt-desc default: an
+        // updated row bubbles to the front so recent activity reads as live.
+        if (!spec.sort?.length) rows = [record, ...rows.filter((r) => r.id !== change.id)];
+      } else {
+        rows = spec.sort?.length ? [...e.rows, record] : [record, ...e.rows];
+      }
+      if (spec.sort?.length) rows = sortRowsBy(rows, spec.sort);
+      if (spec.limit && rows.length > spec.limit) rows = rows.slice(0, spec.limit);
+      e.rows = rows;
+      this.#notify(e);
+    }
+  }
+
+  #notify(e: BindEntry): void {
+    for (const notify of e.subs) notify();
   }
 }
 
@@ -818,10 +920,19 @@ const BRIDGE_SCRIPT = `
     const SOURCE = '${APP_CLIENT_MESSAGE_SOURCE}';
     const VERSION = ${APP_CLIENT_PROTOCOL_VERSION};
     const pending = new Map();
+    const subs = new Map();
     let nextId = 0;
+    let nextSub = 0;
     window.addEventListener('message', (event) => {
       const message = event.data || {};
-      if (message.source !== SOURCE || message.version !== VERSION || !pending.has(message.id)) return;
+      if (message.source !== SOURCE || message.version !== VERSION) return;
+      // Live event pushed from the parent for a realtime/state subscription.
+      if (message.kind === 'rt-event') {
+        const handler = subs.get(message.subId);
+        if (handler) { try { handler(message.payload); } catch (e) {} }
+        return;
+      }
+      if (!pending.has(message.id)) return;
       const entry = pending.get(message.id);
       pending.delete(message.id);
       message.ok ? entry.resolve(message.result) : entry.reject(new Error(message.error || 'Agentis bridge request failed'));
@@ -833,11 +944,25 @@ const BRIDGE_SCRIPT = `
         parent.postMessage({ source: SOURCE, version: VERSION, id, op, payload }, '*');
       });
     }
+    // Live subscription over the bridge: the parent authz-checks + relays each
+    // matching realtime event back as { kind:'rt-event', subId, payload }. So a
+    // CodeSurface can FOLLOW live data/run/agent events — no network egress.
+    function subscribeRt(event, handler) {
+      if (typeof handler !== 'function') return function () {};
+      const subId = 'rt' + (++nextSub);
+      subs.set(subId, handler);
+      parent.postMessage({ source: SOURCE, version: VERSION, kind: 'rt-subscribe', subId: subId, event: event }, '*');
+      return function () {
+        if (!subs.has(subId)) return;
+        subs.delete(subId);
+        parent.postMessage({ source: SOURCE, version: VERSION, kind: 'rt-unsubscribe', subId: subId }, '*');
+      };
+    }
     window.agentis = {
       data: { query: (collection, query) => request('data.query', { collection, query: query || {} }) },
       actions: { invoke: (name, args) => request('actions.invoke', { name, args: args || {} }) },
-      state: { get: (key) => request('state.get', { key }), set: (key, value) => request('state.set', { key, value }), subscribe: () => () => {} },
-      realtime: { subscribe: () => () => {} },
+      state: { get: (key) => request('state.get', { key }), set: (key, value) => request('state.set', { key, value }), subscribe: (key, handler) => subscribeRt('state:' + key, handler) },
+      realtime: { subscribe: (event, handler) => subscribeRt(event, handler) },
       navigation: { go: (surface, params) => request('navigation.go', { surface, params: params || {} }) },
       files: { upload: () => Promise.reject(new Error('files.upload is not available in a sandboxed surface')) },
       query: (collection, query) => request('data.query', { collection, query: query || {} }),
@@ -933,11 +1058,33 @@ function useSandboxBridge(
   enabled: boolean,
 ) {
   const { client } = useRuntime();
+  // Live subscriptions opened by the frame (subId → unsubscribe), so a CodeSurface
+  // can follow realtime events over the bridge without network egress.
+  const rtSubsRef = useRef<Map<string, () => void>>(new Map());
   const onMessage = useCallback(
     async (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow) return;
-      const message = event.data as AppClientMessage | undefined;
+      const message = event.data as (AppClientMessage & { kind?: string; subId?: string; event?: string }) | undefined;
       if (!message || message.source !== APP_CLIENT_MESSAGE_SOURCE || message.version !== APP_CLIENT_PROTOCOL_VERSION) return;
+      // Realtime subscription control (no numeric id). The frame asks to follow a
+      // live event name; we relay each matching payload back as `rt-event`.
+      if (message.kind === 'rt-subscribe' && typeof message.subId === 'string' && typeof message.event === 'string') {
+        if (rtSubsRef.current.has(message.subId)) return;
+        const subId = message.subId;
+        const off = client.realtime.subscribe(message.event, (payload) => {
+          (frameRef.current?.contentWindow as Window | null)?.postMessage(
+            { source: APP_CLIENT_MESSAGE_SOURCE, version: APP_CLIENT_PROTOCOL_VERSION, kind: 'rt-event', subId, payload },
+            '*',
+          );
+        });
+        rtSubsRef.current.set(subId, off);
+        return;
+      }
+      if (message.kind === 'rt-unsubscribe' && typeof message.subId === 'string') {
+        rtSubsRef.current.get(message.subId)?.();
+        rtSubsRef.current.delete(message.subId);
+        return;
+      }
       // Only handle request/reply calls (numeric `id`). One-way notifications
       // (e.g. the height reporter's `kind:'resize'`) carry no id — ignore them.
       if (typeof (message as { id?: unknown }).id !== 'number') return;
@@ -985,8 +1132,13 @@ function useSandboxBridge(
 
   useEffect(() => {
     if (!enabled) return undefined;
+    const subs = rtSubsRef.current;
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      for (const off of subs.values()) off();
+      subs.clear();
+    };
   }, [enabled, onMessage]);
 }
 
@@ -2614,15 +2766,37 @@ export function relativeTime(iso: string): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+type DataChangePayload = { appId?: string; collection?: string; op?: 'insert' | 'update' | 'delete'; id?: string; record?: Record<string, unknown> };
+
 export function useDataRevision(appId: string): number {
   const [rev, setRev] = useState(0);
   const handler = useCallback((env: RealtimeEnvelope) => {
-    const payload = env.payload as { appId?: string } | undefined;
+    const payload = env.payload as DataChangePayload | undefined;
     if (payload?.appId && payload.appId !== appId) return;
+    // A row-level delta (delete, or insert/update carrying the row) is applied in
+    // place by useDataDeltas → no full refetch. Only a bulk/opaque change (no
+    // record, not a delete) bumps the revision to re-query the whole collection.
+    const isDelta = payload?.op === 'delete' || Boolean(payload?.record);
+    if (isDelta) return;
     setRev((r) => r + 1);
   }, [appId]);
   useRealtime(useMemo(() => [REALTIME_EVENTS.DATA_CHANGED], []), handler);
   return rev;
+}
+
+/**
+ * Apply row-level datastore deltas to the shared BindStore in place, so bound
+ * views update live WITHOUT re-querying the whole collection (snapshot + delta).
+ * Mounted once per app runtime. Falls back to the revision refetch for bulk edits.
+ */
+export function useDataDeltas(client: AgentisAppClient, appId: string): void {
+  const handler = useCallback((env: RealtimeEnvelope) => {
+    const p = env.payload as DataChangePayload | undefined;
+    if (!p || (p.appId && p.appId !== appId)) return;
+    if (!p.collection || !p.op || !p.id) return;
+    bindStoreFor(client).applyChange({ collection: p.collection, op: p.op, id: p.id, record: p.record });
+  }, [client, appId]);
+  useRealtime(useMemo(() => [REALTIME_EVENTS.DATA_CHANGED], []), handler);
 }
 
 // ── Built-in block registry ──────────────────────────────────

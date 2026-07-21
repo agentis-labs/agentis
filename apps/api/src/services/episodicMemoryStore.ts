@@ -30,7 +30,7 @@ import type {
   RuntimeEpisodeOutcome,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
-import { type EmbeddingProvider, cosineSimilarity, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
+import { type EmbeddingProvider, cosineSimilarity, embedSyncOrDefer, providerIdentity, vectorIsComparable } from './embedding/embeddingProvider.js';
 import type { EmbeddingProviderResolver } from './embedding/embeddingProviderRegistry.js';
 
 /** Accept either a bound resolver (preferred) or a fixed instance (tests). */
@@ -139,9 +139,9 @@ export class EpisodicMemoryStore {
     const provider = this.resolveProvider?.(input.workspaceId);
     if (provider) {
       const text = `${input.title} ${input.summary} ${input.details ?? ''}`;
-      const raw = provider.embed(text);
-      if (Array.isArray(raw)) {
-        embedding = raw;
+      const vector = embedSyncOrDefer(provider, text);
+      if (vector) {
+        embedding = vector;
         const identity = providerIdentity(provider);
         embeddingModel = identity.model;
         embeddingDims = identity.dims;
@@ -484,8 +484,9 @@ export class EpisodicMemoryStore {
     let qVec: number[] | null = null;
     const wantsVector = (mode === 'vector' || mode === 'hybrid' || mode === 'auto') && provider !== undefined;
     if (wantsVector && provider) {
-      const raw = provider.embed(args.query!);
-      if (Array.isArray(raw)) qVec = raw;
+      // Sync-only on this path; an async provider degrades to lexical for this
+      // query rather than blocking it (and its promise must not be dropped raw).
+      qVec = embedSyncOrDefer(provider, args.query!);
     }
 
     const maxTfidf = Math.max(...docs.map((d) => d.tfidf), 1e-9);
@@ -541,8 +542,8 @@ export class EpisodicMemoryStore {
     // Heuristic: cosine sim ≥ threshold means "close enough to dedupe".
     const provider = this.resolveProvider?.(workspaceId);
     if (!provider) return hits.slice(0, 1);
-    const candVec = provider.embed(`${candidate.title} ${candidate.summary}`);
-    if (!Array.isArray(candVec)) return hits;
+    const candVec = embedSyncOrDefer(provider, `${candidate.title} ${candidate.summary}`);
+    if (!candVec) return hits;
     return hits.filter((h) => {
       if (!h.embedding || h.embedding.length !== candVec.length) return false;
       return cosineSimilarity(candVec, h.embedding) >= threshold;

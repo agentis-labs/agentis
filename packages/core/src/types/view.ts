@@ -284,7 +284,7 @@ type ViewNodeBase =
   // ── Interactive archetype composites (APP-INTERFACE-10X §2.4) ──
   // A real kanban over a collection: drag a card across columns to write
   // `groupBy` back through the declared `update` data action (target "col.update").
-  | { type: 'Kanban'; bind: DataBind; groupBy: string; columns?: string[]; columnLabels?: Record<string, string>; titleField?: string; subtitleField?: string; badgeField?: string; valueField?: string; update?: ActionRef; transitions?: KanbanTransition[]; cardActions?: RecordActionRef[]; contextActions?: RecordActionRef[]; emptyLabel?: string }
+  | { type: 'Kanban'; bind: DataBind; groupBy: string; columns?: string[]; columnLabels?: Record<string, string>; titleField?: string; subtitleField?: string; badgeField?: string; valueField?: string; orderField?: string; update?: ActionRef; transitions?: KanbanTransition[]; cardActions?: RecordActionRef[]; contextActions?: RecordActionRef[]; emptyLabel?: string }
   // CRM/ERP master-detail: searchable record list + full record page with field
   // sections, related child collections, and per-record actions.
   | { type: 'RecordMaster'; bind: DataBind; titleField?: string; subtitleField?: string; statusField?: string; searchFields?: string[]; sections?: Array<{ title?: string; fields: string[] }>; related?: Array<{ collection: string; foreignKey: string; title?: string; titleField?: string }>; recordActions?: RecordActionRef[] }
@@ -394,6 +394,8 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
       subtitleField: z.string().optional(),
       badgeField: z.string().optional(),
       valueField: z.string().optional(),
+      /** Numeric field that orders cards WITHIN a column (drag-to-reorder writes a value between neighbours). */
+      orderField: z.string().optional(),
       update: actionRefSchema.optional(),
       transitions: z.array(kanbanTransitionSchema).optional(),
       cardActions: z.array(recordActionRefSchema).optional(),

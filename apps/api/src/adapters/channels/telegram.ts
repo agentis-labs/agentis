@@ -15,9 +15,22 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, OutboundMediaKind, ParsedInboundMessage } from './types.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
+
+/** Map a media kind to its Telegram Bot API method + multipart field. */
+function telegramMediaEndpoint(kind: OutboundMediaKind): { method: string; field: string; captioned: boolean } {
+  switch (kind) {
+    case 'image': return { method: 'sendPhoto', field: 'photo', captioned: true };
+    case 'video': return { method: 'sendVideo', field: 'video', captioned: true };
+    case 'audio': return { method: 'sendAudio', field: 'audio', captioned: true };
+    case 'voice': return { method: 'sendVoice', field: 'voice', captioned: true };
+    case 'sticker': return { method: 'sendSticker', field: 'sticker', captioned: false };
+    case 'file':
+    default: return { method: 'sendDocument', field: 'document', captioned: true };
+  }
+}
 
 /**
  * Effective Telegram inbound transport for a connection.
@@ -176,12 +189,12 @@ export class TelegramChannelAdapter implements ChannelAdapter {
   }
 
   async #sendMedia(token: string, chatId: string, attachment: OutboundAttachment, caption: string): Promise<ChannelDeliveryReceipt> {
-    const isPhoto = attachment.kind === 'image';
-    const method = isPhoto ? 'sendPhoto' : 'sendDocument';
-    const field = isPhoto ? 'photo' : 'document';
+    // Map each media kind to its dedicated Bot API method + form field so
+    // Telegram renders it natively. Stickers carry no caption.
+    const { method, field, captioned } = telegramMediaEndpoint(attachment.kind);
     const form = new FormData();
     form.set('chat_id', chatId);
-    if (caption) form.set('caption', caption.slice(0, 1024));
+    if (captioned && caption) form.set('caption', caption.slice(0, 1024));
     form.set(field, new Blob([new Uint8Array(attachment.data)], { type: attachment.mimeType }), attachment.filename);
     const url = `${TELEGRAM_API}/bot${encodeURIComponent(token)}/${method}`;
     const res = await this.fetchImpl(url, { method: 'POST', body: form });

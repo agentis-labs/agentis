@@ -74,14 +74,44 @@ token-gated, read-only, CSP-safe, and embeddable (`PublicAppSurfacePage`).
 - **Proactive followups** (`services/proactiveFollowups.ts`) — a sweep over due
   `nextTouchAt` clocks dispatches turns so apps reach out first (subject to outbound policy).
 
+## App Goals & the Evolution Loop
+
+An App can hold a durable **Goal** (the reserved north-star tier — distinct from a run-scoped
+**Objective**; a Goal decomposes into the objectives runs chase) and get measurably better at
+it over time. The loop closes three arcs that previously existed but never touched:
+
+- **Goal** (`services/app/appGoal.ts`, `AppIdentity.goal` in the manifest) — a statement +
+  optional north-star metric, set via `agentis.app.goal`. Portable (rides the manifest) and
+  mirrored into the App's Brain scope as a governing atom, so every run recalls it.
+- **Strategy** (`strategies` table, `services/app/strategyService.ts`) — a competing approach
+  mapped to an experiment arm. Confidence is the **outcome-weighted** Laplace win rate
+  `(wins+1)/(trials+2)`, *not* recurrence; proven strategies mirror into the App Brain as
+  recallable atoms. Tools: `agentis.strategy.{propose,list}`.
+- **Measure → learn bridge** — `ExperimentService.record` fires an `onOutcome` hook →
+  `StrategyService.recordExperimentOutcome`, so an A/B outcome updates the arm's strategy.
+  `RollingBaselineStore` (now wired into `AppLearningService.onRunSettled`) captures 7/30/90d
+  performance baselines.
+- **Evolution controller** (`services/app/strategyEvolution.ts`) — winner selection gated by a
+  min-sample floor + a two-proportion z-test (no promotion on noise); promotes the winner,
+  retires significant losers, recommends the next generation. A 6h scheduler sweep runs it;
+  **ACT** (auto promote/retire) is operator-gated (`AGENTIS_EVOLUTION_AUTONOMY`, off by
+  default — otherwise SURFACE-only). Tool: `agentis.evolution.review`.
+- **Mission Control** — `GET /v1/apps/:id/mission-control` (goal + strategies + decisions +
+  experiments + baselines, computed live) → the App engine's **Goal** tab
+  (`MissionControlPanel`).
+
+The decision core is deterministic and tested; next-generation variant *authoring* is left to
+the owner agent (via `strategy.propose`), keeping the LLM out of the promote/retire logic.
+
 ## API surface
 
 - HTTP: `/v1/apps`, `/v1/artifacts`, `/v1/rooms`, `/v1/interactions`,
-  `/v1/workspace-context`.
-- Tools: `agentis.app.{create,list,archive,delete,adopt_workflow,scaffold,plan}` plus the
-  `data.*` and `ui.*` families above.
+  `/v1/workspace-context`, `/v1/apps/:id/mission-control`.
+- Tools: `agentis.app.{create,list,archive,delete,adopt_workflow,scaffold,plan,goal}`,
+  `agentis.strategy.{propose,list}`, `agentis.evolution.review`, plus the `data.*` and `ui.*`
+  families above.
 - Web pages: `AppsPage`, `AppEditorPage` (Interface / Workflow / Data / Brain facets),
-  `PublicAppSurfacePage`, `GenUIShowcasePage`.
+  `PublicAppSurfacePage`, `GenUIShowcasePage`. App engine modal → **Goal** tab (Mission Control).
 
 ---
 

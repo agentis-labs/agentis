@@ -39,8 +39,8 @@ import { AppStore } from './appStore.js';
 import { AppDatastore } from './appDatastore.js';
 import { AppSurfaceStore } from './appSurfaceStore.js';
 import type { BrainReader, BrainWriter } from './brainPort.js';
-import { rewriteNodeRefs, type RefIdMap } from './appRefs.js';
-import { computeAppClosure, type AppClosure } from './appClosure.js';
+import { rewriteNodeRefs, rewriteScriptRefs, type RefIdMap } from './appRefs.js';
+import { computeAppClosure, CONVERSATION_SCRIPT_COLLECTION, CONVERSATION_SCRIPT_KEY, type AppClosure } from './appClosure.js';
 
 /** Options controlling how much learned intelligence an App export carries. */
 export interface AppExportOptions {
@@ -589,7 +589,14 @@ export class AppPackager {
     for (const col of parsed.collections) {
       data.defineCollection(workspaceId, app.id, { name: col.name, schema: collectionSchemaSchema.parse(col.schema) });
       if (withData && col.seed && col.seed.length > 0) {
-        const res = data.insertMany(workspaceId, app.id, col.name, col.seed, userId);
+        // The conversation-script collection carries workflow/agent ids INSIDE its
+        // rows (a script is a datastore row, not a graph), so it needs the same
+        // rebind as workflow node configs — otherwise a stage keeps pointing at
+        // the exporter's workflow and imports as "a workflow outside this App".
+        const seed = col.name === CONVERSATION_SCRIPT_COLLECTION
+          ? col.seed.map((row) => rewriteConversationScriptRow(row, refIdMap))
+          : col.seed;
+        const res = data.insertMany(workspaceId, app.id, col.name, seed, userId);
         if (res.failed.length > 0) {
           opts.warnings?.push(`Collection "${col.name}": ${res.failed.length} of ${col.seed.length} row(s) failed to import.`);
         }
@@ -809,6 +816,12 @@ function chunkDocument(content: string, maxChars = 960): string[] {
   }
   if (current) chunks.push(current);
   return chunks;
+}
+
+/** Rebind the workflow/agent ids inside one conversation-script datastore row. */
+function rewriteConversationScriptRow(row: Record<string, unknown>, idMap: RefIdMap): Record<string, unknown> {
+  if (row.key !== CONVERSATION_SCRIPT_KEY || !row.script) return row;
+  return { ...row, script: rewriteScriptRefs(row.script, idMap) };
 }
 
 function stringArray(value: unknown): string[] {

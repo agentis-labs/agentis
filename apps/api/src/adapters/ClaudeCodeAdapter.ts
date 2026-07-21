@@ -329,29 +329,37 @@ export class ClaudeCodeAdapter implements AgentAdapter {
           const ev = JSON.parse(line) as { type: string; [k: string]: unknown };
           const streamErr = claudeStreamError(ev);
           if (streamErr) dispatchError = streamErr;
-          if (ev.type === 'assistant' || ev.type === 'thinking') {
-            turns += 1;
-            this.#emit({
-              eventType: 'agent.thinking',
-              agentId: this.opts.agentId,
-              runId: task.runId,
-              workflowId: task.workflowId,
-              taskId: task.taskId,
-              text: String(ev.text ?? ev.content ?? ''),
-              timestamp: at(),
-            });
-          } else if (ev.type === 'tool_use') {
-            this.#emit({
-              eventType: 'agent.tool_call',
-              agentId: this.opts.agentId,
-              runId: task.runId,
-              workflowId: task.workflowId,
-              taskId: task.taskId,
-              tool: String(ev.name ?? ''),
-              input: ev.input ?? {},
-              timestamp: at(),
-            });
-          } else if (ev.type === 'result') {
+          // Reuse the SAME rich interpreter the chat surface uses, so a dispatched
+          // (mcp_native) agent_task streams reasoning IDENTICALLY to chat — walking
+          // content-block thinking/text/tool blocks — instead of the old
+          // `String(ev.text ?? ev.content)` that yielded empty thoughts for modern
+          // stream-json assistant events. (Reasoning parity, all harnesses.)
+          for (const part of interpretClaudeChatEvent(ev)) {
+            if ((part.kind === 'thinking' || part.kind === 'text' || part.kind === 'final') && part.text) {
+              turns += 1;
+              this.#emit({
+                eventType: 'agent.thinking',
+                agentId: this.opts.agentId,
+                runId: task.runId,
+                workflowId: task.workflowId,
+                taskId: task.taskId,
+                text: part.text,
+                timestamp: at(),
+              });
+            } else if (part.kind === 'activity' && part.delta.label) {
+              // A Claude Code tool use (Bash/Read/MCP) — surface it as a live step.
+              this.#emit({
+                eventType: 'task.progress',
+                agentId: this.opts.agentId,
+                runId: task.runId,
+                workflowId: task.workflowId,
+                taskId: task.taskId,
+                message: part.delta.label,
+                timestamp: at(),
+              });
+            }
+          }
+          if (ev.type === 'result') {
             lastOutput = (ev.result as Record<string, unknown>) ?? { text: ev.text };
           }
         } catch {

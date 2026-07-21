@@ -21,6 +21,8 @@ import { EmptyState } from '../components/shared/EmptyState';
 import { AgentConfigPanel } from '../components/agents/AgentConfigPanel';
 import { AgentChannelsTab } from '../components/agents/AgentChannelsTab';
 import { AgentInteractionFeed } from '../components/agents/AgentInteractionFeed';
+import { rtSubscribe, useRealtime } from '../lib/realtime';
+import { REALTIME_ACTIVITY_EVENTS, describeRealtimeActivity, type RealtimeActivity } from '../lib/realtimeActivity';
 import { RuntimeNativePanel } from '../components/agents/RuntimeNativePanel';
 import { DeleteAgentDialog } from '../components/agents/DeleteAgentDialog';
 import { DomainEditorSheet, type DomainOption } from '../components/agents/DomainEditorSheet';
@@ -717,9 +719,56 @@ function HistoryTab({ agent }: { agent: AgentDetail }) {
           </div>
         )}
       </section>
+      {/* Live "watch this agent think" — its reasoning/tool stream across every run. */}
+      <AgentLiveThinking agentId={agent.id} />
       {/* Agent↔agent interactions merged into History (former Interactions tab). */}
       <AgentInteractionFeed agentId={agent.id} />
     </div>
+  );
+}
+
+/**
+ * Live reasoning feed for one agent — subscribes to the agent's realtime room and
+ * streams its thinking / tool activity across all its runs, so clicking an agent
+ * shows what it is doing right now (not just a static run list). Renders nothing
+ * until there's activity. Mirrors the canvas node feed, keyed to the agent room.
+ */
+function AgentLiveThinking({ agentId }: { agentId: string }) {
+  const [feed, setFeed] = useState<RealtimeActivity[]>([]);
+  const seqRef = useRef(0);
+
+  useEffect(() => rtSubscribe('agent', { agentId }), [agentId]);
+
+  useRealtime([...REALTIME_ACTIVITY_EVENTS], (env) => {
+    const activity = describeRealtimeActivity(env);
+    if (!activity || activity.agentId !== agentId) return;
+    seqRef.current += 1;
+    setFeed((current) => {
+      // Collapse a copy that arrives from more than one joined room.
+      if (current.slice(0, 12).some((c) => c.id.replace(/:\d+$/, '') === activity.id)) return current;
+      return [{ ...activity, id: `${activity.id}:${seqRef.current}` }, ...current].slice(0, 50);
+    });
+  });
+
+  if (feed.length === 0) return null;
+
+  return (
+    <section className="mt-4 rounded-md border border-accent/25 bg-accent-soft/5 px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-accent">Live thinking</span>
+      </div>
+      <div className="mt-2 space-y-1.5">
+        {feed.map((item) => (
+          <div key={item.id} className="flex items-start gap-2">
+            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-accent/70" />
+            <span className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-text-secondary">
+              {item.tool ? <span className="text-text-muted">{item.tool}: </span> : null}{item.detail || item.title}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

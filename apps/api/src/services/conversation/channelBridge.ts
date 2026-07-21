@@ -35,11 +35,15 @@ import {
   type ChannelStatus,
   type OutboundAttachment,
   type OutboundAttachmentRef,
+  type OutboundMediaKind,
   type ParsedInboundMessage,
 } from '../../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 import type { ArtifactService } from '../artifactService.js';
 import type { ChannelAccess, ChannelRecipient } from './channelAccess.js';
+import { normalizePersona, resolveHumanize, type ChannelPersona, type HumanizeConfig } from './humanize.js';
+import { ChannelSendGuard } from './channelGuards.js';
+import { channelCapabilities, type ChannelCapabilities } from '../../adapters/channels/channelCapabilities.js';
 
 export interface ChannelBridgeDeps {
   db: AgentisSqliteDb;
@@ -111,6 +115,16 @@ export interface PublicConnection {
   transportStatus: string | null;
   /** Workspace default for this kind — deterministic sends resolve to it. */
   isDefault: boolean;
+  /** Human-like pacing persona (§6). */
+  persona: ChannelPersona;
+  /** Anti-ban caps (§7), or null when unlimited. */
+  rateLimit: { perMinute?: number; perDay?: number } | null;
+  /** Require a prior inbound before cold-messaging a new contact. */
+  requireOptIn: boolean;
+  /** Warmup window start (ISO), or null. */
+  warmupStartedAt: string | null;
+  /** What this channel can send — media kinds, reactions, presence, etc. */
+  capabilities: ChannelCapabilities;
   health: ChannelHealth;
   lastEventAt: string | null;
   lastError: string | null;
@@ -138,11 +152,13 @@ export interface PersistentChannelTransport {
   onCreated?(conn: PersistentChannelRef): void;
   /** Current live-session state, if this transport owns the connection. */
   status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
-  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[]): Promise<ChannelDeliveryReceipt>;
+  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[], humanize?: HumanizeConfig): Promise<ChannelDeliveryReceipt>;
   /** Provider account/quota diagnostics; read-only and never sends a message. */
   outboundHealth?(connectionId: string): Promise<ChannelHealthCheck | null>;
   /** Show/clear the typing indicator (best-effort). */
   setTyping?(connectionId: string, chatId: string, on: boolean): Promise<void>;
+  /** Add/clear a reaction on a prior message (best-effort). */
+  react?(connectionId: string, chatId: string, targetMessageId: string, emoji: string): Promise<void>;
   /** Tear down the live session when a connection is deleted. */
   stop?(connectionId: string): Promise<void>;
 }
@@ -165,10 +181,44 @@ type ChannelSettings = {
    *  workflow node / agentis.channel.send by kind) use when several exist. At most
    *  one connection per (workspace, kind) carries this. */
   isDefault?: boolean;
+  /** Human-like outbound pacing persona (§6). Defaults to `instant`. */
+  persona?: ChannelPersona;
+  /** Anti-ban rails (§7). Absent = unlimited (behaviour unchanged). */
+  rateLimit?: { perMinute?: number; perDay?: number };
+  /** New-connection warmup ramp start (ISO); volume scales up over the window. */
+  warmupStartedAt?: string;
+  /** Require a prior inbound before cold-messaging a new contact. */
+  requireOptIn?: boolean;
 };
 
 const GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v20.0';
 const TELEGRAM_API = 'https://api.telegram.org';
+
+/**
+ * Infer a delivery kind from a resolved MIME type when the caller didn't pin one.
+ * `voice` and `sticker` are never inferred (they need an explicit caller hint —
+ * a generic audio/webp file is not implicitly a voice note or sticker).
+ */
+function inferOutboundMediaKind(mimeType: string): OutboundMediaKind {
+  const mime = mimeType.toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'file';
+}
+
+/** Map an Agentis media kind to a WhatsApp Cloud API media message type. */
+function whatsappCloudMediaType(kind: OutboundMediaKind): 'image' | 'video' | 'audio' | 'sticker' | 'document' {
+  switch (kind) {
+    case 'image': return 'image';
+    case 'video': return 'video';
+    case 'audio':
+    case 'voice': return 'audio';
+    case 'sticker': return 'sticker';
+    case 'file':
+    default: return 'document';
+  }
+}
 const DEFAULT_HEALTH_CHECK_NAMES: ChannelHealthCheckName[] = ['credential', 'transport', 'outbound', 'inbound', 'runtime'];
 const ME_ALIASES = new Set(['me', 'default']);
 
@@ -176,6 +226,8 @@ export class ChannelBridge {
   readonly #adapters: Map<ChannelKind, ChannelAdapter>;
   #turnDispatcher: ChannelTurnDispatcher | null = null;
   #persistent: PersistentChannelTransport | null = null;
+  /** Anti-ban rails (§7). Opt-in via connection settings; default allows all. */
+  readonly #guard = new ChannelSendGuard();
 
   constructor(private readonly deps: ChannelBridgeDeps) {
     this.#adapters = new Map();
@@ -223,18 +275,60 @@ export class ChannelBridge {
   }
 
   /**
+   * Add/clear a reaction (emoji, or '' to clear) on a prior message in a chat.
+   * Only persistent transports with a live session support it; others no-op.
+   */
+  async reactToMessage(connectionId: string, chatId: string, targetMessageId: string, emoji: string): Promise<void> {
+    if (!this.#persistent?.react) return;
+    const row = this.deps.db
+      .select({ id: schema.channelConnections.id, kind: schema.channelConnections.kind, settings: schema.channelConnections.settings })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId))
+      .get();
+    if (!row || !this.#persistent.handles({ id: row.id, kind: row.kind, settings: row.settings })) return;
+    try {
+      await this.#persistent.react(connectionId, chatId, targetMessageId, emoji);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** The capability descriptor for a connection (media kinds, reactions, presence…). */
+  capabilitiesFor(connectionId: string): ChannelCapabilities | null {
+    const row = this.deps.db
+      .select({ kind: schema.channelConnections.kind, settings: schema.channelConnections.settings })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId))
+      .get();
+    if (!row) return null;
+    const settings = this.#settings(row);
+    return channelCapabilities(row.kind as ChannelKind, settings.mode ? { whatsappMode: settings.mode } : undefined);
+  }
+
+  /**
    * Deliver an outbound message to a single connection's channel. Used by the
    * turn dispatcher to send the orchestrator's reply back to the origin chat.
    * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
    * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
    */
-  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string }): Promise<ChannelDeliveryReceipt> {
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string; bypassGuards?: boolean }): Promise<ChannelDeliveryReceipt> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, args.connectionId))
       .get();
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
+    // §7 anti-ban rails — opt-in (default) so behaviour is unchanged until an
+    // operator configures caps/opt-in. An operator cockpit send may bypass.
+    if (!args.bypassGuards) {
+      const guardSettings = this.#settings(row);
+      const decision = this.#guard.evaluate(row.id, guardSettings, {
+        isNewContact: guardSettings.requireOptIn ? !this.#hasPriorContact(row.id, args.chatId) : false,
+      });
+      if (!decision.ok) {
+        throw new AgentisError(decision.code ?? 'CHANNEL_SEND_BLOCKED', `${decision.reason ?? 'send blocked'}${decision.remediation ? ` ${decision.remediation}` : ''}`);
+      }
+    }
     const attachments = await this.#resolveAttachments(row.workspaceId, args.attachments);
     const idempotencyKey = args.idempotencyKey?.trim() || null;
     const bodyHash = createHash('sha256')
@@ -291,6 +385,7 @@ export class ChannelBridge {
         throw new AgentisError('CHANNEL_SEND_FAILED', `${row.kind} returned no provider message id; delivery is unverified`);
       }
       this.#markActive(row.id);
+      this.#guard.record(row.id);
       const durableReceipt = idempotencyKey ? { ...receipt, idempotencyKey } : receipt;
       this.deps.db.update(schema.channelOutboundDeliveries).set({
         status: receipt.status,
@@ -597,6 +692,39 @@ export class ChannelBridge {
         };
       }
     }
+    this.deps.db
+      .update(schema.channelConnections)
+      .set({ settings, updatedAt: new Date().toISOString() })
+      .where(eq(schema.channelConnections.id, row.id))
+      .run();
+    return this.get(workspaceId, id);
+  }
+
+  /**
+   * Update the human-like persona (§6) and anti-ban rails (§7) for a connection.
+   * All fields are optional; only the provided ones are merged. `rateLimit:null`
+   * clears the caps; `startWarmup` stamps/clears the warmup window.
+   */
+  updateBehavior(workspaceId: string, id: string, input: {
+    persona?: ChannelPersona;
+    rateLimit?: { perMinute?: number | null; perDay?: number | null } | null;
+    requireOptIn?: boolean;
+    startWarmup?: boolean;
+  }): PublicConnection {
+    const row = this.#row(workspaceId, id);
+    const settings = { ...this.#settings(row) };
+    if (input.persona) settings.persona = normalizePersona(input.persona);
+    if (input.rateLimit === null) {
+      delete settings.rateLimit;
+    } else if (input.rateLimit) {
+      const rl: { perMinute?: number; perDay?: number } = {};
+      if (typeof input.rateLimit.perMinute === 'number' && input.rateLimit.perMinute > 0) rl.perMinute = Math.floor(input.rateLimit.perMinute);
+      if (typeof input.rateLimit.perDay === 'number' && input.rateLimit.perDay > 0) rl.perDay = Math.floor(input.rateLimit.perDay);
+      if (Object.keys(rl).length > 0) settings.rateLimit = rl; else delete settings.rateLimit;
+    }
+    if (typeof input.requireOptIn === 'boolean') settings.requireOptIn = input.requireOptIn;
+    if (input.startWarmup === true) settings.warmupStartedAt = new Date().toISOString();
+    else if (input.startWarmup === false) delete settings.warmupStartedAt;
     this.deps.db
       .update(schema.channelConnections)
       .set({ settings, updatedAt: new Date().toISOString() })
@@ -1068,7 +1196,7 @@ export class ChannelBridge {
       throw new AgentisError('CHANNEL_SEND_FAILED', `${selfCheck.message} ${selfCheck.remediation ?? ''}`.trim());
     }
     if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
-      return this.#persistent.send(row.id, normalizedChatId, body, attachments.length ? attachments : undefined);
+      return this.#persistent.send(row.id, normalizedChatId, body, attachments.length ? attachments : undefined, resolveHumanize(settings.persona));
     }
     if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
       return this.#sendWhatsAppCloud(row, settings, normalizedChatId, body, attachments);
@@ -1082,6 +1210,23 @@ export class ChannelBridge {
       settings: settings as Record<string, unknown>,
       ...(attachments.length ? { attachments } : {}),
     });
+  }
+
+  /**
+   * True when this channel chat has an existing conversation — i.e. the contact
+   * has interacted before, so an outbound is a reply, not cold outreach. Powers
+   * the opt-in gate (§7). A missing conversation means a brand-new contact.
+   */
+  #hasPriorContact(connectionId: string, chatId: string): boolean {
+    const row = this.deps.db
+      .select({ id: schema.conversations.id })
+      .from(schema.conversations)
+      .where(and(
+        eq(schema.conversations.channelConnectionId, connectionId),
+        eq(schema.conversations.channelChatId, chatId),
+      ))
+      .get();
+    return Boolean(row);
   }
 
   /** Resolve loose attachment references into uploadable bytes (artifact ids, data/http URLs). */
@@ -1100,8 +1245,17 @@ export class ChannelBridge {
       if (ref.filename) hint.filename = ref.filename;
       if (ref.mimeType) hint.mimeType = ref.mimeType;
       const resolved = await this.deps.artifacts.resolveBytes(workspaceId, source, hint);
-      const kind = ref.kind ?? (resolved.mimeType.startsWith('image/') ? 'image' : 'file');
-      out.push({ kind, filename: resolved.filename, mimeType: resolved.mimeType, data: resolved.buffer });
+      const kind = ref.kind ?? inferOutboundMediaKind(resolved.mimeType);
+      out.push({
+        kind,
+        filename: resolved.filename,
+        mimeType: resolved.mimeType,
+        data: resolved.buffer,
+        ...(ref.caption ? { caption: ref.caption } : {}),
+        ...(ref.seconds ? { seconds: ref.seconds } : {}),
+        ...(ref.gifPlayback ? { gifPlayback: ref.gifPlayback } : {}),
+        ...(ref.viewOnce ? { viewOnce: ref.viewOnce } : {}),
+      });
     }
     return out;
   }
@@ -1165,11 +1319,14 @@ export class ChannelBridge {
     if (!uploadRes.ok || !uploadJson.id) {
       throw new AgentisError('CHANNEL_SEND_FAILED', `whatsapp cloud media upload failed (${uploadRes.status}): ${uploadJson.error?.message ?? uploadRes.statusText}`);
     }
-    const isImage = attachment.kind === 'image';
-    const mediaType = isImage ? 'image' : 'document';
+    // WhatsApp Cloud media types: image | video | audio | sticker | document.
+    // A voice note is an audio message (Opus renders as a voice note); captions
+    // are supported on image/video/document only; filename only on document.
+    const mediaType = whatsappCloudMediaType(attachment.kind);
+    const captioned = mediaType === 'image' || mediaType === 'video' || mediaType === 'document';
     const media: Record<string, unknown> = { id: uploadJson.id };
-    if (caption) media.caption = caption;
-    if (!isImage) media.filename = attachment.filename;
+    if (caption && captioned) media.caption = caption;
+    if (mediaType === 'document') media.filename = attachment.filename;
     const res = await fetch(`${base}/messages`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
@@ -1557,6 +1714,11 @@ export class ChannelBridge {
       mode: settings.mode ?? null,
       transportStatus: settings.transportStatus ?? null,
       isDefault: settings.isDefault === true,
+      persona: normalizePersona(settings.persona),
+      rateLimit: settings.rateLimit ?? null,
+      requireOptIn: settings.requireOptIn === true,
+      warmupStartedAt: settings.warmupStartedAt ?? null,
+      capabilities: channelCapabilities(row.kind as ChannelKind, settings.mode ? { whatsappMode: settings.mode } : undefined),
       health: this.#healthFromRow(row),
       lastEventAt: row.lastEventAt,
       lastError: row.lastError,

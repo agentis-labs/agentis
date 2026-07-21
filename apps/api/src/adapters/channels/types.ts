@@ -45,17 +45,38 @@ export interface ParsedInboundMessage {
 }
 
 /**
+ * The reliable, non-ban-prone media kinds Agentis models across channels. These
+ * map to native sends on the richer channels (baileys/Telegram/Cloud) and
+ * degrade to the closest supported kind (or a text link) elsewhere.
+ *
+ *   - `image`    inline photo
+ *   - `video`    inline video (set `gifPlayback` to render as a looping GIF)
+ *   - `audio`    an audio track (music/clip)
+ *   - `voice`    a push-to-talk voice note (waveform); OGG/Opus mono for WhatsApp
+ *   - `sticker`  a sticker (WebP on WhatsApp)
+ *   - `file`     a document upload (PDF, etc.)
+ */
+export type OutboundMediaKind = 'image' | 'video' | 'audio' | 'voice' | 'sticker' | 'file';
+
+/**
  * A fully-resolved outbound attachment: raw bytes plus the metadata a channel
  * API needs to upload it. The ChannelBridge resolves loose references
  * (artifact ids, data URLs, http URLs) into these before calling `send`, so
  * adapters never fetch or decode anything themselves.
  */
 export interface OutboundAttachment {
-  /** `image` → inline photo where the channel supports it; `file` → document upload. */
-  kind: 'image' | 'file';
+  kind: OutboundMediaKind;
   filename: string;
   mimeType: string;
   data: Buffer;
+  /** Per-attachment caption. Falls back to the message body for the first item. */
+  caption?: string;
+  /** Duration hint for voice/audio/video, in seconds. */
+  seconds?: number;
+  /** Render a video as a looping GIF. */
+  gifPlayback?: boolean;
+  /** Deliver as view-once media where the channel supports it. */
+  viewOnce?: boolean;
 }
 
 /**
@@ -70,7 +91,12 @@ export interface OutboundAttachmentRef {
   filename?: string;
   mimeType?: string;
   /** Hint how to deliver; inferred from the resolved MIME type when omitted. */
-  kind?: 'image' | 'file';
+  kind?: OutboundMediaKind;
+  /** Per-attachment caption. */
+  caption?: string;
+  seconds?: number;
+  gifPlayback?: boolean;
+  viewOnce?: boolean;
 }
 
 /**

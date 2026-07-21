@@ -32,8 +32,11 @@ export interface VariantResult {
   successRate: number;
 }
 
+/** Notified when a subject's terminal outcome is recorded — bridges A/B outcomes into the Evolution Loop. */
+export type ExperimentOutcomeHook = (evt: { workspaceId: string; experimentKey: string; variant: string; subjectKey: string; outcome: string }) => void;
+
 export class ExperimentService {
-  constructor(private readonly db: AgentisSqliteDb) {}
+  constructor(private readonly db: AgentisSqliteDb, private readonly onOutcome?: ExperimentOutcomeHook) {}
 
   /** Find-or-create the experiment by (workspace, key). Updates variants when provided. */
   define(input: DefineExperimentInput) {
@@ -84,11 +87,22 @@ export class ExperimentService {
   record(input: { workspaceId: string; key: string; subjectKey: string; outcome: string }): boolean {
     const exp = this.#byKey(input.workspaceId, input.key);
     if (!exp) return false;
-    const res = this.db.update(schema.experimentAssignments)
-      .set({ outcome: input.outcome, outcomeAt: new Date().toISOString() })
+    // Read the assignment first so the outcome hook knows which arm (variant) won.
+    const assignment = this.db.select().from(schema.experimentAssignments)
       .where(and(eq(schema.experimentAssignments.experimentId, exp.id), eq(schema.experimentAssignments.subjectKey, input.subjectKey)))
+      .get();
+    if (!assignment) return false;
+    this.db.update(schema.experimentAssignments)
+      .set({ outcome: input.outcome, outcomeAt: new Date().toISOString() })
+      .where(eq(schema.experimentAssignments.id, assignment.id))
       .run();
-    return res.changes > 0;
+    // Bridge into the Evolution Loop — the strategy for this arm counts the outcome.
+    try {
+      this.onOutcome?.({ workspaceId: input.workspaceId, experimentKey: exp.key, variant: assignment.variant, subjectKey: input.subjectKey, outcome: input.outcome });
+    } catch {
+      /* the bridge must never break outcome recording */
+    }
+    return true;
   }
 
   /** Per-variant success rates — "the percentage of success of each". */

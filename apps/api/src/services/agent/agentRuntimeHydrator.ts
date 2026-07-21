@@ -57,6 +57,7 @@ export async function hydrateAgentRuntimes(deps: AgentRuntimeHydratorDeps): Prom
   let connected = 0;
   let skipped = 0;
   let failed = 0;
+  let needsConfig = 0;
 
   skipped = agents.length - eligibleAgents.length;
 
@@ -80,17 +81,40 @@ export async function hydrateAgentRuntimes(deps: AgentRuntimeHydratorDeps): Prom
       setAgentStatus(deps, agent.workspaceId, agent.id, 'online');
       connected += 1;
     } catch (err) {
+      const message = (err as Error).message;
+      // A missing gateway URL / baseUrl is INCOMPLETE CONFIGURATION, not a runtime
+      // error. Treating it as `error` (with a per-agent WARN) made an imported App
+      // whose openclaw/http agents lack their connection details look catastrophically
+      // broken — dozens of scary lines and red agents on the org chart. It is a
+      // "needs setup" state: park it offline, say so once, and let the operator's
+      // next visit to that agent surface the exact fix via the runtime probe.
+      if (isNeedsConfigError(err)) {
+        needsConfig += 1;
+        deps.logger.info('agent_runtime_hydrator.needs_config', { agentId: agent.id, adapterType, reason: message });
+        setAgentStatus(deps, agent.workspaceId, agent.id, 'offline');
+        return;
+      }
       failed += 1;
-      deps.logger.warn('agent_runtime_hydrator.agent_failed', {
-        agentId: agent.id,
-        adapterType,
-        err: (err as Error).message,
-      });
+      deps.logger.warn('agent_runtime_hydrator.agent_failed', { agentId: agent.id, adapterType, err: message });
       setAgentStatus(deps, agent.workspaceId, agent.id, 'error');
     }
   });
 
-  deps.logger.info('agent_runtime_hydrator.complete', { connected, skipped, failed });
+  deps.logger.info('agent_runtime_hydrator.complete', { connected, skipped, failed, needsConfig });
+}
+
+/**
+ * True when registration failed because the adapter is missing REQUIRED CONNECTION
+ * CONFIG the operator must supply (a gateway URL, an http baseUrl/dispatch), rather
+ * than because something went wrong at runtime. These are expected on a fresh or
+ * imported install — secrets and gateway rows never travel — so they must read as
+ * "needs setup", not "error".
+ */
+function isNeedsConfigError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  const message = (err as Error | null)?.message ?? '';
+  return code === 'VALIDATION_FAILED'
+    && /gateway url|requires baseUrl|dispatchPath|dispatchUrl|needs a Gateway URL/i.test(message);
 }
 
 function canTrustDetectionForConfig(

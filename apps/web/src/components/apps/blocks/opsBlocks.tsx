@@ -24,7 +24,7 @@ import type { AppWorkflowSummary } from '@agentis/core';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { appsApi, type AppCompileReport, type AppDoctorReport, type AppOrchestrationRule } from '../../../lib/appsApi';
 import { opsApi, isActiveRunStatus, type ApprovalRequest, type RunSummary } from '../../../lib/opsApi';
-import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../../lib/realtime';
+import { rtSubscribe, useRealtime, useRealtimeStatus, type RealtimeEnvelope } from '../../../lib/realtime';
 import { useRunActivity } from '../../../lib/useRunActivity';
 import type { RealtimeActivity } from '../../../lib/realtimeActivity';
 import { ApprovalPreviewCard, ApprovalReviewModal, type ApprovalReview } from '../../shared/ApprovalReviewModal';
@@ -744,10 +744,18 @@ export function RunMonitorView({ appId, title, workflowIds, limit = 8, controls 
                     <span className="shrink-0"><Elapsed startedAt={run.startedAt} done={run.completedAt} /></span>
                     <span className="shrink-0">{relativeTime(run.startedAt)}</span>
                   </div>
-                  {progress !== null && active ? (
-                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
-                      <div className="h-full rounded-full bg-success transition-[width] duration-500" style={{ width: `${Math.round(progress * 100)}%` }} />
-                    </div>
+                  {active ? (
+                    progress !== null ? (
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
+                        <div className="h-full rounded-full bg-success transition-[width] duration-500" style={{ width: `${Math.round(progress * 100)}%` }} />
+                      </div>
+                    ) : (
+                      // Indeterminate work in flight — a pulsing pending line (the "still
+                      // working" heartbeat) when the step count is unknown.
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2">
+                        <div className="h-full w-full animate-pulse rounded-full bg-success/50" />
+                      </div>
+                    )
                   ) : null}
                 </div>
                 {controls && active ? (
@@ -790,10 +798,31 @@ function RunControl({ title, danger, onClick, children }: { title: string; dange
   );
 }
 
+/**
+ * Honest liveness badge: green "live" only when the realtime link is actually up.
+ * On fallback/reconnect it reads amber "reconnecting"; when the socket is down it
+ * reads gray "offline" — the anti-dead-dashboard signal (a still-but-green panel
+ * lies about being live). Truthful liveness, never a false pulse.
+ */
 function LiveDot() {
+  const status = useRealtimeStatus();
+  if (status === 'connected') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-success">
+        <span className="s-pulse h-1.5 w-1.5 rounded-full bg-success text-success" /> live
+      </span>
+    );
+  }
+  if (status === 'disconnected') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-text-muted" title="The live link is down — this view may be stale.">
+        <span className="h-1.5 w-1.5 rounded-full bg-text-disabled" /> offline
+      </span>
+    );
+  }
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-success">
-      <span className="s-pulse h-1.5 w-1.5 rounded-full bg-success text-success" /> live
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-warn" title="Reconnecting to the live link…">
+      <span className="s-pulse h-1.5 w-1.5 rounded-full bg-warn text-warn" /> reconnecting
     </span>
   );
 }

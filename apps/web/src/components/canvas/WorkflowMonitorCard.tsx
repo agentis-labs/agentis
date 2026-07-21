@@ -43,7 +43,9 @@ type MonitorMode = 'minimized' | 'expanded';
 type MonitorStatus = 'idle' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed';
 type OperationsTab = 'activity' | 'health' | 'analytics';
 
-const DEFAULT_VISIBLE_EVENTS = 4;
+// Show a fuller live trace by default — following an agent's reasoning needs more
+// than a 4-line peephole (the "Show earlier" toggle still reveals the rest).
+const DEFAULT_VISIBLE_EVENTS = 12;
 const DEFAULT_WIDTH = 372;
 const MIN_WIDTH = 300;
 const MAX_WIDTH = 560;
