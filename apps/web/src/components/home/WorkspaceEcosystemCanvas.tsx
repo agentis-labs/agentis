@@ -70,6 +70,7 @@ import {
   buildWorkSessions,
   captionMapFromSessions,
   liveNodeIdsFromSessions,
+  type DelegateStatus,
   type WorkSession,
 } from '../../lib/workSessions';
 import { buildStepIndex, sessionStepTrack, type StepIndex } from '../../lib/workSteps';
@@ -206,6 +207,9 @@ const ECOSYSTEM_REFRESH_EVENTS = [
   REALTIME_EVENTS.AGENT_UPDATED,
   REALTIME_EVENTS.AGENT_STATUS_CHANGED,
   REALTIME_EVENTS.AGENT_HEARTBEAT,
+  REALTIME_EVENTS.APP_CREATED,
+  REALTIME_EVENTS.APP_UPDATED,
+  REALTIME_EVENTS.APP_DELETED,
   REALTIME_EVENTS.ARTIFACT_CREATED,
   REALTIME_EVENTS.ARTIFACT_UPDATED,
   REALTIME_EVENTS.ARTIFACT_DELETED,
@@ -2686,6 +2690,18 @@ function ActiveWorkRow({
           <div className="truncate text-[12px] font-medium text-text-primary">{session.title}</div>
           <div className="mt-0.5 truncate text-[11px] text-text-secondary">{currentLabel ?? 'Working…'}</div>
         </button>
+        {session.delegates && session.delegates.length > 0 && (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-canvas/55 px-1.5 py-0.5 text-[9px] font-medium text-text-secondary"
+            title={`${session.delegates.length} delegated agent${session.delegates.length === 1 ? '' : 's'}`}
+          >
+            <Users size={9} aria-hidden="true" />
+            {session.delegates.length}
+            {session.delegates.some((d) => d.status === 'active') && (
+              <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse-dot" />
+            )}
+          </span>
+        )}
         {total > 0 && <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">{current}/{total}</span>}
         <button
           type="button"
@@ -2736,6 +2752,25 @@ function ActiveWorkRow({
           ) : (
             <div className="line-clamp-3 text-[10px] italic text-text-muted">{thought ?? 'Working…'}</div>
           )}
+          {session.delegates && session.delegates.length > 0 && (
+            <div className="mt-2 border-t border-line/60 pt-2">
+              <div className="mb-1 text-[9.5px] uppercase tracking-wide text-text-muted">Delegated</div>
+              <ol className="space-y-1.5">
+                {session.delegates.map((d) => (
+                  <li key={d.id} className="flex items-start gap-2">
+                    <DelegateStatusIcon status={d.status} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[11px] leading-snug text-text-primary">
+                        {d.agentName ?? d.role ?? 'Specialist'}
+                        {d.role && d.agentName && <span className="text-text-muted"> · {d.role}</span>}
+                      </div>
+                      {d.task && <div className="truncate text-[10px] text-text-muted">{d.task}</div>}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2747,6 +2782,12 @@ function ActiveStepIcon({ status }: { status: WorkStepTrack['steps'][number]['st
   if (status === 'done') return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-accent" />;
   if (status === 'failed') return <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />;
   return <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-line" />;
+}
+
+function DelegateStatusIcon({ status }: { status: DelegateStatus }) {
+  if (status === 'active') return <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin text-accent" />;
+  if (status === 'completed') return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-accent" />;
+  return <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />;
 }
 
 /**

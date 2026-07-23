@@ -3,7 +3,7 @@ import { Target, TrendingUp, Loader2, RefreshCcw } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
 
-/** Shape of GET /v1/apps/:id/mission-control (Evolution Loop). */
+/** Shape of GET /v1/apps/:id/goal — the Goal dashboard (Evolution Loop). */
 interface Strategy {
   key: string;
   hypothesis: string;
@@ -22,7 +22,7 @@ interface Decision {
   spawnFromKey?: string;
   rationale: string;
 }
-interface MissionControl {
+interface GoalDashboard {
   appId: string;
   goal: { statement: string; northStar?: { metric: string; direction: string; target?: number } | null } | null;
   strategies: Strategy[];
@@ -40,8 +40,8 @@ const STATUS_TONE: Record<string, string> = {
   insufficient_data: 'text-text-muted',
 };
 
-export function MissionControlPanel({ appId }: { appId: string }) {
-  const [data, setData] = useState<MissionControl | null>(null);
+export function AppGoalPanel({ appId }: { appId: string }) {
+  const [data, setData] = useState<GoalDashboard | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,7 +49,7 @@ export function MissionControlPanel({ appId }: { appId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await api<{ data: MissionControl }>(`/v1/apps/${appId}/mission-control`);
+      const res = await api<{ data: GoalDashboard }>(`/v1/apps/${appId}/goal`);
       setData(res.data);
     } catch (err) {
       setError(String(err));
@@ -61,7 +61,7 @@ export function MissionControlPanel({ appId }: { appId: string }) {
   useEffect(() => { void load(); }, [load]);
 
   if (loading && !data) {
-    return <div className="flex items-center gap-2 p-4 text-[12px] text-text-muted"><Loader2 size={13} className="animate-spin" /> Loading Mission Control…</div>;
+    return <div className="flex items-center gap-2 p-4 text-[12px] text-text-muted"><Loader2 size={13} className="animate-spin" /> Loading Goal…</div>;
   }
   if (error) return <div className="p-4 text-[12px] text-danger">{error}</div>;
   if (!data) return null;

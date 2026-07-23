@@ -150,8 +150,14 @@ const envSchema = z.object({
   // Inline OAuth (ORCHESTRATOR-CREATION §7). Public base URL the provider
   // redirects back to — must match the registered OAuth app redirect URI
   // (`<AGENTIS_PUBLIC_URL>/v1/oauth/<provider>/callback`). Defaults to the
-  // local HTTP host:port. Local client id + secret override the proxy per
-  // provider; otherwise AGENTIS_OAUTH_PROXY_URL can make OAuth zero-config.
+  // local HTTP host:port.
+  //
+  // Agentis is BYOC (bring-your-own-credentials) by default: each self-hosted
+  // instance registers its own OAuth app per provider and sets that provider's
+  // OAUTH_<PROVIDER>_CLIENT_ID/_SECRET below — no shared/hosted relay, no
+  // shared rate limits, no third party ever sees your tokens. AGENTIS_OAUTH_PROXY_URL
+  // is an optional escape hatch for operators who want to run their own relay
+  // (e.g. to avoid registering an OAuth app per instance); it is never defaulted.
   AGENTIS_PUBLIC_URL: z.string().url().optional(),
   AGENTIS_OAUTH_PROXY_URL: z.string().optional(),
   OAUTH_GOOGLE_CLIENT_ID: z.string().optional(),
@@ -186,8 +192,5 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AgentisEnv {
     AGENTIS_DATA_DIR: dataDir,
     AGENTIS_ASSETS_DIR: assetsDir,
     AGENTIS_ARCHIVE_DIR: archiveDir,
-    AGENTIS_OAUTH_PROXY_URL: parsed.AGENTIS_OAUTH_PROXY_URL === undefined
-      ? 'https://connect.agentis.dev'
-      : parsed.AGENTIS_OAUTH_PROXY_URL,
   };
 }

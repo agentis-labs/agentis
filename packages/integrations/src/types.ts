@@ -56,6 +56,8 @@ export interface IntegrationManifest {
   nodeConfig: { kind: 'integration'; service: string; operation?: string };
   icon?: string;
   docsUrl?: string;
+  /** One line telling the operator exactly where to get this credential. */
+  authHint?: string;
   builtin: boolean;
   runtime: 'implemented' | 'manifest_only';
 }

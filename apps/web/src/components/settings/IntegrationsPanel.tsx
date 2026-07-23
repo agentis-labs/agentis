@@ -1,6 +1,7 @@
 ﻿import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { CheckCircle2, ExternalLink, Key, Plus, Search, Trash2, X } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ExternalLink, HelpCircle, Key, Plus, Search, Settings2, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
+import * as Collapsible from '@radix-ui/react-collapsible';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
@@ -61,6 +62,11 @@ function isSecretField(field: string) {
   return /token|secret|password|key|credential/i.test(field);
 }
 
+/** Fallback for the rare manifest without an authored `authHint`. */
+function authHintFor(manifest: IntegrationManifestLite): string {
+  return manifest.authHint ?? `Check ${manifest.name}'s account or developer settings for an API key or access token.`;
+}
+
 export function IntegrationsPanel() {
   const toast = useToast();
   const confirm = useConfirm();
@@ -72,6 +78,7 @@ export function IntegrationsPanel() {
   const [customOpen, setCustomOpen] = useState(false);
   const [editing, setEditing] = useState<{ manifest: IntegrationManifestLite; credential?: CredentialRow } | null>(null);
   const [connectingSlug, setConnectingSlug] = useState<string | null>(null);
+  const [settingUpOAuth, setSettingUpOAuth] = useState<{ manifest: IntegrationManifestLite; provider: OAuthProvider } | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -265,15 +272,32 @@ export function IntegrationsPanel() {
                       No credential required
                     </span>
                   ) : isOAuth ? (
-                    <Button
-                      variant={saved.length > 0 ? 'secondary' : 'primary'}
-                      size="sm"
-                      iconLeft={<Key size={13} />}
-                      loading={connectingSlug === manifest.service}
-                      onClick={() => connectOAuth(manifest)}
-                    >
-                      {saved.length > 0 ? 'Connect another' : 'Connect'}
-                    </Button>
+                    (() => {
+                      const provider = providerFor(manifest);
+                      if (provider && provider.configured === false) {
+                        return (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            iconLeft={<Settings2 size={13} />}
+                            onClick={() => setSettingUpOAuth({ manifest, provider })}
+                          >
+                            Set up {provider.label} sign-in
+                          </Button>
+                        );
+                      }
+                      return (
+                        <Button
+                          variant={saved.length > 0 ? 'secondary' : 'primary'}
+                          size="sm"
+                          iconLeft={<Key size={13} />}
+                          loading={connectingSlug === manifest.service}
+                          onClick={() => connectOAuth(manifest)}
+                        >
+                          {saved.length > 0 ? 'Connect another' : 'Connect'}
+                        </Button>
+                      );
+                    })()
                   ) : (
                     <Button
                       variant={saved.length > 0 ? 'secondary' : 'primary'}
@@ -296,6 +320,14 @@ export function IntegrationsPanel() {
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
+          void refresh();
+        }}
+      />
+      <OAuthAppCredentialDialog
+        entry={settingUpOAuth}
+        onClose={() => setSettingUpOAuth(null)}
+        onSaved={() => {
+          setSettingUpOAuth(null);
           void refresh();
         }}
       />
@@ -385,6 +417,30 @@ function CredentialDialog({
           <IconButton icon={<X size={16} />} label="Close" variant="ghost" size="sm" onClick={onClose} />
         </header>
         <div className="space-y-4 px-5 py-5">
+          <Collapsible.Root className="rounded-input border border-line bg-surface-2">
+            <Collapsible.Trigger asChild>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[12px] font-medium text-text-secondary hover:text-text-primary"
+              >
+                <span className="inline-flex items-center gap-1.5"><HelpCircle size={13} /> How do I get this?</span>
+                <ChevronDown size={13} className="transition-transform data-[state=open]:rotate-180" />
+              </button>
+            </Collapsible.Trigger>
+            <Collapsible.Content className="border-t border-line px-3 py-2.5 text-[12px] leading-relaxed text-text-muted">
+              <p>{authHintFor(entry.manifest)}</p>
+              {entry.manifest.docsUrl && (
+                <a
+                  href={entry.manifest.docsUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1.5 inline-flex items-center gap-1 text-accent hover:underline"
+                >
+                  Full docs <ExternalLink size={10} />
+                </a>
+              )}
+            </Collapsible.Content>
+          </Collapsible.Root>
           <label className="block">
             <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Credential name</span>
             <input className={inputCls} value={name} onChange={(event) => setName(event.target.value)} autoFocus />
@@ -422,5 +478,111 @@ function CredentialDialog({
   );
 }
 
+/**
+ * BYOC — paste an OAuth app's own client id/secret (from Google Cloud
+ * Console, the Slack app dashboard, etc.) so "Sign in with X" works on this
+ * instance without editing env vars and restarting the server. Stored
+ * encrypted, instance-wide (see OAuthAppCredentialStore).
+ */
+function OAuthAppCredentialDialog({
+  entry,
+  onClose,
+  onSaved,
+}: {
+  entry: { manifest: IntegrationManifestLite; provider: OAuthProvider } | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    if (!entry) return;
+    setClientId('');
+    setClientSecret('');
+  }, [entry]);
+
+  if (!entry) return null;
+  const { manifest, provider } = entry;
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!clientId.trim() || !clientSecret.trim()) return;
+    setSaving(true);
+    try {
+      await api(`/v1/oauth/app-credentials/${provider.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim() }),
+      });
+      toast.success(`${provider.label} sign-in is ready — click Connect`);
+      onSaved();
+    } catch (err) {
+      toast.error('Failed to save OAuth app credentials', apiErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="animate-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
+      <form onSubmit={save} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
+        <header className="flex items-center justify-between border-b border-line px-5 py-4">
+          <div>
+            <h3 className="text-heading text-text-primary">Set up {provider.label} sign-in</h3>
+            <p className="mt-0.5 text-[11px] text-text-muted">Your own OAuth app — takes effect immediately, no restart.</p>
+          </div>
+          <IconButton icon={<X size={16} />} label="Close" variant="ghost" size="sm" onClick={onClose} />
+        </header>
+        <div className="space-y-4 px-5 py-5">
+          <Collapsible.Root className="rounded-input border border-line bg-surface-2">
+            <Collapsible.Trigger asChild>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[12px] font-medium text-text-secondary hover:text-text-primary"
+              >
+                <span className="inline-flex items-center gap-1.5"><HelpCircle size={13} /> How do I get this?</span>
+                <ChevronDown size={13} className="transition-transform data-[state=open]:rotate-180" />
+              </button>
+            </Collapsible.Trigger>
+            <Collapsible.Content className="border-t border-line px-3 py-2.5 text-[12px] leading-relaxed text-text-muted">
+              <p>{authHintFor(manifest)}</p>
+            </Collapsible.Content>
+          </Collapsible.Root>
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Client ID</span>
+            <input
+              className={inputCls}
+              value={clientId}
+              onChange={(event) => setClientId(event.target.value)}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              autoFocus
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Client Secret</span>
+            <input
+              className={inputCls}
+              type="password"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+          </label>
+        </div>
+        <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
+          <Button variant="ghost" size="md" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="md" type="submit" loading={saving} disabled={!clientId.trim() || !clientSecret.trim()}>
+            Save
+          </Button>
+        </footer>
+      </form>
+    </div>
+  );
+}
 

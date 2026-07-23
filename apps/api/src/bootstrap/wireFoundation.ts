@@ -6,6 +6,7 @@
  * tool runtime. Pure construction (no late-binding), so it runs first and its
  * products are threaded into the later phases.
  */
+import { join } from 'node:path';
 import { AdapterManager } from '../adapters/AdapterManager.js';
 import { openDatabase } from '../db.js';
 import { ActiveWorkflowRegistry } from '../engine/ActiveWorkflowRegistry.js';
@@ -24,6 +25,9 @@ import { AssetStore } from '../services/assetStore.js';
 import { AuditTrailService } from '../services/auditTrail.js';
 import { AuthService } from '../services/auth.js';
 import { BrowserPool } from '../services/browserPool.js';
+import { BrowserSessionManager } from '../services/browser/browserSessionManager.js';
+import { BrowserAuthStateStore } from '../services/browser/browserAuthStateStore.js';
+import { resolveRealChromeAllowed } from '../services/browser/browserControlSettings.js';
 import { BudgetService } from '../services/budget.js';
 import { CommandIndex } from '../services/command/commandIndex.js';
 import { ConversationStore } from '../services/conversation/conversationStore.js';
@@ -43,7 +47,8 @@ import { LedgerService } from '../services/ledger.js';
 import { McpOAuthService } from '../services/mcp/mcpOAuthService.js';
 import { McpToolBridge, computerUseServerFromEnv } from '../services/mcp/mcpToolBridge.js';
 import { MemoryStore } from '../services/memory/memoryStore.js';
-import { OAuthService } from '../services/oauthService.js';
+import { OAuthAppCredentialStore } from '../services/oauthAppCredentialStore.js';
+import { OAuthService, type OAuthProviderId } from '../services/oauthService.js';
 import { ObservabilityService } from '../services/observability.js';
 import { PartialReplayService } from '../services/partialReplay.js';
 import { PersonalBrainService } from '../services/personalBrain.js';
@@ -128,6 +133,14 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     },
     logger,
   });
+  // BYOC — hydrate any OAuth app credentials pasted into Settings →
+  // Integrations (instead of env vars) so they're live immediately on boot,
+  // same as env-backed ones. Env vars above still win if both are set.
+  const oauthAppCredentialStore = new OAuthAppCredentialStore(sqlite, credentialVault);
+  for (const provider of Object.keys(oauthAppCredentialStore.list()) as OAuthProviderId[]) {
+    const credential = oauthAppCredentialStore.get(provider);
+    if (credential) oauthService.setDbClient(provider, credential);
+  }
   // Spec-compliant OAuth for external MCP servers (discovery + DCR + PKCE) —
   // "Connect with X", distinct from the fixed-provider oauthService above.
   const mcpOAuthService = new McpOAuthService();
@@ -260,7 +273,18 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // Native Playwright runtime for `browser` nodes AND the `browser_*` agent
   // tools (lazy: Chromium installs on first use if absent). Headless Chromium,
   // capped by AGENTIS_BROWSER_CONCURRENCY.
-  const browserPool = new BrowserPool(logger);
+  const browserPool = new BrowserPool(logger, { profilesDir: join(env.AGENTIS_DATA_DIR, 'browser-profiles') });
+  // Persistent, stateful browser sessions (BROWSERPOOL-10X) — reuse the pool's
+  // headless Chromium + SSRF guard + concurrency budget, but keep a live
+  // context/page across tool calls so agents can log in once then act as the
+  // logged-in user. Saved auth profiles are vault-encrypted (credential-grade).
+  const browserAuthStore = new BrowserAuthStateStore(sqlite, credentialVault);
+  const browserSessionManager = new BrowserSessionManager(browserPool, {
+    logger,
+    authStore: browserAuthStore,
+    // Per-workspace Settings→Governance opt-in gates real-Chrome attach (env master wins).
+    resolveRealChromeAllowed: (workspaceId) => resolveRealChromeAllowed(sqlite, workspaceId),
+  });
   // Shared artifact persistence/resolution — screenshots become referenceable
   // artifacts and channel attachments resolve back to bytes. The assets dir lets
   // it resolve `asset://<hash>` refs off the content-addressed store.
@@ -297,6 +321,7 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     logger,
     webSearch: webSearchProvider,
     browser: browserPool,
+    browserSessions: browserSessionManager,
     artifacts: artifactService,
     mcpBridge: mcpToolBridge,
     appData: appStores.data,
@@ -321,6 +346,7 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     credentialVault,
     allowedOrigins,
     oauthService,
+    oauthAppCredentialStore,
     mcpOAuthService,
     auth,
     archiveStore,
@@ -362,6 +388,8 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     specialistProfiles,
     appStores,
     browserPool,
+    browserSessionManager,
+    browserAuthStore,
     artifactService,
     assetStore,
     mcpAllowPrivate,

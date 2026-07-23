@@ -141,16 +141,33 @@ export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
         isNull(schema.apiKeys.revokedAt),
       ))
       .all()
-      .map((key) => ({ id: key.id, name: key.name, preview: key.preview, createdAt: key.createdAt }));
+      .map((key) => ({
+        id: key.id,
+        name: key.name,
+        preview: key.preview,
+        createdAt: key.createdAt,
+        lastUsedAt: key.lastUsedAt,
+        expiresAt: key.expiresAt,
+      }));
     return c.json({ keys });
   });
 
+  // Keys never live longer than a year without being re-issued — a bound on
+  // how long a leaked/forgotten key stays usable. `null` = no expiry.
+  const MAX_API_KEY_TTL_DAYS = 365;
+
   app.post('/api-keys', requireAuth(deps), requireWorkspace(deps), async (c) => {
     const ws = getWorkspace(c);
-    const body = z.object({ name: z.string().trim().min(1).max(120) }).parse(await c.req.json());
+    const body = z.object({
+      name: z.string().trim().min(1).max(120),
+      expiresInDays: z.number().int().min(1).max(MAX_API_KEY_TTL_DAYS).nullable().optional(),
+    }).parse(await c.req.json());
     const id = randomUUID();
     const secret = createApiKeySecret();
     const preview = `${secret.slice(0, 8)}...${secret.slice(-4)}`;
+    const expiresAt = body.expiresInDays
+      ? new Date(Date.now() + body.expiresInDays * 24 * 60 * 60 * 1000).toISOString()
+      : null;
     deps.db.insert(schema.apiKeys).values({
       id,
       workspaceId: ws.workspaceId,
@@ -158,8 +175,9 @@ export function buildAuthRoutes(deps: { db: AgentisSqliteDb; auth: AuthService; 
       name: body.name,
       keyHash: hashApiKey(secret),
       preview,
+      expiresAt,
     }).run();
-    return c.json({ key: { id, name: body.name, secret, preview, createdAt: new Date().toISOString() } }, 201);
+    return c.json({ key: { id, name: body.name, secret, preview, createdAt: new Date().toISOString(), expiresAt } }, 201);
   });
 
   app.delete('/api-keys/:id', requireAuth(deps), requireWorkspace(deps), (c) => {

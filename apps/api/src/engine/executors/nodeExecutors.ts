@@ -8,6 +8,7 @@
  * NodeExecutorHost facade.
  */
 import { BrowserPool } from '../../services/browserPool.js';
+import { runBrowserSessionAction } from '../../services/browser/browserSessionActions.js';
 import { CredentialVault } from '../../services/credentialVault.js';
 import { getCustomIntegrationManifest } from '../../services/integrationRegistry.js';
 import { assertSafeUrl } from '../../services/safeUrl.js';
@@ -181,6 +182,24 @@ export class NodeExecutorController {
         case 'extract_table': {
           const rows = await this.host.deps.browserPool.extractTable(opts);
           return { rows, count: rows.length };
+        }
+        case 'session': {
+          if (!this.host.deps.browserSessions) {
+            throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'browser session node present but BrowserSessionManager not wired');
+          }
+          const sessionArgs = {
+            action: config.sessionAction,
+            sessionId: config.sessionId,
+            ...(config.sessionArgs ?? {}),
+          } as Record<string, unknown>;
+          const sessionResult = await runBrowserSessionAction(sessionArgs, {
+            manager: this.host.deps.browserSessions,
+            workspaceId: ctx.workspaceId,
+            userId: ctx.userId ?? null,
+            owner: { kind: 'run', id: ctx.runId },
+            ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
+          });
+          return (sessionResult ?? {}) as Record<string, unknown>;
         }
         default:
           throw new AgentisError('VALIDATION_FAILED', `browser: unknown operation ${(config as { operation: string }).operation}`);

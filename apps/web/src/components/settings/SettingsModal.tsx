@@ -1,6 +1,6 @@
 /**
  * SettingsPage tabs: Profile / Workspace / Channels / MCP / Integrations /
- * Governance / Security / Budget / Runtimes.
+ * Governance / API Keys / Budget / Runtimes.
  *
  * Channels = gateways + inbound messaging (WhatsApp/Slack/…) + channel
  * identities. MCP = external MCP-server mounts (its own subpage — mounts are
@@ -10,7 +10,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, MessageCircle, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, Shield, DollarSign, Cpu, Scale, Boxes, Database, Loader2, CheckCircle2, Users, ChevronDown, ChevronUp } from 'lucide-react';
+import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, MessageCircle, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, DollarSign, Cpu, Scale, Boxes, Database, Loader2, CheckCircle2, Users, ChevronDown, ChevronUp, Clock, RefreshCcw } from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -20,6 +21,7 @@ import { Skeleton } from '../shared/Skeleton';
 import { ThemeToggle } from '../shared/ThemeToggle';
 import { StatusBadge } from '../shared/StatusBadge';
 import { GovernancePanel } from './GovernancePanel';
+import { BrowserControlPanel } from './BrowserControlPanel';
 import { McpConnectionsPanel } from './McpConnectionsPanel';
 import { ChannelIdentitiesPanel } from './ChannelIdentitiesPanel';
 import { OrchestratorModelsPanel } from './OrchestratorModelsPanel';
@@ -28,6 +30,7 @@ import { SelfHealingPanel } from './SelfHealingPanel';
 import { AutonomyPanel } from './AutonomyPanel';
 import { IntegrationsPanel } from './IntegrationsPanel';
 import { DataOwnershipPanel } from './DataOwnershipPanel';
+import { StartupPanel } from './StartupPanel';
 import { useAgentisStore, SettingsTab } from '../../store/agentisStore';
 
 const TABS: { value: SettingsTab; label: string; icon: React.ReactNode }[] = [
@@ -38,7 +41,7 @@ const TABS: { value: SettingsTab; label: string; icon: React.ReactNode }[] = [
   { value: 'mcp', label: 'MCP', icon: <Boxes size={16} /> },
   { value: 'integrations', label: 'Integrations', icon: <LinkIcon size={16} /> },
   { value: 'governance', label: 'Governance', icon: <Scale size={16} /> },
-  { value: 'security', label: 'Security', icon: <Shield size={16} /> },
+  { value: 'apiKeys', label: 'API Keys', icon: <Key size={16} /> },
   { value: 'budget', label: 'Budget', icon: <DollarSign size={16} /> },
   { value: 'runtimes', label: 'Runtimes', icon: <Cpu size={16} /> },
 ];
@@ -118,8 +121,13 @@ export function SettingsModal() {
               )}
               {settingsTab === 'mcp' && <McpConnectionsPanel />}
               {settingsTab === 'integrations' && <IntegrationsPanel />}
-              {settingsTab === 'governance' && <GovernancePanel />}
-              {settingsTab === 'security' && <SecurityTab />}
+              {settingsTab === 'governance' && (
+                <div className="space-y-6">
+                  <GovernancePanel />
+                  <BrowserControlPanel />
+                </div>
+              )}
+              {settingsTab === 'apiKeys' && <ApiKeysTab />}
               {settingsTab === 'budget' && <BudgetTab />}
               {settingsTab === 'runtimes' && (
                 <div className="space-y-10">
@@ -296,6 +304,8 @@ function ProfileTab() {
           </p>
         </div>
       </div>
+
+      <StartupPanel />
     </div>
   );
 }
@@ -526,6 +536,38 @@ function ConnectionsTab() {
     } catch (e) { toast.error('Could not set default', apiErrorMessage(e)); }
   }
 
+  // WhatsApp relink — a disconnected/errored QR session needs a new device scan.
+  // Kick the login session and poll for the QR + connected state (same endpoints
+  // the connect flow uses), showing the QR in a modal above this settings modal.
+  const relinkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [relink, setRelink] = useState<{ id: string; name: string; status: string; qrDataUrl?: string } | null>(null);
+  const stopRelinkPoll = () => { if (relinkPollRef.current) { clearInterval(relinkPollRef.current); relinkPollRef.current = null; } };
+  useEffect(() => stopRelinkPoll, []);
+
+  async function startRelink(c: Connection) {
+    try {
+      const login = await api<{ status: string; qrDataUrl?: string }>(`/v1/channels/${c.id}/login`, { method: 'POST', body: '{}' });
+      setRelink({ id: c.id, name: c.name, status: login.status, qrDataUrl: login.qrDataUrl });
+      stopRelinkPoll();
+      relinkPollRef.current = setInterval(() => {
+        void (async () => {
+          try {
+            const state = await api<{ status: string; qrDataUrl?: string }>(`/v1/channels/${c.id}/login`);
+            setRelink((prev) => (prev && prev.id === c.id ? { ...prev, status: state.status, qrDataUrl: state.qrDataUrl ?? prev.qrDataUrl } : prev));
+            if (['open', 'active', 'connected'].includes(state.status)) {
+              stopRelinkPoll();
+              setRelink(null);
+              toast.success('Reconnected', c.name);
+              void refresh();
+            }
+          } catch { /* keep polling */ }
+        })();
+      }, 1000);
+    } catch (e) { toast.error('Could not start relink', apiErrorMessage(e)); }
+  }
+
+  const RELINK_STATES = ['error', 'needs_action', 'degraded', 'paused', 'disconnected', 'logged_out'];
+
   // A kind has "competing" connections when >1 of it exists — that's when a
   // default matters for deterministic sends.
   const kindCounts = items.reduce<Record<string, number>>((acc, i) => { acc[i.kind] = (acc[i.kind] ?? 0) + 1; return acc; }, {});
@@ -616,6 +658,11 @@ function ConnectionsTab() {
                       Individual connection · manage on {c.owner} →
                     </Link>
                   )}
+                  {c.kind === 'whatsapp' && RELINK_STATES.includes(c.status ?? '') && (
+                    <Button variant="secondary" size="sm" iconLeft={<RefreshCcw size={12} />} onClick={() => void startRelink(c)} title="Scan a new QR to reconnect this WhatsApp">
+                      Relink
+                    </Button>
+                  )}
                   <Button variant="ghost" size="sm" aria-label="Disconnect" onClick={() => void handleDelete(c)}>
                     <Trash2 size={12} />
                   </Button>
@@ -624,6 +671,32 @@ function ConnectionsTab() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {relink && (
+        <div
+          className="animate-fade-in fixed inset-0 z-[110] flex items-center justify-center bg-overlay p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { stopRelinkPoll(); setRelink(null); }}
+        >
+          <div className="animate-scale-in w-full max-w-sm rounded-modal border border-line bg-surface p-5 text-center shadow-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-subheading text-text-primary">Relink {relink.name}</h3>
+            {['open', 'active', 'connected'].includes(relink.status) ? (
+              <div className="mt-4 flex flex-col items-center gap-2 text-success"><CheckCircle2 size={32} /> Connected</div>
+            ) : relink.qrDataUrl ? (
+              <>
+                <img src={relink.qrDataUrl} alt="WhatsApp pairing QR" className="mx-auto mt-4 h-52 w-52 rounded-card border border-line bg-white p-2" />
+                <p className="mt-3 text-[12px] text-text-secondary">On your phone: WhatsApp → Linked devices → Link a device, then scan this code.</p>
+              </>
+            ) : (
+              <div className="mt-6 flex items-center justify-center gap-2 text-text-muted"><Loader2 size={16} className="animate-spin" /> Generating QR…</div>
+            )}
+            <div className="mt-4">
+              <Button variant="ghost" size="sm" onClick={() => { stopRelinkPoll(); setRelink(null); }}>Close</Button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -711,17 +784,36 @@ function ConnectionPermissions({ connectionId, owner }: { connectionId: string; 
   );
 }
 
-function SecurityTab() {
+interface ApiKeyRow {
+  id: string;
+  name: string;
+  preview: string;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  expiresAt?: string | null;
+}
+
+/** Expiry urgency → badge tone + label, shared between the list and the reveal dialog. */
+function expiryStatus(expiresAt?: string | null): { tone: 'muted' | 'success' | 'warn' | 'danger'; label: string } {
+  if (!expiresAt) return { tone: 'muted', label: 'No expiration' };
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  const relative = formatDistanceToNow(new Date(expiresAt), { addSuffix: true });
+  if (ms <= 0) return { tone: 'danger', label: `Expired ${relative}` };
+  if (ms <= 7 * 24 * 60 * 60 * 1000) return { tone: 'warn', label: `Expires ${relative}` };
+  return { tone: 'success', label: `Expires ${relative}` };
+}
+
+function ApiKeysTab() {
   const toast = useToast();
-  const [keys, setKeys] = useState<Array<{ id: string; name: string; preview: string; createdAt: string }>>([]);
+  const [keys, setKeys] = useState<ApiKeyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const confirm = useConfirm();
   const [creatingOpen, setCreatingOpen] = useState(false);
-  const [revealedKey, setRevealedKey] = useState<{ name: string; secret: string } | null>(null);
+  const [revealedKey, setRevealedKey] = useState<{ name: string; secret: string; expiresAt: string | null } | null>(null);
 
   async function refresh() {
     try {
-      const data = await api<{ keys: typeof keys }>('/v1/auth/api-keys');
+      const data = await api<{ keys: ApiKeyRow[] }>('/v1/auth/api-keys');
       setKeys(data.keys ?? []);
     } catch { setKeys([]); }
     finally { setLoading(false); }
@@ -729,15 +821,15 @@ function SecurityTab() {
 
   useEffect(() => { void refresh(); }, []);
 
-  async function createKey(name: string) {
+  async function createKey(name: string, expiresInDays: number | null) {
     if (!name.trim()) return;
     try {
-      const data = await api<{ key: { id: string; secret: string } }>('/v1/auth/api-keys', {
+      const data = await api<{ key: { id: string; secret: string; expiresAt: string | null } }>('/v1/auth/api-keys', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name: name.trim(), expiresInDays }),
       });
       setCreatingOpen(false);
-      setRevealedKey({ name: name.trim(), secret: data.key.secret });
+      setRevealedKey({ name: name.trim(), secret: data.key.secret, expiresAt: data.key.expiresAt });
       void refresh();
     } catch (e) { toast.error('Failed to create key', apiErrorMessage(e)); }
   }
@@ -758,9 +850,14 @@ function SecurityTab() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="max-w-2xl space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">API Keys</h2>
+        <div>
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">API Keys</h2>
+          <p className="mt-1 text-[12px] text-text-muted">
+            Authenticate programmatic access to Agentis. Give each key a limited lifetime so a forgotten or leaked key stops working on its own.
+          </p>
+        </div>
         <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreatingOpen(true)}>
           New key
         </Button>
@@ -787,35 +884,59 @@ function SecurityTab() {
         </div>
       ) : (
         <div className="space-y-1.5">
-          {keys.map((k) => (
-            <div key={k.id} className="flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3">
-              <Key size={14} className="text-text-muted" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium text-text-primary">{k.name}</div>
-                <div className="mt-0.5 font-mono text-[11px] text-text-muted">{k.preview}</div>
+          {keys.map((k) => {
+            const status = expiryStatus(k.expiresAt);
+            return (
+              <div key={k.id} className="flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-card bg-surface-2 text-text-secondary">
+                  <Key size={14} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[13px] font-medium text-text-primary">{k.name}</span>
+                    <StatusBadge tone={status.tone} label={status.label} size="sm" dot={status.tone !== 'muted'} />
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-muted">
+                    <span className="font-mono">{k.preview}</span>
+                    <span>·</span>
+                    <span>{k.lastUsedAt ? `Last used ${formatDistanceToNow(new Date(k.lastUsedAt), { addSuffix: true })}` : 'Never used'}</span>
+                  </div>
+                </div>
+                <Button variant="danger" size="sm" iconLeft={<Trash2 size={11} />} onClick={() => void revoke(k.id)}>
+                  Revoke
+                </Button>
               </div>
-              <Button variant="danger" size="sm" iconLeft={<Trash2 size={11} />} onClick={() => void revoke(k.id)}>
-                Revoke
-              </Button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
+// Common expirations for programmatic-access keys, mirroring GitHub/GitLab PAT
+// UX. Defaulting to a bounded lifetime (90 days) nudges toward key rotation;
+// "No expiration" stays one click away for long-lived automation.
+const API_KEY_EXPIRY_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '7', label: '7 days' },
+  { value: '30', label: '30 days' },
+  { value: '90', label: '90 days' },
+  { value: '365', label: '1 year' },
+  { value: '', label: 'No expiration' },
+];
+
 function ApiKeyCreateDialog({
   open, onClose, onCreate,
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (name: string) => Promise<void> | void;
+  onCreate: (name: string, expiresInDays: number | null) => Promise<void> | void;
 }) {
   const [name, setName] = useState('');
+  const [expiry, setExpiry] = useState('90');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { if (open) setName(''); }, [open]);
+  useEffect(() => { if (open) { setName(''); setExpiry('90'); } }, [open]);
   if (!open) return null;
 
   return (
@@ -825,7 +946,7 @@ function ApiKeyCreateDialog({
           e.preventDefault();
           if (!name.trim() || busy) return;
           setBusy(true);
-          try { await onCreate(name); }
+          try { await onCreate(name, expiry ? Number(expiry) : null); }
           finally { setBusy(false); }
         }}
         className="animate-scale-in w-full max-w-sm rounded-modal border border-line bg-surface shadow-modal"
@@ -847,6 +968,23 @@ function ApiKeyCreateDialog({
               placeholder="e.g., CI deploy script"
               className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
             />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 flex items-center gap-1.5 text-[12px] font-medium text-text-secondary">
+              <Clock size={12} /> Expiration
+            </span>
+            <select
+              value={expiry}
+              onChange={(e) => setExpiry(e.target.value)}
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
+            >
+              {API_KEY_EXPIRY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <span className="mt-1 block text-[11px] text-text-muted">
+              A limited lifetime means a forgotten or leaked key stops working on its own.
+            </span>
           </label>
           <p className="text-[11px] text-text-muted">
             The full key will only be shown once after creation. Save it somewhere safe.
@@ -872,12 +1010,13 @@ function ApiKeyCreateDialog({
 function ApiKeyRevealDialog({
   keyValue, onClose,
 }: {
-  keyValue: { name: string; secret: string } | null;
+  keyValue: { name: string; secret: string; expiresAt: string | null } | null;
   onClose: () => void;
 }) {
   const toast = useToast();
   const [copied, setCopied] = useState(false);
   if (!keyValue) return null;
+  const status = expiryStatus(keyValue.expiresAt);
   return (
     <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
       <div className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
@@ -891,9 +1030,12 @@ function ApiKeyRevealDialog({
           <div className="rounded-card border border-warn/30 bg-warn-soft px-3 py-2 text-[12px] text-text-primary">
             This is the only time this key will be shown. Copy and store it somewhere safe.
           </div>
-          <div className="space-y-1.5">
-            <span className="text-[12px] text-text-muted">Key name</span>
-            <div className="text-[13px] text-text-primary">{keyValue.name}</div>
+          <div className="flex items-center justify-between">
+            <div className="space-y-1.5">
+              <span className="text-[12px] text-text-muted">Key name</span>
+              <div className="text-[13px] text-text-primary">{keyValue.name}</div>
+            </div>
+            <StatusBadge tone={status.tone} label={status.label} size="sm" dot={status.tone !== 'muted'} />
           </div>
           <div className="space-y-1.5">
             <span className="text-[12px] text-text-muted">Secret</span>

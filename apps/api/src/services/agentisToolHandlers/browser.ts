@@ -12,6 +12,9 @@ import type { BrowserRenderOptions } from '../browserPool.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { shouldPersistScreenshot } from '../artifactRetentionPolicy.js';
+import { runBrowserSessionAction } from '../browser/browserSessionActions.js';
+import { resolveSessionOwner } from '../browser/browserSessionManager.js';
+import { makeUploadMaterializer } from '../browser/uploadMaterializer.js';
 
 export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -108,12 +111,110 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
         return { text: text.slice(0, 50_000) };
       },
     },
+    {
+      definition: {
+        id: 'agentis.browser.extract_table',
+        family: 'run',
+        description: 'Open a real browser and parse an HTML <table> into an array of row objects. args: { url?, html?, selector? }.',
+        inputSchema: {
+          type: 'object',
+          properties: { url: { type: 'string' }, html: { type: 'string' }, selector: { type: 'string' } },
+        },
+        mutating: false,
+        mcpExposed: true,
+      },
+      handler: async (args) => {
+        const browser = requireBrowser(deps);
+        const rows = await browser.extractTable(browserOpts(args));
+        return { rows, count: rows.length };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.browser.fill_form',
+        family: 'run',
+        description: 'Open a real browser, fill form fields by CSS selector, optionally submit, and return read-back values + final HTML. args: { url?, html?, formData: { [selector]: value }, submitSelector? }.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            html: { type: 'string' },
+            formData: { type: 'object', description: 'Map of CSS selector → value.' },
+            submitSelector: { type: 'string' },
+          },
+          required: ['formData'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args) => {
+        const browser = requireBrowser(deps);
+        const opts = browserOpts(args);
+        if (args.formData && typeof args.formData === 'object' && !Array.isArray(args.formData)) {
+          opts.formData = args.formData as Record<string, string>;
+        } else {
+          throw new AgentisError('VALIDATION_FAILED', 'agentis.browser.fill_form requires a formData object');
+        }
+        if (typeof args.submitSelector === 'string') opts.submitSelector = args.submitSelector;
+        const r = await browser.fillForm(opts);
+        return { title: r.title, values: r.values, html: r.html.slice(0, 200_000) };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.browser.session',
+        family: 'run',
+        description:
+          'Drive a PERSISTENT browser session that survives across calls — log in once, then act as the logged-in user on later calls (unlike the one-shot agentis.browser.* tools). First call action:"open" with a sessionId (optionally restoreAuth to reuse saved cookies); later calls reuse that sessionId and return a compact { snapshot:{url,title,text}, value? }. actions: open|navigate|click|fill|type|press|select_option|hover|scroll|wait_for|get|upload|evaluate|save_auth|close. On open: visible:true pops up a real WATCHABLE window on the host machine; attach:"chrome" drives the user\'s OWN running Chrome (real logins; they must launch Chrome with --remote-debugging-port=9222). upload attaches workspace assetRefs to a file input. Call save_auth with authName to persist login for future runs.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string' },
+            sessionId: { type: 'string' },
+            visible: { type: 'boolean', description: 'On open: pop up a real watchable browser window (local host only).' },
+            attach: { type: 'string', enum: ['chrome'], description: 'On open: attach to the user\'s running Chrome via CDP (real profile/logins).' },
+            profileName: { type: 'string', description: 'On open (visible): persistent profile name so logins survive across runs.' },
+            url: { type: 'string' },
+            selector: { type: 'string' },
+            value: { type: 'string' },
+            text: { type: 'string' },
+            key: { type: 'string' },
+            what: { type: 'string', enum: ['text', 'value', 'attribute', 'innerHTML'] },
+            attribute: { type: 'string' },
+            restoreAuth: { type: 'string' },
+            authName: { type: 'string' },
+            expression: { type: 'string' },
+            assetRefs: { type: 'array', items: { type: 'string' }, description: 'For action:"upload" — workspace asset/artifact refs to attach to a file input.' },
+          },
+          required: ['action', 'sessionId'],
+        },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        const manager = requireSessions(deps);
+        const owner = resolveSessionOwner({ runId: ctx.runId, conversationId: ctx.conversationId, agentId: ctx.agentId });
+        if (!owner) throw new AgentisError('VALIDATION_FAILED', 'browser session requires a run, agent, or conversation context');
+        return runBrowserSessionAction(args, {
+          manager,
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId ?? null,
+          owner,
+          ...(deps.artifacts ? { materializeUploads: makeUploadMaterializer(deps.artifacts, ctx.workspaceId) } : {}),
+        });
+      },
+    },
   ]);
 }
 
 function requireBrowser(deps: ToolHandlerDeps) {
   if (!deps.browserPool) throw new AgentisError('VALIDATION_FAILED', 'browser runtime is not wired (Playwright unavailable)');
   return deps.browserPool;
+}
+
+function requireSessions(deps: ToolHandlerDeps) {
+  if (!deps.browserSessions) throw new AgentisError('VALIDATION_FAILED', 'persistent browser sessions are not wired (Playwright unavailable)');
+  return deps.browserSessions;
 }
 
 function browserOpts(args: Record<string, unknown>): BrowserRenderOptions {

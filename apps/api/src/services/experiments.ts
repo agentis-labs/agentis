@@ -130,7 +130,7 @@ export class ExperimentService {
     return { key: exp.key, variants: [...byVariant.values()] };
   }
 
-  /** All experiments in a workspace (for the mission-control dashboard). */
+  /** All experiments in a workspace (for the Goal dashboard). */
   listExperiments(workspaceId: string) {
     return this.db.select().from(schema.experiments)
       .where(eq(schema.experiments.workspaceId, workspaceId)).all();

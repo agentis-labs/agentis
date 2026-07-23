@@ -34,7 +34,7 @@ describe('CredentialVault.rotateAll', () => {
         logger: ctx.logger,
       });
 
-      expect(counts).toEqual({ credentials: 1 });
+      expect(counts).toEqual({ credentials: 1, oauthAppCredentials: 0 });
 
       const newVault = new CredentialVault(newKeyB64);
       const credRow = ctx.db.select().from(schema.credentials).all()[0]!;
@@ -54,7 +54,31 @@ describe('CredentialVault.rotateAll', () => {
         newKeyB64: newKey(),
         logger: ctx.logger,
       });
-      expect(counts).toEqual({ credentials: 0 });
+      expect(counts).toEqual({ credentials: 0, oauthAppCredentials: 0 });
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it('also re-encrypts BYOC OAuth app credentials (client id/secret)', async () => {
+    const ctx = await createTestContext();
+    try {
+      const oldKeyB64 = ctx.secrets.credentialKeyB64;
+      const oldVault = new CredentialVault(oldKeyB64);
+
+      ctx.db.insert(schema.oauthAppCredentials).values({
+        provider: 'google',
+        encryptedValue: oldVault.encrypt(JSON.stringify({ clientId: 'gid', clientSecret: 'gsec' })),
+      }).run();
+
+      const newKeyB64 = newKey();
+      const counts = await CredentialVault.rotateAll({ db: ctx.db, oldKeyB64, newKeyB64, logger: ctx.logger });
+      expect(counts).toEqual({ credentials: 0, oauthAppCredentials: 1 });
+
+      const newVault = new CredentialVault(newKeyB64);
+      const row = ctx.db.select().from(schema.oauthAppCredentials).all()[0]!;
+      expect(JSON.parse(newVault.decrypt(row.encryptedValue))).toEqual({ clientId: 'gid', clientSecret: 'gsec' });
+      expect(() => oldVault.decrypt(row.encryptedValue)).toThrow();
     } finally {
       ctx.close();
     }

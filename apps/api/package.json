@@ -9,7 +9,8 @@
     "./bootstrap": "./src/bootstrap.ts",
     "./backup": "./src/services/backup.ts",
     "./defaultDataDir": "./src/defaultDataDir.ts",
-    "./embeddingProvider": "./src/services/embedding/embeddingProvider.ts"
+    "./embeddingProvider": "./src/services/embedding/embeddingProvider.ts",
+    "./autostart": "./src/services/system/autostartService.ts"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",

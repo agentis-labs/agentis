@@ -49,4 +49,25 @@ describe('BrowserPool', () => {
   it('blocks private-network navigation by default', async () => {
     await expect(pool.navigate({ url: 'http://127.0.0.1:9/private' })).rejects.toThrow(/private|loopback/i);
   }, 60_000);
+
+  it('refuses a visible session when headed mode is disabled', async () => {
+    const prev = process.env.AGENTIS_BROWSER_ALLOW_HEADED;
+    process.env.AGENTIS_BROWSER_ALLOW_HEADED = 'false';
+    try {
+      await expect(pool.openSessionSurface({ mode: 'visible' })).rejects.toThrow(/disabled|display/i);
+    } finally {
+      if (prev === undefined) delete process.env.AGENTIS_BROWSER_ALLOW_HEADED;
+      else process.env.AGENTIS_BROWSER_ALLOW_HEADED = prev;
+    }
+  });
+
+  it('refuses attaching to real Chrome unless explicitly enabled', async () => {
+    const prev = process.env.AGENTIS_BROWSER_ALLOW_CDP;
+    delete process.env.AGENTIS_BROWSER_ALLOW_CDP;
+    try {
+      await expect(pool.openSessionSurface({ mode: 'attach' })).rejects.toThrow(/disabled|AGENTIS_BROWSER_ALLOW_CDP/i);
+    } finally {
+      if (prev !== undefined) process.env.AGENTIS_BROWSER_ALLOW_CDP = prev;
+    }
+  });
 });

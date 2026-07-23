@@ -33,6 +33,7 @@ import type { SkillService } from '../skillService.js';
 import type { PlanService } from '../planService.js';
 import type { ChannelBridge } from '../conversation/channelBridge.js';
 import type { BrowserPool } from '../browserPool.js';
+import type { BrowserSessionManager } from '../browser/browserSessionManager.js';
 import type { ArtifactService } from '../artifactService.js';
 import type { AssetStore } from '../assetStore.js';
 import type { McpToolBridge } from '../mcp/mcpToolBridge.js';
@@ -121,6 +122,8 @@ export interface ToolHandlerDeps {
   channels?: ChannelBridge;
   /** Headless Chromium pool — backs the `agentis.browser.*` tools. */
   browserPool?: BrowserPool;
+  /** Persistent browser sessions — backs `agentis.browser.session`. */
+  browserSessions?: BrowserSessionManager;
   /** Artifact persistence + resolution — screenshots become referenceable, channel attachments resolve to bytes. */
   artifacts?: ArtifactService;
   /** Content-addressed asset store — backs agentis.assets.save (dedup + register). */

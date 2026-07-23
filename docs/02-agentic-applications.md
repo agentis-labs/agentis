@@ -96,9 +96,9 @@ it over time. The loop closes three arcs that previously existed but never touch
   retires significant losers, recommends the next generation. A 6h scheduler sweep runs it;
   **ACT** (auto promote/retire) is operator-gated (`AGENTIS_EVOLUTION_AUTONOMY`, off by
   default — otherwise SURFACE-only). Tool: `agentis.evolution.review`.
-- **Mission Control** — `GET /v1/apps/:id/mission-control` (goal + strategies + decisions +
+- **Goal dashboard** — `GET /v1/apps/:id/goal` (goal + strategies + decisions +
   experiments + baselines, computed live) → the App engine's **Goal** tab
-  (`MissionControlPanel`).
+  (`AppGoalPanel`).
 
 The decision core is deterministic and tested; next-generation variant *authoring* is left to
 the owner agent (via `strategy.propose`), keeping the LLM out of the promote/retire logic.
@@ -106,12 +106,12 @@ the owner agent (via `strategy.propose`), keeping the LLM out of the promote/ret
 ## API surface
 
 - HTTP: `/v1/apps`, `/v1/artifacts`, `/v1/rooms`, `/v1/interactions`,
-  `/v1/workspace-context`, `/v1/apps/:id/mission-control`.
+  `/v1/workspace-context`, `/v1/apps/:id/goal`.
 - Tools: `agentis.app.{create,list,archive,delete,adopt_workflow,scaffold,plan,goal}`,
   `agentis.strategy.{propose,list}`, `agentis.evolution.review`, plus the `data.*` and `ui.*`
   families above.
 - Web pages: `AppsPage`, `AppEditorPage` (Interface / Workflow / Data / Brain facets),
-  `PublicAppSurfacePage`, `GenUIShowcasePage`. App engine modal → **Goal** tab (Mission Control).
+  `PublicAppSurfacePage`, `GenUIShowcasePage`. App engine modal → **Goal** tab (Goal dashboard).
 
 ---
 

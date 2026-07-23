@@ -120,6 +120,40 @@ export const credentials = sqliteTable('credentials', {
   ...baseTimestamps(),
 });
 
+// ────────────────────────────────────────────────────────────
+// Browser auth profiles — reusable "log in once" session state.
+// storageState (cookies + localStorage) = credential-equivalent, so it is
+// AES-256-GCM encrypted at rest in CredentialVault, same as `credentials`.
+// Named + workspace-scoped so a session can be re-hydrated across runs.
+// ────────────────────────────────────────────────────────────
+export const browserAuthStates = sqliteTable('browser_auth_states', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  /** Provenance only — who saved it; the profile itself is workspace-scoped. */
+  userId: text('user_id').references(() => users.id, { onDelete: 'set null' }),
+  name: text('name').notNull(),
+  /** AES-256-GCM ciphertext, base64, of the Playwright storageState JSON. */
+  encryptedValue: text('encrypted_value').notNull(),
+  ...baseTimestamps(),
+}, (table) => ({
+  nameUnique: uniqueIndex('idx_browser_auth_states_name').on(table.workspaceId, table.name),
+}));
+
+// ────────────────────────────────────────────────────────────
+// OAuth app credentials (BYOC) — client id/secret per provider, entered via
+// Settings → Integrations instead of env vars + a restart. Instance-wide
+// (no workspace_id): the redirect URI registered with the provider is fixed
+// per deployment (AGENTIS_PUBLIC_URL), not per workspace.
+// ────────────────────────────────────────────────────────────
+export const oauthAppCredentials = sqliteTable('oauth_app_credentials', {
+  provider: text('provider').primaryKey(),
+  /** AES-256-GCM ciphertext, base64, of JSON {clientId, clientSecret}. */
+  encryptedValue: text('encrypted_value').notNull(),
+  ...baseTimestamps(),
+});
+
 export const apiKeys = sqliteTable('api_keys', {
   id: text('id').primaryKey(),
   workspaceId: text('workspace_id')
@@ -133,6 +167,7 @@ export const apiKeys = sqliteTable('api_keys', {
   preview: text('preview').notNull(),
   lastUsedAt: text('last_used_at'),
   revokedAt: text('revoked_at'),
+  expiresAt: text('expires_at'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 

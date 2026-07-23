@@ -5,6 +5,20 @@ import type { WorkspaceActiveRun, WorkspaceFailedRun } from './workspaceData';
 export type WorkSessionKind = 'agent' | 'workflow' | 'run' | 'approval' | 'system';
 export type WorkSessionStatus = 'active' | 'waiting' | 'blocked' | 'completed' | 'failed' | 'info';
 
+export type DelegateStatus = 'active' | 'completed' | 'failed';
+
+/** A child agent a session delegated a subtask to (`delegate_task`/`spawn_team`). */
+export interface DelegateSummary {
+  id: string;
+  agentId?: string;
+  agentName?: string;
+  role?: string;
+  task?: string;
+  status: DelegateStatus;
+  startedAt: string;
+  updatedAt: string;
+}
+
 export interface WorkSession {
   id: string;
   kind: WorkSessionKind;
@@ -24,6 +38,8 @@ export interface WorkSession {
   active: boolean;
   progress?: { completed: number; total: number };
   events: RealtimeActivity[];
+  /** Sub-agents this session delegated a subtask to, keyed by their child session id. */
+  delegates?: DelegateSummary[];
 }
 
 interface BuildWorkSessionsArgs {
@@ -55,6 +71,25 @@ export function buildWorkSessions({
   const activeRunById = new Map(liveRuns.map((run) => [run.id, run]));
 
   for (const item of activity) {
+    // A delegate's own tone/phase (e.g. its failure) must never leak into the
+    // PARENT session's status — both share the same `run:{runId}` key. Branch
+    // out before the generic status/terminal logic and upsert into a separate
+    // roster instead. #runDelegate blocks the parent node synchronously, so
+    // the parent's own 'complete' step can't fire before every delegate is
+    // done — no extra "stay active while a delegate runs" logic is needed.
+    if (item.delegate) {
+      const key = sessionKey(item);
+      if (!key) continue;
+      const run = item.runId ? activeRunById.get(item.runId) : undefined;
+      // Rare ordering edge case: the delegate's 'start' event can arrive before
+      // the parent node's own step. Seed the session with a neutered copy (no
+      // tone/phase) so a delegate's failure can't poison the freshly-created
+      // parent session's status.
+      const session = sessions.get(key) ?? createSession(key, { ...item, tone: 'accent', phase: undefined }, run, now, windowMs, false);
+      upsertDelegate(session, item);
+      sessions.set(key, session);
+      continue;
+    }
     if (!isSessionActivity(item)) continue;
     const key = sessionKey(item);
     if (!key) continue;
@@ -182,6 +217,30 @@ function createSession(
     progress: item.progress ?? (run?.totalSteps ? { completed: run.stepIndex ?? 0, total: run.totalSteps } : undefined),
     events: [],
   };
+}
+
+function upsertDelegate(session: WorkSession, item: RealtimeActivity): void {
+  const id = item.delegate?.childSessionId;
+  if (!id) return;
+  const list = session.delegates ?? (session.delegates = []);
+  const existing = list.find((d) => d.id === id);
+  const status: DelegateStatus = item.tone === 'danger' ? 'failed' : item.tone === 'success' ? 'completed' : 'active';
+  if (existing) {
+    existing.status = status;
+    existing.updatedAt = item.at;
+    if (item.agentName) existing.agentName = item.agentName;
+  } else {
+    list.push({
+      id,
+      agentId: item.agentId,
+      agentName: item.agentName,
+      role: item.delegate?.role,
+      task: item.detail,
+      status,
+      startedAt: item.at,
+      updatedAt: item.at,
+    });
+  }
 }
 
 function appendSessionEvent(session: WorkSession, item: RealtimeActivity): void {

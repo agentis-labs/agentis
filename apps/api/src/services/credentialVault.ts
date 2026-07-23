@@ -80,10 +80,10 @@ export class CredentialVault {
     oldKeyB64: string;
     newKeyB64: string;
     logger?: Logger;
-  }): Promise<{ credentials: number }> {
+  }): Promise<{ credentials: number; oauthAppCredentials: number }> {
     const oldVault = new CredentialVault(args.oldKeyB64);
     const newVault = new CredentialVault(args.newKeyB64);
-    const counts = { credentials: 0 };
+    const counts = { credentials: 0, oauthAppCredentials: 0 };
 
     const credRows = args.db.select().from(schema.credentials).all();
     const credPlans = credRows.map((row) => ({
@@ -98,6 +98,23 @@ export class CredentialVault {
         .where(eq(schema.credentials.id, plan.id))
         .run();
       counts.credentials += 1;
+    }
+
+    // BYOC OAuth app credentials (client id/secret) live in a separate,
+    // instance-wide table — same vault, so they need the same rotation pass.
+    const oauthAppRows = args.db.select().from(schema.oauthAppCredentials).all();
+    const oauthAppPlans = oauthAppRows.map((row) => ({
+      provider: row.provider,
+      next: newVault.encrypt(oldVault.decrypt(row.encryptedValue)),
+    }));
+
+    for (const plan of oauthAppPlans) {
+      args.db
+        .update(schema.oauthAppCredentials)
+        .set({ encryptedValue: plan.next })
+        .where(eq(schema.oauthAppCredentials.provider, plan.provider))
+        .run();
+      counts.oauthAppCredentials += 1;
     }
 
     args.logger?.info('credential_vault.rotation_complete', counts);

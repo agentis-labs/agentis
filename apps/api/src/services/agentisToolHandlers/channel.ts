@@ -16,7 +16,8 @@ const ATTACHMENT_ITEM_SCHEMA = {
     artifactId: { type: 'string', description: 'Artifact id (alternative to url).' },
     filename: { type: 'string' },
     mimeType: { type: 'string' },
-    kind: { type: 'string', enum: ['image', 'video', 'audio', 'voice', 'sticker', 'file'], description: 'Delivery hint; inferred from MIME type when omitted. "voice" = a push-to-talk voice note (OGG/Opus mono for WhatsApp); "sticker" = WebP.' },
+    kind: { type: 'string', enum: ['image', 'video', 'audio', 'voice', 'sticker', 'file'], description: 'Delivery hint; inferred from MIME type when omitted. "voice" = a push-to-talk voice note; "sticker" = WebP.' },
+    text: { type: 'string', description: 'For a spoken voice note with no file: set kind:"voice" and put the words here — a voice model synthesizes it (no encoding to worry about).' },
     caption: { type: 'string', description: 'Per-attachment caption.' },
   },
 } as const;
@@ -364,10 +365,12 @@ function parseAttachments(value: unknown): OutboundAttachmentRef[] {
     const obj = raw as Record<string, unknown>;
     const url = typeof obj.url === 'string' ? obj.url.trim() : '';
     const artifactId = typeof obj.artifactId === 'string' ? obj.artifactId.trim() : '';
-    if (!url && !artifactId) throw new AgentisError('VALIDATION_FAILED', `attachment[${i}] needs a url or artifactId`);
+    const speakText = typeof obj.text === 'string' ? obj.text.trim() : '';
+    if (!url && !artifactId && !speakText) throw new AgentisError('VALIDATION_FAILED', `attachment[${i}] needs a url, artifactId, or text (for a spoken voice note)`);
     const ref: OutboundAttachmentRef = {};
     if (url) ref.url = url;
     if (artifactId) ref.artifactId = artifactId;
+    if (speakText) { ref.text = speakText; if (!obj.kind) ref.kind = 'voice'; }
     if (typeof obj.filename === 'string' && obj.filename.trim()) ref.filename = obj.filename.trim();
     if (typeof obj.mimeType === 'string' && obj.mimeType.trim()) ref.mimeType = obj.mimeType.trim();
     if (obj.kind === 'image' || obj.kind === 'video' || obj.kind === 'audio' || obj.kind === 'voice' || obj.kind === 'sticker' || obj.kind === 'file') ref.kind = obj.kind;

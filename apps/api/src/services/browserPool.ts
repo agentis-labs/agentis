@@ -25,17 +25,32 @@ import type { Logger } from '../logger.js';
 import { assertSafeUrl } from './safeUrl.js';
 
 // ── Minimal Playwright shim (only what we use) ──────────────────────────────
-interface PWPage {
+// Exported so the session layer (browserSession.ts) types against the same
+// minimal shape and `tsc` never needs the real `playwright` types resolved.
+export interface PWPage {
   route(pattern: string, handler: (route: PWRoute) => Promise<void>): Promise<void>;
   setContent(html: string, opts?: { waitUntil?: string; timeout?: number }): Promise<void>;
   goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
   screenshot(opts?: { fullPage?: boolean; type?: 'png' | 'jpeg' }): Promise<Buffer>;
   pdf(opts?: { printBackground?: boolean; format?: string }): Promise<Buffer>;
+  url(): string;
   title(): Promise<string>;
   innerText(selector: string): Promise<string>;
   content(): Promise<string>;
-  fill(selector: string, value: string): Promise<void>;
-  click(selector: string): Promise<void>;
+  fill(selector: string, value: string, opts?: { timeout?: number }): Promise<void>;
+  type(selector: string, text: string, opts?: { delay?: number; timeout?: number }): Promise<void>;
+  click(selector: string, opts?: { timeout?: number }): Promise<void>;
+  hover(selector: string, opts?: { timeout?: number }): Promise<void>;
+  selectOption(selector: string, values: string | string[], opts?: { timeout?: number }): Promise<string[]>;
+  setInputFiles(selector: string, files: string | string[], opts?: { timeout?: number }): Promise<void>;
+  getAttribute(selector: string, name: string, opts?: { timeout?: number }): Promise<string | null>;
+  inputValue(selector: string, opts?: { timeout?: number }): Promise<string>;
+  innerHTML(selector: string, opts?: { timeout?: number }): Promise<string>;
+  waitForSelector(selector: string, opts?: { state?: 'attached' | 'detached' | 'visible' | 'hidden'; timeout?: number }): Promise<unknown>;
+  waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', opts?: { timeout?: number }): Promise<void>;
+  waitForTimeout(timeout: number): Promise<void>;
+  keyboard: { press(key: string, opts?: { delay?: number }): Promise<void> };
+  mouse: { wheel(deltaX: number, deltaY: number): Promise<void> };
   evaluate<T = unknown, A = unknown>(expression: string | ((arg: A) => T | Promise<T>), arg?: A): Promise<T>;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   emulateMedia(opts: { media?: 'screen' | 'print' }): Promise<void>;
@@ -46,13 +61,34 @@ interface PWRoute {
   abort(errorCode?: string): Promise<void>;
   continue(): Promise<void>;
 }
+/** Playwright `StorageState` — cookies + per-origin localStorage. Opaque to us. */
+export type PWStorageState = Record<string, unknown>;
+export interface PWContext {
+  newPage(): Promise<PWPage>;
+  storageState(): Promise<PWStorageState>;
+  close(): Promise<void>;
+}
+
+/** Normalized session surface — a live page plus mode-specific close/persist behavior. */
+export interface SessionSurface {
+  page: PWPage;
+  storageState: () => Promise<PWStorageState>;
+  /** Mode-aware teardown: closes our context/window, or (attach) only the tab. */
+  close: () => Promise<void>;
+}
 interface PWBrowser {
   newPage(): Promise<PWPage>;
+  newContext(opts?: { storageState?: PWStorageState; viewport?: { width: number; height: number } | null }): Promise<PWContext>;
+  contexts(): PWContext[];
   close(): Promise<void>;
   isConnected(): boolean;
 }
 interface PWChromium {
   launch(opts?: { headless?: boolean }): Promise<PWBrowser>;
+  /** Headed, persistent-profile launch — returns a context directly (no separate browser). */
+  launchPersistentContext(userDataDir: string, opts?: { headless?: boolean; channel?: string }): Promise<PWContext>;
+  /** Attach to an already-running Chrome exposing a CDP endpoint (e.g. --remote-debugging-port). */
+  connectOverCDP(endpoint: string): Promise<PWBrowser>;
   executablePath(): string;
 }
 interface PWModule { chromium: PWChromium; }
@@ -85,9 +121,15 @@ export class BrowserPool {
   readonly #limit: number;
   #active = 0;
   readonly #waiters: Array<() => void> = [];
+  /** Headed persistent contexts we launched — closed on shutdown (they own a visible window). */
+  readonly #headedContexts = new Set<PWContext>();
+  /** CDP-attached browsers (user's real Chrome) — NEVER closed by us on shutdown. */
+  readonly #attachedBrowsers = new Set<PWBrowser>();
+  readonly #profilesDir: string;
 
-  constructor(private readonly logger: Logger) {
+  constructor(private readonly logger: Logger, opts?: { profilesDir?: string }) {
     this.#limit = resolveConcurrency();
+    this.#profilesDir = opts?.profilesDir ?? join(process.cwd(), '.agentis', 'browser-profiles');
   }
 
   /** Whether Playwright can be loaded at all (module installed). */
@@ -197,9 +239,151 @@ export class BrowserPool {
   }
 
   async shutdown(): Promise<void> {
+    // Close headed windows we launched…
+    for (const ctx of this.#headedContexts) await ctx.close().catch(() => {});
+    this.#headedContexts.clear();
+    // …but NEVER close a CDP-attached browser — that is the user's real Chrome.
+    this.#attachedBrowsers.clear();
     if (this.#browser) {
       await this.#browser.close().catch(() => {});
       this.#browser = null;
+    }
+  }
+
+  // ── Session-support surface (used by BrowserSessionManager) ────────────────
+  // These expose the pool's SSRF guard + concurrency budget so persistent
+  // sessions reuse the exact same safety logic as one-shot ops instead of
+  // duplicating it. A session holds its own BrowserContext (isolated cookies),
+  // but every Chromium *operation* still runs through `withConcurrencySlot`.
+
+  /**
+   * Create a fresh isolated BrowserContext (own cookies/localStorage) off the
+   * shared headless browser, optionally seeded with a saved `storageState`
+   * ("log in once, reuse"). The caller owns closing the context.
+   */
+  async newSessionContext(opts: { storageState?: PWStorageState; viewport?: { width: number; height: number } } = {}): Promise<PWContext> {
+    await this.ensureReady();
+    const browser = await this.#sharedBrowser();
+    return browser.newContext({
+      ...(opts.storageState ? { storageState: opts.storageState } : {}),
+      ...(opts.viewport ? { viewport: opts.viewport } : {}),
+    });
+  }
+
+  /**
+   * Open a session surface for one of three modes and return a normalized
+   * lifecycle so the session layer never branches on mode internals:
+   *   - `headless` (default): invisible isolated context off the shared browser.
+   *   - `visible`: a REAL, watchable window (persistent Chrome profile) — pops up
+   *     on the machine running the API. Requires a display (local only).
+   *   - `attach`: the user's OWN running Chrome over CDP — real profile + logins,
+   *     seen in their own window. Close touches ONLY the tab we opened.
+   * The page is SSRF-guarded in every mode.
+   */
+  async openSessionSurface(opts: {
+    mode?: 'headless' | 'visible' | 'attach';
+    storageState?: PWStorageState;
+    viewport?: { width: number; height: number };
+    profileName?: string;
+    /** Explicit allow decision for `attach` (resolved from the Settings opt-in). Undefined → fall back to the env master. */
+    allowCdp?: boolean;
+  } = {}): Promise<SessionSurface> {
+    const mode = opts.mode ?? 'headless';
+    if (mode === 'visible') return this.#openVisibleSurface(opts);
+    if (mode === 'attach') return this.#openAttachSurface(opts.allowCdp);
+    // headless (default)
+    const context = await this.newSessionContext({
+      ...(opts.storageState ? { storageState: opts.storageState } : {}),
+      ...(opts.viewport ? { viewport: opts.viewport } : {}),
+    });
+    const page = await context.newPage();
+    await this.guardPage(page);
+    return { page, storageState: () => context.storageState(), close: () => context.close() };
+  }
+
+  async #openVisibleSurface(opts: { profileName?: string; viewport?: { width: number; height: number } }): Promise<SessionSurface> {
+    if (!browserHeadedAllowed()) {
+      throw new AgentisError('BROWSER_OPERATION_FAILED', 'visible browser is disabled (set AGENTIS_BROWSER_ALLOW_HEADED=true; requires a local display)');
+    }
+    await this.ensureReady();
+    const profile = sanitizeProfile(opts.profileName);
+    const dir = join(this.#profilesDir, profile);
+    // Prefer the user's real Chrome for fidelity; fall back to bundled Chromium.
+    const context = await this.#launchPersistent(dir).catch((err) => {
+      throw new AgentisError('BROWSER_OPERATION_FAILED', `could not open a visible browser window: ${(err as Error).message} (a local display is required)`);
+    });
+    this.#headedContexts.add(context);
+    const page = await context.newPage();
+    await this.guardPage(page);
+    const close = async () => { this.#headedContexts.delete(context); await context.close().catch(() => {}); };
+    return { page, storageState: () => context.storageState(), close };
+  }
+
+  async #launchPersistent(dir: string): Promise<PWContext> {
+    await this.#load();
+    try {
+      const ctx = await this.#pw!.chromium.launchPersistentContext(dir, { headless: false, channel: 'chrome' });
+      this.logger.info('browser.session.visible_launched', { channel: 'chrome', dir });
+      return ctx;
+    } catch (err) {
+      // Chrome not installed → bundled Chromium (still a visible window).
+      this.logger.info('browser.session.visible_fallback_chromium', { reason: (err as Error).message });
+      const ctx = await this.#pw!.chromium.launchPersistentContext(dir, { headless: false });
+      this.logger.info('browser.session.visible_launched', { channel: 'chromium', dir });
+      return ctx;
+    }
+  }
+
+  async #openAttachSurface(allowCdpOverride?: boolean): Promise<SessionSurface> {
+    // The Settings opt-in (resolved upstream) wins; absent that, the env master.
+    const allowed = allowCdpOverride ?? browserCdpAllowed();
+    if (!allowed) {
+      throw new AgentisError('BROWSER_OPERATION_FAILED', 'attaching to your real Chrome is disabled — enable it in Settings → Governance ("Let agents control my real Chrome")');
+    }
+    await this.#load();
+    const endpoint = chromeCdpUrl();
+    let browser: PWBrowser;
+    try {
+      browser = await this.#pw!.chromium.connectOverCDP(endpoint);
+    } catch (err) {
+      throw new AgentisError(
+        'BROWSER_OPERATION_FAILED',
+        `could not reach your Chrome at ${endpoint}. Start Chrome once with:  chrome --remote-debugging-port=9222   (${(err as Error).message})`,
+      );
+    }
+    this.#attachedBrowsers.add(browser);
+    // Reuse the user's real default context (their logins/cookies), else make one.
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    const page = await context.newPage();
+    await this.guardPage(page);
+    // CLOSE-SAFETY: only close the tab we opened — never the context or the
+    // user's browser. The CDP client disconnects when the process exits.
+    const close = async () => { await page.close().catch(() => {}); };
+    return { page, storageState: () => context.storageState(), close };
+  }
+
+  /** Apply the SSRF request guard to a session-owned page (same as one-shot ops). */
+  async guardPage(page: PWPage): Promise<void> {
+    return this.#guardNetworkRequests(page);
+  }
+
+  /** Validate + normalize a navigation URL against the SSRF policy. Throws on block. */
+  async resolveSafeNavUrl(raw: string): Promise<string> {
+    const url = await assertSafeUrl(raw, { allowPrivate: browserPrivateNetworkAllowed() });
+    return url.toString();
+  }
+
+  /**
+   * Run a single Chromium operation inside the shared concurrency budget, so a
+   * long-lived session never permanently holds a slot — it acquires one only
+   * for the duration of one primitive, then releases.
+   */
+  async withConcurrencySlot<T>(fn: () => Promise<T>): Promise<T> {
+    await this.#acquire();
+    try {
+      return await fn();
+    } finally {
+      this.#release();
     }
   }
 
@@ -394,6 +578,27 @@ function resolveConcurrency(): number {
 
 function browserPrivateNetworkAllowed(): boolean {
   return String(process.env.AGENTIS_BROWSER_ALLOW_PRIVATE ?? '').toLowerCase() === 'true';
+}
+
+/** Visible (headed) windows are allowed by default; only meaningful on a machine with a display. */
+function browserHeadedAllowed(): boolean {
+  return String(process.env.AGENTIS_BROWSER_ALLOW_HEADED ?? 'true').toLowerCase() !== 'false';
+}
+
+/** Attaching to the user's real Chrome (CDP) is OFF by default — it lets the agent act as logged-in you. */
+function browserCdpAllowed(): boolean {
+  return String(process.env.AGENTIS_BROWSER_ALLOW_CDP ?? '').toLowerCase() === 'true';
+}
+
+function chromeCdpUrl(): string {
+  const raw = String(process.env.AGENTIS_CHROME_CDP_URL ?? '').trim();
+  return raw || 'http://localhost:9222';
+}
+
+/** A safe on-disk profile folder name (no traversal / separators). */
+function sanitizeProfile(name?: string): string {
+  const base = (name ?? 'default').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return base.slice(0, 48) || 'default';
 }
 
 /** Resolve the Playwright CLI entrypoint for the on-demand install. */

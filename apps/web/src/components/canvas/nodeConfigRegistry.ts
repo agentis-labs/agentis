@@ -30,6 +30,8 @@
   /** Logo id (one of the bundled connector logos) or absolute URL. */
   icon?: string;
   docsUrl?: string;
+  /** One line telling the operator exactly where to get this credential. */
+  authHint?: string;
 }
 
 export interface NodeReadiness {

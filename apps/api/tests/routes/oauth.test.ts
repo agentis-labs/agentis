@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { CredentialVault } from '../../src/services/credentialVault.js';
+import { OAuthAppCredentialStore } from '../../src/services/oauthAppCredentialStore.js';
 import { OAuthService } from '../../src/services/oauthService.js';
 import { buildOAuthRoutes } from '../../src/routes/oauth.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -29,7 +30,11 @@ function tokenFetch(): typeof fetch {
 function appWith(oauth: OAuthService) {
   return ctx.buildApp([{
     path: '/v1/oauth',
-    app: buildOAuthRoutes({ db: ctx.db, auth: ctx.auth, vault, oauth, allowedOrigins: ['http://localhost:5173'] }),
+    app: buildOAuthRoutes({
+      db: ctx.db, auth: ctx.auth, vault, oauth,
+      oauthAppCredentials: new OAuthAppCredentialStore(ctx.db, vault),
+      allowedOrigins: ['http://localhost:5173'],
+    }),
   }]);
 }
 
@@ -214,5 +219,62 @@ describe('/v1/oauth', () => {
     const tokens = JSON.parse(vault.decrypt(cred!.encryptedValue)) as { accessToken: string; refreshToken: string };
     expect(tokens.accessToken).toBe('proxy-at');
     expect(tokens.refreshToken).toBe('proxy-rt');
+  });
+
+  describe('BYOC app credentials (no restart)', () => {
+    it('lets an operator paste OAuth app credentials and use them immediately — no env var needed', async () => {
+      const oauth = new OAuthService({ baseUrl: 'http://localhost:8787', clients: {} });
+      const a = appWith(oauth);
+
+      const before = await a.request('/v1/oauth/app-credentials', { headers: ctx.authHeaders });
+      const beforeBody = await before.json() as { providers: Array<{ id: string; source: string }> };
+      expect(beforeBody.providers.find((p) => p.id === 'google')).toMatchObject({ source: 'none' });
+
+      const put = await a.request('/v1/oauth/app-credentials/google', {
+        method: 'PUT', headers: ctx.authHeaders,
+        body: JSON.stringify({ clientId: 'db-gid', clientSecret: 'db-gsec' }),
+      });
+      expect(put.status).toBe(200);
+
+      const after = await a.request('/v1/oauth/app-credentials', { headers: ctx.authHeaders });
+      const afterBody = await after.json() as { providers: Array<{ id: string; source: string }> };
+      expect(afterBody.providers.find((p) => p.id === 'google')).toMatchObject({ source: 'db' });
+
+      // No OAUTH_GOOGLE_CLIENT_ID set anywhere — this must come from the DB-backed store.
+      const auth = await a.request('/v1/oauth/google/authorize', {
+        method: 'POST', headers: ctx.authHeaders,
+        body: JSON.stringify({ integrationSlug: 'gmail', origin: 'http://localhost:5173' }),
+      });
+      expect(auth.status).toBe(200);
+      const { url } = await auth.json() as { url: string };
+      expect(new URL(url).searchParams.get('client_id')).toBe('db-gid');
+
+      const del = await a.request('/v1/oauth/app-credentials/google', { method: 'DELETE', headers: ctx.authHeaders });
+      expect(del.status).toBe(200);
+      const afterDelete = await a.request('/v1/oauth/app-credentials', { headers: ctx.authHeaders });
+      const afterDeleteBody = await afterDelete.json() as { providers: Array<{ id: string; source: string }> };
+      expect(afterDeleteBody.providers.find((p) => p.id === 'google')).toMatchObject({ source: 'none' });
+    });
+
+    it('lets an env var override a DB-stored credential', async () => {
+      const oauth = new OAuthService({ baseUrl: 'http://localhost:8787', clients: { google: { clientId: 'env-gid', clientSecret: 'env-gsec' } } });
+      const a = appWith(oauth);
+
+      await a.request('/v1/oauth/app-credentials/google', {
+        method: 'PUT', headers: ctx.authHeaders,
+        body: JSON.stringify({ clientId: 'db-gid', clientSecret: 'db-gsec' }),
+      });
+
+      const list = await a.request('/v1/oauth/app-credentials', { headers: ctx.authHeaders });
+      const listBody = await list.json() as { providers: Array<{ id: string; source: string }> };
+      expect(listBody.providers.find((p) => p.id === 'google')).toMatchObject({ source: 'env' });
+
+      const auth = await a.request('/v1/oauth/google/authorize', {
+        method: 'POST', headers: ctx.authHeaders,
+        body: JSON.stringify({ integrationSlug: 'gmail', origin: 'http://localhost:5173' }),
+      });
+      const { url } = await auth.json() as { url: string };
+      expect(new URL(url).searchParams.get('client_id')).toBe('env-gid');
+    });
   });
 });

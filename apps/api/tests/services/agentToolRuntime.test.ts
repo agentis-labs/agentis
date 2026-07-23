@@ -142,4 +142,40 @@ describe('AgentToolRuntime', () => {
     });
   });
 
+  it('browser_session reports unavailable when the manager is not wired', async () => {
+    const runtime = new AgentToolRuntime({ volume });
+    const res = await runtime.execute(WS, 'browser_session', { action: 'open', sessionId: 's' }, undefined, { runId: 'run-1' });
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/not wired|unavailable/i);
+  });
+
+  it('browser_session forwards to the manager with a run-scoped owner', async () => {
+    const opened: Array<Record<string, unknown>> = [];
+    const fakeSession = { navigate: async (url: string) => ({ snapshot: { url, title: 'T', text: 'body' } }) };
+    const manager = {
+      openSession: async (req: Record<string, unknown>) => { opened.push(req); return fakeSession; },
+    };
+    const runtime = new AgentToolRuntime({ volume, browserSessions: manager as never });
+
+    const res = await runtime.execute(
+      WS,
+      'browser_session',
+      { action: 'open', sessionId: 'login', url: 'https://example.com' },
+      undefined,
+      { runId: 'run-42', agentId: 'agent-1' },
+    );
+
+    expect(res.ok).toBe(true);
+    expect(res.result).toMatchObject({ opened: true, sessionId: 'login', snapshot: { url: 'https://example.com' } });
+    expect(opened[0]).toMatchObject({ workspaceId: WS, owner: { kind: 'run', id: 'run-42' }, sessionId: 'login' });
+  });
+
+  it('browser_session requires a run or agent context to scope the session', async () => {
+    const manager = { openSession: async () => ({}) };
+    const runtime = new AgentToolRuntime({ volume, browserSessions: manager as never });
+    const res = await runtime.execute(WS, 'browser_session', { action: 'open', sessionId: 's' }, undefined, {});
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/run or agent context/i);
+  });
+
 });

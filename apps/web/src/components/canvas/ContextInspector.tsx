@@ -1,6 +1,7 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
-import { Check, Code2, LayoutTemplate, Search, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Code2, ExternalLink, HelpCircle, LayoutTemplate, Search, Settings2 } from 'lucide-react';
 import clsx from 'clsx';
+import * as Collapsible from '@radix-ui/react-collapsible';
 import { api } from '../../lib/api';
 import { ExtensionCombobox } from './ExtensionCombobox';
 import { SchemaDrivenFields } from './genericSchemaForm';
@@ -643,6 +644,11 @@ function credentialFieldPlaceholder(serviceName: string, field: string): string 
     .replace(/[_-]+/g, ' ')
     .replace(/^./, (char) => char.toUpperCase());
   return `${serviceName ? `${serviceName} ` : ''}${label}`.trim();
+}
+
+/** Fallback for the rare manifest without an authored `authHint`. */
+function authHintFor(manifest: { name: string; authHint?: string }): string {
+  return manifest.authHint ?? `Check ${manifest.name}'s account or developer settings for an API key or access token.`;
 }
 
 // ─── Per-kind forms ────────────────────────────────────────────────────────
@@ -1611,7 +1617,7 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
     if (!provider) return;
     setOauthError(null);
     if (provider.configured === false) {
-      setOauthError(`${provider.label} sign-in isn't enabled on this server yet. Enable AGENTIS_OAUTH_PROXY_URL or set OAUTH_${provider.id.toUpperCase()}_CLIENT_ID and OAUTH_${provider.id.toUpperCase()}_CLIENT_SECRET, then restart.`);
+      setOauthError(`${provider.label} sign-in isn't set up on this server yet — open Settings → Integrations to paste your own OAuth app's Client ID/Secret.`);
       return;
     }
     setConnecting(true);
@@ -1700,25 +1706,29 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
       ) : (
         <div className="mb-3 rounded-input border border-warn/50 bg-warn/10 p-2.5">
           <div className="text-[11px] font-semibold text-warn">Connect {manifest?.name ?? 'this service'}</div>
-          {isOAuth ? (
-            // OAuth-only service: always offer the sign-in button (never an API key).
+          {isOAuth && provider?.configured !== false ? (
+            // OAuth-only service, already set up on this instance: offer the sign-in button directly.
             <>
               <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
-                {provider?.configured === false
-                  ? `Sign-in for ${provider.label} isn't enabled on this server yet.`
-                  : `Sign in to connect your account — Agentis handles the rest. Nothing is stored on the node.`}
+                Sign in to connect your account — Agentis handles the rest. Nothing is stored on the node.
               </p>
               <button type="button" onClick={connectOAuth} disabled={connecting} className="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-btn border border-accent/40 bg-accent-soft text-[12px] font-semibold text-accent hover:bg-accent/20 disabled:opacity-50">
                 {connecting ? 'Connecting…' : `Sign in with ${provider?.label ?? manifest?.name ?? 'OAuth'}`}
               </button>
               {oauthError && <p className="mt-2 text-[10px] leading-relaxed text-danger">{oauthError}</p>}
             </>
+          ) : isOAuth ? (
+            // Provider not set up on this instance yet — BYOC: paste your own OAuth
+            // app's client id/secret in Settings → Integrations, no restart needed.
+            <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
+              {provider ? `${provider.label} sign-in needs your own OAuth app set up first.` : 'This service needs OAuth set up first.'} Open Settings → Integrations to paste your Client ID/Secret.
+            </p>
           ) : (
             <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
               Connect this service once in Settings. Saved workspace credentials are encrypted and reused by every workflow.
             </p>
           )}
-          {!isOAuth && (
+          {(!isOAuth || provider?.configured === false) && (
             <button
               onClick={() => setSettingsOpen(true, 'integrations')}
               className="mt-2 inline-flex h-8 w-full items-center justify-center rounded-btn border border-line bg-surface px-2 text-[11px] font-semibold text-text-secondary hover:border-accent/50 hover:text-text-primary"
@@ -1736,6 +1746,27 @@ function IntegrationForm({ data, update, upstream: _upstream, credentials, oauth
                 </button>
               ))}
             </div>
+          )}
+          {!isOAuth && manifest && (
+            <Collapsible.Root className="mt-2 overflow-hidden rounded-input border border-line bg-surface">
+              <Collapsible.Trigger asChild>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-1.5 px-2 py-1.5 text-left text-[10px] font-medium text-text-secondary hover:text-text-primary"
+                >
+                  <span className="inline-flex items-center gap-1"><HelpCircle size={11} /> How do I get this?</span>
+                  <ChevronDown size={11} className="transition-transform data-[state=open]:rotate-180" />
+                </button>
+              </Collapsible.Trigger>
+              <Collapsible.Content className="border-t border-line px-2 py-1.5 text-[10px] leading-relaxed text-text-muted">
+                <p>{authHintFor(manifest)}</p>
+                {manifest.docsUrl && (
+                  <a href={manifest.docsUrl} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-accent hover:underline">
+                    Full docs <ExternalLink size={9} />
+                  </a>
+                )}
+              </Collapsible.Content>
+            </Collapsible.Root>
           )}
           {!isOAuth && (
             <div className="mt-2 border-t border-line/70 pt-2">

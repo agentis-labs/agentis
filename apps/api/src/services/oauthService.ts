@@ -48,16 +48,27 @@ const PROVIDER_DEFS: Record<OAuthProviderId, ProviderDef> = {
     // `brain_google_drive` is the Workspace Brain read-sync slug (RFC §7.6) —
     // distinct from the workflow `google_drive` connector so it can request
     // read-only access to existing files instead of drive.file.
-    slugs: ['gmail', 'google_sheets', 'google_calendar', 'google_drive', 'sheets', 'calendar', 'gdrive', 'google', 'brain_google_drive'],
+    slugs: [
+      'gmail', 'google_sheets', 'google_calendar', 'google_drive', 'sheets', 'calendar', 'gdrive', 'google', 'brain_google_drive',
+      // Rest of the Google product family — same registered OAuth app, just more scopes.
+      'google_docs', 'google_forms', 'google_analytics', 'bigquery', 'pubsub', 'youtube', 'google_meet',
+    ],
     scopeSeparator: ' ',
     authParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
     scopesForSlug: (slug) => {
       const base = ['openid', 'email'];
       if (slug === 'gmail') return [...base, 'https://www.googleapis.com/auth/gmail.send'];
       if (slug === 'google_sheets' || slug === 'sheets') return [...base, 'https://www.googleapis.com/auth/spreadsheets'];
-      if (slug === 'google_calendar' || slug === 'calendar') return [...base, 'https://www.googleapis.com/auth/calendar.events'];
+      // Meet links are created through Calendar conference data — no separate Meet scope.
+      if (slug === 'google_calendar' || slug === 'calendar' || slug === 'google_meet') return [...base, 'https://www.googleapis.com/auth/calendar.events'];
       if (slug === 'brain_google_drive') return [...base, 'https://www.googleapis.com/auth/drive.readonly'];
       if (slug === 'google_drive' || slug === 'gdrive') return [...base, 'https://www.googleapis.com/auth/drive.file'];
+      if (slug === 'google_docs') return [...base, 'https://www.googleapis.com/auth/documents'];
+      if (slug === 'google_forms') return [...base, 'https://www.googleapis.com/auth/forms.body', 'https://www.googleapis.com/auth/forms.responses.readonly'];
+      if (slug === 'google_analytics') return [...base, 'https://www.googleapis.com/auth/analytics.readonly'];
+      if (slug === 'bigquery') return [...base, 'https://www.googleapis.com/auth/bigquery'];
+      if (slug === 'pubsub') return [...base, 'https://www.googleapis.com/auth/pubsub'];
+      if (slug === 'youtube') return [...base, 'https://www.googleapis.com/auth/youtube'];
       return [...base, 'https://www.googleapis.com/auth/userinfo.profile'];
     },
   },
@@ -153,9 +164,32 @@ export interface OAuthServiceOptions {
 export class OAuthService {
   readonly #fetch: typeof fetch;
   readonly #states = new Map<string, StateEntry>();
+  /**
+   * BYOC credentials pasted into Settings → Integrations (see
+   * OAuthAppCredentialStore) instead of env vars. Hydrated at boot and kept
+   * live by the app-credentials routes — no restart needed to pick up a
+   * change. `opts.clients` (env vars) still wins when both are set, so an
+   * operator's deployment-level config can't be silently overridden by a
+   * value pasted into the UI.
+   */
+  readonly #dbClients = new Map<OAuthProviderId, { clientId: string; clientSecret: string }>();
 
   constructor(private readonly opts: OAuthServiceOptions) {
     this.#fetch = opts.fetchImpl ?? fetch;
+  }
+
+  setDbClient(provider: OAuthProviderId, credential: { clientId: string; clientSecret: string }): void {
+    this.#dbClients.set(provider, credential);
+  }
+
+  clearDbClient(provider: OAuthProviderId): void {
+    this.#dbClients.delete(provider);
+  }
+
+  /** Whether an env var (not a DB-pasted credential) configures this provider — env always wins. */
+  hasEnvClient(provider: OAuthProviderId): boolean {
+    const c = this.opts.clients[provider];
+    return !!(c && c.clientId && c.clientSecret);
   }
 
   /** Providers that are actually configured (client id + secret present). */
@@ -281,7 +315,8 @@ export class OAuthService {
 
   #client(provider: OAuthProviderId): { clientId: string; clientSecret: string } | null {
     const c = this.opts.clients[provider];
-    return c && c.clientId && c.clientSecret ? c : null;
+    if (c && c.clientId && c.clientSecret) return c;
+    return this.#dbClients.get(provider) ?? null;
   }
 
   #proxyUrl(): string | null {

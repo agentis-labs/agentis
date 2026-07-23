@@ -16,6 +16,9 @@ import type { WorkflowStoreService } from '../workflow/workflowStore.js';
 import type { AgentMemoryService } from './agentMemory.js';
 import type { MemoryStore } from '../memory/memoryStore.js';
 import type { BrowserPool, BrowserRenderOptions } from '../browserPool.js';
+import type { BrowserSessionManager } from '../browser/browserSessionManager.js';
+import { runBrowserSessionAction } from '../browser/browserSessionActions.js';
+import { makeUploadMaterializer } from '../browser/uploadMaterializer.js';
 import type { ArtifactService } from '../artifactService.js';
 import type { McpToolBridge, BridgedToolSpec } from '../mcp/mcpToolBridge.js';
 import type { Logger } from '../../logger.js';
@@ -37,6 +40,8 @@ export interface AgentToolContext {
   appId?: string;
   /** The concrete workflow run this tool call belongs to. */
   runId?: string;
+  /** Owning user, when known — provenance for saved browser auth profiles. */
+  userId?: string;
   /** Per-task asset retention policy. Defaults to intentional-only persistence. */
   artifactPolicy?: ArtifactRetentionPolicy | null;
   /**
@@ -65,6 +70,8 @@ export interface AgentToolRuntimeDeps {
   webSearch?: (query: string) => Promise<unknown>;
   /** Headless Chromium pool — backs the `browser_*` tools. Absent → tools report unavailable. */
   browser?: BrowserPool;
+  /** Persistent browser sessions — backs the stateful `browser_session` tool. Absent → tool reports unavailable. */
+  browserSessions?: BrowserSessionManager;
   /** Artifact persistence — screenshots become referenceable artifacts for channel send. */
   artifacts?: ArtifactService;
   /** External MCP tool bridge — backs dynamic `mcp__*` tools (computer-use, browser, …). */
@@ -378,6 +385,26 @@ export class AgentToolRuntime {
         if (typeof args.submitSelector === 'string') opts.submitSelector = args.submitSelector;
         const r = await browser.fillForm(opts);
         return { title: r.title, values: r.values, html: r.html.slice(0, 200_000) };
+      }
+      case 'browser_session': {
+        if (!this.deps.browserSessions) {
+          throw new AgentisError('VALIDATION_FAILED', 'persistent browser sessions are not wired (Playwright unavailable)');
+        }
+        const owner = context.runId
+          ? { kind: 'run' as const, id: context.runId }
+          : context.agentId
+            ? { kind: 'agent' as const, id: context.agentId }
+            : null;
+        if (!owner) {
+          throw new AgentisError('VALIDATION_FAILED', 'browser_session requires a run or agent context to scope the session');
+        }
+        return runBrowserSessionAction(args, {
+          manager: this.deps.browserSessions,
+          workspaceId,
+          userId: context.userId ?? null,
+          owner,
+          ...(this.deps.artifacts ? { materializeUploads: makeUploadMaterializer(this.deps.artifacts, workspaceId) } : {}),
+        });
       }
 
       // ── AG-UI: author Agentic App surfaces (§4) ──

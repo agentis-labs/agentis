@@ -1345,10 +1345,10 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     return c.json({ data: deps.learning.recentLearnings(ws.workspaceId, appId) });
   });
 
-  // Evolution Loop — Mission Control: the App's Goal, its competing strategies +
+  // Evolution Loop — the Goal dashboard: the App's Goal, its competing strategies +
   // measured stats, live experiments, performance baselines, and the controller's
   // current promote/retire/spawn recommendations. Computed on-demand from state.
-  app.get('/:id/mission-control', (c) => {
+  app.get('/:id/goal', (c) => {
     const ws = getWorkspace(c);
     const appId = c.req.param('id');
     const appRec = store.get(ws.workspaceId, appId); // authorize + 404 in-workspace

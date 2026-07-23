@@ -92,6 +92,8 @@ export interface OutboundAttachmentRef {
   mimeType?: string;
   /** Hint how to deliver; inferred from the resolved MIME type when omitted. */
   kind?: OutboundMediaKind;
+  /** When set with no url/artifactId, the text is synthesized to a spoken voice note (kind:"voice"). */
+  text?: string;
   /** Per-attachment caption. */
   caption?: string;
   seconds?: number;

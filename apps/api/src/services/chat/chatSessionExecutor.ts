@@ -12,6 +12,7 @@ import { scanForInjection, wrapUntrusted } from '../security/promptInjection.js'
 import { buildOrchestratorSystemPrompt, responseProfileForChannel } from '../orchestrator/orchestratorPrompt.js';
 import { agentIdentityChecksum, chatSessionKeyWithIdentity, loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../agent/agentIdentity.js';
 import type { WorkspaceAwarenessService } from '../workspace/workspaceAwarenessService.js';
+import { BrowserSessionManager, resolveSessionOwner, renderOpenSessionsBlock } from '../browser/browserSessionManager.js';
 import type { OrchestratorModelRouter } from '../orchestrator/orchestratorModelRouter.js';
 import type { ModelRoutingDecision } from '../modelRoutingPolicy.js';
 import { recordToolCall, recordTurn } from './chatMetrics.js';
@@ -68,6 +69,8 @@ export interface ChatSessionExecutorDeps {
   knowledgeBases?: KnowledgeBaseService;
   brainDiscourse?: BrainDiscourseService;
   awareness?: WorkspaceAwarenessService;
+  /** Live browser sessions — surfaced each turn so the agent continues an open session instead of restarting. */
+  browserSessions?: BrowserSessionManager;
   /**
    * Reach + comprehension (AUTONOMOUS-ORCHESTRATOR-COMMAND-MODEL). The capability
    * index provides a constant-size CAPABILITY MANIFEST (know-of-everything without
@@ -685,6 +688,19 @@ export class ChatSessionExecutor {
         situationalModel = this.#deps.awareness.buildContextBlock(ctx.workspaceId) || null;
       } catch (err) {
         this.#deps.logger?.warn?.('chat.awareness.failed', { workspaceId: ctx.workspaceId, err: (err as Error).message });
+      }
+    }
+    // Live browser-session awareness (applies to web AND channel turns): if the
+    // agent has an open session, tell it to CONTINUE that session and read the
+    // current page — the fix for restarting a task from scratch mid-automation.
+    if (this.#deps.browserSessions) {
+      try {
+        const owner = resolveSessionOwner({ conversationId: ctx.conversationId, agentId: ctx.agentId });
+        const open = owner ? this.#deps.browserSessions.listForOwner(ctx.workspaceId, owner) : [];
+        const block = renderOpenSessionsBlock(open);
+        if (block) situationalModel = [situationalModel, block].filter(Boolean).join('\n\n');
+      } catch (err) {
+        this.#deps.logger?.warn?.('chat.browser_awareness.failed', { workspaceId: ctx.workspaceId, err: (err as Error).message });
       }
     }
     const responseProfile = channelContext ? responseProfileForChannel(channelContext.kind) : null;

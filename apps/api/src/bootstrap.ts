@@ -75,6 +75,7 @@ import { CapabilityIndex } from './services/capability/capabilityIndex.js';
 import { CommandModelService } from './services/command/commandModel.js';
 import { CommandHeartbeat, isWorkspaceAutonomyEnabled } from './services/command/commandHeartbeat.js';
 import { TranscriptionService } from './services/transcriptionService.js';
+import { SpeechService } from './services/speechService.js';
 import { VisionService } from './services/visionService.js';
 import { DocumentExtractionService } from './services/documentExtractionService.js';
 import { ChannelIdentityService } from './services/conversation/channelIdentityService.js';
@@ -477,6 +478,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     specialistProfiles,
     appStores,
     browserPool,
+    browserSessionManager,
     artifactService,
     assetStore,
     mcpAllowPrivate,
@@ -759,6 +761,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     vault: credentialVault,
     workspaceIntelligence,
     browserPool,
+    browserSessions: browserSessionManager,
     specialists: specialistAgents,
     specialistProfiles,
     specialistRuntime,
@@ -1112,6 +1115,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     plans: planService,
     channels: channelBridge,
     browserPool,
+    browserSessions: browserSessionManager,
     artifacts: artifactService,
     assetStore,
     mcpBridge: mcpToolBridge,
@@ -1297,6 +1301,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     knowledgeBases: knowledgeBaseService,
     brainDiscourse,
     awareness: workspaceAwareness,
+    browserSessions: browserSessionManager,
     capabilityIndex,
     commandModel,
     audit: auditTrail,
@@ -1495,7 +1500,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   scheduler.registerSweep('abandoned_contacts', 3_600_000, async (now) => (await appLearning.sweepAbandoned(now.toISOString())).swept);
   // Evolution Loop cadence — periodically review each App's strategies. ACT (auto
   // promote winners + retire losers) is operator-gated via AGENTIS_EVOLUTION_AUTONOMY;
-  // otherwise it only evaluates (proposals are read live via Mission Control).
+  // otherwise it only evaluates (proposals are read live via the Goal dashboard).
   scheduler.registerSweep('evolution_loop', 6 * 3_600_000, async () => {
     const mode = process.env.AGENTIS_EVOLUTION_AUTONOMY === 'true' ? 'act' : 'surface';
     return (await strategyEvolution.sweep(mode)).applied;
@@ -1623,6 +1628,14 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     profile: () => orchestratorModelRouter.profile('vision'),
     logger,
   });
+  // Text-to-speech (voice notes) — uses the model router's `speech` role. The
+  // voice model emits Opus directly, so an agent can send a spoken reply by
+  // passing `{ kind:"voice", text }` with no encoding. No-op when unconfigured.
+  const speech = new SpeechService({
+    profile: () => orchestratorModelRouter.profile('speech'),
+    logger,
+  });
+  channelBridge.setSpeech(speech);
   specialistVision = vision;
   // Document (PDF / text) extraction for inbound channel attachments.
   const documentExtraction = new DocumentExtractionService({ logger });
@@ -1638,8 +1651,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     dataDir: env.AGENTIS_DATA_DIR,
     hasPublicWebhookUrl: () => Boolean(env.AGENTIS_PUBLIC_URL),
     dispatcher: channelTurnDispatcher,
-    ...(transcription.enabled ? { transcribeAudio: (bytes, mime) => transcription.transcribe({ bytes, mimeType: mime }) } : {}),
-    ...(vision.enabled ? { describeImage: (bytes, mime, caption) => vision.describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }) } : {}),
+    // Always wired — these services return null when no model is configured, so
+    // inbound voice/image understanding activates the moment a capable model is
+    // set (Settings → Runtimes → transcription/vision role), with no toggle and
+    // no restart. Zero cost when unconfigured (no network call).
+    transcribeAudio: (bytes, mime) => transcription.transcribe({ bytes, mimeType: mime }),
+    describeImage: (bytes, mime, caption) => vision.describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }),
     extractDocument: (bytes, mime, fileName) => documentExtraction.extract({ bytes, mimeType: mime, ...(fileName ? { fileName } : {}) }),
   });
   channelBridge.setPersistentTransport(channelSupervisor);
@@ -1952,6 +1969,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       orchestratorBridge.stop();
       channelBridge.shutdown();
       await channelSupervisor.shutdown().catch((err) => logger.warn('agentis.shutdown.channel_supervisor', { err: (err as Error).message }));
+      await browserSessionManager.shutdown().catch((err) => logger.warn('agentis.shutdown.browser_sessions', { err: (err as Error).message }));
       await browserPool.shutdown().catch((err) => logger.warn('agentis.shutdown.browser', { err: (err as Error).message }));
       await registry.shutdown().catch((err) => logger.warn('agentis.shutdown.registry', { err: (err as Error).message }));
       for (const reg of adapters.list()) {

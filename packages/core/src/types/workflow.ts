@@ -1110,7 +1110,14 @@ export interface BrowserNodeConfig {
     | 'navigate'        // load a URL, return { title, text, html }
     | 'extract_text'    // load a URL/html, return visible text under selector
     | 'fill_form'       // fill fields by selector, optionally submit
-    | 'extract_table';  // extract a <table> into row objects
+    | 'extract_table'   // extract a <table> into row objects
+    | 'session';        // drive a PERSISTENT run-scoped session (stateful multi-step / login)
+  /** For `session`: the session action (open|navigate|click|fill|type|press|select_option|hover|scroll|wait_for|get|save_auth|close). */
+  sessionAction?: string;
+  /** For `session`: names the persistent session; the same id across nodes/runs reuses the live page. */
+  sessionId?: string;
+  /** For `session`: extra args forwarded to the action (e.g. { value, text, key, restoreAuth, authName }). Supports `{{variable}}`. */
+  sessionArgs?: Record<string, unknown>;
   /** Target URL. Supports `{{variable}}` interpolation. */
   url?: string;
   /** Inline HTML to render (serve_html / screenshot / pdf). Supports templates. */

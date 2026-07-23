@@ -19,6 +19,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { CredentialVault } from '../services/credentialVault.js';
+import type { OAuthAppCredentialStore } from '../services/oauthAppCredentialStore.js';
 import { OAUTH_PROVIDER_IDS, providerForSlug, type OAuthService, type OAuthProviderId } from '../services/oauthService.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
@@ -26,6 +27,11 @@ import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 const authorizeSchema = z.object({
   integrationSlug: z.string().min(1).max(60),
   origin: z.string().url().optional(),
+});
+
+const appCredentialSchema = z.object({
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
 });
 
 const proxyCallbackSchema = z.object({
@@ -55,6 +61,7 @@ export function buildOAuthRoutes(deps: {
   auth: AuthService;
   vault: CredentialVault;
   oauth: OAuthService;
+  oauthAppCredentials: OAuthAppCredentialStore;
   allowedOrigins: readonly string[];
 }) {
   const app = new Hono();
@@ -64,6 +71,37 @@ export function buildOAuthRoutes(deps: {
   // ones) so the canvas can render the right OAuth affordance for an OAuth-only
   // service even before the operator sets client credentials.
   app.get('/providers', ...authed, (c) => c.json({ providers: deps.oauth.allProviders() }));
+
+  // BYOC — an operator pastes their own OAuth app's client id/secret here
+  // instead of editing OAUTH_<PROVIDER>_CLIENT_ID/SECRET env vars and
+  // restarting. Instance-wide (see OAuthAppCredentialStore), gated by the
+  // same requireAuth/requireWorkspace as everything else — this codebase has
+  // no separate admin role, every authenticated user is already treated as
+  // the instance operator (Governance, API Keys, etc. work the same way).
+  app.get('/app-credentials', ...authed, (c) => {
+    const stored = deps.oauthAppCredentials.list();
+    // Env always wins (see OAuthService#client) — reflect that precedence here too.
+    const providers = OAUTH_PROVIDER_IDS.map((id) => ({
+      id,
+      source: deps.oauth.hasEnvClient(id) ? 'env' as const : stored[id] ? 'db' as const : 'none' as const,
+    }));
+    return c.json({ providers });
+  });
+
+  app.put('/app-credentials/:provider', ...authed, async (c) => {
+    const provider = asProvider(c.req.param('provider'));
+    const body = appCredentialSchema.parse(await c.req.json().catch(() => ({})));
+    deps.oauthAppCredentials.set(provider, body);
+    deps.oauth.setDbClient(provider, body);
+    return c.json({ ok: true });
+  });
+
+  app.delete('/app-credentials/:provider', ...authed, (c) => {
+    const provider = asProvider(c.req.param('provider'));
+    deps.oauthAppCredentials.delete(provider);
+    deps.oauth.clearDbClient(provider);
+    return c.json({ ok: true });
+  });
 
   app.post('/:provider/authorize', ...authed, async (c) => {
     const ws = getWorkspace(c);

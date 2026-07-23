@@ -14,12 +14,20 @@ import { Hono } from 'hono';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
+import {
+  disableAutostart,
+  enableAutostart,
+  getAutostartStatus,
+  type AutostartTarget,
+} from '../services/system/autostartService.js';
 
 export interface SystemRoutesDeps {
   db: AgentisSqliteDb;
   auth: AuthService;
   /** Installed npm package version (from the CLI), or undefined when run from source. */
   currentVersion?: string;
+  /** "Launch Agentis at login" target for this host, built once at boot. */
+  autostartTarget: AutostartTarget;
 }
 
 /** The published npm package + GitHub home for the platform. */
@@ -98,6 +106,36 @@ export function buildSystemRoutes(deps: SystemRoutesDeps) {
       installCommand: `npm install -g ${NPM_PACKAGE_NAME}@latest`,
       github: GITHUB_URL,
       checkedAt: new Date(cache?.fetchedAt ?? Date.now()).toISOString(),
+    });
+  });
+
+  app.get('/autostart', (c) => {
+    const target = deps.autostartTarget;
+    return c.json({
+      supported: target.supported,
+      enabled: getAutostartStatus(target),
+      platform: target.platform,
+      reason: target.reason,
+    });
+  });
+
+  app.post('/autostart', async (c) => {
+    const target = deps.autostartTarget;
+    const body = await c.req.json().catch(() => ({}));
+    const wantEnabled = (body as { enabled?: unknown }).enabled;
+    if (typeof wantEnabled !== 'boolean') {
+      return c.json({ error: 'enabled must be a boolean' }, 400);
+    }
+    if (wantEnabled && !target.supported) {
+      return c.json({ error: target.reason ?? 'Autostart is not supported on this host.' }, 400);
+    }
+    if (wantEnabled) await enableAutostart(target);
+    else await disableAutostart(target);
+    return c.json({
+      supported: target.supported,
+      enabled: getAutostartStatus(target),
+      platform: target.platform,
+      reason: target.reason,
     });
   });
 

@@ -6,7 +6,7 @@
  */
 
 import type { Context, MiddlewareHandler } from 'hono';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, or, gt } from 'drizzle-orm';
 import { AgentisError, type AuthenticatedUser } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -38,9 +38,10 @@ export function requireAuth(deps: { db: AgentisSqliteDb; auth: AuthService }): M
           eq(schema.apiKeys.workspaceId, workspaceId),
           eq(schema.apiKeys.keyHash, hashApiKey(token)),
           isNull(schema.apiKeys.revokedAt),
+          or(isNull(schema.apiKeys.expiresAt), gt(schema.apiKeys.expiresAt, new Date().toISOString())),
         ))
         .get();
-      if (!key) throw new AgentisError('AUTH_TOKEN_INVALID', 'Invalid API key');
+      if (!key) throw new AgentisError('AUTH_TOKEN_INVALID', 'Invalid or expired API key');
       userId = key.userId;
       deps.db.update(schema.apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(eq(schema.apiKeys.id, key.id)).run();
     }

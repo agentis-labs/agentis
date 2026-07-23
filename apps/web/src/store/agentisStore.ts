@@ -41,7 +41,7 @@ export interface ActiveRunSummary {
   startedAt: string;
 }
 
-export type SettingsTab = 'profile' | 'data' | 'workspace' | 'channels' | 'mcp' | 'integrations' | 'security' | 'budget' | 'runtimes' | 'governance';
+export type SettingsTab = 'profile' | 'data' | 'workspace' | 'channels' | 'mcp' | 'integrations' | 'apiKeys' | 'budget' | 'runtimes' | 'governance';
 
 export interface AgentisStore {
   // Workspace + ambient context

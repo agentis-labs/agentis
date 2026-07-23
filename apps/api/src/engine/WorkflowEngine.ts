@@ -143,6 +143,7 @@ import { parseGeneric } from '../services/evaluatorRuntime.js';
 import type { CredentialVault } from '../services/credentialVault.js';
 import type { WorkspaceIntelligenceService } from '../services/workspace/workspaceIntelligence.js';
 import type { BrowserPool } from '../services/browserPool.js';
+import type { BrowserSessionManager } from '../services/browser/browserSessionManager.js';
 import type { SpecialistAgentService } from '../services/specialist/specialistAgents.js';
 import { resolveResponsibleSpecialist } from '../services/responsibleSpecialist.js';
 import type { SpecialistProfileService } from '../services/specialist/specialistProfileService.js';
@@ -256,6 +257,8 @@ export interface EngineDeps {
   workspaceIntelligence?: WorkspaceIntelligenceService;
   /** Native Playwright runtime — required for `browser` nodes. */
   browserPool?: BrowserPool;
+  /** Persistent browser sessions — closed per run at settle so no session outlives its run. */
+  browserSessions?: BrowserSessionManager;
   /** Specialist agent library — resolves `agent_task.agentRole` → agentId (Layer 2). */
   specialists?: SpecialistAgentService;
   specialistProfiles?: SpecialistProfileService;
@@ -3910,6 +3913,15 @@ export class WorkflowEngine {
         ...(resolved.instanceId ? { specialistInstanceId: resolved.instanceId, temporary: Boolean(y.temporary) } : {}),
       },
     });
+    this.#emitDelegateStep(ctx, {
+      nodeId: child.nodeId!,
+      childSessionId: child.id,
+      parentSessionId,
+      agentId,
+      role: y.role,
+      phase: 'start',
+      description: `${this.#agentName(agentId) ?? y.role} started: ${y.task.slice(0, 120)}`,
+    });
     // Attenuate the parent's delegation scope against what it granted this
     // delegate (§8). The child can only ever narrow — never widen — its parent's
     // tool scope. A top-level session with no grant + no request stays
@@ -3970,13 +3982,40 @@ export class WorkflowEngine {
     const outcome = await this.#advanceSessionLoop(ctx, node, child.id, childCtx);
     if (outcome.kind === 'completed' || outcome.kind === 'max_steps') {
       settleSpecialistRun('completed', typeof outcome.output === 'string' ? outcome.output : JSON.stringify(outcome.output ?? {}));
+      this.#emitDelegateStep(ctx, {
+        nodeId: child.nodeId!,
+        childSessionId: child.id,
+        parentSessionId,
+        agentId,
+        role: y.role,
+        phase: 'complete',
+        description: `${this.#agentName(agentId) ?? y.role} finished`,
+      });
       return { ok: true, result: outcome.output };
     }
     if (outcome.kind === 'failed') {
       settleSpecialistRun('failed', outcome.error);
+      this.#emitDelegateStep(ctx, {
+        nodeId: child.nodeId!,
+        childSessionId: child.id,
+        parentSessionId,
+        agentId,
+        role: y.role,
+        phase: 'fail',
+        description: outcome.error.slice(0, 200),
+      });
       return { ok: false, error: outcome.error };
     }
     settleSpecialistRun('failed', 'delegated sub-agent attempted an unsupported non-delegate yield');
+    this.#emitDelegateStep(ctx, {
+      nodeId: child.nodeId!,
+      childSessionId: child.id,
+      parentSessionId,
+      agentId,
+      role: y.role,
+      phase: 'fail',
+      description: 'unsupported non-delegate yield',
+    });
     // A delegated child cannot park (no cross-tick wake path for sub-sessions).
     return { ok: false, error: 'delegated sub-agent attempted a non-delegate yield (await/sleep/approval), which is unsupported inside synchronous delegation' };
   }
@@ -7515,6 +7554,46 @@ export class WorkflowEngine {
   }
 
   /**
+   * Publish a delegate child's lifecycle as an AGENT_WORK_STEP so the Live
+   * Workspace panel can render it under the parent session (same runId).
+   * Mirrors #emitWorkStep's payload shape but for a synthetic delegate "node"
+   * that has no WorkflowNode — agentId/agentName are the CHILD's, not the
+   * parent's. #runDelegate has no WorkflowNode for the child, so this can't
+   * reuse #emitWorkStep directly.
+   */
+  #emitDelegateStep(
+    ctx: RunningContext,
+    args: {
+      nodeId: string;
+      childSessionId: string;
+      parentSessionId: string;
+      agentId: string;
+      role: string;
+      phase: 'start' | 'complete' | 'fail';
+      description: string;
+    },
+  ): void {
+    const workStepPayload = {
+      workspaceId: ctx.workspaceId,
+      runId: ctx.runId,
+      workflowId: ctx.workflowId,
+      nodeId: args.nodeId,
+      agentId: args.agentId,
+      agentName: this.#agentName(args.agentId),
+      step: 'delegate',
+      phase: args.phase,
+      description: args.description,
+      detail: args.description,
+      delegate: true,
+      role: args.role,
+      parentSessionId: args.parentSessionId,
+      childSessionId: args.childSessionId,
+    };
+    this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.AGENT_WORK_STEP, workStepPayload);
+    this.#appendActivityTail(ctx.runId, REALTIME_EVENTS.AGENT_WORK_STEP, workStepPayload);
+  }
+
+  /**
    * Run-level self-heal. The run completed every reachable node but produced NO
    * terminal output — a routing DEAD-END (classically: a gate's `fail`/reject
    * verdict whose only wired path is an error-catch that never fires, so every
@@ -7686,6 +7765,10 @@ export class WorkflowEngine {
         actorId: 'engine',
         outputSummary: `${ctx.state.completedNodeIds.length} completed, ${ctx.state.failedNodeIds.length} failed`,
       });
+      // Close any persistent browser sessions this run opened — a session must
+      // never outlive its run (the idle reaper is only a backstop). Best-effort;
+      // fires for every terminal status including CANCELLED.
+      void this.deps.browserSessions?.closeOwner({ kind: 'run', id: ctx.runId });
       // Self-improvement: after a failure, look for a repeat pattern (§7.2).
       if ((status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS') && this.deps.instincts) {
         void this.deps.instincts.onRunFailed({

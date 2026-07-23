@@ -57,6 +57,8 @@ export interface ChannelBridgeDeps {
   runtimeHealth?: (args: { workspaceId: string; agentId: string }) => Promise<ChannelHealthCheck> | ChannelHealthCheck;
   /** Resolves outbound attachment references (artifact ids, data/http URLs) into bytes. */
   artifacts?: ArtifactService;
+  /** Voice model — turns an attachment's `text` into a spoken Opus voice note. */
+  speech?: { synthesize(input: { text: string; voice?: string }): Promise<{ bytes: Buffer; mimeType: string } | null> };
 }
 
 export interface CreateConnectionInput {
@@ -253,6 +255,11 @@ export class ChannelBridge {
   /** Wire the persistent-transport supervisor (WhatsApp etc.). */
   setPersistentTransport(transport: PersistentChannelTransport) {
     this.#persistent = transport;
+  }
+
+  /** Late-bind the voice model (constructed after the model router). */
+  setSpeech(speech: ChannelBridgeDeps['speech']) {
+    this.deps.speech = speech;
   }
 
   /**
@@ -1232,14 +1239,27 @@ export class ChannelBridge {
   /** Resolve loose attachment references into uploadable bytes (artifact ids, data/http URLs). */
   async #resolveAttachments(workspaceId: string, refs: OutboundAttachmentRef[] | undefined): Promise<OutboundAttachment[]> {
     if (!refs || refs.length === 0) return [];
-    if (!this.deps.artifacts) {
-      throw new AgentisError('VALIDATION_FAILED', 'channel attachments require the artifact service (not wired)');
-    }
     const out: OutboundAttachment[] = [];
     for (const ref of refs) {
       const source = ref.artifactId ?? ref.url;
+      // Text → spoken voice note via the speech (voice) model. The model emits
+      // Opus directly, so it sends as a native voice note with no transcoding.
+      if ((!source || !source.trim()) && ref.text && ref.text.trim()) {
+        if (!this.deps.speech) {
+          throw new AgentisError('VALIDATION_FAILED', 'voice synthesis needs a speech model — set the "speech" role in Settings → Runtimes, or send text instead');
+        }
+        const spoken = await this.deps.speech.synthesize({ text: ref.text });
+        if (!spoken) {
+          throw new AgentisError('CHANNEL_SEND_FAILED', 'the speech model returned no audio; configure a speech/voice model or send text instead');
+        }
+        out.push({ kind: 'voice', filename: ref.filename ?? 'voice.ogg', mimeType: spoken.mimeType, data: spoken.bytes, ...(ref.seconds ? { seconds: ref.seconds } : {}) });
+        continue;
+      }
       if (!source || !source.trim()) {
-        throw new AgentisError('VALIDATION_FAILED', 'each attachment needs an artifactId or url');
+        throw new AgentisError('VALIDATION_FAILED', 'each attachment needs an artifactId, url, or text (for a voice note)');
+      }
+      if (!this.deps.artifacts) {
+        throw new AgentisError('VALIDATION_FAILED', 'channel attachments require the artifact service (not wired)');
       }
       const hint: { filename?: string; mimeType?: string } = {};
       if (ref.filename) hint.filename = ref.filename;

@@ -42,7 +42,8 @@ export type OrchestratorModelRole =
   | 'synthesis'
   | 'evaluation'
   | 'vision'
-  | 'transcription';
+  | 'transcription'
+  | 'speech';
 
 export const ORCHESTRATOR_MODEL_ROLES: readonly OrchestratorModelRole[] = [
   'conversation',
@@ -51,6 +52,7 @@ export const ORCHESTRATOR_MODEL_ROLES: readonly OrchestratorModelRole[] = [
   'evaluation',
   'vision',
   'transcription',
+  'speech',
 ];
 
 export interface ModelProfile {

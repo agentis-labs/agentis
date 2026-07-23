@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { exec, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { availableParallelism, cpus } from 'node:os';
+import { availableParallelism, cpus, homedir } from 'node:os';
 import type { AppTestOptions, AppManifestEnvelope } from '@agentis/sdk';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
 
@@ -108,6 +108,9 @@ Usage:
                                           Run manifest actions/assertions in an isolated runtime transaction.
   agentis app export <app-id> --url <url> --api-key <key> --workspace-id <id> [--out f]
                                           Export an installed App as .agentisapp.
+  agentis service status                  Show whether Agentis launches automatically at login.
+  agentis service enable                  Launch Agentis automatically when this machine turns on.
+  agentis service disable                 Stop launching Agentis automatically at login.
   agentis bootstrap --url <url> --api-key <key> --adapter <adapter>
                                           Commission an orchestrator, manager, or specialist through the API.
   agentis bootstrap generate-config --from <claude_code|codex> [--output <file>]
@@ -397,6 +400,53 @@ async function runRestoreCmd(argv: string[]): Promise<number> {
   }
 }
 
+async function buildAutostartTargetForCli() {
+  bindCliVersion();
+  const dir = await dataDir();
+  const { buildAutostartTarget } = await import('@agentis/api/autostart');
+  return buildAutostartTarget({
+    platform: process.platform,
+    homeDir: homedir(),
+    appDataDir: process.env.APPDATA,
+    execPath: process.execPath,
+    scriptPath: process.argv[1] ?? '',
+    dataDir: dir,
+    cliVersion: process.env.AGENTIS_CLI_VERSION,
+  });
+}
+
+async function runServiceCmd(argv: string[]): Promise<number> {
+  const sub = argv[0] ?? 'status';
+  const { getAutostartStatus, enableAutostart, disableAutostart } = await import('@agentis/api/autostart');
+  const target = await buildAutostartTargetForCli();
+
+  if (sub === 'status') {
+    const enabled = getAutostartStatus(target);
+    process.stdout.write(
+      target.supported
+        ? `Autostart on ${target.platform}: ${enabled ? 'enabled' : 'disabled'}\n  ${target.markerPath}\n`
+        : `Autostart is not available: ${target.reason}\n`,
+    );
+    return 0;
+  }
+  if (sub === 'enable') {
+    if (!target.supported) {
+      process.stderr.write(`agentis service enable failed: ${target.reason}\n`);
+      return 1;
+    }
+    await enableAutostart(target);
+    process.stdout.write(`Agentis will now start automatically when you log in.\n  ${target.markerPath}\n`);
+    return 0;
+  }
+  if (sub === 'disable') {
+    await disableAutostart(target);
+    process.stdout.write('Autostart disabled.\n');
+    return 0;
+  }
+  process.stderr.write(`Unknown service command: ${sub}\nUsage: agentis service <status|enable|disable>\n`);
+  return 2;
+}
+
 async function runCreateCmd(argv: string[]): Promise<number> {
   const { positionals, flags } = parseFlags(argv);
   const destination = positionals[0];
@@ -663,6 +713,10 @@ async function main() {
   }
   if (cmd === 'app') {
     process.exitCode = await runAppCmd(process.argv.slice(3));
+    return;
+  }
+  if (cmd === 'service') {
+    process.exitCode = await runServiceCmd(process.argv.slice(3));
     return;
   }
   if (cmd === 'bootstrap') {

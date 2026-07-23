@@ -113,10 +113,21 @@ async function loadBaileys() {
   return cachedBaileys;
 }
 
-const RECONNECT_INITIAL_MS = 2_000;
-const RECONNECT_MAX_MS = 30_000;
+const RECONNECT_INITIAL_MS = 5_000;  // gentler first backoff — don't hammer the companion
+const RECONNECT_MAX_MS = 60_000;
 const RECONNECT_FACTOR = 1.8;
-const RECONNECT_MAX_ATTEMPTS = 12;
+const RECONNECT_MAX_ATTEMPTS = 8;
+/** A reconnect only resets the backoff after the connection STAYS open this long. */
+const STABLE_OPEN_MS = 60_000;
+/** Never pause reconnection longer than this while waiting out a reach-out timelock. */
+const REACHOUT_PAUSE_CAP_MS = 6 * 60 * 60 * 1000;
+/** When WhatsApp reports a 463 lock but no end time, pause this long, then re-check (and re-pause if still locked). */
+const REACHOUT_UNKNOWN_PAUSE_MS = 30 * 60 * 1000;
+
+// Cache the WhatsApp Web version so a reconnect burst doesn't re-fetch it on every
+// attempt (a network call per connect). Refreshed at most once per TTL.
+let cachedWaVersion: { version: [number, number, number]; fetchedAt: number } | undefined;
+const WA_VERSION_TTL_MS = 6 * 60 * 60 * 1000;
 const DELIVERY_ACK_TIMEOUT_MS = Math.max(1_000, Number(process.env.AGENTIS_WHATSAPP_ACK_TIMEOUT_MS) || 8_000);
 
 type WhatsAppDeliverySignal = {
@@ -184,6 +195,10 @@ export class WhatsAppSession {
   #closed = false;
   #reconnectAttempts = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Epoch ms until which reconnection is paused because WhatsApp reported a reach-out timelock (463). */
+  #reachoutBlockedUntil: number | undefined;
+  /** Fires after a SUSTAINED open; only then is the backoff reset (so a flap can't reset it every time). */
+  #stableOpenTimer: ReturnType<typeof setTimeout> | undefined;
   #startPromise: Promise<void> | undefined;
   // Set during connect — downloads media for the current socket/baileys module.
   #downloadMedia: ((msg: unknown) => Promise<Buffer>) | undefined;
@@ -211,6 +226,9 @@ export class WhatsAppSession {
     if (this.#startPromise && live) return this.#startPromise;
     this.#closed = false;
     this.#reconnectAttempts = 0;
+    // An explicit (re)start is the operator choosing to try now — clear any pause.
+    this.#reachoutBlockedUntil = undefined;
+    this.#clearStableOpenTimer();
     if (this.#reconnectTimer) {
       clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = undefined;
@@ -225,6 +243,7 @@ export class WhatsAppSession {
   async stop(): Promise<void> {
     this.#closed = true;
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#clearStableOpenTimer();
     try { this.#sock?.end?.(undefined); } catch { /* best-effort */ }
     this.#sock = undefined;
     this.#startPromise = undefined;
@@ -316,6 +335,11 @@ export class WhatsAppSession {
           const ends = timelock?.timeEnforcementEnds instanceof Date
             ? timelock.timeEnforcementEnds.toISOString()
             : undefined;
+          // Pause reconnection until the lock lifts so a WhatsApp-initiated close
+          // during enforcement doesn't trigger a reconnect storm on the companion.
+          this.#reachoutBlockedUntil = timelock?.timeEnforcementEnds instanceof Date
+            ? timelock.timeEnforcementEnds.getTime()
+            : Date.now() + REACHOUT_UNKNOWN_PAUSE_MS;
           if (scope === 'companion') {
             rejectionMessage = `WhatsApp rejected the Agentis linked-device send because companion outbound is restricted${timelock?.enforcementType ? ` (${timelock.enforcementType})` : ''}${ends ? ` until ${ends}` : ''}. The primary phone app may still send normally.`;
             remediation = 'Pause outbound sends from this linked Agentis session until the companion restriction expires. A successful phone-app send does not prove the linked companion is unblocked.';
@@ -517,17 +541,28 @@ export class WhatsAppSession {
     const browser: [string, string, string] =
       typeof Browsers?.appropriate === 'function' ? Browsers.appropriate('Agentis') : ['Agentis', 'Chrome', '1.0.0'];
 
+    // Tear down any prior socket before opening a new one — never leave two
+    // companion connections briefly alive on the same creds (WhatsApp reads a
+    // duplicate companion as a conflict). `#connect` is the single reconnect path.
+    try { this.#sock?.end?.(undefined); } catch { /* best-effort */ }
+
     this.#setStatus('connecting');
     // Vault-backed auth state when provided; otherwise baileys' on-disk files.
     const { state, saveCreds } = this.opts.loadAuthState
       ? await this.opts.loadAuthState()
       : await useMultiFileAuthState(this.opts.authDir);
     const logger = silentBaileysLogger();
-    let version: [number, number, number] | undefined;
-    try {
-      ({ version } = await fetchLatestBaileysVersion());
-    } catch {
-      // fall back to baileys' bundled version when the fetch fails offline
+    // Reuse a cached WA Web version so a reconnect burst doesn't re-fetch it every attempt.
+    let version: [number, number, number] | undefined =
+      cachedWaVersion && Date.now() - cachedWaVersion.fetchedAt < WA_VERSION_TTL_MS ? cachedWaVersion.version : undefined;
+    if (!version) {
+      try {
+        ({ version } = await fetchLatestBaileysVersion());
+        if (version) cachedWaVersion = { version, fetchedAt: Date.now() };
+      } catch {
+        // fall back to a previously cached version, else baileys' bundled version
+        version = cachedWaVersion?.version;
+      }
     }
 
     const sock = makeWASocket({
@@ -564,12 +599,16 @@ export class WhatsAppSession {
         void this.#onQr(qr);
       }
       if (connection === 'open') {
-        this.#reconnectAttempts = 0;
         this.#qr = undefined;
         this.#qrDataUrl = undefined;
         this.#selfId = sock.user?.id;
+        this.#reachoutBlockedUntil = undefined; // a real open clears any reach-out pause
         this.#setStatus('open');
+        // Only reset the backoff after the connection STAYS open — a flap
+        // (open→close during enforcement) must grow the backoff, not zero it each time.
+        this.#armStableOpenReset();
       } else if (connection === 'close') {
+        this.#clearStableOpenTimer();
         const statusCode = readDisconnectStatus(lastDisconnect?.error);
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         if (loggedOut) {
@@ -720,8 +759,48 @@ export class WhatsAppSession {
     }
   }
 
+  /** Reset the backoff only once the connection has stayed open a while. */
+  #armStableOpenReset(): void {
+    this.#clearStableOpenTimer();
+    this.#stableOpenTimer = setTimeout(() => {
+      this.#stableOpenTimer = undefined;
+      this.#reconnectAttempts = 0;
+    }, STABLE_OPEN_MS);
+    this.#stableOpenTimer.unref?.();
+  }
+
+  #clearStableOpenTimer(): void {
+    if (this.#stableOpenTimer) {
+      clearTimeout(this.#stableOpenTimer);
+      this.#stableOpenTimer = undefined;
+    }
+  }
+
+  #doReconnect(): void {
+    this.#startPromise = this.#connect().catch((err) => {
+      this.opts.logger.warn('whatsapp.reconnect_failed', { connectionId: this.opts.connectionId, err: (err as Error).message });
+      this.#scheduleReconnect();
+    });
+  }
+
   #scheduleReconnect(): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#reconnectTimer) return;
+    const now = Date.now();
+    // Respect an active reach-out timelock — do NOT hammer the companion while
+    // WhatsApp is enforcing a 463 lock. Wait out the window (best-effort), then
+    // try once. An operator relink (start) clears the pause immediately.
+    if (this.#reachoutBlockedUntil && this.#reachoutBlockedUntil > now) {
+      const wait = Math.min(this.#reachoutBlockedUntil - now + 5_000, REACHOUT_PAUSE_CAP_MS);
+      this.opts.logger.warn('whatsapp.reconnect_paused_reachout', { connectionId: this.opts.connectionId, resumeInMs: wait });
+      this.#reconnectTimer = setTimeout(() => {
+        this.#reconnectTimer = undefined;
+        this.#reachoutBlockedUntil = undefined;
+        this.#reconnectAttempts = 0;
+        this.#doReconnect();
+      }, wait);
+      this.#reconnectTimer.unref?.();
+      return;
+    }
     if (this.#reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
       this.opts.logger.warn('whatsapp.reconnect_exhausted', { connectionId: this.opts.connectionId });
       this.#setStatus('error');
@@ -733,11 +812,10 @@ export class WhatsAppSession {
     );
     this.#reconnectAttempts += 1;
     this.#reconnectTimer = setTimeout(() => {
-      this.#startPromise = this.#connect().catch((err) => {
-        this.opts.logger.warn('whatsapp.reconnect_failed', { connectionId: this.opts.connectionId, err: (err as Error).message });
-        this.#scheduleReconnect();
-      });
+      this.#reconnectTimer = undefined;
+      this.#doReconnect();
     }, delay);
+    this.#reconnectTimer.unref?.();
   }
 
   #setStatus(status: WhatsAppSessionStatus): void {

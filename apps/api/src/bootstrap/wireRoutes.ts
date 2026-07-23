@@ -6,7 +6,9 @@
  * deps it needs), so it runs near the end of the composition root.
  */
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { bootProfileSnapshot } from '../services/bootProfile.js';
+import { buildAutostartTarget } from '../services/system/autostartService.js';
 import { ClaimService } from '../grounding/claimService.js';
 import { GroundingContextComposer } from '../grounding/contextComposer.js';
 import { GroundingDiscoveryService } from '../grounding/discovery.js';
@@ -40,6 +42,7 @@ import { buildCapabilityRoutes } from '../routes/capabilities.js';
 import { buildChannelRoutes } from '../routes/channels.js';
 import { buildCommandRoutes } from '../routes/command.js';
 import { buildCommandAutonomyRoutes } from '../routes/commandAutonomy.js';
+import { buildBrowserControlRoutes } from '../routes/browserControl.js';
 import { buildConversationRoutes } from '../routes/conversations.js';
 import { buildCredentialRoutes } from '../routes/credentials.js';
 import { buildDashboardRoutes } from '../routes/dashboard.js';
@@ -277,6 +280,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     mcpToolBridge,
     memoryStore,
     oauthService,
+    oauthAppCredentialStore,
     observability,
     orchestratorModelRouter,
     outboundPolicy,
@@ -493,7 +497,16 @@ export function wireRoutes(deps: WireRoutesDeps) {
   const appPresence = new AppPresenceService({ bus, logger });
   appPresence.start();
   app.route('/v1/apps', buildAppRoutes({ db: sqlite, auth, bus, engine, toolRuntime: agentToolRuntime, completer: defaultCognitiveCompleter, staffing: appStaffing, conversations, channels: channelBridge, contacts: appContacts, participants: conversationParticipants, learning: appLearning, simulator: conversationSimulator, presence: appPresence, outboundPolicy, orchestrator: appOrchestrator, triggerRuntime, episodes: episodicMemoryStore, appGoal, strategies, evolution: strategyEvolution, experiments, baselines: rollingBaselineStore }));
-  app.route('/v1/system', buildSystemRoutes({ db: sqlite, auth, currentVersion: env.AGENTIS_CLI_VERSION }));
+  const autostartTarget = buildAutostartTarget({
+    platform: process.platform,
+    homeDir: homedir(),
+    appDataDir: process.env.APPDATA,
+    execPath: process.execPath,
+    scriptPath: process.argv[1] ?? '',
+    dataDir: env.AGENTIS_DATA_DIR,
+    cliVersion: env.AGENTIS_CLI_VERSION,
+  });
+  app.route('/v1/system', buildSystemRoutes({ db: sqlite, auth, currentVersion: env.AGENTIS_CLI_VERSION, autostartTarget }));
   app.route('/v1/harness', buildHarnessRoutes({ db: sqlite, auth }));
   const ownershipSync = new AgentOwnershipSyncService(sqlite, harnessMemoryIngestion, skillService, logger);
   const harnessImportDeps = { db: sqlite, auth, vault: credentialVault, adapters, logger, bus, mcpHarness, ingestion: harnessMemoryIngestion, skills: skillService, skillMaterializer, ownershipSync };
@@ -508,11 +521,12 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/command', buildCommandRoutes({ db: sqlite, auth, commandIndex }));
   app.route('/v1/scheduler', buildSchedulerRoutes({ db: sqlite, auth }));
   app.route('/v1/command', buildCommandAutonomyRoutes({ db: sqlite, auth, master: commandAutonomyMaster }));
+  app.route('/v1/browser', buildBrowserControlRoutes({ db: sqlite, auth }));
   app.route('/v1/triggers', buildTriggerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
   app.route('/v1/listeners', buildListenerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
   app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge, voice: voiceChannelAdapter }));
   app.route('/v1/credentials', buildCredentialRoutes({ db: sqlite, auth, vault: credentialVault }));
-  app.route('/v1/oauth', buildOAuthRoutes({ db: sqlite, auth, vault: credentialVault, oauth: oauthService, allowedOrigins }));
+  app.route('/v1/oauth', buildOAuthRoutes({ db: sqlite, auth, vault: credentialVault, oauth: oauthService, oauthAppCredentials: oauthAppCredentialStore, allowedOrigins }));
   app.route('/v1/mcp-oauth', buildMcpOAuthRoutes({
     db: sqlite,
     auth,

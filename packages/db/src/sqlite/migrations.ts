@@ -2795,6 +2795,49 @@ CREATE INDEX IF NOT EXISTS strategies_app_idx ON strategies(workspace_id, app_id
 CREATE INDEX IF NOT EXISTS strategies_experiment_idx ON strategies(workspace_id, experiment_key, variant);
 `,
   },
+  {
+    version: 116,
+    name: 'api_keys_expiry',
+    sql: `
+ALTER TABLE api_keys ADD COLUMN expires_at TEXT;
+`,
+  },
+  {
+    version: 117,
+    name: 'browser_auth_states',
+    sql: `
+-- Reusable "log in once" browser session auth. storageState (cookies +
+-- localStorage) is credential-equivalent, so encrypted_value is AES-256-GCM
+-- ciphertext (same vault as credentials). Named + workspace-scoped.
+CREATE TABLE IF NOT EXISTS browser_auth_states (
+  id             TEXT PRIMARY KEY,
+  workspace_id   TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id        TEXT REFERENCES users(id) ON DELETE SET NULL,
+  name           TEXT NOT NULL,
+  encrypted_value TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_auth_states_name ON browser_auth_states(workspace_id, name);
+`,
+  },
+  {
+    version: 118,
+    name: 'oauth_app_credentials',
+    sql: `
+-- BYOC OAuth app credentials (client id/secret per provider), entered via
+-- Settings → Integrations instead of OAUTH_<PROVIDER>_CLIENT_ID/SECRET env
+-- vars + a restart. Instance-wide (no workspace_id): the redirect URI
+-- registered with the provider is fixed per deployment (AGENTIS_PUBLIC_URL),
+-- not per workspace. AES-256-GCM ciphertext, same vault as credentials.
+CREATE TABLE IF NOT EXISTS oauth_app_credentials (
+  provider       TEXT PRIMARY KEY,
+  encrypted_value TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+`,
+  },
 ];
 
 

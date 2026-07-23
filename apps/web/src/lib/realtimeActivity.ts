@@ -39,6 +39,8 @@ export interface RealtimeActivity {
   progress?: { completed: number; total: number };
   /** A concrete thing the agent produced (record/artifact/surface…) — the "creation" feed. */
   creation?: { kind: string; title?: string; count?: number; collection?: string; ref?: string };
+  /** Present when this work-step belongs to a delegated child session, not the emitting node's own agent. */
+  delegate?: { childSessionId: string; role?: string; parentSessionId?: string };
   raw: Record<string, unknown>;
 }
 
@@ -379,6 +381,7 @@ export function describeRealtimeActivity(
           },
         };
       }
+      const childSessionId = payload.delegate === true ? stringField(payload, ['childSessionId']) : undefined;
       return {
         ...base,
         kind: 'agent',
@@ -386,6 +389,13 @@ export function describeRealtimeActivity(
         title: agentName ?? nodeTitle ?? 'Agent update',
         detail: text,
         progress: normalizeProgress(payload.progress),
+        ...(childSessionId ? {
+          delegate: {
+            childSessionId,
+            role: stringField(payload, ['role']),
+            parentSessionId: stringField(payload, ['parentSessionId']),
+          },
+        } : {}),
       };
     }
     case REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL: {

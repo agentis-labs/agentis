@@ -37,7 +37,7 @@ import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { useConfirm } from '../shared/ConfirmDialog';
 import { nestedDomainOptions } from '../shared/DomainToolbar';
-import { MissionControlPanel } from './MissionControlPanel';
+import { AppGoalPanel } from './AppGoalPanel';
 
 /** App-level run analytics — shape of `GET /v1/apps/:id/analytics`. */
 interface AppAnalytics {
@@ -412,7 +412,7 @@ export function AppEngineModal({
               </div>
             )}
 
-            {page === 'goal' && appId && <MissionControlPanel appId={appId} />}
+            {page === 'goal' && appId && <AppGoalPanel appId={appId} />}
 
             {page === 'analytics' && (
               <AppAnalyticsPanel

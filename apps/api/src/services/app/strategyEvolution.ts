@@ -133,7 +133,7 @@ export class StrategyEvolutionService {
 
   /**
    * Autonomous cadence sweep across every App with active strategies. In SURFACE
-   * mode it only evaluates (proposals are read live via Mission Control); in ACT
+   * mode it only evaluates (proposals are read live via the Goal dashboard); in ACT
    * mode it promotes winners + retires losers. ACT is operator-gated — off by
    * default (operator sovereignty). Returns how many winner-actions were applied.
    */

@@ -96,6 +96,7 @@ export type AgentTool =
   | 'browser_extract_text'
   | 'browser_extract_table'
   | 'browser_fill_form'
+  | 'browser_session'
   | 'knowledge_search'
   | 'memory_append'
   | 'agent_memory_search'
@@ -144,6 +145,7 @@ export const DEFAULT_SPECIALIST_TOOLS: AgentTool[] = [
   'browser_extract_text',
   'browser_extract_table',
   'browser_fill_form',
+  'browser_session',
   'ui_render',
   'ui_patch',
   'ui_inspect',
@@ -189,6 +191,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentTool, string> = {
   browser_extract_text: 'Open a real browser, load a URL (or html), and return the visible text under a CSS selector (default body). args: { url?: string, html?: string, selector?: string }',
   browser_extract_table: 'Open a real browser and parse an HTML <table> into an array of row objects. args: { url?: string, html?: string, selector?: string }',
   browser_fill_form: 'Open a real browser, fill form fields by CSS selector, optionally submit, and return the read-back values + final HTML. args: { url?: string, html?: string, formData: { [selector]: value }, submitSelector?: string }',
+  browser_session: 'Drive a PERSISTENT browser session that survives across calls — the way to log in once then act as the logged-in user on later turns (unlike the one-shot browser_* tools). First call action:"open" with a sessionId (optionally restoreAuth:"profileName" to reuse saved cookies); later calls reuse that sessionId. Each returns a compact { snapshot:{url,title,text}, value? }. actions: open|navigate|click|fill|type|press|select_option|hover|scroll|wait_for|get|upload|evaluate|save_auth|close. VISIBILITY (on open): pass visible:true when the user wants to WATCH — a real browser window pops up on their machine (local only); pass attach:"chrome" to drive the user\'s OWN running Chrome with their real logins (they must have started Chrome with --remote-debugging-port=9222); default is invisible/headless. args: { action: string, sessionId: string, visible?: boolean, attach?: "chrome", profileName?: string, url?, selector?, value?, text?, key?, attribute?, what?: "text"|"value"|"attribute"|"innerHTML", assetRefs?: string[], restoreAuth?: string, authName?: string, expression?: string }. Call save_auth with authName to persist login for future runs. Close sessions when done.',
   knowledge_search: 'Search the workspace Brain (knowledge bases) for relevant passages. args: { query: string, topK?: number }',
   memory_append: 'Record a finding or decision so future runs start knowing it. scope "workspace" (default) writes the shared log every agent sees; scope "agent" writes your own private memory. args: { section: string, entry: string, scope?: "workspace" | "agent" }',
   agent_memory_search: 'Recall your own past findings from your personal memory (separate from the shared workspace log). args: { query: string, topK?: number }',
