@@ -6,8 +6,15 @@
  * via `agents.config.residency`, so a plain worker/specialist — the kind the
  * manager-only heartbeat could never wake — becomes a persistent agent that
  * discovers, follows up, and drains a queue on a cadence, carrying working memory
- * (plan/observations blocks of its resident session) from one wake to the next.
+ * (task/plan/observations blocks of its resident session) from one wake to the next.
+ *
+ * ORCHESTRATOR-SUSPEND-10X Phase 0 (warm revival) — a resident wake is no longer a
+ * cold turn seeded with a two-paragraph summary. It carries the agent's standing
+ * GOAL (task block) plus its recent conversation reconstructed from the resident
+ * session, so the same agent resumes where it left off instead of waking amnesiac.
  */
+
+import type { ChatMessage } from '@agentis/core';
 
 export interface ResidencyConfig {
   enabled: boolean;
@@ -49,11 +56,33 @@ export function residencyDue(lastWokeAtIso: string | null, cfg: ResidencyConfig,
 }
 
 /** Compose the wake turn: the standing instruction + the working state carried from the prior wake. */
-export function buildResidencyWake(cfg: ResidencyConfig, carried: { plan?: string; observations?: string }): string {
+export function buildResidencyWake(cfg: ResidencyConfig, carried: { task?: string; plan?: string; observations?: string }): string {
   const parts = [`[Scheduled residency wake] ${cfg.wake}`];
+  const task = carried.task?.trim();
   const plan = carried.plan?.trim();
   const obs = carried.observations?.trim();
+  // The GOAL leads — a warm wake means resuming toward the standing objective the
+  // agent already holds, not re-deriving it from a summary.
+  if (task) parts.push(`Your standing objective: ${task}`);
   if (plan) parts.push(`Your current plan: ${plan}`);
   if (obs) parts.push(`Where you left off last time: ${obs}`);
   return parts.join('\n');
+}
+
+/**
+ * Reconstruct the conversation history for a warm resident wake from the resident
+ * session's recent episodic messages. Keeps only clean user/assistant text turns
+ * (tool-call/tool-result pairs are dropped so a partial slice never leaves a
+ * dangling tool call the chat adapter would reject), so the woken agent resumes
+ * with its actual prior exchange as context instead of an empty slate.
+ */
+export function buildResidentWakeHistory(messages: Array<{ role: string; content: string }>): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    const content = m.content?.trim();
+    if (!content) continue;
+    out.push({ role: m.role, content });
+  }
+  return out;
 }

@@ -2665,27 +2665,45 @@ function BoundFunnel({ node, bind }: { node: Extract<ViewNode, { type: 'Funnel' 
   return <FunnelShell title={node.title} stages={stages} />;
 }
 
-interface CalEvent { date: string; label: string }
+interface CalEvent { date: string; label: string; id?: string }
 
-function CalendarShell({ title, events }: { title?: string; events: CalEvent[] }) {
+/**
+ * `onReschedule` (bound Calendars with an `update` action only, INTEGRATION-
+ * CEILING-10X §6) makes events draggable between days — dropping one invokes
+ * the SAME declarative update-action contract Kanban already uses for
+ * drag-to-reorder (`{ id, patch }`), just patching the date field instead of
+ * an order field. A general reviewable-pipeline capability (works for social
+ * posts, but equally emails, tasks, any dated record), not scheduling-specific.
+ */
+function CalendarShell({ title, events, onReschedule }: { title?: string; events: CalEvent[]; onReschedule?: (id: string, newDateIso: string) => void }) {
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverDay, setDragOverDay] = useState<number | null>(null);
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
   const first = new Date(year, month, 1);
   const startDay = first.getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const byDay = new Map<number, string[]>();
+  const byDay = new Map<number, CalEvent[]>();
   for (const event of events) {
     const d = new Date(event.date);
     if (!Number.isNaN(d.getTime()) && d.getMonth() === month && d.getFullYear() === year) {
       const arr = byDay.get(d.getDate()) ?? [];
-      arr.push(event.label);
+      arr.push(event);
       byDay.set(d.getDate(), arr);
     }
   }
   const cells: Array<number | null> = [];
   for (let i = 0; i < startDay; i += 1) cells.push(null);
   for (let d = 1; d <= daysInMonth; d += 1) cells.push(d);
+  const draggable = Boolean(onReschedule);
+  const dropOn = (day: number) => {
+    setDragOverDay(null);
+    if (!dragId || !onReschedule) return;
+    const target = new Date(year, month, day);
+    onReschedule(dragId, target.toISOString());
+    setDragId(null);
+  };
   return (
     <div className="rounded-card border border-line bg-surface p-3">
       <div className="mb-2 text-[12px] font-semibold text-text-primary">{title ?? first.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</div>
@@ -2694,14 +2712,37 @@ function CalendarShell({ title, events }: { title?: string; events: CalEvent[] }
       </div>
       <div className="mt-1 grid grid-cols-7 gap-1">
         {cells.map((d, i) => {
-          const labels = d ? byDay.get(d) ?? [] : [];
+          const dayEvents = d ? byDay.get(d) ?? [] : [];
           return (
-            <div key={i} className={clsx('min-h-14 rounded-btn p-1 text-left', d ? 'border border-line bg-canvas' : '')}>
+            <div
+              key={i}
+              className={clsx(
+                'min-h-14 rounded-btn p-1 text-left transition-colors',
+                d ? 'border border-line bg-canvas' : '',
+                d && draggable && dragOverDay === d ? 'border-accent bg-accent-soft' : '',
+              )}
+              onDragOver={d && draggable ? (e) => { e.preventDefault(); setDragOverDay(d); } : undefined}
+              onDragLeave={d && draggable ? () => setDragOverDay((cur) => (cur === d ? null : cur)) : undefined}
+              onDrop={d && draggable ? (e) => { e.preventDefault(); dropOn(d); } : undefined}
+            >
               {d ? (
                 <>
                   <div className={clsx('text-[10px]', d === now.getDate() ? 'font-semibold text-accent' : 'text-text-muted')}>{d}</div>
-                  {labels.slice(0, 2).map((label, j) => <div key={j} className="mt-0.5 truncate rounded bg-accent-soft px-1 text-[9px] text-accent">{label}</div>)}
-                  {labels.length > 2 ? <div className="text-[9px] text-text-muted">+{labels.length - 2}</div> : null}
+                  {dayEvents.slice(0, 2).map((event, j) => (
+                    <div
+                      key={event.id ?? j}
+                      draggable={draggable && Boolean(event.id)}
+                      onDragStart={draggable && event.id ? () => setDragId(event.id!) : undefined}
+                      onDragEnd={() => { setDragId(null); setDragOverDay(null); }}
+                      className={clsx(
+                        'mt-0.5 truncate rounded bg-accent-soft px-1 text-[9px] text-accent',
+                        draggable && event.id ? 'cursor-grab active:cursor-grabbing' : '',
+                      )}
+                    >
+                      {event.label}
+                    </div>
+                  ))}
+                  {dayEvents.length > 2 ? <div className="text-[9px] text-text-muted">+{dayEvents.length - 2}</div> : null}
                 </>
               ) : null}
             </div>
@@ -2719,9 +2760,26 @@ function CalendarView({ node }: { node: Extract<ViewNode, { type: 'Calendar' }> 
 
 function BoundCalendar({ node, bind }: { node: Extract<ViewNode, { type: 'Calendar' }>; bind: DataBind }) {
   const { rows, loading } = useBoundRows(bind);
+  const invoke = useActionInvoker();
+  const { uiState } = useRuntime();
   if (loading) return <SkeletonRows />;
-  const events: CalEvent[] = rows.map((r) => ({ date: String(r[node.dateField ?? 'date'] ?? ''), label: String(r[node.labelField ?? 'title'] ?? r.name ?? '') }));
-  return <CalendarShell title={node.title} events={events} />;
+  const dateField = node.dateField ?? 'date';
+  const events: CalEvent[] = rows.map((r) => ({
+    date: String(r[dateField] ?? ''),
+    label: String(r[node.labelField ?? 'title'] ?? r.name ?? ''),
+    id: r.id != null ? String(r.id) : undefined,
+  }));
+  const onReschedule = node.update
+    ? (id: string, newDateIso: string) => {
+        const row = rows.find((r) => r.id != null && String(r.id) === id);
+        void invoke(node.update!.action, {
+          ...resolveActionArgs(node.update!.args, { row: row ?? {}, state: uiState }),
+          id,
+          patch: { [dateField]: newDateIso },
+        });
+      }
+    : undefined;
+  return <CalendarShell title={node.title} events={events} onReschedule={onReschedule} />;
 }
 
 function GaugeView({ node, scope }: { node: Extract<ViewNode, { type: 'Gauge' }>; scope: ResolveScope }) {

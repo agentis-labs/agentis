@@ -22,16 +22,27 @@ const implementedConnectors: ConnectorModule[] = [
   googleSheetsConnector,
 ];
 
-// `manifest_only` services get a real, working connector when we have a per-service
-// template (renders URL + auth from a bound credential); otherwise they fall back
-// to the generic HTTP connector (caller must supply params.url / credential.baseUrl).
+// A `manifest_only` service with no per-service template falls back to the
+// generic HTTP connector: it auto-attaches the bound credential as a bearer
+// token (http.ts#applyCredential), so a text-only authenticated call genuinely
+// works if the caller supplies params.url — but services whose REAL posting
+// flow needs binary/multipart upload (an image attached to a tweet, a LinkedIn
+// asset, an Instagram media container) can never be expressed this way. Give
+// those an honest, specific reason instead of a generic "supply a URL" dead
+// end (INTEGRATION-CEILING-10X §0 — never claim more than the platform does).
+const GENERIC_CONNECTOR_HINTS: Record<string, string> = {
+  twitter_x: 'No built-in X connector exists yet — this generic path sends plain JSON to whatever endpoint you supply as params.url and will authenticate with your OAuth credential, but X requires a separate multipart media-upload step (POST /2/tweets with media_ids) that this path cannot express; text-only posts may work if you supply the exact endpoint yourself.',
+  linkedin: 'No built-in LinkedIn connector exists yet — this generic path sends plain JSON to whatever endpoint you supply as params.url and will authenticate with your OAuth credential, but LinkedIn requires a separate binary asset-upload step (registerUpload + PUT bytes) that this path cannot express; text-only posts may work if you supply the exact endpoint yourself.',
+  instagram: 'No built-in Instagram connector exists yet — its Graph API requires a container-based publish flow (create a media container referencing a hosted image URL, then publish that container) that this generic JSON path cannot express at all.',
+};
+
 const manifestOnlyConnectors: ConnectorModule[] = builtinIntegrationManifests
   .filter((manifest) => manifest.runtime === 'manifest_only')
   .map((manifest) => {
     const template = SERVICE_TEMPLATES[manifest.service];
     return template
       ? templatedHttpConnector(manifest.service, manifest.operations, template)
-      : genericHttpConnector(manifest.service, manifest.operations);
+      : genericHttpConnector(manifest.service, manifest.operations, GENERIC_CONNECTOR_HINTS[manifest.service]);
   });
 
 export const builtinConnectors: ConnectorModule[] = [...implementedConnectors, ...manifestOnlyConnectors];

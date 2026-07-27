@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
-import { readResidency, residencyDue, buildResidencyWake } from '../../src/services/residency.js';
+import { readResidency, residencyDue, buildResidencyWake, buildResidentWakeHistory } from '../../src/services/residency.js';
 import { AgentSessionService } from '../../src/services/agent/agentSession.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -45,11 +45,30 @@ describe('residency helpers', () => {
     expect(residencyDue('2026-01-01T00:04:00.000Z', cfg, now)).toBe(true); // 6 min ago >= 5
   });
 
-  it('builds a wake message carrying prior plan + observations', () => {
-    const msg = buildResidencyWake({ enabled: true, intervalMinutes: 5, wake: 'do the thing' }, { plan: 'msg 100 leads', observations: 'last lead was #42' });
+  it('builds a wake message carrying the standing GOAL + prior plan + observations', () => {
+    const msg = buildResidencyWake(
+      { enabled: true, intervalMinutes: 5, wake: 'do the thing' },
+      { task: 'grow the pipeline to 200 leads', plan: 'msg 100 leads', observations: 'last lead was #42' },
+    );
     expect(msg).toContain('do the thing');
+    expect(msg).toContain('grow the pipeline to 200 leads'); // the goal leads a warm wake
     expect(msg).toContain('msg 100 leads');
     expect(msg).toContain('#42');
+  });
+
+  it('reconstructs warm wake history from clean user/assistant turns only', () => {
+    const history = buildResidentWakeHistory([
+      { role: 'user', content: 'find ICP stores' },
+      { role: 'assistant', content: 'found 12, messaged 3' },
+      { role: 'tool', content: '{"ok":true}' }, // tool result — dropped (no paired call)
+      { role: 'assistant', content: '   ' }, // empty — dropped
+      { role: 'user', content: 'keep going' },
+    ]);
+    expect(history).toEqual([
+      { role: 'user', content: 'find ICP stores' },
+      { role: 'assistant', content: 'found 12, messaged 3' },
+      { role: 'user', content: 'keep going' },
+    ]);
   });
 });
 
@@ -63,6 +82,15 @@ describe('AgentSessionService resident session', () => {
     expect(a.runId).toBeNull();
 
     svc.rememberResident(ctx.workspace.id, agentId, { plan: 'find ICP stores', observations: 'stopped at page 3' });
-    expect(svc.residentState(ctx.workspace.id, agentId)).toEqual({ plan: 'find ICP stores', observations: 'stopped at page 3' });
+    expect(svc.residentState(ctx.workspace.id, agentId)).toEqual({ task: '', plan: 'find ICP stores', observations: 'stopped at page 3' });
+  });
+
+  it('carries the standing GOAL (task block) across wakes for a warm revival', () => {
+    const svc = new AgentSessionService(ctx.db, ctx.logger);
+    const agentId = seedAgent();
+    const s = svc.getOrCreateResident({ workspaceId: ctx.workspace.id, agentId });
+    // The goal lives in the task block; residentState surfaces it so the wake leads with it.
+    svc.updateMemoryBlock(s.id, 'task', 'reach 200 qualified leads this month');
+    expect(svc.residentState(ctx.workspace.id, agentId).task).toBe('reach 200 qualified leads this month');
   });
 });

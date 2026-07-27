@@ -278,6 +278,15 @@ export const extensions = sqliteTable('extensions', {
   /** builtin | node_worker | docker_sandbox */
   runtime: text('runtime').notNull(),
   manifest: text('manifest', { mode: 'json' }).notNull(),
+  /**
+   * Operator-set mapping of the manifest's declared `credentialKeys` (a name
+   * the extension AUTHOR chose, e.g. "instagram_token") to a real `credentials`
+   * row id in this workspace (INTEGRATION-CEILING-10X §3). Set by the operator
+   * when installing/configuring the extension — never by the extension's own
+   * code — so a sandboxed script can reference a credential by name but can
+   * never choose which real secret backs it.
+   */
+  credentialBindings: text('credential_bindings', { mode: 'json' }).notNull().default('{}'),
   ...baseTimestamps(),
 });
 
@@ -1299,6 +1308,57 @@ export const workspaceModelConfig = sqliteTable('workspace_model_config', {
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
   role: text('role').notNull(),
+  baseUrl: text('base_url'),
+  model: text('model').notNull(),
+  apiKeyEncrypted: text('api_key_encrypted'),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+});
+
+/**
+ * Per-workspace media (image/audio/video) generation model override — the
+ * SAME "bring your own model" shape as `workspaceModelConfig`, but for the
+ * media-generation seam instead of chat cognition roles (INTEGRATION-CEILING-10X
+ * §1: media generation was hardcoded to OpenAI while chat was already free-text
+ * provider-agnostic; this closes that gap the same way, not a new pattern).
+ */
+/**
+ * User-configured "bring your own OAuth app" providers (INTEGRATION-CEILING-10X
+ * §2). The built-in provider list (google/slack/github/…) is a hardcoded enum;
+ * this table lets a workspace register a FULLY CUSTOM OAuth2 app — any authUrl/
+ * tokenUrl/scopes/clientId/clientSecret — for a service Agentis-core has never
+ * heard of, using the same generic authorize→callback mechanics (oauthFlow.ts).
+ * Workspace-scoped (unlike the instance-wide built-in BYOC credentials) since a
+ * custom integration is naturally per-workspace, not a shared deployment app.
+ */
+export const oauthCustomProviders = sqliteTable('oauth_custom_providers', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  providerId: text('provider_id').notNull(),
+  label: text('label').notNull(),
+  authUrl: text('auth_url').notNull(),
+  tokenUrl: text('token_url').notNull(),
+  /** JSON array of scope strings. */
+  scopes: text('scopes').notNull().default('[]'),
+  scopeSeparator: text('scope_separator').notNull().default(' '),
+  pkce: integer('pkce', { mode: 'boolean' }).notNull().default(false),
+  tokenAuth: text('token_auth').notNull().default('body'),
+  tokenBodyFormat: text('token_body_format').notNull().default('form'),
+  clientId: text('client_id').notNull(),
+  clientSecretEncrypted: text('client_secret_encrypted').notNull(),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+}, (table) => ({
+  providerUnique: uniqueIndex('idx_oauth_custom_providers_id').on(table.workspaceId, table.providerId),
+}));
+
+export const workspaceMediaConfig = sqliteTable('workspace_media_config', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  modality: text('modality').notNull(),
   baseUrl: text('base_url'),
   model: text('model').notNull(),
   apiKeyEncrypted: text('api_key_encrypted'),

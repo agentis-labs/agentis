@@ -14,6 +14,8 @@ import { runBuiltin, BUILTIN_LONG_RUNNING_TIMEOUTS } from './builtinExtensions.j
 import { runNodeWorkerExtension } from '../extensions/nodeWorkerRuntime.js';
 import { runDockerSandboxExtension } from '../extensions/dockerSandboxRuntime.js';
 import type { ExtensionKvStore } from '../extensions/kv.js';
+import type { CredentialVault } from './credentialVault.js';
+import type { ResolvedExtensionCredential } from '../extensions/credentialAttach.js';
 
 /** Minimal cursor surface the ExtensionSource passes to a listener-source op. */
 export interface ListenerSourceCursor {
@@ -85,7 +87,59 @@ export class ExtensionRuntime {
     private readonly logger: Logger,
     private readonly options: { dockerEnabled: boolean },
     private readonly kv?: ExtensionKvStore,
+    /** Decrypts operator-bound credentials (INTEGRATION-CEILING-10X §3). Absent → extensions declaring `credentials` get none resolved (fail closed, not a crash). */
+    private readonly vault?: CredentialVault,
   ) {}
+
+  /**
+   * Operator-set bindings (schema.extensions.credentialBindings: declared
+   * credentialKey → real credentials-table row id) resolved to decrypted
+   * values, scoped to keys the manifest actually declares. Never exposed to
+   * the sandbox directly — only consumed host-side by credentialAttach.ts.
+   */
+  #resolveCredentials(extension: typeof schema.extensions.$inferSelect, manifest: ExtensionManifest): Record<string, ResolvedExtensionCredential> {
+    if (!this.vault) return {};
+    const declaredKeys = (manifest.credentialKeys ?? []).map((k) => (typeof k === 'string' ? k : k.key));
+    if (declaredKeys.length === 0) return {};
+    const bindings = (extension.credentialBindings ?? {}) as Record<string, string>;
+    const resolved: Record<string, ResolvedExtensionCredential> = {};
+    for (const key of declaredKeys) {
+      const credentialId = bindings[key];
+      if (!credentialId) continue;
+      const row = this.db.select().from(schema.credentials)
+        .where(and(eq(schema.credentials.id, credentialId), eq(schema.credentials.workspaceId, extension.workspaceId)))
+        .get();
+      if (!row) continue;
+      try {
+        const decrypted = this.vault.decrypt(row.encryptedValue);
+        let value = decrypted;
+        try {
+          // OAuth-minted credentials store a JSON token bundle; a plain API key is just a string.
+          const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+          const token = parsed.accessToken ?? parsed.access_token ?? parsed.token ?? parsed.value;
+          if (typeof token === 'string') value = token;
+        } catch {
+          /* not JSON — use as-is */
+        }
+        resolved[key] = { value };
+      } catch (err) {
+        this.logger.warn('extension.credential.decrypt_failed', { extensionId: extension.id, key, err: (err as Error).message });
+      }
+    }
+    return resolved;
+  }
+
+  /** Operator-only: bind a manifest-declared credentialKey to a real credential id. */
+  setCredentialBinding(extensionId: string, credentialKey: string, credentialId: string | null): void {
+    const row = this.db.select({ credentialBindings: schema.extensions.credentialBindings })
+      .from(schema.extensions).where(eq(schema.extensions.id, extensionId)).get();
+    if (!row) throw new AgentisError('EXTENSION_NOT_FOUND', `extension ${extensionId} not found`);
+    const bindings = { ...(row.credentialBindings as Record<string, string>) };
+    if (credentialId) bindings[credentialKey] = credentialId;
+    else delete bindings[credentialKey];
+    this.db.update(schema.extensions).set({ credentialBindings: bindings, updatedAt: new Date().toISOString() })
+      .where(eq(schema.extensions.id, extensionId)).run();
+  }
 
   /**
    * Run an extension operation under the Listener source contract
@@ -136,6 +190,7 @@ export class ExtensionRuntime {
       allowPrivateNetwork: String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
       timeoutMs: clampTimeout(manifest.timeoutMs),
       logger: this.logger,
+      credentials: this.#resolveCredentials(extension, manifest),
       listenerHooks: {
         emit: args.onEmit,
         getCursor: () => args.cursor?.read(),
@@ -233,6 +288,7 @@ export class ExtensionRuntime {
               String(process.env.AGENTIS_EXTENSION_HTTP_ALLOW_PRIVATE ?? '').toLowerCase() === 'true',
             timeoutMs,
             logger: this.logger,
+            credentials: this.#resolveCredentials(extension, manifest),
             ...(args.signal ? { signal: args.signal } : {}),
           }));
           break;

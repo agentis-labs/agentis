@@ -25,6 +25,8 @@ import { BrowserControlPanel } from './BrowserControlPanel';
 import { McpConnectionsPanel } from './McpConnectionsPanel';
 import { ChannelIdentitiesPanel } from './ChannelIdentitiesPanel';
 import { OrchestratorModelsPanel } from './OrchestratorModelsPanel';
+import { MediaModelsPanel } from './MediaModelsPanel';
+import { CustomOAuthProvidersPanel } from './CustomOAuthProvidersPanel';
 import { BrainMemoryTierPanel } from './BrainMemoryTierPanel';
 import { SelfHealingPanel } from './SelfHealingPanel';
 import { AutonomyPanel } from './AutonomyPanel';
@@ -120,7 +122,12 @@ export function SettingsModal() {
                 </div>
               )}
               {settingsTab === 'mcp' && <McpConnectionsPanel />}
-              {settingsTab === 'integrations' && <IntegrationsPanel />}
+              {settingsTab === 'integrations' && (
+                <>
+                  <IntegrationsPanel />
+                  <CustomOAuthProvidersPanel />
+                </>
+              )}
               {settingsTab === 'governance' && (
                 <div className="space-y-6">
                   <GovernancePanel />
@@ -132,6 +139,7 @@ export function SettingsModal() {
               {settingsTab === 'runtimes' && (
                 <div className="space-y-10">
                   <OrchestratorModelsPanel />
+                  <MediaModelsPanel />
                   <BrainMemoryTierPanel />
                   <RuntimesTab />
                 </div>

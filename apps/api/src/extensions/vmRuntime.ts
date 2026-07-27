@@ -22,6 +22,8 @@ import type { ExtensionExecutionOutcome, ExtensionManifest, ExtensionPermission 
 import type { Logger } from '../logger.js';
 import { safeFetch } from '../services/safeFetch.js';
 import { normalizeExtensionSource } from './normalizeSource.js';
+import { encodeMultipart, type MultipartPart } from './multipartEncoder.js';
+import { attachExtensionCredential, type ResolvedExtensionCredential } from './credentialAttach.js';
 import type { ListenerHooks } from './nodeWorkerRuntime.js';
 
 export async function runVmExtension(args: {
@@ -36,20 +38,34 @@ export async function runVmExtension(args: {
   timeoutMs: number;
   logger: Logger;
   listenerHooks?: ListenerHooks;
+  /** Operator-bound credentials this extension may reference by key (INTEGRATION-CEILING-10X §3). Never exposed to the sandbox directly. */
+  credentials?: Record<string, ResolvedExtensionCredential>;
 }): Promise<ExtensionExecutionOutcome> {
   const start = Date.now();
   const hasPerm = (p: ExtensionPermission) => args.permissions.includes(p);
 
-  const fetchProxy = async (url: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}) => {
+  const fetchProxy = async (url: string, init: { method?: string; body?: string; headers?: Record<string, string>; formData?: MultipartPart[]; credential?: string } = {}) => {
     if (!hasPerm('network') && !hasPerm('network.unrestricted')) {
       throw new AgentisError('EXTENSION_PERMISSION_DENIED', 'Extension manifest does not grant network access');
     }
+    if (init.credential && !hasPerm('credentials')) {
+      throw new AgentisError('EXTENSION_PERMISSION_DENIED', 'Extension manifest does not grant the `credentials` permission');
+    }
+    const reqHeaders: Record<string, string> = { ...(init.headers ?? {}) };
+    let reqBody: string | Uint8Array | undefined = init.body;
+    if (init.formData) {
+      const encoded = encodeMultipart(init.formData);
+      reqBody = encoded.body;
+      reqHeaders['content-type'] = encoded.contentType;
+    }
+    // Host-side only: the sandbox never sees the decrypted value, only the key name.
+    attachExtensionCredential(reqHeaders, init.credential, args.credentials ?? {});
     // safeFetch pins the connection to the IP validated at check time (defeats
     // DNS rebinding) and re-validates every redirect hop.
     {
       const res = await safeFetch(
         url,
-        { method: init.method ?? 'GET', body: init.body, headers: init.headers, timeoutMs: args.timeoutMs },
+        { method: init.method ?? 'GET', body: reqBody, headers: reqHeaders, timeoutMs: args.timeoutMs },
         {
           allowPrivate: args.allowPrivateNetwork,
           allowedDomains: hasPerm('network.unrestricted') ? [] : args.allowedDomains,

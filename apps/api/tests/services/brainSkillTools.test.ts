@@ -79,3 +79,76 @@ describe('agentis.brain.search', () => {
     expect(res.errorCode).toBe('VALIDATION_FAILED');
   });
 });
+
+describe('agentis.skill.create', () => {
+  it('authors a new agent-scoped skill that is then loadable and above the materialize floor', async () => {
+    const res = await registry.execute(
+      {
+        toolId: 'agentis.skill.create',
+        arguments: {
+          name: 'Onboard a WhatsApp lead',
+          description: 'a new lead messages in on WhatsApp for the first time',
+          body: '1. Greet.\n2. Capture name + intent.\n3. Route to the right app.',
+        },
+      },
+      toolCtx('agent-42'),
+    );
+    expect(res.ok).toBe(true);
+    const out = res.output as { skillId: string; slug: string; scope: string; replaced: boolean };
+    expect(out.scope).toBe('agent');
+    expect(out.replaced).toBe(false);
+    expect(out.slug).toBe('onboard-a-whatsapp-lead');
+
+    // Persisted with the authoring agent's scope and full body.
+    const stored = skills.getSkill(ctx.workspace.id, out.skillId);
+    expect(stored?.scopeId).toBe('agent-42');
+    expect(stored?.body).toContain('Route to the right app');
+    // Non-seed source ⇒ confidence 0.7, above the 0.3 materialize floor.
+    expect(stored?.confidence ?? 0).toBeGreaterThanOrEqual(0.3);
+
+    // Reachable through the on-demand loader for the same agent.
+    const load = await registry.execute(
+      { toolId: 'agentis.skill.load', arguments: { skill: 'onboard-a-whatsapp-lead' } },
+      toolCtx('agent-42'),
+    );
+    expect(load.ok).toBe(true);
+    expect((load.output as { name: string }).name).toBe('Onboard a WhatsApp lead');
+  });
+
+  it('is idempotent by slug within scope — re-creating updates and reports replaced', async () => {
+    const first = await registry.execute(
+      { toolId: 'agentis.skill.create', arguments: { name: 'Ship a release', description: 'cutting a release', body: 'v1 steps' } },
+      toolCtx('agent-42'),
+    );
+    const second = await registry.execute(
+      { toolId: 'agentis.skill.create', arguments: { name: 'Ship a release', description: 'cutting a release', body: 'v2 steps' } },
+      toolCtx('agent-42'),
+    );
+    expect((second.output as { replaced: boolean }).replaced).toBe(true);
+    expect((first.output as { skillId: string }).skillId).toBe((second.output as { skillId: string }).skillId);
+    const stored = skills.getSkill(ctx.workspace.id, (second.output as { skillId: string }).skillId);
+    expect(stored?.body).toBe('v2 steps');
+  });
+
+  it('scope:"workspace" shares the skill workspace-globally (null scope)', async () => {
+    const res = await registry.execute(
+      { toolId: 'agentis.skill.create', arguments: { name: 'Shared Skill', description: 'anyone can use this', body: 'steps', scope: 'workspace' } },
+      toolCtx('agent-42'),
+    );
+    expect((res.output as { scope: string }).scope).toBe('workspace');
+    const stored = skills.getSkill(ctx.workspace.id, (res.output as { skillId: string }).skillId);
+    expect(stored?.scopeId).toBeNull();
+    // A different agent can load a workspace-global skill.
+    const load = await registry.execute({ toolId: 'agentis.skill.load', arguments: { skill: 'shared-skill' } }, toolCtx('someone-else'));
+    expect(load.ok).toBe(true);
+  });
+
+  it('requires a body', async () => {
+    const res = await registry.execute(
+      { toolId: 'agentis.skill.create', arguments: { name: 'No body', description: 'x' } },
+      toolCtx('agent-42'),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.errorCode).toBe('VALIDATION_FAILED');
+  });
+});

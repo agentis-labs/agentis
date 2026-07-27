@@ -261,8 +261,13 @@ type ViewNodeBase =
   | { type: 'MediaGen'; title?: string; bind?: DataBind; srcField?: string; captionField?: string; generate?: ActionRef; placeholder?: string }
   // Conversion funnel (marketing / sales).
   | { type: 'Funnel'; title?: string; stages?: Array<{ label: string; value: number }>; bind?: DataBind; labelField?: string; valueField?: string }
-  // Calendar / schedule of events.
-  | { type: 'Calendar'; title?: string; bind?: DataBind; dateField?: string; labelField?: string; events?: Array<{ date: string; label: string; tone?: Tone }> }
+  // Calendar / schedule of events. `update` (bound Calendars only) enables
+  // drag-to-reschedule: dropping an event on a new day invokes the action with
+  // { id, patch: { [dateField]: newDateIso } } — the same declarative
+  // update-action contract Kanban already uses for drag-to-reorder
+  // (INTEGRATION-CEILING-10X §6 — a general reviewable-pipeline capability,
+  // not scheduling-specific).
+  | { type: 'Calendar'; title?: string; bind?: DataBind; dateField?: string; labelField?: string; events?: Array<{ date: string; label: string; tone?: Tone }>; update?: ActionRef }
   // Radial gauge for a single metric.
   | { type: 'Gauge'; label?: string; value: Bindable; max?: number; tone?: Tone }
   // Workflow control plane (Agentic-Apps) — the App's OWN workflows with purpose,
@@ -377,7 +382,7 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     z.object({ type: z.literal('Inbox'), source: z.enum(['collection', 'conversations']).optional(), bind: dataBindSchema.optional(), titleField: z.string().optional(), subtitleField: z.string().optional(), channelField: z.string().optional(), messagesBind: dataBindSchema.optional(), messageRoleField: z.string().optional(), messageContentField: z.string().optional(), matchField: z.string().optional(), send: actionRefSchema.optional(), ...styled }),
     z.object({ type: z.literal('MediaGen'), title: z.string().optional(), bind: dataBindSchema.optional(), srcField: z.string().optional(), captionField: z.string().optional(), generate: actionRefSchema.optional(), placeholder: z.string().optional(), ...styled }),
     z.object({ type: z.literal('Funnel'), title: z.string().optional(), stages: z.array(z.object({ label: z.string(), value: z.number() })).optional(), bind: dataBindSchema.optional(), labelField: z.string().optional(), valueField: z.string().optional(), ...styled }),
-    z.object({ type: z.literal('Calendar'), title: z.string().optional(), bind: dataBindSchema.optional(), dateField: z.string().optional(), labelField: z.string().optional(), events: z.array(z.object({ date: z.string(), label: z.string(), tone: toneSchema.optional() })).optional(), ...styled }),
+    z.object({ type: z.literal('Calendar'), title: z.string().optional(), bind: dataBindSchema.optional(), dateField: z.string().optional(), labelField: z.string().optional(), events: z.array(z.object({ date: z.string(), label: z.string(), tone: toneSchema.optional() })).optional(), update: actionRefSchema.optional(), ...styled }),
     z.object({ type: z.literal('Gauge'), label: z.string().optional(), value: bindableSchema, max: z.number().positive().optional(), tone: toneSchema.optional(), ...styled }),
     z.object({ type: z.literal('WorkflowControl'), title: z.string().optional(), ...styled }),
     z.object({ type: z.literal('OrchestrationPanel'), title: z.string().optional(), controls: z.boolean().optional(), ...styled }),

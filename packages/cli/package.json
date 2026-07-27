@@ -69,7 +69,7 @@
     "node-cron": "^3.0.3",
     "onnxruntime-node": "1.24.3",
     "playwright": "^1.60.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.0"
   },
   "devDependencies": {
     "@agentis/api": "workspace:*",

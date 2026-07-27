@@ -48,6 +48,8 @@ import { McpOAuthService } from '../services/mcp/mcpOAuthService.js';
 import { McpToolBridge, computerUseServerFromEnv } from '../services/mcp/mcpToolBridge.js';
 import { MemoryStore } from '../services/memory/memoryStore.js';
 import { OAuthAppCredentialStore } from '../services/oauthAppCredentialStore.js';
+import { CustomOAuthProviderService } from '../services/customOAuthProviderService.js';
+import { CustomOAuthStateStore } from '../services/customOAuthState.js';
 import { OAuthService, type OAuthProviderId } from '../services/oauthService.js';
 import { ObservabilityService } from '../services/observability.js';
 import { PartialReplayService } from '../services/partialReplay.js';
@@ -144,6 +146,12 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // Spec-compliant OAuth for external MCP servers (discovery + DCR + PKCE) —
   // "Connect with X", distinct from the fixed-provider oauthService above.
   const mcpOAuthService = new McpOAuthService();
+  // "Bring your own OAuth app" for ANY service (INTEGRATION-CEILING-10X §2) —
+  // a workspace registers a full custom OAuth2 app (authUrl/tokenUrl/scopes/
+  // clientId/clientSecret), reusing the exact same generic flow mechanics
+  // (oauthFlow.ts) as the built-in provider list above.
+  const customOAuthProviders = new CustomOAuthProviderService({ db: sqlite, vault: credentialVault });
+  const customOAuthStates = new CustomOAuthStateStore();
   const auth = new AuthService(secrets);
   const archiveStore = new ColdArchiveStore(env.AGENTIS_ARCHIVE_DIR);
   const ledger = new LedgerService(sqlite, bus, archiveStore);
@@ -153,7 +161,7 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   observability.startLegacyBridge();
   const approvals = new ApprovalInboxService(sqlite, bus);
   const extensionKv = new ExtensionKvStore(sqlite);
-  const extensions = new ExtensionRuntime(sqlite, logger, { dockerEnabled: !!env.AGENTIS_EXTENSION_DOCKER }, extensionKv);
+  const extensions = new ExtensionRuntime(sqlite, logger, { dockerEnabled: !!env.AGENTIS_EXTENSION_DOCKER }, extensionKv, credentialVault);
 
   // Telemetry (D38) — opt-in via AGENTIS_OTEL_ENDPOINT. Falls back to a
   // no-op tracer if the OTel SDK packages are not installed, so the
@@ -347,6 +355,8 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     allowedOrigins,
     oauthService,
     oauthAppCredentialStore,
+    customOAuthProviders,
+    customOAuthStates,
     mcpOAuthService,
     auth,
     archiveStore,

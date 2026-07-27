@@ -13,6 +13,7 @@
 import { AgentisError, type MediaModality, type MediaProvider, type MediaGenerateRequest, type GeneratedMedia } from '@agentis/core';
 import type { Logger } from '../logger.js';
 import type { AssetStore } from './assetStore.js';
+import type { WorkspaceMediaConfigService } from './workspace/workspaceMediaConfigService.js';
 
 export interface MediaGenerateContext {
   workspaceId: string;
@@ -32,13 +33,46 @@ export interface MediaGeneratedAsset {
 
 const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'video/mp4': 'mp4' };
 
+/**
+ * A provider whose {baseUrl,model,apiKey} can be overridden per workspace
+ * (Settings → Media), mirroring how chat models are already free-text/
+ * provider-agnostic (OrchestratorModelRouter). `envDefaults` seeds the
+ * instance-wide fallback; `build` constructs a fresh {@link MediaProvider}
+ * from whatever config actually applies for a given call.
+ */
+export interface ConfigurableMediaFactory {
+  modality: MediaModality;
+  envDefaults: { baseUrl: string; apiKey?: string; model: string };
+  build: (cfg: { baseUrl: string; apiKey: string; model: string }) => MediaProvider;
+}
+
 export class MediaService {
   private readonly providers: MediaProvider[] = [];
-  constructor(private readonly deps: { assetStore?: AssetStore; logger: Logger }) {}
+  private readonly configurable = new Map<MediaModality, ConfigurableMediaFactory>();
+  constructor(private readonly deps: { assetStore?: AssetStore; logger: Logger; workspaceMediaConfig?: WorkspaceMediaConfigService }) {}
 
   register(provider: MediaProvider): void {
     this.providers.push(provider);
     this.deps.logger.info('media.provider.registered', { id: provider.id, modalities: provider.modalities });
+  }
+
+  /**
+   * Register a provider factory that a workspace can override with its own
+   * {baseUrl, model, apiKey} — e.g. point at OpenRouter, a self-hosted
+   * endpoint, or just a different model, with no Agentis-core code change and
+   * no restart. When an instance-wide API key is present, also registers the
+   * env-default instance so the zero-config path keeps working unchanged.
+   */
+  registerConfigurable(factory: ConfigurableMediaFactory): void {
+    this.configurable.set(factory.modality, factory);
+    if (factory.envDefaults.apiKey) {
+      this.register(factory.build({
+        baseUrl: factory.envDefaults.baseUrl,
+        apiKey: factory.envDefaults.apiKey,
+        model: factory.envDefaults.model,
+      }));
+    }
+    this.deps.logger.info('media.provider.configurable_registered', { modality: factory.modality, hasEnvDefault: Boolean(factory.envDefaults.apiKey) });
   }
 
   /** Modalities the workspace can currently produce (drives capability advertising). */
@@ -50,9 +84,35 @@ export class MediaService {
     return this.providers.find((p) => p.modalities.includes(modality));
   }
 
+  /**
+   * Resolve the provider for one call: a per-workspace override (Settings →
+   * Media) wins if one exists for this modality, freshly built from the
+   * override merged over the env default (missing baseUrl/apiKey inherit the
+   * env default — same merge rule as WorkspaceModelConfigService); otherwise
+   * fall back to the statically registered / env-configured provider.
+   */
+  private resolveProvider(workspaceId: string, modality: MediaModality): MediaProvider | undefined {
+    const factory = this.configurable.get(modality);
+    const override = factory && this.deps.workspaceMediaConfig
+      ? this.deps.workspaceMediaConfig.resolveOverride(workspaceId, modality)
+      : null;
+    if (factory && override) {
+      const apiKey = override.apiKey ?? factory.envDefaults.apiKey;
+      if (!apiKey) {
+        throw new AgentisError('MEDIA_UNAVAILABLE', `No API key configured for ${modality} generation — set one in Settings → Media for model "${override.model}".`);
+      }
+      return factory.build({
+        baseUrl: override.baseUrl ?? factory.envDefaults.baseUrl,
+        apiKey,
+        model: override.model,
+      });
+    }
+    return this.providerFor(modality);
+  }
+
   /** Generate media, persist each output as an artifact, return the refs. */
   async generate(ctx: MediaGenerateContext, req: MediaGenerateRequest): Promise<{ provider: string; assets: MediaGeneratedAsset[] }> {
-    const provider = this.providerFor(req.modality);
+    const provider = this.resolveProvider(ctx.workspaceId, req.modality);
     if (!provider) {
       throw new AgentisError('MEDIA_UNAVAILABLE', `No media provider is configured for "${req.modality}". Available: ${this.modalities().join(', ') || 'none'}.`);
     }

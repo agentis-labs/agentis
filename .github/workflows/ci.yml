@@ -40,13 +40,14 @@ jobs:
       - name: Test (api)
         run: pnpm --filter @agentis/api test
 
-      # Contract grep — Brain / Apps / Memory-OS must stay out of v1.0 src.
-      # If any of these tokens reappear in source code we fail loudly.
+      # Contract grep — legacy Brain / Apps / Memory-OS runtime tokens must stay
+      # out of the v1.0 source. `workspaceBrain` is part of the current package
+      # format/export surface, so it is intentionally not banned here.
       - name: Brain/Apps contract grep
         run: |
           set -e
           hits=$(grep -rEn \
-            "\b(BrainPromotion|SessionAtom|peer_representation|dreaming|dialectic|collectiveBrain|appInstances|workspaceBrain|MemoryEntry|memoryPlanes)\b" \
+            "\b(BrainPromotion|SessionAtom|peer_representation|dreaming|dialectic|collectiveBrain|appInstances|MemoryEntry|memoryPlanes)\b" \
             apps/api/src apps/web/src packages/core/src packages/db/src \
             packages/integrations/src packages/sdk/src packages/cli/src \
             2>/dev/null || true)

@@ -196,7 +196,9 @@ export function buildOAuthRoutes(deps: {
 }
 
 /** Minimal HTML that hands the result back to the opener (canvas) and closes. */
-function closePage(result: { ok: boolean; credentialId?: string; integrationSlug?: string; error?: string; origin?: string }): string {
+// Exported so customOAuth.ts (INTEGRATION-CEILING-10X §2) reuses the exact same
+// popup-close/postMessage contract instead of duplicating it for custom providers.
+export function closePage(result: { ok: boolean; credentialId?: string; integrationSlug?: string; error?: string; origin?: string }): string {
   const target = result.origin && /^https?:\/\//.test(result.origin) ? result.origin : null;
   const payload = JSON.stringify({ type: 'agentis-oauth', ...result });
   const msg = result.ok ? 'Connected. You can close this window.' : `Connection failed: ${result.error ?? 'unknown error'}`;
@@ -210,7 +212,7 @@ function closePage(result: { ok: boolean; credentialId?: string; integrationSlug
 </body></html>`;
 }
 
-function requireAllowedOrigin(value: string | undefined, allowedOrigins: readonly string[]): string {
+export function requireAllowedOrigin(value: string | undefined, allowedOrigins: readonly string[]): string {
   const origin = value ? new URL(value).origin : allowedOrigins[0];
   if (!origin || !allowedOrigins.includes(origin)) {
     throw new AgentisError('VALIDATION_FAILED', 'OAuth popup origin is not an allowed application origin');

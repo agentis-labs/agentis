@@ -285,12 +285,12 @@ export function unavailableConnector(service: string, operations: readonly strin
   };
 }
 
-export function genericHttpConnector(service: string, operations: readonly string[]): ConnectorModule {
+export function genericHttpConnector(service: string, operations: readonly string[], missingUrlHint?: string): ConnectorModule {
   return {
     service,
     operations,
     async execute({ operation, params, credential, timeoutMs }) {
-      const url = genericUrl(params, credential);
+      const url = genericUrl(params, credential, missingUrlHint);
       const method = stringValue(params.method)?.toUpperCase() ?? defaultMethod(operation);
       return executeHttpRequest(
         {
@@ -313,13 +313,18 @@ export function genericHttpConnector(service: string, operations: readonly strin
   };
 }
 
-function genericUrl(params: Record<string, unknown>, credential: Record<string, unknown> | null): string {
+function genericUrl(params: Record<string, unknown>, credential: Record<string, unknown> | null, hint?: string): string {
   const direct = stringValue(params.url);
   if (direct) return direct;
   const baseUrl = stringValue(params.baseUrl ?? credential?.baseUrl ?? credential?.apiBaseUrl ?? credential?.endpoint);
   const path = stringValue(params.path) ?? '';
   if (!baseUrl) {
-    throw new AgentisError('VALIDATION_FAILED', 'Generic integration execution requires params.url or credential.baseUrl');
+    // Bare-bones message by default; services with a known real limitation (e.g.
+    // "this needs a multipart upload step the generic path can't express") get an
+    // honest, specific reason instead of a mysterious dead end (Phase 0 — BROWSERPOOL/
+    // INTEGRATION-CEILING-10X §0).
+    const suffix = hint ? ` ${hint}` : '';
+    throw new AgentisError('VALIDATION_FAILED', `Generic integration execution requires params.url or credential.baseUrl.${suffix}`);
   }
   const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
   return new URL(path.replace(/^\//u, ''), base).toString();

@@ -54,6 +54,87 @@ describe('MediaService', () => {
   });
 });
 
+describe('MediaService.registerConfigurable — per-workspace "bring your own model/endpoint" (INTEGRATION-CEILING-10X §1)', () => {
+  function fakeConfigService(overrides: Record<string, { model: string; baseUrl?: string; apiKey?: string } | null>) {
+    return {
+      resolveOverride: vi.fn((workspaceId: string, modality: string) => overrides[`${workspaceId}:${modality}`] ?? null),
+    } as never;
+  }
+
+  it('with NO instance env default, a workspace override alone is enough to generate (no Agentis-core config needed)', async () => {
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      urls.push(url);
+      return { ok: true, json: async () => ({ data: [{ b64_json: Buffer.from('X').toString('base64') }] }) } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    try {
+      const workspaceMediaConfig = fakeConfigService({
+        'ws1:image': { model: 'my-openrouter-model', baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'or-key' },
+      });
+      const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
+      svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1' /* no apiKey */ }, build: openAiImageProvider });
+
+      const out = await svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'a cat' });
+      expect(out.assets).toHaveLength(1);
+      expect(urls[0]).toBe('https://openrouter.ai/api/v1/images/generations');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a workspace override missing apiKey inherits the env default apiKey (merge, not replace)', async () => {
+    const seenAuth: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seenAuth.push((init?.headers as Record<string, string>)?.Authorization ?? '');
+      return { ok: true, json: async () => ({ data: [{ b64_json: Buffer.from('X').toString('base64') }] }) } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    try {
+      const workspaceMediaConfig = fakeConfigService({ 'ws1:image': { model: 'gemini-image-2' /* no baseUrl/apiKey override */ } });
+      const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
+      svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1', apiKey: 'env-key' }, build: openAiImageProvider });
+
+      await svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'a cat' });
+      expect(seenAuth[0]).toBe('Bearer env-key');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('without an env default AND without an override apiKey, throws a clean MEDIA_UNAVAILABLE naming the model', async () => {
+    const workspaceMediaConfig = fakeConfigService({ 'ws1:image': { model: 'my-model' } });
+    const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
+    svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1' }, build: openAiImageProvider });
+    await expect(svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'x' })).rejects.toThrow(/my-model/);
+  });
+
+  it('is workspace-scoped — a different workspace with no override falls back to the env default, unaffected by ws1', async () => {
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      urls.push(url);
+      return { ok: true, json: async () => ({ data: [{ b64_json: Buffer.from('X').toString('base64') }] }) } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    try {
+      const workspaceMediaConfig = fakeConfigService({ 'ws1:image': { model: 'custom', baseUrl: 'https://custom.example/v1', apiKey: 'k' } });
+      const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
+      svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1', apiKey: 'env-key' }, build: openAiImageProvider });
+
+      await svc.generate({ workspaceId: 'ws2' }, { modality: 'image', prompt: 'x' });
+      expect(urls[0]).toBe('https://api.openai.com/v1/images/generations');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('registerConfigurable with an env apiKey keeps the zero-config path working (modalities() reports it, backward compat)', () => {
+    const svc = new MediaService({ assetStore: fakeAssetStore(), logger });
+    svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1', apiKey: 'env-key' }, build: openAiImageProvider });
+    expect(svc.modalities()).toEqual(['image']);
+  });
+});
+
 describe('openAiImageProvider (one adapter behind the seam)', () => {
   it('POSTs /images/generations for text-only and /images/edits when reference images are given', async () => {
     const urls: string[] = [];

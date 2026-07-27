@@ -476,6 +476,24 @@ export class PlanService {
     return next;
   }
 
+  /**
+   * ORCHESTRATOR-SUSPEND-10X follow-up C — ensure a session has a durable ChatPlan
+   * bound to it (idempotent). For a resident/owning agent whose session outlives any
+   * single run, this anchors its standing OBJECTIVE (plus the decisions and
+   * verification recorded against the plan) so they travel across suspensions and
+   * revivals instead of living only in the volatile wake message. Returns the
+   * existing bound plan when one is present, else creates one from `objective` and
+   * binds it.
+   */
+  ensureForSession(workspaceId: string, userId: string, sessionId: string, objective: string): ChatPlan {
+    const existing = this.findBySession(workspaceId, sessionId);
+    if (existing) return existing;
+    // A resident session is not tied to a chat conversation, so the plan carries a
+    // null conversationId (the plans.conversation_id FK rejects a synthetic id).
+    const plan = this.createTask({ workspaceId, userId, objective, conversationId: null });
+    return this.bindSession(workspaceId, userId, plan.id, sessionId);
+  }
+
   setStatus(workspaceId: string, userId: string, planId: string, status: PlanStatus): ChatPlan {
     const current = this.byId(workspaceId, planId);
     const next = this.revise(workspaceId, userId, { ...current, status, updatedAt: new Date().toISOString() });

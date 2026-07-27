@@ -158,6 +158,7 @@ import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
 import type { AgentSessionService } from '../services/agent/agentSession.js';
 import { estimateTokens } from '../services/agent/agentSession.js';
 import type { AgentSessionRuntime, SessionRunContext, SessionOutcome, SessionYield } from '../services/agent/agentSessionRuntime.js';
+import { waitForAllRunsSettle, summarizeFanIn } from '../services/run/runSettle.js';
 import { attenuateGrant } from '../services/agent/agentSessionRuntime.js';
 import type { PlanService } from '../services/planService.js';
 import type { AgentMemoryService } from '../services/agent/agentMemory.js';
@@ -219,7 +220,9 @@ export interface EngineDeps {
    * agent_task dispatch prompt, so a task agent knows the same connected surface a
    * chat agent does. Structurally typed to avoid a hard dependency on the service.
    */
-  capabilityIndex?: { mountedConnectionsBlock(workspaceId: string): Promise<string> };
+  capabilityIndex?: { mountedConnectionsBlock(workspaceId: string): Promise<string>; manifestBlock(workspaceId: string): string };
+  /** Scoped command briefing parity for workflow-bound agents. */
+  commandModel?: { briefingBlock(workspaceId: string, agentId: string): string };
   /** Native channel send — required for the deterministic `channel` node. */
   channelSend?: ChannelSendPort;
   /** Agentic App datastore access for the `data_query` / `data_mutate` nodes. */
@@ -1067,6 +1070,19 @@ export class WorkflowEngine {
           if (remaining <= 0) queueMicrotask(fire);
           else this.#armTimer(remaining, fire);
           recovered += 1;
+        } else if (cond.startsWith('runs:')) {
+          // A parked `await_runs` fan-in — re-arm the wait from the persisted run
+          // set (some may have settled during downtime; the helper resolves those
+          // immediately from current state, so a fully-finished set wakes at once).
+          const runIds = Array.isArray(session.suspendPayload?.runIds)
+            ? (session.suspendPayload!.runIds as unknown[]).filter((v): v is string => typeof v === 'string')
+            : [];
+          if (runIds.length > 0) {
+            void waitForAllRunsSettle({ db: this.deps.db, bus: this.deps.bus }, ctx.workspaceId, runIds, { timeoutMs: 6 * 60 * 60_000 })
+              .then((res) => this.#wakeSession(ctx, node, session.id, runCtx, toolCallId, summarizeFanIn(runIds, res)))
+              .catch(() => {});
+            recovered += 1;
+          }
         } else if (cond.startsWith('approval:')) {
           const approval = this.deps.db
             .select()
@@ -4113,6 +4129,18 @@ export class WorkflowEngine {
         this.#sessionWaiters(ctx).set(y.event, list);
         break;
       }
+      case 'await_runs': {
+        // Fan-in: park (zero tokens) until EVERY run in the set settles, then wake
+        // this session with all their statuses — the in-session twin of
+        // agentis.run.await_all. Shares the one settle helper. A generous 6h cap
+        // bounds a truly stuck set; on a partial timeout the agent resumes with the
+        // pending ids and can await_runs them again (mirrors the tool).
+        const runIds = y.runIds;
+        void waitForAllRunsSettle({ db: this.deps.db, bus: this.deps.bus }, ctx.workspaceId, runIds, { timeoutMs: 6 * 60 * 60_000 })
+          .then((res) => this.#wakeSession(ctx, node, sessionId, runCtx, y.toolCallId, summarizeFanIn(runIds, res)))
+          .catch((err) => this.#wakeSession(ctx, node, sessionId, runCtx, y.toolCallId, { ok: false, error: (err as Error).message }));
+        break;
+      }
       case 'sleep_until': {
         const remaining = Math.max(0, Date.parse(y.untilIso) - Date.now());
         this.#armTimer(remaining, () => {
@@ -4803,8 +4831,33 @@ export class WorkflowEngine {
     } catch (err) {
       this.deps.logger.warn('engine.mounted_connections.failed', { runId: ctx.runId, err: (err as Error).message });
     }
+    // WORKER SELF-MODEL PARITY — a task agent also gets the CAPABILITY MANIFEST
+    // (the ~constant-size "you know everything exists but hold none of it in
+    // context — reach it via capability.search/load/invoke" digest) that the chat
+    // orchestrator gets. Without it a delegated worker was half-blind to the apps,
+    // workflows, extensions, and skills it could compose. Best-effort.
+    let capabilityManifestBlock = '';
+    try {
+      if (this.deps.capabilityIndex) {
+        const raw = this.deps.capabilityIndex.manifestBlock(ctx.workspaceId);
+        if (raw) capabilityManifestBlock = `<capability_manifest>\n${raw}\n</capability_manifest>`;
+      }
+    } catch (err) {
+      this.deps.logger.warn('engine.capability_manifest.failed', { runId: ctx.runId, err: (err as Error).message });
+    }
+    // A workflow-bound orchestrator/manager needs the same scoped command model
+    // as chat: inventory, work in motion, failures, approvals, and recent deltas.
+    let commandBriefingBlock = '';
+    try {
+      if (agentId && this.deps.commandModel) {
+        const raw = this.deps.commandModel.briefingBlock(ctx.workspaceId, agentId);
+        if (raw) commandBriefingBlock = `<command_briefing>\n${raw}\n</command_briefing>`;
+      }
+    } catch (err) {
+      this.deps.logger.warn('engine.command_briefing.failed', { runId: ctx.runId, err: (err as Error).message });
+    }
     return {
-      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, connectionsBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
+      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, connectionsBlock, capabilityManifestBlock, commandBriefingBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
     };
   }
 

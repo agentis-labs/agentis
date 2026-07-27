@@ -51,4 +51,33 @@ describe('<McpConnectionsPanel />', () => {
 
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path.includes('/v1/mcp-servers'))).toBe(true));
   });
+
+  it('filters the quick-connect catalog by name/category/description (INTEGRATION-CEILING-10X §4)', async () => {
+    const bigCatalog = Array.from({ length: 8 }, (_, i) => ({
+      id: `svc${i}`, name: `Service${i}`, category: i === 3 ? 'Payments' : 'Other',
+      url: `https://svc${i}.example/mcp`, authType: 'none' as const, authHint: 'no auth', description: `desc ${i}`,
+    }));
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes('/v1/mcp-servers/catalog')) return jsonResponse({ catalog: bigCatalog });
+      if (path.includes('/v1/mcp-servers')) return jsonResponse({ servers: [] });
+      if (path.includes('/v1/mcp/server-card')) return jsonResponse({ protocolVersion: '1', serverInfo: { name: 'agentis', version: '1.0.0' }, toolCount: 0, endpoint: '/v1/mcp/rpc' });
+      return jsonResponse({});
+    }));
+
+    render(<McpConnectionsPanel />);
+    await waitFor(() => expect(screen.getByText('Service0')).toBeInTheDocument());
+    // With >6 entries, a filter box appears.
+    const filterInput = screen.getByPlaceholderText('Filter…');
+    expect(screen.getByText('Service7')).toBeInTheDocument();
+
+    fireEvent.change(filterInput, { target: { value: 'payments' } });
+    await waitFor(() => {
+      expect(screen.getByText('Service3')).toBeInTheDocument();
+      expect(screen.queryByText('Service0')).not.toBeInTheDocument();
+    });
+
+    fireEvent.change(filterInput, { target: { value: 'no-such-server' } });
+    await waitFor(() => expect(screen.getByText(/No servers match/i)).toBeInTheDocument());
+  });
 });

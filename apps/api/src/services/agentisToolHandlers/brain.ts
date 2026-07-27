@@ -206,5 +206,66 @@ export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHand
         return { exampleId, skillId: skill.id };
       },
     },
+    {
+      definition: {
+        id: 'agentis.skill.create',
+        family: 'run',
+        description:
+          'Author a durable, reusable SKILL — a procedure you worked out that should be recalled and applied again, by you or a peer, instead of re-derived. Use this the moment you land a repeatable way of doing something (a deploy sequence, a data-cleaning recipe, a channel-onboarding flow). The `description` is the short trigger the Brain matches on for recall — write it as WHEN to reach for this skill; `body` is the full SKILL.md procedure loaded on demand via agentis.skill.load. Idempotent by slug within its scope: creating with an existing name/slug UPDATES that skill. Scope "agent" (default) keeps it private to you; "workspace" shares it with every agent here. Returns { skillId, slug, scope, replaced }. Example: {"name":"Deploy migrations safely","description":"shipping a DB schema change to production","body":"1. Flag the column...\\n2. Migrate...\\n3. Verify...\\n4. Flip the read path"}.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Human name for the skill (also the default slug).' },
+            description: {
+              type: 'string',
+              description: 'The short recall trigger — WHEN to use this skill. This is what the Brain matches against, so make it about the situation, not the steps.',
+            },
+            body: { type: 'string', description: 'The full procedure (SKILL.md markdown body).' },
+            scope: {
+              type: 'string',
+              enum: ['agent', 'workspace'],
+              description: 'Who can recall it: "agent" (default) = private to you; "workspace" = shared with every agent here.',
+            },
+            slug: { type: 'string', description: 'Optional stable slug for idempotent updates. Defaults to a slug of the name.' },
+          },
+          required: ['name', 'description', 'body'],
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: (args: Record<string, unknown>, ctx: AgentisToolContext) => {
+        if (!deps.skills) {
+          throw new AgentisError('VALIDATION_FAILED', 'skills are not available in this workspace');
+        }
+        const name = requireStr(args.name, 'name');
+        const description = requireStr(args.description, 'description');
+        const body = requireStr(args.body, 'body');
+        // "agent" scopes the skill to the authoring agent's Brain; "workspace"
+        // shares it. Absent an agent identity, "agent" degrades to workspace-global
+        // (a null scope) rather than silently dropping the skill.
+        const scope = args.scope === 'workspace' ? 'workspace' : 'agent';
+        const scopeId = scope === 'workspace' ? null : (ctx.agentId ?? null);
+        const slug = typeof args.slug === 'string' && args.slug.trim() ? args.slug.trim() : undefined;
+        const before = deps.skills.getByScopeAndSlug(ctx.workspaceId, scopeId, slug ?? name);
+        const saved = deps.skills.upsertSkill({
+          workspaceId: ctx.workspaceId,
+          scopeId,
+          name,
+          description,
+          body,
+          source: 'agent',
+          ...(slug ? { slug } : {}),
+        });
+        return {
+          skillId: saved.id,
+          slug: saved.slug,
+          scope: scopeId ? 'agent' : 'workspace',
+          replaced: before !== null,
+          guidance:
+            'Skill saved. It is now discoverable via agentis.brain.search (kind:"skill") and materialized to disk so harnesses load it natively; read the full procedure any time with agentis.skill.load. As runs that used it are judged, its confidence moves — a proven-good skill sticks, a proven-bad one sinks.',
+        };
+      },
+    },
   ]);
 }

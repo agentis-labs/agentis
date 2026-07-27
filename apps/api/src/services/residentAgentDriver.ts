@@ -22,8 +22,8 @@ export interface ResidentAgentDriverDeps {
   db: AgentisSqliteDb;
   /** Run the wake turn as this agent (the same runner the manager heartbeat uses). */
   wakeAgent: (args: { workspaceId: string; agentId: string; message: string }) => Promise<void> | void;
-  /** The agent's carried working state (plan/observations) for continuity across wakes. */
-  residentState: (workspaceId: string, agentId: string) => { plan: string; observations: string };
+  /** The agent's carried working state (goal/plan/observations) for continuity across wakes. */
+  residentState: (workspaceId: string, agentId: string) => { task: string; plan: string; observations: string };
   /** Two-switch autonomy gate — an agent only becomes/stays a live entity when enabled. */
   autonomyEnabled: (workspaceId: string) => boolean;
   now?: () => number;

@@ -2838,6 +2838,63 @@ CREATE TABLE IF NOT EXISTS oauth_app_credentials (
 );
 `,
   },
+  {
+    version: 119,
+    name: 'workspace_media_config',
+    sql: `
+-- Per-workspace media (image/audio/video) model override — same "bring your
+-- own model" shape as workspace_model_config, for media generation instead of
+-- chat cognition roles (INTEGRATION-CEILING-10X §1).
+CREATE TABLE IF NOT EXISTS workspace_media_config (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  modality          TEXT NOT NULL,
+  base_url          TEXT,
+  model             TEXT NOT NULL,
+  api_key_encrypted TEXT,
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_media_modality ON workspace_media_config(workspace_id, modality);
+`,
+  },
+  {
+    version: 120,
+    name: 'oauth_custom_providers',
+    sql: `
+-- User-configured "bring your own OAuth app" providers — any authUrl/tokenUrl/
+-- scopes/client credentials for a service Agentis-core has never heard of
+-- (INTEGRATION-CEILING-10X §2). Workspace-scoped, unlike the instance-wide
+-- built-in BYOC oauth_app_credentials.
+CREATE TABLE IF NOT EXISTS oauth_custom_providers (
+  id                       TEXT PRIMARY KEY,
+  workspace_id             TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  provider_id              TEXT NOT NULL,
+  label                    TEXT NOT NULL,
+  auth_url                 TEXT NOT NULL,
+  token_url                TEXT NOT NULL,
+  scopes                   TEXT NOT NULL DEFAULT '[]',
+  scope_separator          TEXT NOT NULL DEFAULT ' ',
+  pkce                     INTEGER NOT NULL DEFAULT 0,
+  token_auth               TEXT NOT NULL DEFAULT 'body',
+  token_body_format        TEXT NOT NULL DEFAULT 'form',
+  client_id                TEXT NOT NULL,
+  client_secret_encrypted  TEXT NOT NULL,
+  created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_custom_providers_id ON oauth_custom_providers(workspace_id, provider_id);
+`,
+  },
+  {
+    version: 121,
+    name: 'extensions_credential_bindings',
+    sql: `
+-- Operator-set mapping of a manifest's declared credentialKeys (author-chosen
+-- names) to real credentials-table row ids (INTEGRATION-CEILING-10X §3). Set
+-- by the operator, never by the extension's own sandboxed code.
+ALTER TABLE extensions ADD COLUMN credential_bindings TEXT NOT NULL DEFAULT '{}';
+`,
+  },
 ];
 
 

@@ -12,6 +12,8 @@ import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type WorkflowGraph, type
 import { buildInitialRunState } from '../../engine/initialRunState.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import { collectFailedNodeIds, failedNodeCount } from '../run/runStateFailures.js';
+import { workflowDurationStats } from '../run/runAnalytics.js';
+import { waitForRunSettle, waitForAllRunsSettle } from '../run/runSettle.js';
 import { analyzeRunFailure } from '../run/runFailureAnalysis.js';
 import { recordWorkflowLesson, recallWorkflowLessons } from '../workflow/workflowPlaybook.js';
 import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop, type CompassStep } from '../workflow/workflowCompass.js';
@@ -67,6 +69,17 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
                 'Random extra wait in [0, jitterMs). Spreads starts that would otherwise land on the same instant — '
                 + 'prefer this over exact spacing when many runs share a downstream.',
             },
+            waitMode: {
+              type: 'string',
+              enum: ['background', 'inline', 'auto'],
+              description:
+                'background (default) returns immediately and durably parks the resident orchestrator until a completion/judgment event; '
+                + 'inline starts+awaits in this call (max 15m); auto uses observed duration (inline at <=2m, otherwise background).',
+            },
+            timeoutMs: {
+              type: 'number',
+              description: 'For waitMode:inline/auto-inline: max wait in ms (default 300000, max 900000).',
+            },
           },
           required: ['workflowId'],
         },
@@ -82,6 +95,10 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           throw new Error(`workflow ${args.workflowId} not found in workspace`);
         }
         const graph = wf.graph as WorkflowGraph;
+        const requestedWaitMode = typeof args.waitMode === 'string' ? args.waitMode : 'background';
+        if (!['background', 'inline', 'auto'].includes(requestedWaitMode)) {
+          throw new AgentisError('VALIDATION_FAILED', `unknown waitMode '${requestedWaitMode}'`);
+        }
         const planId = args.planId ? String(args.planId) : args.taskId ? String(args.taskId) : null;
         const debugRun = args.debugRun === true;
         if (wf.appId) {
@@ -216,19 +233,42 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           workflowId: wf.id,
           ambientId: ctx.ambientId ?? null,
         });
-        const handle = await deps.engine.startRun({
-          workspaceId: ctx.workspaceId,
-          ambientId: ctx.ambientId ?? null,
-          conversationId: ctx.conversationId ?? null,
-          workflowId: wf.id,
-          ...(planId ? { planId } : {}),
-          userId: ctx.userId,
-          triggerId: null,
-          inputs: prepared?.inputs ?? inputs,
-          initialState,
-          debugRun,
-          graph,
-        });
+        // Decide before dispatch so a background resident can be durably parked
+        // before a very fast run has any chance to emit its terminal wake.
+        const timing = workflowDurationStats(deps.db, ctx.workspaceId, wf.id);
+        const effectiveWaitMode =
+          requestedWaitMode === 'auto'
+            ? timing && timing.p50Ms <= 120_000 ? 'inline' : 'background'
+            : requestedWaitMode;
+        const residentParked = effectiveWaitMode === 'background' && ctx.agentId && deps.parkResidentRuns
+          ? deps.parkResidentRuns({
+              workspaceId: ctx.workspaceId,
+              agentId: ctx.agentId,
+              runIds: [runId],
+              conversationId: ctx.conversationId,
+            })
+          : false;
+        let handle;
+        try {
+          handle = await deps.engine.startRun({
+            workspaceId: ctx.workspaceId,
+            ambientId: ctx.ambientId ?? null,
+            conversationId: ctx.conversationId ?? null,
+            workflowId: wf.id,
+            ...(planId ? { planId } : {}),
+            userId: ctx.userId,
+            triggerId: null,
+            inputs: prepared?.inputs ?? inputs,
+            initialState,
+            debugRun,
+            graph,
+          });
+        } catch (err) {
+          if (residentParked && ctx.agentId) {
+            deps.wakeResident?.({ workspaceId: ctx.workspaceId, agentId: ctx.agentId });
+          }
+          throw err;
+        }
         // SWIFT "warn previously": a PRODUCTION run (not a debug run — that IS the
         // verification) of a graph that diverges from its PROVEN blueprint/hardened
         // version is proceeding UNVERIFIED. Warn the agent at the run, before a
@@ -237,18 +277,64 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           debugRun
             ? null
             : detectProvenDivergence(readBuildLoop(wf.settings), graphContentHash(graph), wf.id);
+        // TEMPORAL SELF-MODEL — tell the agent HOW LONG this workflow usually
+        // takes, from its own run history, so it can decide to await inline (short)
+        // vs. move on and await later (long) instead of guessing a sleep window.
+        if (effectiveWaitMode === 'inline') {
+          const timeoutMs = clampNumber(args.timeoutMs, 300_000, 1_000, 900_000);
+          const settled = await waitForRunSettle(deps, ctx.workspaceId, handle.runId, { timeoutMs });
+          const snapshot = runStatus(deps, ctx.workspaceId, handle.runId);
+          const suspendedAfterTimeout =
+            settled.resolved === 'timeout' && ctx.agentId && deps.parkResidentRuns
+              ? deps.parkResidentRuns({
+                  workspaceId: ctx.workspaceId,
+                  agentId: ctx.agentId,
+                  runIds: [handle.runId],
+                  conversationId: ctx.conversationId,
+                })
+              : false;
+          return {
+            ...snapshot,
+            runId: handle.runId,
+            workflowId: handle.workflowId,
+            started: true,
+            waitMode: 'inline',
+            awaited: settled.resolved,
+            ...(settled.resolved === 'timeout'
+              ? {
+                  timedOut: true,
+                  residentSuspended: suspendedAfterTimeout,
+                  note: 'Still running after the inline wait cap; the resident orchestrator is now parked and will be selectively woken.',
+                }
+              : {}),
+            ...(timing ? { timing } : {}),
+          };
+        }
         // PAVED-ROAD P1 — every result is a signpost: hand the agent the exact
         // next call (poll → diagnose-on-fail) instead of a terminal "started".
         return {
           runId: handle.runId,
           workflowId: handle.workflowId,
           status: 'started',
+          waitMode: 'background',
+          residentSuspended: residentParked,
           restartMode: candidate ? 'failed_frontier' : 'fresh',
           ...(candidate ? {
             resumedFromRunId: candidate.id,
             reusedNodeIds: initialState.completedNodeIds,
           } : {}),
           ...(divergence ? { divergence } : {}),
+          ...(timing ? {
+            timing: {
+              typicalMs: timing.p50Ms,
+              p95Ms: timing.p95Ms,
+              samples: timing.sampleCount,
+              summary: timing.summary,
+              guidance: timing.p50Ms <= 120_000
+                ? 'Short run — agentis.run.await now is fine (event-driven, zero-token).'
+                : 'Longer run — do NOT busy-wait. Do other useful work now and agentis.run.await when convenient (zero tokens while blocked), await several together with agentis.run.await_all, or chain downstream work off it with agentis.workflow.chain.',
+            },
+          } : {}),
           compass: compassForRun({
             runId: handle.runId,
             workflowId: handle.workflowId,
@@ -359,6 +445,59 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           ...(result.nodeEvent ? { nodeEvent: result.nodeEvent } : {}),
           ...(result.resolved === 'timeout'
             ? { timedOut: true, note: 'Still running after the timeout — call agentis.run.await again to keep waiting (no tokens spent while blocked).' }
+            : {}),
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.run.await_all',
+        family: 'run',
+        mcpExposed: true,
+        description:
+          '[EFFICIENT FAN-IN WAIT] BLOCK until EVERY run in `runIds` settles (each COMPLETED / FAILED / CANCELLED, or PAUSED/WAITING), '
+          + 'then return all their statuses in ONE call. This is the conjunction join for when you kicked off SEVERAL apps/workflows '
+          + 'and want to wake ONCE, when the LAST finishes — instead of awaiting them one-by-one. Event-driven and zero-token while '
+          + 'blocked (no polling, no per-run sleeping). Runs already settled count immediately; an unknown runId is treated as settled '
+          + '(found:false) so a bad id never hangs the wait. Bounded by timeoutMs; on timeout returns timedOut:true with the still-pending '
+          + 'ids — call again with those to keep waiting.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            runIds: { type: 'array', items: { type: 'string' }, description: 'The run ids to wait on (1–25). Wakes when ALL have settled.' },
+            timeoutMs: { type: 'number', description: 'Max block in ms (default 300000 = 5m, max 900000 = 15m). On timeout, returns timedOut:true; await again if any remain.' },
+          },
+          required: ['runIds'],
+        },
+        mutating: false,
+      },
+      handler: async (args, ctx) => {
+        const raw = Array.isArray(args.runIds) ? args.runIds : [];
+        const runIds = [...new Set(
+          raw.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim()),
+        )].slice(0, 25);
+        if (runIds.length === 0) {
+          throw new AgentisError('VALIDATION_FAILED', 'runIds must be a non-empty array of run ids');
+        }
+        const timeoutMs = clampNumber(args.timeoutMs, 300_000, 1_000, 900_000);
+        const result = await waitForAllRunsSettle(deps, ctx.workspaceId, runIds, { timeoutMs });
+        const runs = runIds.map((runId) => {
+          const s = result.settled.get(runId);
+          if (!s || !s.found) return { runId, found: false, settled: Boolean(s) };
+          return { ...runStatus(deps, ctx.workspaceId, runId), settled: true };
+        });
+        const pending = runIds.filter((runId) => !result.settled.has(runId));
+        return {
+          awaited: result.resolved,
+          requested: runIds.length,
+          settledCount: result.settled.size,
+          runs,
+          ...(result.resolved === 'timeout'
+            ? {
+                timedOut: true,
+                pending,
+                note: 'Some runs are still going after the timeout — call agentis.run.await_all again with the pending ids to keep waiting (no tokens spent while blocked).',
+              }
             : {}),
         };
       },
@@ -901,72 +1040,10 @@ function latestSameGraphActiveRun(
   }) ?? null;
 }
 
-const RUN_SETTLE_EVENTS: ReadonlySet<string> = new Set([
-  REALTIME_EVENTS.RUN_COMPLETED,
-  REALTIME_EVENTS.RUN_FAILED,
-  REALTIME_EVENTS.RUN_CANCELLED,
-  REALTIME_EVENTS.RUN_PAUSED,
-]);
-/** Statuses at which awaiting stops: terminal, or parked WAITING/PAUSED (e.g. an approval). */
-const SETTLED_RUN_STATUSES: ReadonlySet<string> = new Set([
-  'COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'COMPLETED_WITH_ERRORS', 'FAILED', 'CANCELLED', 'WAITING', 'PAUSED',
-]);
-
-interface RunSettleResult {
-  resolved: 'settled' | 'node' | 'timeout' | 'not_found';
-  status?: string;
-  nodeEvent?: 'completed' | 'failed';
-}
-
-/**
- * Event-driven wait (backs agentis.run.await): resolve when the run settles — or the
- * given node finishes — or on timeout, WITHOUT polling. Subscribes to the bus FIRST,
- * then reads the current state, so an event that fires between the read and the
- * subscribe is never missed. The agent spends no tokens while this blocks.
- */
-export function waitForRunSettle(
-  deps: Pick<ToolHandlerDeps, 'db' | 'bus'>,
-  workspaceId: string,
-  runId: string,
-  opts: { nodeId?: string; timeoutMs: number },
-): Promise<RunSettleResult> {
-  return new Promise((resolve) => {
-    let done = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let unsub: () => void = () => {};
-    const finish = (r: RunSettleResult): void => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      unsub();
-      resolve(r);
-    };
-    unsub = deps.bus.subscribe((msg) => {
-      const ev = msg.envelope.event as string;
-      const p = (msg.envelope.payload ?? {}) as { runId?: string; nodeId?: string; status?: string };
-      if (p.runId !== runId) return;
-      if (opts.nodeId) {
-        if (ev === REALTIME_EVENTS.NODE_COMPLETED && p.nodeId === opts.nodeId) return finish({ resolved: 'node', nodeEvent: 'completed' });
-        if (ev === REALTIME_EVENTS.NODE_FAILED && p.nodeId === opts.nodeId) return finish({ resolved: 'node', nodeEvent: 'failed' });
-      }
-      if (RUN_SETTLE_EVENTS.has(ev)) return finish({ resolved: 'settled', ...(p.status ? { status: p.status } : {}) });
-    });
-    timer = setTimeout(() => finish({ resolved: 'timeout' }), opts.timeoutMs);
-    // Subscribed — now resolve from the CURRENT state if it already settled.
-    const row = deps.db
-      .select({ status: schema.workflowRuns.status, runState: schema.workflowRuns.runState })
-      .from(schema.workflowRuns)
-      .where(and(eq(schema.workflowRuns.id, runId), eq(schema.workflowRuns.workspaceId, workspaceId)))
-      .get();
-    if (!row) return finish({ resolved: 'not_found' });
-    if (opts.nodeId) {
-      const st = row.runState as WorkflowRunState;
-      if (st.completedNodeIds?.includes(opts.nodeId)) return finish({ resolved: 'node', nodeEvent: 'completed' });
-      if (collectFailedNodeIds(st).includes(opts.nodeId)) return finish({ resolved: 'node', nodeEvent: 'failed' });
-    }
-    if (SETTLED_RUN_STATUSES.has(row.status)) return finish({ resolved: 'settled', status: row.status });
-  });
-}
+// The run-settle waits (event-driven, zero-token) now live in ../run/runSettle.js
+// so the engine's in-session `await_runs` yield can share them without importing
+// the tool layer. Re-exported so existing importers of run.js (incl. tests) resolve.
+export { waitForRunSettle, waitForAllRunsSettle };
 
 function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
   const run = deps.db

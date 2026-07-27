@@ -207,6 +207,61 @@ describe('Kanban', () => {
   });
 });
 
+describe('Calendar — drag-to-reschedule (INTEGRATION-CEILING-10X §6)', () => {
+  const now = new Date();
+  const day5 = new Date(now.getFullYear(), now.getMonth(), 5).toISOString();
+  const rows = [{ id: 'post-1', title: 'Downtown Loft listing', date: day5 }];
+  const node: ViewNode = {
+    type: 'Calendar',
+    bind: { collection: 'posts', live: true },
+    dateField: 'date',
+    labelField: 'title',
+    update: { action: 'reschedule_post' },
+  };
+
+  it('renders the bound event on its day', async () => {
+    renderNode(node, rows);
+    await waitFor(() => expect(screen.getByText('Downtown Loft listing')).toBeTruthy());
+  });
+
+  it('dragging an event to a new day dispatches the update action with { id, patch: { date } }', async () => {
+    const { invoke } = renderNode(node, rows);
+    await waitFor(() => expect(screen.getByText('Downtown Loft listing')).toBeTruthy());
+    const card = screen.getByText('Downtown Loft listing');
+    expect(card.getAttribute('draggable')).toBe('true');
+
+    // Day-20 cell: locate by its day-number label, walking up to the day cell container.
+    const day20Label = screen.getByText('20');
+    const day20Cell = day20Label.closest('div.min-h-14') as HTMLElement;
+    expect(day20Cell).toBeTruthy();
+
+    const dataTransfer = {
+      data: {} as Record<string, string>,
+      setData(type: string, value: string) { this.data[type] = value; },
+      getData(type: string) { return this.data[type] ?? ''; },
+      effectAllowed: '',
+    };
+    fireEvent.dragStart(card, { dataTransfer });
+    fireEvent.dragOver(day20Cell, { dataTransfer });
+    fireEvent.drop(day20Cell, { dataTransfer });
+
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    const call = invoke.mock.calls[0]!;
+    expect(call[0]).toBe('reschedule_post');
+    const args = call[1] as { id: string; patch: { date: string } };
+    expect(args.id).toBe('post-1');
+    const patched = new Date(args.patch.date);
+    expect(patched.getDate()).toBe(20);
+    expect(patched.getMonth()).toBe(now.getMonth());
+  });
+
+  it('an unbound Calendar (no update action) renders events read-only, not draggable', async () => {
+    renderNode({ type: 'Calendar', events: [{ date: day5, label: 'Static event' }] }, []);
+    await waitFor(() => expect(screen.getByText('Static event')).toBeTruthy());
+    expect(screen.getByText('Static event').getAttribute('draggable')).not.toBe('true');
+  });
+});
+
 describe('RecordMaster', () => {
   it('renders the master list and the selected record page', async () => {
     renderNode(

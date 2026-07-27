@@ -166,6 +166,19 @@ export interface ToolHandlerDeps {
    * resident agent persist its plan/observations blocks across scheduled wakes.
    */
   sessionStore?: Pick<AgentSessionService, 'rememberResident' | 'residentState'>;
+  /**
+   * Park a chat/channel orchestrator's resident session on one or more runs.
+   * The selective-wake supervisor clears the suspension and resumes the same
+   * persisted context when the awaited work reaches a judgment point.
+   */
+  parkResidentRuns?: (args: {
+    workspaceId: string;
+    agentId: string;
+    runIds: string[];
+    conversationId?: string | null;
+  }) => boolean;
+  /** Undo a resident suspension when launch fails before a run can own the wake. */
+  wakeResident?: (args: { workspaceId: string; agentId: string }) => void;
   /** Experiment/variant substrate (§3.5) — backs agentis.experiment.define/assign/record/results. */
   experiments?: ExperimentService;
   /** App Goal (Evolution Loop north-star) — backs agentis.app.goal. */

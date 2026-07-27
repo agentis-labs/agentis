@@ -182,10 +182,10 @@ export class AgentSessionService {
     return this.create({ workspaceId: args.workspaceId, agentId: args.agentId, nodeId: RESIDENT_NODE_ID, personaBlock: args.personaBlock });
   }
 
-  /** Read a resident agent's carried working state (plan + observations blocks). */
-  residentState(workspaceId: string, agentId: string): { plan: string; observations: string } {
+  /** Read a resident agent's carried working state (task/goal + plan + observations blocks). */
+  residentState(workspaceId: string, agentId: string): { task: string; plan: string; observations: string } {
     const s = this.getOrCreateResident({ workspaceId, agentId });
-    return { plan: s.planBlock ?? '', observations: s.observationsBlock ?? '' };
+    return { task: s.taskBlock ?? '', plan: s.planBlock ?? '', observations: s.observationsBlock ?? '' };
   }
 
   /** Persist a resident agent's working state across wakes (what it's doing / where it left off). */

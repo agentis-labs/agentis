@@ -12,8 +12,8 @@
  * Self-contained (no Toast/Confirm context) so it renders in isolation tests.
  */
 
-import { useEffect, useState } from 'react';
-import { Plus, Trash2, Copy, Check, Server, Boxes, RefreshCw, Lock, Plug, AlertTriangle, Loader2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Plus, Trash2, Copy, Check, Server, Boxes, RefreshCw, Lock, Plug, AlertTriangle, Loader2, Search } from 'lucide-react';
 import {
   listMcpServers, addMcpServer, updateMcpServer, deleteMcpServer, listMcpServerTools, verifyMcpServer, listMcpCatalog, beginMcpOAuth, getMcpServerCard,
   type McpServer, type McpTool, type McpServerCard, type McpCatalogEntry,
@@ -45,6 +45,7 @@ export function McpConnectionsPanel() {
   const [busy, setBusy] = useState(false);
   const [toolsFor, setToolsFor] = useState<{ id: string; tools: McpTool[]; checked: Set<string> } | null>(null);
   const [catalog, setCatalog] = useState<McpCatalogEntry[]>([]);
+  const [catalogQuery, setCatalogQuery] = useState('');
   const [verify, setVerify] = useState<Record<string, VerifyState>>({});
   const authType: 'none' | 'oauth' | 'token' | 'header' | 'custom' = pending ? pending.authType : 'custom';
 
@@ -105,6 +106,19 @@ export function McpConnectionsPanel() {
     setError(null);
     setAdding(true);
   }
+
+  // Client-side filter over the (small, curated) catalog — keeps "quick
+  // connect" scannable as more real servers get added, without needing a
+  // live external-registry integration (INTEGRATION-CEILING-10X §4).
+  const filteredCatalog = useMemo(() => {
+    const q = catalogQuery.trim().toLowerCase();
+    if (!q) return catalog;
+    return catalog.filter((e) =>
+      e.name.toLowerCase().includes(q) ||
+      e.category.toLowerCase().includes(q) ||
+      e.description.toLowerCase().includes(q),
+    );
+  }, [catalog, catalogQuery]);
 
   function resetForm() {
     setName(''); setUrl(''); setSecretValue(''); setPending(null); setAdding(false);
@@ -213,9 +227,25 @@ export function McpConnectionsPanel() {
             of pasting a URL. */}
         {catalog.length > 0 && (
           <div className="mb-3">
-            <div className="mb-1.5 text-caption text-text-muted">Quick connect</div>
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="text-caption text-text-muted">Quick connect</span>
+              {catalog.length > 6 && (
+                <div className="relative ml-auto w-40">
+                  <Search size={11} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+                  <input
+                    value={catalogQuery}
+                    onChange={(e) => setCatalogQuery(e.target.value)}
+                    placeholder="Filter…"
+                    className="h-6 w-full rounded-full border border-line bg-surface pl-6 pr-2 text-[11px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                  />
+                </div>
+              )}
+            </div>
             <div className="flex flex-wrap gap-1.5">
-              {catalog.map((entry) => (
+              {filteredCatalog.length === 0 && (
+                <span className="text-[12px] text-text-muted">No servers match &quot;{catalogQuery}&quot;.</span>
+              )}
+              {filteredCatalog.map((entry) => (
                 <button
                   key={entry.id}
                   type="button"

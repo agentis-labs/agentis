@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import type { AgentisToolContext, WorkflowGraph, WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
@@ -11,6 +12,8 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 let ctx: TestContext;
 let registry: AgentisToolRegistry;
 let starts: Array<{ initialState: WorkflowRunState; debugRun?: boolean }>;
+let parked: Array<{ workspaceId: string; agentId: string; runIds: string[]; conversationId?: string | null }>;
+let settleOnStart: boolean;
 
 const graph = (): WorkflowGraph => ({
   version: 1,
@@ -29,6 +32,8 @@ const graph = (): WorkflowGraph => ({
 beforeEach(async () => {
   ctx = await createTestContext();
   starts = [];
+  parked = [];
+  settleOnStart = false;
   registry = new AgentisToolRegistry({ logger: ctx.logger });
   registerRunTools(registry, {
     db: ctx.db,
@@ -37,6 +42,12 @@ beforeEach(async () => {
     engine: {
       startRun: async (args: { initialState: WorkflowRunState; workflowId: string; debugRun?: boolean }) => {
         starts.push({ initialState: args.initialState, debugRun: args.debugRun });
+        if (settleOnStart) {
+          ctx.db.update(schema.workflowRuns)
+            .set({ status: 'COMPLETED', completedAt: new Date().toISOString() })
+            .where(eq(schema.workflowRuns.id, args.initialState.runId))
+            .run();
+        }
         return { runId: args.initialState.runId, workflowId: args.workflowId };
       },
     } as unknown as ToolHandlerDeps['engine'],
@@ -46,6 +57,7 @@ beforeEach(async () => {
     approvals: { list: () => [] } as unknown as ToolHandlerDeps['approvals'],
     activity: {} as ToolHandlerDeps['activity'],
     replay: new PartialReplayService(ctx.db),
+    parkResidentRuns: (args) => { parked.push(args); return true; },
   } as ToolHandlerDeps);
 });
 
@@ -57,6 +69,7 @@ function toolCtx(): AgentisToolContext {
     ambientId: ctx.ambient.id,
     userId: ctx.user.id,
     conversationId: null,
+    agentId: 'agent-orchestrator',
     caller: 'chat',
   };
 }
@@ -107,6 +120,38 @@ function seedFailedRun(): { workflowId: string; sourceRunId: string } {
 }
 
 describe('agentis.workflow.run debug restart policy', () => {
+  it('durably hands a background launch to the resident orchestrator', async () => {
+    const { workflowId } = seedFailedRun();
+    const result = await registry.execute({
+      id: 'background',
+      toolId: 'agentis.workflow.run',
+      arguments: { workflowId, debugRun: true, restartMode: 'fresh', waitMode: 'background' },
+    }, toolCtx());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatchObject({ waitMode: 'background', residentSuspended: true });
+    expect(parked).toEqual([{
+      workspaceId: ctx.workspace.id,
+      agentId: 'agent-orchestrator',
+      runIds: [(result.output as { runId: string }).runId],
+      conversationId: null,
+    }]);
+  });
+
+  it('supports atomic start+await inline without parking when the run settles', async () => {
+    const { workflowId } = seedFailedRun();
+    settleOnStart = true;
+    const result = await registry.execute({
+      id: 'inline',
+      toolId: 'agentis.workflow.run',
+      arguments: { workflowId, debugRun: true, restartMode: 'fresh', waitMode: 'inline', timeoutMs: 1_000 },
+    }, toolCtx());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatchObject({ waitMode: 'inline', awaited: 'settled', status: 'COMPLETED' });
+    expect(parked).toHaveLength(0);
+  });
+
   it('auto-resumes the latest same-graph failed frontier without rerunning the trigger', async () => {
     const { workflowId, sourceRunId } = seedFailedRun();
     const result = await registry.execute({

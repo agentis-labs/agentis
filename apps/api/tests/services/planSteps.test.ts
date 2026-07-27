@@ -59,3 +59,18 @@ describe('PlanService step projection', () => {
     expect(summarizeWorkSteps(steps)).toEqual({ steps, current: 2, total: 3 });
   });
 });
+
+describe('PlanService.ensureForSession (resident objective anchor)', () => {
+  it('creates + binds a durable plan for a session and is idempotent', () => {
+    const plans = new PlanService(ctx.db, ctx.bus);
+    const sessionId = 'resident-session-1';
+    const p1 = plans.ensureForSession(ctx.workspace.id, ctx.user.id, sessionId, 'Reach 200 qualified leads this month');
+    expect(p1.sessionId).toBe(sessionId);
+    expect(p1.objective).toBeTruthy();
+
+    // A second call returns the SAME bound plan — never a duplicate per session.
+    const p2 = plans.ensureForSession(ctx.workspace.id, ctx.user.id, sessionId, 'Reach 200 qualified leads this month');
+    expect(p2.id).toBe(p1.id);
+    expect(plans.findBySession(ctx.workspace.id, sessionId)?.id).toBe(p1.id);
+  });
+});

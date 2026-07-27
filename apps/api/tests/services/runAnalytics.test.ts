@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
-import { aggregateRunAnalytics } from '../../src/services/run/runAnalytics.js';
+import { aggregateRunAnalytics, workflowDurationStats, humanDuration } from '../../src/services/run/runAnalytics.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 function seedWorkflow(ctx: TestContext, title: string, nodeId: string): string {
@@ -149,5 +149,60 @@ describe('aggregateRunAnalytics', () => {
     expect(a.perWorkflow[0]?.title).toBe('Workflow A');
     expect(a.perWorkflow[0]?.totalTokens).toBe(1000);
     expect(a.perWorkflow[1]?.totalTokens).toBe(200);
+  });
+});
+
+describe('workflowDurationStats (temporal self-model)', () => {
+  let ctx: TestContext;
+  beforeEach(async () => { ctx = await createTestContext(); });
+  afterEach(() => { ctx.close(); });
+
+  function seedRunDur(workflowId: string, status: string, durationMs: number): void {
+    const start = Date.parse('2026-06-29T10:00:00.000Z');
+    ctx.db.insert(schema.workflowRuns).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      workflowId,
+      userId: ctx.user.id,
+      status,
+      runState: { nodeStates: {} },
+      startedAt: new Date(start).toISOString(),
+      completedAt: new Date(start + durationMs).toISOString(),
+    }).run();
+  }
+
+  it('returns null when there are too few finished samples to be honest', () => {
+    const wf = seedWorkflow(ctx, 'New workflow', 'n1');
+    seedRunDur(wf, 'COMPLETED', 5_000);
+    seedRunDur(wf, 'COMPLETED', 7_000);
+    expect(workflowDurationStats(ctx.db, ctx.workspace.id, wf)).toBeNull();
+  });
+
+  it('computes p50 / p95 / avg over finished runs and a human summary', () => {
+    const wf = seedWorkflow(ctx, 'Seasoned workflow', 'n1');
+    for (const d of [2_000, 4_000, 6_000, 8_000, 10_000]) seedRunDur(wf, 'COMPLETED', d);
+    const stats = workflowDurationStats(ctx.db, ctx.workspace.id, wf);
+    expect(stats).not.toBeNull();
+    expect(stats!.sampleCount).toBe(5);
+    expect(stats!.p50Ms).toBe(6_000);
+    expect(stats!.p95Ms).toBe(10_000);
+    expect(stats!.avgMs).toBe(6_000);
+    expect(stats!.summary).toBe('typically ~6s (p95 ~10s) over 5 runs');
+  });
+
+  it('excludes CANCELLED runs (aborted early → misleadingly short)', () => {
+    const wf = seedWorkflow(ctx, 'Cancels workflow', 'n1');
+    for (const d of [30_000, 32_000, 34_000]) seedRunDur(wf, 'COMPLETED', d);
+    seedRunDur(wf, 'CANCELLED', 10); // must not drag the estimate down
+    const stats = workflowDurationStats(ctx.db, ctx.workspace.id, wf);
+    expect(stats!.sampleCount).toBe(3);
+    expect(stats!.p50Ms).toBe(32_000);
+  });
+
+  it('humanDuration renders compact units', () => {
+    expect(humanDuration(45_000)).toBe('45s');
+    expect(humanDuration(4 * 60_000)).toBe('4m');
+    expect(humanDuration(130 * 60_000)).toBe('2h 10m');
+    expect(humanDuration(120 * 60_000)).toBe('2h');
   });
 });

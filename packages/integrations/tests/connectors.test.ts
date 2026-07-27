@@ -10,6 +10,8 @@ import { AgentisError } from '@agentis/core';
 import { executeHttpRequest } from '../src/connectors/http.js';
 import { manifestHttpConnector, executeManifestOperation } from '../src/connectors/manifestHttp.js';
 import { SERVICE_TEMPLATES, templatedHttpConnector } from '../src/connectors/templatedConnectors.js';
+import { genericHttpConnector } from '../src/connectors/apiConnectors.js';
+import { builtinConnectors } from '../src/registry.js';
 import type { IntegrationManifest, IntegrationOperationSpec } from '../src/types.js';
 
 /** Capture the fetch call without hitting the network. */
@@ -324,5 +326,46 @@ describe('manifestHttpConnector — operation contract derivation', () => {
     const contract = manifestHttpConnector(manifest).operationContracts?.op;
     // Only `id` (params scope) is required — credential/input refs don't gate.
     expect(contract!.required).toEqual(['id']);
+  });
+});
+
+describe('genericHttpConnector — honest failure for un-implemented social connectors (INTEGRATION-CEILING-10X §0)', () => {
+  it('without a hint, throws the bare "supply a URL" message', async () => {
+    const connector = genericHttpConnector('some_service', ['do_thing']);
+    await expect(
+      connector.execute({ operation: 'do_thing', params: {}, credential: null, timeoutMs: 1000, inputData: {} }),
+    ).rejects.toThrow(/requires params\.url or credential\.baseUrl\.$/);
+  });
+
+  it('with a hint (twitter_x/linkedin/instagram), the error names the REAL limitation, not a generic dead end', async () => {
+    const connector = genericHttpConnector('twitter_x', ['post_tweet'], 'X requires a separate multipart media-upload step that this path cannot express.');
+    await expect(
+      connector.execute({ operation: 'post_tweet', params: {}, credential: null, timeoutMs: 1000, inputData: {} }),
+    ).rejects.toThrow(/multipart media-upload step/);
+  });
+
+  it('a text-only call still works when the caller supplies params.url and a bearer credential (the honest fix must not regress this)', async () => {
+    const { calls } = stubFetch();
+    const connector = genericHttpConnector('linkedin', ['create_post'], 'some hint');
+    const result = await connector.execute({
+      operation: 'create_post',
+      params: { url: 'https://api.linkedin.com/v2/ugcPosts', method: 'POST', body: { text: 'hello' } },
+      credential: { accessToken: 'tok-123' },
+      timeoutMs: 1000,
+      inputData: {},
+    });
+    expect(result.ok).toBe(true);
+    expect(calls[0]!.url).toBe('https://api.linkedin.com/v2/ugcPosts');
+    expect((calls[0]!.init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
+  });
+
+  it('builtinConnectors registers twitter_x/linkedin/instagram with their honest hints wired (not the bare generic fallback)', async () => {
+    for (const service of ['twitter_x', 'linkedin', 'instagram']) {
+      const connector = builtinConnectors.find((c) => c.service === service);
+      expect(connector, `expected a registered connector for ${service}`).toBeDefined();
+      await expect(
+        connector!.execute({ operation: connector!.operations[0]!, params: {}, credential: null, timeoutMs: 1000, inputData: {} }),
+      ).rejects.toThrow(/no built-in .* connector exists yet/i);
+    }
   });
 });

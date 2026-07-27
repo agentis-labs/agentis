@@ -14,7 +14,7 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type WorkflowGraph, type WorkflowGraphPatch } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AgentisRuntimeHandle, AgentisRuntimeStartResult } from '@agentis/runtime';
@@ -57,6 +57,7 @@ import { registerAllTools } from './services/agentisToolHandlers/index.js';
 import { ChatToolExecutor } from './services/chat/chatToolExecutor.js';
 import { ChatSessionExecutor } from './services/chat/chatSessionExecutor.js';
 import { OrchestratorEventBridge } from './services/orchestrator/orchestratorEventBridge.js';
+import { SelectiveWakeSupervisor } from './services/orchestrator/selectiveWakeSupervisor.js';
 import { ViewportStore } from './services/viewportStore.js';
 import { seedIfEmpty, type SeedResult } from './services/seed.js';
 import { mountOpenApi } from './openapi.js';
@@ -80,6 +81,7 @@ import { VisionService } from './services/visionService.js';
 import { DocumentExtractionService } from './services/documentExtractionService.js';
 import { ChannelIdentityService } from './services/conversation/channelIdentityService.js';
 import { WorkspaceModelConfigService } from './services/workspace/workspaceModelConfigService.js';
+import { WorkspaceMediaConfigService } from './services/workspace/workspaceMediaConfigService.js';
 import { WorkspaceEvaluatorRuntimeFactory } from './services/workspace/workspaceEvaluatorRuntimeFactory.js';
 import { buildOrchestratorModelRoutes } from './routes/orchestratorModels.js';
 import { WorkflowEngine, type EngineDeps } from './engine/WorkflowEngine.js';
@@ -124,6 +126,7 @@ import { ConnectionGrantService } from './services/connectionGrants.js';
 import { DurableEntityService, DurableEntityDispatcher } from './services/durableEntities.js';
 import { SubjectRuntime, channelCorrelationId } from './services/subjectRuntime.js';
 import { ResidentAgentDriver } from './services/residentAgentDriver.js';
+import { buildResidentWakeHistory } from './services/residency.js';
 import { ExperimentService } from './services/experiments.js';
 import { ProactiveFollowupService } from './services/proactiveFollowups.js';
 import { AppLearningService } from './services/app/appLearning.js';
@@ -500,6 +503,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // conversation runtime (and any workspace-aware consumer) honors them.
   const workspaceModelConfig = new WorkspaceModelConfigService({ db: sqlite, vault: credentialVault, logger });
   orchestratorModelRouter.setConfigProvider(workspaceModelConfig.asConfigProvider());
+  // Same "bring your own model" treatment for MEDIA generation (INTEGRATION-CEILING-10X §1).
+  const workspaceMediaConfigService = new WorkspaceMediaConfigService({ db: sqlite, vault: credentialVault, logger });
   // Zero-config fallback: when neither Settings nor env name a model for a
   // workspace, derive one from its first connected agent runtime — so connecting
   // any HTTP/LLM agent lights up the whole autonomy stack (sessions, evaluation,
@@ -1062,6 +1067,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // The fractal Command Model — an orchestrator/manager's progressive comprehension
   // of what it manages: scoped inventory + progress/deltas + App minds.
   const commandModel = new CommandModelService({ db: sqlite, logger, appLearning });
+  engineDeps.commandModel = commandModel;
   // §3.0/§3.3/§3.5 — spine + connection grants + experiments, shared by the tool
   // handlers, the dispatcher, AND the Mission Control read routes (§3.6).
   const durableEntities = new DurableEntityService(sqlite);
@@ -1131,6 +1137,77 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     connectionGrants,
     // §3.1 — resident session store, backs agentis.residency.remember (cross-wake continuity).
     sessionStore,
+    parkResidentRuns: ({
+      workspaceId,
+      agentId,
+      runIds,
+      conversationId,
+    }: {
+      workspaceId: string;
+      agentId: string;
+      runIds: string[];
+      conversationId?: string | null;
+    }) => {
+      if (!autonomyGate(workspaceId)) return false;
+      const session = sessionStore.getOrCreateResident({ workspaceId, agentId });
+      if (conversationId) {
+        const marker = `[Durable origin conversation:${conversationId}]`;
+        const alreadyCarried = sessionStore.getRecentMessages(session.id, 30)
+          .some((message) => message.content.includes(marker));
+        if (!alreadyCarried) {
+          const origin = sqlite.select({
+            channelConnectionId: schema.conversations.channelConnectionId,
+            channelChatId: schema.conversations.channelChatId,
+          }).from(schema.conversations).where(and(
+            eq(schema.conversations.id, conversationId),
+            eq(schema.conversations.workspaceId, workspaceId),
+          )).get();
+          const recent = sqlite.select({
+            authorType: schema.conversationMessages.authorType,
+            body: schema.conversationMessages.body,
+          }).from(schema.conversationMessages).where(and(
+            eq(schema.conversationMessages.conversationId, conversationId),
+            eq(schema.conversationMessages.workspaceId, workspaceId),
+          )).orderBy(desc(schema.conversationMessages.createdAt)).limit(6).all().reverse();
+          const originHeader = [
+            marker,
+            origin?.channelConnectionId ? `channelConnectionId: ${origin.channelConnectionId}` : '',
+            origin?.channelChatId ? `channelChatId: ${origin.channelChatId}` : '',
+            'When this work settles, continue/reply in this originating conversation.',
+          ].filter(Boolean).join('\n');
+          sessionStore.appendMessages(session.id, [
+            { role: 'user', content: originHeader },
+            ...recent.map((message) => ({
+              role: message.authorType === 'agent' || message.authorType === 'assistant'
+                ? 'assistant' as const
+                : 'user' as const,
+              content: message.body,
+            })),
+          ], session.totalSteps);
+        }
+      }
+      const existingRunIds = session.status === 'waiting' && Array.isArray(session.suspendPayload?.runIds)
+        ? session.suspendPayload.runIds.filter((value): value is string => typeof value === 'string')
+        : [];
+      const awaitedRunIds = [...new Set([...existingRunIds, ...runIds])];
+      sessionStore.suspend(session.id, 'await_event', `runs:${awaitedRunIds.join(',')}`, { runIds: awaitedRunIds });
+      // Close the settle-between-check-and-suspend race. A terminal run needs no
+      // future event, so do not leave the resident parked waiting for one.
+      const allSettled = awaitedRunIds.every((runId) => {
+        const row = sqlite.select({ status: schema.workflowRuns.status })
+          .from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get();
+        return !row || ['COMPLETED', 'COMPLETED_WITH_ERRORS', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'FAILED', 'CANCELLED', 'PAUSED', 'WAITING'].includes(row.status);
+      });
+      if (allSettled) {
+        sessionStore.wake(session.id);
+        return false;
+      }
+      return true;
+    },
+    wakeResident: ({ workspaceId, agentId }: { workspaceId: string; agentId: string }) => {
+      const session = sessionStore.getOrCreateResident({ workspaceId, agentId });
+      if (session.status === 'waiting') sessionStore.wake(session.id);
+    },
     // §3.5 — experiment/variant substrate (A/B of any decision + per-variant success rate).
     experiments,
     // Evolution Loop — the App's durable Goal (north-star), backs agentis.app.goal.
@@ -1268,14 +1345,20 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // provider is registered behind the pluggable MediaProvider seam — swap it or add
   // audio/video / a home-grown harness with mediaService.register(...). No API key ⇒
   // the capability simply isn't offered (agentis.media.generate errors cleanly).
-  const mediaService = new MediaService({ assetStore, logger });
-  if (env.AGENTIS_MEDIA_IMAGE_API_KEY) {
-    mediaService.register(openAiImageProvider({
+  // registerConfigurable (not a plain register) means a workspace can override
+  // {baseUrl, model, apiKey} from Settings → Media — point at OpenRouter, a
+  // self-hosted endpoint, or just a different model — with no restart, the same
+  // "bring your own model" treatment chat models already had (INTEGRATION-CEILING-10X §1).
+  const mediaService = new MediaService({ assetStore, logger, workspaceMediaConfig: workspaceMediaConfigService });
+  mediaService.registerConfigurable({
+    modality: 'image',
+    envDefaults: {
       baseUrl: env.AGENTIS_MEDIA_IMAGE_BASE_URL,
-      apiKey: env.AGENTIS_MEDIA_IMAGE_API_KEY,
       model: env.AGENTIS_MEDIA_IMAGE_MODEL,
-    }));
-  }
+      ...(env.AGENTIS_MEDIA_IMAGE_API_KEY ? { apiKey: env.AGENTIS_MEDIA_IMAGE_API_KEY } : {}),
+    },
+    build: openAiImageProvider,
+  });
   toolHandlerDeps.media = mediaService;
   // LAYER 0: agent_task runtime inheritance — bind the workspace default model to
   // any agent that has no explicit adapter, so specialists actually run.
@@ -1533,6 +1616,52 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       logger.warn('agent_turn.failed', { agentId, thread, err: (err as Error).message });
     }
   };
+  // ORCHESTRATOR-SUSPEND-10X Phase 0 — WARM resident revival. The generic
+  // runAgentTurn wakes with an empty history, so a resident agent restarted cold
+  // every tick, its only continuity a two-paragraph summary baked into `message`.
+  // This runner instead reconstructs the agent's recent conversation from its
+  // persisted resident AgentSession and feeds it as the turn's history, then
+  // persists the wake exchange back — so the SAME agent resumes where it left off
+  // (goal + plan + observations + prior conversation), not amnesiac.
+  const runResidentWake = async ({ workspaceId, agentId, message }: { workspaceId: string; agentId: string; message: string }) => {
+    const reg = adapters.get(agentId);
+    const adapter = reg?.adapter?.chat ? reg.adapter : orchestratorRuntime;
+    if (!adapter?.chat) return;
+    const owner = sqlite.select({ userId: schema.workspaces.userId }).from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).get();
+    if (!owner?.userId) return;
+    const session = sessionStore.getOrCreateResident({ workspaceId, agentId });
+    // Clear a durable background-run suspension before reconstructing context.
+    // The wake message below is persisted into the same session, so the resumed
+    // turn sees both its prior working history and the exact reason it woke.
+    if (session.status === 'waiting') sessionStore.wake(session.id);
+    // Follow-up C — once the resident agent holds a standing goal, anchor it in a
+    // durable ChatPlan bound to its session so the objective + decisions +
+    // verification survive suspensions (idempotent; skipped until a goal exists).
+    const objective = session.taskBlock?.trim();
+    if (objective) {
+      try { planService.ensureForSession(workspaceId, owner.userId, session.id, objective); }
+      catch (err) { logger.warn('resident_wake.bind_plan.failed', { agentId, err: (err as Error).message }); }
+    }
+    const history = buildResidentWakeHistory(sessionStore.getRecentMessages(session.id, 20));
+    const step = session.totalSteps + 1;
+    sessionStore.appendMessages(session.id, [{ role: 'user', content: message }], step);
+    let reply = '';
+    try {
+      for await (const delta of ChatSessionExecutor.turn(
+        adapter, history, message,
+        { workspaceId, agentId, userId: owner.userId, conversationId: `resident:${agentId}`, permissionMode: 'auto' },
+        { maxTurns: 4, maxToolCalls: 8 },
+      )) {
+        if (delta.type === 'text' && typeof delta.delta === 'string') reply += delta.delta;
+      }
+    } catch (err) {
+      logger.warn('resident_wake.failed', { agentId, err: (err as Error).message });
+    }
+    // Persist the assistant turn back into the resident session so the NEXT wake
+    // reconstructs a conversation that includes this one (continuity compounds).
+    if (reply.trim()) sessionStore.appendMessages(session.id, [{ role: 'assistant', content: reply.trim() }], step);
+    sessionStore.incrementStats(session.id, { steps: 1 });
+  };
   const commandHeartbeat = new CommandHeartbeat({
     db: sqlite,
     logger,
@@ -1594,7 +1723,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // carrying its resident working state, and reschedules — replacing the residency sweep.
   const residentAgentDriver = new ResidentAgentDriver(durableEntities, {
     db: sqlite,
-    wakeAgent: ({ workspaceId, agentId, message }) => runAgentTurn({ workspaceId, agentId, message, thread: 'resident' }),
+    wakeAgent: ({ workspaceId, agentId, message }) => runResidentWake({ workspaceId, agentId, message }),
     residentState: (workspaceId, agentId) => sessionStore.residentState(workspaceId, agentId),
     autonomyEnabled: autonomyGate,
   });
@@ -1670,6 +1799,19 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
 
   const orchestratorBridge = new OrchestratorEventBridge({ db: sqlite, bus, logger });
   orchestratorBridge.start();
+  // ORCHESTRATOR-SUSPEND-10X Phase 3 — selective-wake supervisor. Where the bridge
+  // above pushes proactive CARDS to the operator, this REVIVES the owning agent
+  // (warm, via runResidentWake) when an app it owns concludes or hits a judgment
+  // point (accomplished/completed/failed/approval) — and only then. Autonomy-gated,
+  // debounced so a fan-in of many runs settling at once wakes the owner once.
+  const selectiveWakeSupervisor = new SelectiveWakeSupervisor({
+    db: sqlite,
+    bus,
+    logger,
+    autonomyEnabled: autonomyGate,
+    wakeOwner: ({ workspaceId, agentId, message }) => runResidentWake({ workspaceId, agentId, message }),
+  });
+  selectiveWakeSupervisor.start();
 
   // Recover runs left mid-flight by a process restart: re-arms `wait` node
   // timers, sleep_until/await_event/approval-parked agent sessions, and
@@ -1796,6 +1938,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     triggerRuntime,
     voiceChannelAdapter,
     workspaceModelConfig,
+    workspaceMediaConfigService,
   });
 
   let httpServer: HttpServer | undefined;

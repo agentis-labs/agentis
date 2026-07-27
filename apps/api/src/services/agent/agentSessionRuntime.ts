@@ -70,6 +70,9 @@ export type SessionYield =
       leaseMinutes?: number;
     }
   | { kind: 'await_event'; toolCallId: string; event: string }
+  // Fan-in: suspend until EVERY run in the set settles, then resume with all their
+  // statuses — the in-session twin of agentis.run.await_all.
+  | { kind: 'await_runs'; toolCallId: string; runIds: string[] }
   | { kind: 'sleep_until'; toolCallId: string; untilIso: string }
   | { kind: 'request_approval'; toolCallId: string; title: string; summary: string }
   // W3 — spawn a TEAM of specialists in parallel, await all, synthesize.
@@ -228,12 +231,13 @@ const TOOL = {
   dryRunWorkflow: 'dry_run_workflow',
   checkRun: 'check_run',
   awaitEvent: 'await_event',
+  awaitRuns: 'await_runs',
   sleepUntil: 'sleep_until',
   requestApproval: 'request_approval',
   completeTask: 'complete_task',
 } as const;
 
-const YIELD_TOOLS = new Set<string>([TOOL.delegateTask, TOOL.spawnTeam, TOOL.runWorkflow, TOOL.buildWorkflow, TOOL.awaitEvent, TOOL.sleepUntil, TOOL.requestApproval]);
+const YIELD_TOOLS = new Set<string>([TOOL.delegateTask, TOOL.spawnTeam, TOOL.runWorkflow, TOOL.buildWorkflow, TOOL.awaitEvent, TOOL.awaitRuns, TOOL.sleepUntil, TOOL.requestApproval]);
 
 /**
  * Tools a delegation grant never restricts: terminal, session-local, and
@@ -518,9 +522,7 @@ export class AgentSessionRuntime {
     }
 
     if (pendingYield) {
-      this.deps.sessions.suspend(sessionId, suspendReasonFor(pendingYield), wakeConditionFor(pendingYield), {
-        toolCallId: pendingYield.toolCallId,
-      });
+      this.deps.sessions.suspend(sessionId, suspendReasonFor(pendingYield), wakeConditionFor(pendingYield), suspendPayloadFor(pendingYield));
       return { kind: 'done', outcome: { kind: 'suspended', yield: pendingYield } };
     }
     return { kind: 'continue' };
@@ -561,6 +563,14 @@ export class AgentSessionRuntime {
         const event = String(args.event ?? '');
         if (!event) return null;
         return { kind: 'await_event', toolCallId: call.id, event };
+      }
+      case TOOL.awaitRuns: {
+        const raw = Array.isArray(args.run_ids) ? args.run_ids : Array.isArray(args.runIds) ? args.runIds : [];
+        const runIds = [...new Set(
+          raw.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim()),
+        )];
+        if (runIds.length === 0) return null;
+        return { kind: 'await_runs', toolCallId: call.id, runIds };
       }
       case TOOL.sleepUntil: {
         const untilIso = String(args.until_iso ?? args.until ?? '');
@@ -1274,6 +1284,18 @@ const CONTROL_TOOLS: ToolDefinition[] = [
     parameters: { type: 'object', properties: { event: { type: 'string' } }, required: ['event'] },
   },
   {
+    name: TOOL.awaitRuns,
+    description:
+      'Suspend until EVERY run in run_ids settles, then resume with ALL their statuses — the fan-in join for when you '
+      + 'started several workflows/apps (e.g. via run_workflow) and want to wake ONCE, when the last finishes. You spend '
+      + 'zero tokens while waiting. On a partial timeout you resume with the pending ids so you can await them again.',
+    parameters: {
+      type: 'object',
+      properties: { run_ids: { type: 'array', items: { type: 'string' }, description: 'The run ids to wait on; wakes when ALL have settled.' } },
+      required: ['run_ids'],
+    },
+  },
+  {
     name: TOOL.sleepUntil,
     description: 'Suspend until an absolute time (ISO-8601). You spend no tokens while sleeping.',
     parameters: { type: 'object', properties: { until_iso: { type: 'string', description: 'ISO-8601 timestamp.' } }, required: ['until_iso'] },
@@ -1336,6 +1358,7 @@ function suspendReasonFor(y: SessionYield): 'delegate' | 'await_event' | 'sleep_
     case 'delegate_team':
       return 'delegate';
     case 'await_event':
+    case 'await_runs':
     case 'run_workflow':
     case 'build_workflow':
       return 'await_event';
@@ -1344,6 +1367,15 @@ function suspendReasonFor(y: SessionYield): 'delegate' | 'await_event' | 'sleep_
     case 'request_approval':
       return 'checkpoint';
   }
+}
+
+/**
+ * The suspend payload persisted with a parked session. Carries the open yield's
+ * toolCallId (so the wake result lands on the right tool call) plus any state the
+ * engine needs to RE-ARM the wait after a restart — for `await_runs`, the run set.
+ */
+function suspendPayloadFor(y: SessionYield): Record<string, unknown> {
+  return { toolCallId: y.toolCallId, ...(y.kind === 'await_runs' ? { runIds: y.runIds } : {}) };
 }
 
 /**
@@ -1358,6 +1390,8 @@ function wakeConditionFor(y: SessionYield): string {
       return `delegate:${y.toolCallId}`;
     case 'await_event':
       return `event:${y.event}`;
+    case 'await_runs':
+      return `runs:${y.toolCallId}`;
     case 'run_workflow':
       return `workflow:${y.toolCallId}`;
     case 'build_workflow':

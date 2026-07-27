@@ -228,6 +228,77 @@ export function aggregateRunAnalytics(
   };
 }
 
+/** Lean per-workflow duration estimate the AGENT can consult (not just the UI). */
+export interface WorkflowDurationStats {
+  sampleCount: number;
+  p50Ms: number;
+  p95Ms: number;
+  avgMs: number;
+  /** A short human phrase, e.g. "typically ~4m (p95 ~12m) over 23 runs". */
+  summary: string;
+}
+
+const DURATION_SCAN = 50;
+
+/**
+ * How long this workflow TYPICALLY takes, from its own recent finished runs —
+ * p50/p95/avg over startedAt→completedAt. One indexed query, no audit join, so it
+ * is cheap enough to attach to a run-start or await result (unlike
+ * {@link aggregateRunAnalytics}, which scans 200 runs and joins the audit sink).
+ * CANCELLED runs are excluded (aborted early → misleadingly short). Returns null
+ * when there aren't enough finished samples to say anything honest.
+ *
+ * This is the temporal self-model the orchestrator was missing: it could reason
+ * about WHAT exists but never about HOW LONG things take, so it awaited blind.
+ */
+export function workflowDurationStats(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  workflowId: string,
+  minSamples = 3,
+): WorkflowDurationStats | null {
+  const rows = db.select({
+    startedAt: schema.workflowRuns.startedAt,
+    completedAt: schema.workflowRuns.completedAt,
+    status: schema.workflowRuns.status,
+  })
+    .from(schema.workflowRuns)
+    .where(and(eq(schema.workflowRuns.workflowId, workflowId), eq(schema.workflowRuns.workspaceId, workspaceId)))
+    .orderBy(desc(schema.workflowRuns.createdAt))
+    .limit(DURATION_SCAN)
+    .all();
+  const durations: number[] = [];
+  for (const r of rows) {
+    if (r.status === 'CANCELLED' || !r.startedAt || !r.completedAt) continue;
+    const d = new Date(r.completedAt).getTime() - new Date(r.startedAt).getTime();
+    if (Number.isFinite(d) && d >= 0) durations.push(d);
+  }
+  if (durations.length < minSamples) return null;
+  durations.sort((a, b) => a - b);
+  const pct = (p: number): number => durations[Math.min(durations.length - 1, Math.floor(p * durations.length))]!;
+  const p50 = pct(0.5);
+  const p95 = pct(0.95);
+  const avg = Math.round(durations.reduce((s, d) => s + d, 0) / durations.length);
+  return {
+    sampleCount: durations.length,
+    p50Ms: p50,
+    p95Ms: p95,
+    avgMs: avg,
+    summary: `typically ~${humanDuration(p50)} (p95 ~${humanDuration(p95)}) over ${durations.length} runs`,
+  };
+}
+
+/** Compact human duration: "~45s", "~4m", "~2h 10m". */
+export function humanDuration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`;
+}
+
 // COMPLETED_WITH_ERRORS is terminal but NOT a success (a node errored).
 function isTerminal(status: string): boolean {
   return status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION'

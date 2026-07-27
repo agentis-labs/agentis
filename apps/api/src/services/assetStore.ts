@@ -178,7 +178,7 @@ export class AssetStore {
         if (referenced.has(hash.toLowerCase())) continue;
         try {
           const s = await fs.stat(path.join(shardDir, hash));
-          if (s.mtimeMs > cutoff) continue; // too new — may be mid-put
+          if (graceMs > 0 && s.mtimeMs > cutoff) continue; // too new — may be mid-put
           await fs.rm(path.join(shardDir, hash));
           result.removedBlobs += 1;
           result.freedBytes += s.size;

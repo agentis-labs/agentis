@@ -24,8 +24,21 @@ import { CapabilityRouter } from '../capability/capabilityRouter.js';
 import { parseCapabilityUrn } from '../capability/capabilityUrn.js';
 import type { CapabilityKind } from '../capability/capabilityUrn.js';
 import { resolveCommandScope } from '../command/commandScope.js';
+import { workflowDurationStats } from '../run/runAnalytics.js';
+import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 
 const CAPABILITY_KINDS: CapabilityKind[] = ['app', 'workflow', 'node', 'phase', 'agent', 'skill', 'mcp_tool', 'collection'];
+
+/**
+ * Temporal self-model at DISCOVERY: how long a workflow typically takes, attached
+ * to the specific search/load hits the agent is choosing between (bounded to those
+ * hits — never the resident manifest hot path). Empty when there isn't enough
+ * finished history to say anything honest.
+ */
+function timingField(db: AgentisSqliteDb, workspaceId: string, workflowId: string): { timing?: { typicalMs: number; p95Ms: number; samples: number; summary: string } } {
+  const s = workflowDurationStats(db, workspaceId, workflowId);
+  return s ? { timing: { typicalMs: s.p50Ms, p95Ms: s.p95Ms, samples: s.sampleCount, summary: s.summary } } : {};
+}
 
 export function registerCapabilityPlaneTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   const router = new CapabilityRouter({ db: deps.db, logger: deps.logger });
@@ -73,7 +86,14 @@ export function registerCapabilityPlaneTools(registry: AgentisToolRegistry, deps
           });
           return {
             count: results.length,
-            results: results.map((r) => ({ urn: r.urn, kind: r.kind, title: r.title, purpose: r.purpose, ...(r.inputDigest ? { inputDigest: r.inputDigest } : {}), score: r.score })),
+            results: results.map((r) => ({
+              urn: r.urn, kind: r.kind, title: r.title, purpose: r.purpose,
+              ...(r.inputDigest ? { inputDigest: r.inputDigest } : {}),
+              score: r.score,
+              // Tell the agent how long a runnable workflow typically takes so it
+              // can weigh which capability to reach for (and plan the wait).
+              ...(r.kind === 'workflow' && r.workflowId ? timingField(deps.db, ctx.workspaceId, r.workflowId) : {}),
+            })),
             next: 'agentis.capability.invoke(urn, input) to run one — down to a single node:<id> or phase:<id>.',
           };
         },
@@ -116,6 +136,12 @@ export function registerCapabilityPlaneTools(registry: AgentisToolRegistry, deps
               urn: { type: 'string', description: 'Capability URN from capability.search.' },
               input: { type: 'object', description: 'Payload: workflow trigger inputs, agent { task }, or MCP tool arguments.' },
               sourceRunId: { type: 'string', description: 'For node/phase: the run to replay from (defaults to the latest run of the workflow).' },
+              waitMode: {
+                type: 'string',
+                enum: ['background', 'inline', 'auto'],
+                description: 'For workflow/App targets: start in background, start+await inline, or choose from observed duration.',
+              },
+              timeoutMs: { type: 'number', description: 'Inline wait cap in milliseconds (max 900000).' },
             },
             required: ['urn'],
           },
@@ -129,6 +155,10 @@ export function registerCapabilityPlaneTools(registry: AgentisToolRegistry, deps
           const resolution = router.resolveInvoke(ctx.workspaceId, urn, input);
           if (!resolution.ok) {
             return { invoked: false, urn, guidance: resolution.guidance, ...(resolution.alternatives ? { alternatives: resolution.alternatives } : {}) };
+          }
+          if (resolution.plan.toolId === 'agentis.workflow.run') {
+            if (typeof args.waitMode === 'string') resolution.plan.arguments.waitMode = args.waitMode;
+            if (typeof args.timeoutMs === 'number') resolution.plan.arguments.timeoutMs = args.timeoutMs;
           }
           const outcome = await registry.execute(
             { id: randomUUID(), toolId: resolution.plan.toolId, arguments: resolution.plan.arguments },
@@ -191,6 +221,7 @@ function hydrate(deps: ToolHandlerDeps, workspaceId: string, urnRaw: string): Re
         inputContract: graph?.inputContract?.fields ?? [],
         nodes: (graph?.nodes ?? []).map((n) => ({ id: n.id, type: n.type, title: n.title })).slice(0, 60),
         phases: (graph?.phases ?? []).map((p) => ({ id: p.id, name: p.name })),
+        ...timingField(db, workspaceId, wf.id),
       };
     }
     case 'agent': {
@@ -208,7 +239,10 @@ function hydrate(deps: ToolHandlerDeps, workspaceId: string, urnRaw: string): Re
       if (!app) return { urn: urnRaw, error: 'app not found' };
       const wfs = db.select({ id: schema.workflows.id, title: schema.workflows.title }).from(schema.workflows)
         .where(and(eq(schema.workflows.appId, urn.appId!), eq(schema.workflows.workspaceId, workspaceId))).all();
-      return { urn: urnRaw, kind: 'app', name: app.name, description: app.description ?? null, workflows: wfs };
+      return {
+        urn: urnRaw, kind: 'app', name: app.name, description: app.description ?? null,
+        workflows: wfs.map((w) => ({ ...w, ...timingField(db, workspaceId, w.id) })),
+      };
     }
     default:
       return { urn: urnRaw, kind: urn.kind, note: 'no extended detail for this kind.' };

@@ -66,7 +66,10 @@ function scriptedAdapter(steps: ScriptStep[], seenMessages?: ChatMessage[][]): S
 let ctx: TestContext;
 let dataDir: string;
 
-function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verifyCompletion?: TaskCompletionJudge } = {}): WorkflowEngine {
+function buildEngine(
+  adapter: SessionAdapter,
+  opts: { plans?: PlanService; verifyCompletion?: TaskCompletionJudge; commandBriefing?: string } = {},
+): WorkflowEngine {
   const volume = new WorkspaceVolumeService(dataDir);
   const agentTools = new AgentToolRuntime({ volume });
   const scratchpad = new ScratchpadService(ctx.bus, ctx.logger);
@@ -113,6 +116,9 @@ function buildEngine(adapter: SessionAdapter, opts: { plans?: PlanService; verif
     sessions,
     sessionRuntime,
     plans: opts.plans,
+    ...(opts.commandBriefing
+      ? { commandModel: { briefingBlock: () => opts.commandBriefing! } }
+      : {}),
   });
   notifyActivityFn = (args) => engine.notifyAgentActivity(args);
   return engine;
@@ -288,6 +294,28 @@ describe('WorkflowEngine — agent_session', () => {
     expect(systemPrompt).not.toContain('sk-secret');
   });
 
+  it('injects the scoped command briefing into a workflow-bound agent session', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      name: 'Workflow Manager',
+      adapterType: 'codex',
+      role: 'manager',
+    }).run();
+    const seenMessages: ChatMessage[][] = [];
+    const engine = buildEngine(
+      scriptedAdapter([{ text: 'managed' }], seenMessages),
+      { commandBriefing: 'COMMAND MODEL: 2 apps; 1 run needs attention.' },
+    );
+    await runSessionGraph(engine, [], undefined, undefined, sessionGraph(agentId));
+
+    const systemPrompt = seenMessages[0]?.[0]?.content ?? '';
+    expect(systemPrompt).toContain('<command_briefing>');
+    expect(systemPrompt).toContain('COMMAND MODEL: 2 apps; 1 run needs attention.');
+  });
+
   it('records a first-class deviation verdict, then continues (W5.1)', async () => {
     const engine = buildEngine(
       scriptedAdapter([
@@ -403,6 +431,33 @@ describe('WorkflowEngine — agent_session', () => {
     expect(run.status).toBe('COMPLETED');
     expect(events).toContain(REALTIME_EVENTS.NODE_WAITING_FOR_INPUT);
     expect(nodeOutput(runId)?.resumed).toBe('yes');
+  });
+
+  it('parks on await_runs (fan-in) and wakes when every awaited run has settled', async () => {
+    // Two sibling runs the session is "waiting on" — both already terminal, so the
+    // fan-in resolves from current state the instant the session parks.
+    const settledRun = (status: string): string => {
+      const id = randomUUID();
+      ctx.db.insert(schema.workflowRuns).values({
+        id, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, status,
+        runState: { nodeStates: {} } as never,
+      }).run();
+      return id;
+    };
+    const runA = settledRun('COMPLETED');
+    const runB = settledRun('FAILED');
+    const engine = buildEngine(
+      scriptedAdapter([
+        { toolCalls: [{ id: 'w1', name: 'await_runs', arguments: { run_ids: [runA, runB] } }] },
+        { toolCalls: [{ id: 'c1', name: 'complete_task', arguments: { output: { joined: 'yes' } } }] },
+      ]),
+    );
+    const events: string[] = [];
+    const runId = await runSessionGraph(engine, events);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(run.status).toBe('COMPLETED');
+    expect(events).toContain(REALTIME_EVENTS.NODE_WAITING_FOR_INPUT); // it really parked
+    expect(nodeOutput(runId)?.joined).toBe('yes'); // and resumed to completion
   });
 
   it('gates complete_task through the durable task spine verification contract', async () => {

@@ -15,8 +15,9 @@
  *  - A provider is only exposed when its client id + secret are configured.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { Logger } from '../logger.js';
+import { buildAuthorizeUrl, exchangeCodeGeneric } from './oauthFlow.js';
 
 export const OAUTH_PROVIDER_IDS = ['google', 'slack', 'github', 'notion', 'linkedin', 'twitter_x'] as const;
 export type OAuthProviderId = typeof OAUTH_PROVIDER_IDS[number];
@@ -226,21 +227,8 @@ export class OAuthService {
     const def = PROVIDER_DEFS[args.provider];
     const codeVerifier = def.pkce ? randomBytes(32).toString('base64url') : undefined;
     const state = this.#createState(args, codeVerifier);
-
     const scopes = def.scopesForSlug(args.integrationSlug.toLowerCase());
-    const params = new URLSearchParams({
-      client_id: client.clientId,
-      redirect_uri: this.#redirectUri(args.provider),
-      response_type: 'code',
-      state,
-      ...(def.authParams ?? {}),
-    });
-    if (scopes.length > 0) params.set('scope', scopes.join(def.scopeSeparator));
-    if (codeVerifier) {
-      params.set('code_challenge', pkceChallenge(codeVerifier));
-      params.set('code_challenge_method', 'S256');
-    }
-    return `${def.authUrl}?${params.toString()}`;
+    return buildAuthorizeUrl({ def, client, redirectUri: this.#redirectUri(args.provider), state, scopes, codeVerifier });
   }
 
   /** Validate + consume a state (single-use). */
@@ -258,51 +246,15 @@ export class OAuthService {
     const client = this.#client(provider);
     if (!client) throw new Error(`OAuth provider '${provider}' is not configured`);
     const def = PROVIDER_DEFS[provider];
-    const bodyValues: Record<string, string> = {
+    const bundle = await exchangeCodeGeneric({
+      def,
+      client,
       code,
-      redirect_uri: this.#redirectUri(provider),
-      grant_type: 'authorization_code',
-    };
-    if (opts.codeVerifier) bodyValues.code_verifier = opts.codeVerifier;
-    if (def.tokenAuth !== 'basic') {
-      bodyValues.client_id = client.clientId;
-      bodyValues.client_secret = client.clientSecret;
-    }
-    const headers: Record<string, string> = {
-      'content-type': def.tokenBodyFormat === 'json' ? 'application/json' : 'application/x-www-form-urlencoded',
-      accept: 'application/json',
-    };
-    if (def.tokenAuth === 'basic') {
-      headers.authorization = `Basic ${Buffer.from(`${client.clientId}:${client.clientSecret}`).toString('base64')}`;
-    }
-    const body = def.tokenBodyFormat === 'json'
-      ? JSON.stringify(bodyValues)
-      : new URLSearchParams(bodyValues);
-    const res = await this.#fetch(def.tokenUrl, {
-      method: 'POST',
-      headers,
-      body,
+      redirectUri: this.#redirectUri(provider),
+      codeVerifier: opts.codeVerifier,
+      fetchImpl: this.#fetch,
     });
-    if (!res.ok) throw new Error(`token exchange failed (${res.status})`);
-    const json = (await res.json()) as Record<string, unknown>;
-    // Slack wraps the result and signals failure with ok=false.
-    if (provider === 'slack' && json.ok === false) throw new Error(`slack oauth error: ${String(json.error)}`);
-    const accessToken = String(json.access_token ?? (json.authed_user as { access_token?: string } | undefined)?.access_token ?? '');
-    if (!accessToken) throw new Error('token exchange returned no access_token');
-    const expiresIn = typeof json.expires_in === 'number' ? json.expires_in : undefined;
-    return {
-      provider,
-      accessToken,
-      refreshToken: typeof json.refresh_token === 'string' ? json.refresh_token : undefined,
-      expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : undefined,
-      scope: typeof json.scope === 'string' ? json.scope : undefined,
-      tokenType: typeof json.token_type === 'string' ? json.token_type : undefined,
-      account: typeof json.email === 'string'
-        ? json.email
-        : typeof json.workspace_name === 'string'
-          ? json.workspace_name
-          : (json.authed_user as { id?: string } | undefined)?.id,
-    };
+    return { provider, ...bundle };
   }
 
   #redirectUri(provider: OAuthProviderId): string {
@@ -353,8 +305,4 @@ export class OAuthService {
     const now = Date.now();
     for (const [k, v] of this.#states) if (now - v.createdAt > STATE_TTL_MS) this.#states.delete(k);
   }
-}
-
-function pkceChallenge(verifier: string): string {
-  return createHash('sha256').update(verifier).digest('base64url');
 }

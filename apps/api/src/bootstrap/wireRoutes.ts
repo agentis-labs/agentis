@@ -69,6 +69,7 @@ import { buildMcpOAuthRoutes } from '../routes/mcpOAuth.js';
 import { buildMcpServerRoutes } from '../routes/mcpServers.js';
 import { buildMemoryRoutes } from '../routes/memory.js';
 import { buildOAuthRoutes } from '../routes/oauth.js';
+import { buildCustomOAuthRoutes } from '../routes/customOAuth.js';
 import { buildObservabilityRoutes } from '../routes/observability.js';
 import { buildOrchestratorModelRoutes } from '../routes/orchestratorModels.js';
 import { buildPackageRoutes } from '../routes/packages.js';
@@ -153,6 +154,8 @@ import type { SpecialistRuntimeService } from '../services/specialist/specialist
 import type { SpecialistTemplateService } from '../services/specialist/specialistTemplateService.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
 import type { WorkspaceModelConfigService } from '../services/workspace/workspaceModelConfigService.js';
+import type { WorkspaceMediaConfigService } from '../services/workspace/workspaceMediaConfigService.js';
+import { buildMediaConfigRoutes } from '../routes/mediaConfig.js';
 import type { wireFoundation } from './wireFoundation.js';
 
 type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
@@ -207,6 +210,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   triggerRuntime: TriggerRuntime;
   voiceChannelAdapter: VoiceChannelAdapter;
   workspaceModelConfig: WorkspaceModelConfigService;
+  workspaceMediaConfigService: WorkspaceMediaConfigService;
 };
 
 export function wireRoutes(deps: WireRoutesDeps) {
@@ -281,6 +285,8 @@ export function wireRoutes(deps: WireRoutesDeps) {
     memoryStore,
     oauthService,
     oauthAppCredentialStore,
+    customOAuthProviders,
+    customOAuthStates,
     observability,
     orchestratorModelRouter,
     outboundPolicy,
@@ -309,6 +315,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     workspaceHarnesses,
     workspaceIntelligence,
     workspaceModelConfig,
+    workspaceMediaConfigService,
   } = deps;
   const app = new Hono();
   app.onError(errorHandler(logger));
@@ -526,6 +533,19 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/listeners', buildListenerRoutes({ db: sqlite, auth, runtime: triggerRuntime }));
   app.route('/v1/webhooks', buildWebhookRoutes({ runtime: triggerRuntime, bridge: channelBridge, voice: voiceChannelAdapter }));
   app.route('/v1/credentials', buildCredentialRoutes({ db: sqlite, auth, vault: credentialVault }));
+  // Mounted BEFORE the built-in /v1/oauth/:provider routes so the static
+  // "custom" segment can never be shadowed by the built-in dynamic :provider
+  // param (asProvider() also rejects "custom" as an unknown built-in provider,
+  // a backstop either way).
+  app.route('/v1/oauth/custom', buildCustomOAuthRoutes({
+    db: sqlite,
+    auth,
+    vault: credentialVault,
+    providers: customOAuthProviders,
+    states: customOAuthStates,
+    allowedOrigins,
+    baseUrl: env.AGENTIS_PUBLIC_URL ?? `http://${env.AGENTIS_HTTP_HOST}:${env.AGENTIS_HTTP_PORT}`,
+  }));
   app.route('/v1/oauth', buildOAuthRoutes({ db: sqlite, auth, vault: credentialVault, oauth: oauthService, oauthAppCredentials: oauthAppCredentialStore, allowedOrigins }));
   app.route('/v1/mcp-oauth', buildMcpOAuthRoutes({
     db: sqlite,
@@ -548,6 +568,18 @@ export function wireRoutes(deps: WireRoutesDeps) {
     config: workspaceModelConfig,
     router: orchestratorModelRouter,
     harnesses: workspaceHarnesses,
+  }));
+  app.route('/v1/media/models', buildMediaConfigRoutes({
+    db: sqlite,
+    auth,
+    config: workspaceMediaConfigService,
+    envDefaults: {
+      image: {
+        baseUrl: env.AGENTIS_MEDIA_IMAGE_BASE_URL,
+        model: env.AGENTIS_MEDIA_IMAGE_MODEL,
+        hasApiKey: Boolean(env.AGENTIS_MEDIA_IMAGE_API_KEY),
+      },
+    },
   }));
   app.route('/v1/extensions/registry', buildExtensionRegistryRoutes({ db: sqlite, auth, registry: extensionRegistry, activity }));
   // Mounted ONLY when AGENTIS_TEST_MODE=true AND NODE_ENV !== 'production'.
