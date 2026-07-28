@@ -1,0 +1,131 @@
+import type en from './en';
+
+type LocaleShape<T> = T extends string ? string : { [K in keyof T]: LocaleShape<T[K]> };
+
+const ptBR: LocaleShape<typeof en> = {
+  common: {
+    cancel: 'Cancelar',
+    confirm: 'Confirmar',
+    close: 'Fechar',
+    dismiss: 'Dispensar',
+    retry: 'Tentar novamente',
+    reloadApp: 'Recarregar aplicativo',
+    undo: 'Desfazer',
+    save: 'Salvar',
+    delete: 'Excluir',
+    rename: 'Renomear',
+    export: 'Exportar',
+    import: 'Importar',
+  },
+  app: {
+    loading: 'Carregando…',
+    opening: 'Abrindo o Agentis…',
+    waitingForServer: 'Aguardando o servidor Agentis…',
+  },
+  navigation: {
+    home: 'Início', apps: 'Apps agênticos', agents: 'Agentes', brain: 'Cérebro', assets: 'Ativos',
+    expandSidebar: 'Expandir barra lateral', collapseSidebar: 'Recolher barra lateral', collapse: 'Recolher',
+  },
+  appEditor: {
+    interface: 'Interface', workflow: 'Workflow', data: 'Dados', brain: 'Cérebro',
+    appNotFound: 'App não encontrado', backToApps: 'Voltar para Apps', appEngine: 'Motor do app',
+    importWorkflow: 'Importar workflow', noWorkflow: 'Ainda não há workflow',
+    noWorkflowDescription: 'Crie um workflow ou importe um arquivo YAML versionado de Workflow como Código. Os workflows importados passam a fazer parte deste App.',
+    createWorkflow: 'Criar workflow', appWorkflows: 'Workflows do app', workflowTitle: 'Título do workflow',
+    renameWorkflow: 'Renomear {{name}}', moreActions: 'Mais ações',
+    deleteWorkflowTitle: 'Excluir o workflow "{{name}}"?', deleteWorkflowDescription: 'Esta ação não pode ser desfeita.',
+    addWorkflow: 'Adicionar workflow',
+  },
+  settings: {
+    title: 'Configurações',
+    tabs: {
+      profile: 'Perfil',
+      data: 'Seus dados',
+      workspace: 'Espaço de trabalho',
+      channels: 'Canais',
+      mcp: 'MCP',
+      integrations: 'Integrações',
+      governance: 'Governança',
+      apiKeys: 'Chaves de API',
+      budget: 'Orçamento',
+      runtimes: 'Ambientes',
+    },
+    language: {
+      title: 'Idioma',
+      description: 'Escolha o idioma usado pela interface do Agentis neste dispositivo.',
+      label: 'Idioma da interface',
+      english: 'English',
+      portugueseBrazil: 'Português (Brasil)',
+    },
+    workspace: {
+      title: 'Espaço de trabalho',
+      noWorkspace: 'Nenhum espaço de trabalho.',
+      imageLabel: 'Alterar imagem do espaço de trabalho',
+      imageHint: 'Clique para alterar a imagem do espaço de trabalho',
+      name: 'Nome',
+      slug: 'Slug',
+      description: 'Descrição',
+      saveChanges: 'Salvar alterações',
+      updated: 'Espaço de trabalho atualizado',
+      updateFailed: 'Falha ao atualizar',
+      dangerZone: 'Zona de perigo',
+      deleteTitle: 'Excluir este espaço de trabalho permanentemente.',
+      deleteDescription: 'Todos os agentes, workflows, conhecimentos e dados nele serão excluídos permanentemente.',
+      delete: 'Excluir espaço de trabalho',
+      deleteConfirmTitle: 'Excluir o espaço de trabalho "{{name}}"?',
+      deleteConfirmBody: 'Isso excluirá permanentemente o espaço de trabalho e todos os seus agentes, workflows, conhecimentos e dados. Esta ação não pode ser desfeita.',
+      deleted: 'Espaço de trabalho excluído',
+      deleteFailed: 'Falha ao excluir',
+    },
+    selfHealing: {
+      title: 'Workflows autorreparáveis',
+      description: 'Quando uma etapa falha, um agente diagnostica o motivo e repara o workflow dentro do orçamento — preservando sua intenção e sem inventar dados. Corrigir workflows à mão é um pesadelo; deixe seus agentes fazerem isso.',
+      updated: 'Autorreparo atualizado',
+      recoveryAutonomy: 'Autonomia de recuperação',
+      guardedTitle: 'Autônomo com proteção (recomendado)',
+      guardedDescription: 'Reparos internos em toda a escala são aplicados imediatamente. O Agentis pausa apenas quando um reparo altera uma ação externa, irreversível ou de efeito desconhecido.',
+      bypassTitle: 'Ignorar proteções',
+      bypassDescription: 'Edições certificadas do grafo que preservam a intenção são aplicadas sem perguntar, dentro do orçamento — como um modo de execução sem as verificações de permissão.',
+      maxPlans: 'Máximo de planos distintos por falha',
+      maxPlansLabel: 'Máximo de planos de reparo',
+      healingAgent: 'Agente de reparo',
+      healingAgentDescription: 'Fundamenta o diagnóstico e executa uma etapa quando o agente responsável fica indisponível.',
+      healingAgentLabel: 'Agente de reparo',
+      orchestrator: 'Orquestrador (padrão)',
+    },
+    autonomy: {
+      title: 'Pulso do gerenciador autônomo',
+      description: 'Em intervalos regulares, seu orquestrador e gerentes de domínio revisam o que possuem — execuções com falha, aprovações pendentes e trabalho parado — e agem por conta própria usando suas ferramentas. Desligado = ainda exibem isso no chat, mas aguardam você.',
+      enabled: 'Gerenciador autônomo ativado',
+      disabled: 'Gerenciador autônomo desativado',
+      masterOff: 'O interruptor mestre da implantação está desligado; por isso, a autonomia permanece inativa mesmo quando ativada aqui. Defina {{variable}} no servidor para habilitá-la.',
+      active: 'Ativo — os gerentes agem autonomamente dentro do seu escopo.',
+    },
+  },
+  confirm: {
+    typeToConfirm: 'Digite {{value}} para confirmar:',
+  },
+  errors: {
+    boundary: {
+      section: 'Não foi possível exibir esta seção',
+      view: 'Esta tela encontrou um erro',
+      description:
+        'Algo nesta página não pôde ser exibido. O restante do Agentis continua funcionando — use a barra lateral para navegar ou tente novamente.',
+    },
+    codes: {
+      AUTH_INVALID_CREDENTIALS: 'As credenciais fornecidas são inválidas.',
+      AUTH_TOKEN_EXPIRED: 'Sua sessão expirou. Entre novamente.',
+      AUTH_FORBIDDEN: 'Você não tem permissão para executar esta ação.',
+      RESOURCE_NOT_FOUND: 'O recurso solicitado não foi encontrado.',
+      RESOURCE_CONFLICT:
+        'Esta alteração entra em conflito com o estado atual. Atualize e tente novamente.',
+      VALIDATION_FAILED: 'Algumas informações precisam da sua atenção.',
+      GRAPH_REVISION_CONFLICT:
+        'Este workflow foi alterado em outro lugar. Atualize antes de salvar novamente.',
+      OPERATION_RATE_LIMITED: 'Solicitações demais. Aguarde um instante e tente novamente.',
+      INTERNAL_ERROR: 'Ocorreu um erro inesperado.',
+    },
+  },
+};
+
+export default ptBR;

@@ -8,9 +8,38 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
-import { Save, Plug, Hash, Key, Trash2, Plus, Upload, Copy, X, MessageSquare, MessageCircle, Webhook as WebhookIcon, User, Briefcase, Link as LinkIcon, DollarSign, Cpu, Scale, Boxes, Database, Loader2, CheckCircle2, Users, ChevronDown, ChevronUp, Clock, RefreshCcw } from 'lucide-react';
+import {
+  Save,
+  Plug,
+  Hash,
+  Key,
+  Trash2,
+  Plus,
+  Upload,
+  Copy,
+  X,
+  MessageSquare,
+  MessageCircle,
+  Webhook as WebhookIcon,
+  User,
+  Briefcase,
+  Link as LinkIcon,
+  DollarSign,
+  Cpu,
+  Scale,
+  Boxes,
+  Database,
+  Loader2,
+  CheckCircle2,
+  Users,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  RefreshCcw,
+} from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import clsx from 'clsx';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -34,21 +63,28 @@ import { IntegrationsPanel } from './IntegrationsPanel';
 import { DataOwnershipPanel } from './DataOwnershipPanel';
 import { StartupPanel } from './StartupPanel';
 import { useAgentisStore, SettingsTab } from '../../store/agentisStore';
+import { normalizeLocale, setLocale, supportedLocales, type SupportedLocale } from '../../i18n';
+import type en from '../../i18n/locales/en';
 
-const TABS: { value: SettingsTab; label: string; icon: React.ReactNode }[] = [
-  { value: 'profile', label: 'Profile', icon: <User size={16} /> },
-  { value: 'data', label: 'Your Data', icon: <Database size={16} /> },
-  { value: 'workspace', label: 'Workspace', icon: <Briefcase size={16} /> },
-  { value: 'channels', label: 'Channels', icon: <MessageSquare size={16} /> },
-  { value: 'mcp', label: 'MCP', icon: <Boxes size={16} /> },
-  { value: 'integrations', label: 'Integrations', icon: <LinkIcon size={16} /> },
-  { value: 'governance', label: 'Governance', icon: <Scale size={16} /> },
-  { value: 'apiKeys', label: 'API Keys', icon: <Key size={16} /> },
-  { value: 'budget', label: 'Budget', icon: <DollarSign size={16} /> },
-  { value: 'runtimes', label: 'Runtimes', icon: <Cpu size={16} /> },
+type SettingsTabLabelKey = {
+  [Key in keyof typeof en.settings.tabs]: `settings.tabs.${Key}`;
+}[keyof typeof en.settings.tabs];
+
+const TABS: { value: SettingsTab; labelKey: SettingsTabLabelKey; icon: React.ReactNode }[] = [
+  { value: 'profile', labelKey: 'settings.tabs.profile', icon: <User size={16} /> },
+  { value: 'data', labelKey: 'settings.tabs.data', icon: <Database size={16} /> },
+  { value: 'workspace', labelKey: 'settings.tabs.workspace', icon: <Briefcase size={16} /> },
+  { value: 'channels', labelKey: 'settings.tabs.channels', icon: <MessageSquare size={16} /> },
+  { value: 'mcp', labelKey: 'settings.tabs.mcp', icon: <Boxes size={16} /> },
+  { value: 'integrations', labelKey: 'settings.tabs.integrations', icon: <LinkIcon size={16} /> },
+  { value: 'governance', labelKey: 'settings.tabs.governance', icon: <Scale size={16} /> },
+  { value: 'apiKeys', labelKey: 'settings.tabs.apiKeys', icon: <Key size={16} /> },
+  { value: 'budget', labelKey: 'settings.tabs.budget', icon: <DollarSign size={16} /> },
+  { value: 'runtimes', labelKey: 'settings.tabs.runtimes', icon: <Cpu size={16} /> },
 ];
 
 export function SettingsModal() {
+  const { t } = useTranslation();
   const { settingsOpen, settingsTab, setSettingsOpen, closeSettings } = useAgentisStore();
 
   useEffect(() => {
@@ -70,22 +106,26 @@ export function SettingsModal() {
           {/* Sidebar */}
           <div className="w-64 shrink-0 border-r border-line bg-surface-2 flex flex-col">
             <div className="px-6 py-6 pb-4">
-              <h2 className="text-[16px] font-semibold text-text-primary">Settings</h2>
+              <h2 className="text-[16px] font-semibold text-text-primary">{t('settings.title')}</h2>
             </div>
             <nav className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
-              {TABS.map((t) => {
-                const isActive = settingsTab === t.value;
+              {TABS.map((tab) => {
+                const isActive = settingsTab === tab.value;
                 return (
                   <button
-                    key={t.value}
-                    onClick={() => setSettingsOpen(true, t.value)}
+                    key={tab.value}
+                    onClick={() => setSettingsOpen(true, tab.value)}
                     className={clsx(
                       'flex w-full items-center gap-3 rounded-btn px-3 py-2 text-[14px] transition-colors',
-                      isActive ? 'bg-surface-3 text-text-primary font-medium shadow-sm border border-line/50' : 'text-text-secondary hover:bg-surface-3/50 hover:text-text-primary border border-transparent'
+                      isActive
+                        ? 'bg-surface-3 text-text-primary font-medium shadow-sm border border-line/50'
+                        : 'text-text-secondary hover:bg-surface-3/50 hover:text-text-primary border border-transparent',
                     )}
                   >
-                    <span className={isActive ? 'text-text-primary' : 'text-text-muted'}>{t.icon}</span>
-                    {t.label}
+                    <span className={isActive ? 'text-text-primary' : 'text-text-muted'}>
+                      {tab.icon}
+                    </span>
+                    {t(tab.labelKey)}
                   </button>
                 );
               })}
@@ -104,7 +144,10 @@ export function SettingsModal() {
             </div>
             <div className="flex-1 overflow-y-auto px-10 py-8">
               <h1 className="mb-6 text-[24px] font-semibold tracking-tight text-text-primary">
-                {TABS.find(t => t.value === settingsTab)?.label}
+                {(() => {
+                  const tab = TABS.find((item) => item.value === settingsTab);
+                  return tab ? t(tab.labelKey) : '';
+                })()}
               </h1>
               {settingsTab === 'profile' && <ProfileTab />}
               {settingsTab === 'data' && <DataOwnershipPanel />}
@@ -149,7 +192,7 @@ export function SettingsModal() {
         </div>
       </div>
     </div>,
-    document.body
+    document.body,
   );
 }
 
@@ -168,12 +211,48 @@ interface RuntimeRow {
 }
 
 const RUNTIME_MATRIX: RuntimeRow[] = [
-  { type: 'http', label: 'HTTP', interactiveChat: true, support: 'native', note: 'Generic HTTP endpoint. Native tool calls work when the endpoint implements the Agentis chat contract.' },
-  { type: 'codex', label: 'Codex CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Slower (re-spawns per tool round). Use the orchestrator fast path for native speed.' },
-  { type: 'claude_code', label: 'Claude Code CLI', interactiveChat: true, support: 'marker', note: 'Marker protocol. Same fast-path recommendation as Codex.' },
-  { type: 'openclaw', label: 'OpenClaw', interactiveChat: true, support: 'relay', note: 'Chats through the gateway session: Agentis relays your message and streams the reply. Platform tool calls run on the gateway agent, not the local chat loop.' },
-  { type: 'hermes_agent', label: 'Hermes Agent', interactiveChat: true, support: 'native', note: 'ACP-native streaming with live reasoning, tool activity, and Agentis tools over MCP. Quiet CLI remains a final-answer-only fallback.' },
-  { type: 'cursor', label: 'Cursor', interactiveChat: true, support: 'marker', note: 'Marker protocol. Chat and tool forwarding via spawn-level JSON stream.' },
+  {
+    type: 'http',
+    label: 'HTTP',
+    interactiveChat: true,
+    support: 'native',
+    note: 'Generic HTTP endpoint. Native tool calls work when the endpoint implements the Agentis chat contract.',
+  },
+  {
+    type: 'codex',
+    label: 'Codex CLI',
+    interactiveChat: true,
+    support: 'marker',
+    note: 'Marker protocol. Slower (re-spawns per tool round). Use the orchestrator fast path for native speed.',
+  },
+  {
+    type: 'claude_code',
+    label: 'Claude Code CLI',
+    interactiveChat: true,
+    support: 'marker',
+    note: 'Marker protocol. Same fast-path recommendation as Codex.',
+  },
+  {
+    type: 'openclaw',
+    label: 'OpenClaw',
+    interactiveChat: true,
+    support: 'relay',
+    note: 'Chats through the gateway session: Agentis relays your message and streams the reply. Platform tool calls run on the gateway agent, not the local chat loop.',
+  },
+  {
+    type: 'hermes_agent',
+    label: 'Hermes Agent',
+    interactiveChat: true,
+    support: 'native',
+    note: 'ACP-native streaming with live reasoning, tool activity, and Agentis tools over MCP. Quiet CLI remains a final-answer-only fallback.',
+  },
+  {
+    type: 'cursor',
+    label: 'Cursor',
+    interactiveChat: true,
+    support: 'marker',
+    note: 'Marker protocol. Chat and tool forwarding via spawn-level JSON stream.',
+  },
 ];
 
 const SUPPORT_META: Record<ToolSupport, { label: string; cls: string }> = {
@@ -189,10 +268,14 @@ function RuntimesTab() {
       <div>
         <h2 className="text-subheading text-text-primary">Runtime tool support</h2>
         <p className="mt-1 text-[13px] text-text-muted">
-          Which agent runtimes can drive Agentis platform tools (build workflows, run, dispatch, etc.) directly from chat.
-          Runtimes marked <span className="font-medium text-warn">Marker</span> work but re-spawn a process per tool round —
-          configure the orchestrator fast path (<code className="rounded bg-canvas/70 px-1 font-mono text-[11px]">AGENTIS_ORCHESTRATOR_BASE_URL</code>)
-          to answer their chats through a native runtime instead.
+          Which agent runtimes can drive Agentis platform tools (build workflows, run, dispatch,
+          etc.) directly from chat. Runtimes marked{' '}
+          <span className="font-medium text-warn">Marker</span> work but re-spawn a process per tool
+          round — configure the orchestrator fast path (
+          <code className="rounded bg-canvas/70 px-1 font-mono text-[11px]">
+            AGENTIS_ORCHESTRATOR_BASE_URL
+          </code>
+          ) to answer their chats through a native runtime instead.
         </p>
       </div>
       <div className="overflow-hidden rounded-card border border-line">
@@ -215,12 +298,24 @@ function RuntimesTab() {
                     <div className="font-mono text-[10px] text-text-muted">{row.type}</div>
                   </td>
                   <td className="px-3 py-2.5">
-                    <span className={clsx('inline-flex items-center rounded-full px-2 py-0.5 text-[11px]', row.interactiveChat ? 'bg-accent-soft text-accent' : 'bg-surface-3 text-text-muted')}>
+                    <span
+                      className={clsx(
+                        'inline-flex items-center rounded-full px-2 py-0.5 text-[11px]',
+                        row.interactiveChat
+                          ? 'bg-accent-soft text-accent'
+                          : 'bg-surface-3 text-text-muted',
+                      )}
+                    >
                       {row.interactiveChat ? 'Interactive' : 'Relay only'}
                     </span>
                   </td>
                   <td className="px-3 py-2.5">
-                    <span className={clsx('inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium', meta.cls)}>
+                    <span
+                      className={clsx(
+                        'inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium',
+                        meta.cls,
+                      )}
+                    >
                       {meta.label}
                     </span>
                   </td>
@@ -236,15 +331,23 @@ function RuntimesTab() {
 }
 
 function ProfileTab() {
+  const { t, i18n } = useTranslation();
   const toast = useToast();
-  const [me, setMe] = useState<{ id: string; email: string; name: string; avatarUrl?: string } | null>(null);
+  const [me, setMe] = useState<{
+    id: string;
+    email: string;
+    name: string;
+    avatarUrl?: string;
+  } | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void api<{ user: { id: string; email: string | null; displayName: string; avatarUrl?: string } }>('/v1/auth/me')
+    void api<{
+      user: { id: string; email: string | null; displayName: string; avatarUrl?: string };
+    }>('/v1/auth/me')
       .then((d) => {
         const mapped = {
           id: d.user.id,
@@ -266,10 +369,13 @@ function ProfileTab() {
     try {
       await api('/v1/auth/me', { method: 'PATCH', body: JSON.stringify({ name, email }) });
       toast.success('Profile updated');
-      setMe((prev) => prev ? { ...prev, name, email } : null);
+      setMe((prev) => (prev ? { ...prev, name, email } : null));
       setTimeout(() => window.location.reload(), 800);
-    } catch (e) { toast.error('Failed to update', apiErrorMessage(e)); }
-    finally { setSaving(false); }
+    } catch (e) {
+      toast.error('Failed to update', apiErrorMessage(e));
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (loading) return <Skeleton height={200} />;
@@ -277,7 +383,9 @@ function ProfileTab() {
   return (
     <div className="max-w-xl space-y-5">
       <div>
-        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Profile</h2>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          Profile
+        </h2>
         <div className="space-y-4 rounded-card border border-line bg-surface p-5">
           <div className="space-y-1.5">
             <label className="text-[12px] font-medium text-text-secondary">Display name</label>
@@ -297,14 +405,22 @@ function ProfileTab() {
               className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
             />
           </div>
-          <Button variant="primary" size="md" iconLeft={<Save size={12} />} disabled={saving} onClick={() => void save()}>
+          <Button
+            variant="primary"
+            size="md"
+            iconLeft={<Save size={12} />}
+            disabled={saving}
+            onClick={() => void save()}
+          >
             Save changes
           </Button>
         </div>
       </div>
 
       <div>
-        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Theme</h2>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          Theme
+        </h2>
         <div className="rounded-card border border-line bg-surface p-5">
           <ThemeToggle variant="full" />
           <p className="mt-3 text-[12px] text-text-muted">
@@ -313,16 +429,55 @@ function ProfileTab() {
         </div>
       </div>
 
+      <div>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          {t('settings.language.title')}
+        </h2>
+        <div className="space-y-3 rounded-card border border-line bg-surface p-5">
+          <div className="space-y-1.5">
+            <label
+              htmlFor="agentis-language"
+              className="text-[12px] font-medium text-text-secondary"
+            >
+              {t('settings.language.label')}
+            </label>
+            <select
+              id="agentis-language"
+              value={normalizeLocale(i18n.resolvedLanguage ?? i18n.language)}
+              onChange={(event) => {
+                void setLocale(event.target.value as SupportedLocale);
+              }}
+              className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
+            >
+              {supportedLocales.map((locale) => (
+                <option key={locale} value={locale}>
+                  {locale === 'en'
+                    ? t('settings.language.english')
+                    : t('settings.language.portugueseBrazil')}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="text-[12px] text-text-muted">{t('settings.language.description')}</p>
+        </div>
+      </div>
+
       <StartupPanel />
     </div>
   );
 }
 
-
 function WorkspaceTab() {
+  const { t } = useTranslation();
   const toast = useToast();
   const confirm = useConfirm();
-  const [ws, setWs] = useState<{ id: string; name: string; slug: string; description?: string; imageUrl?: string | null } | null>(null);
+  const [ws, setWs] = useState<{
+    id: string;
+    name: string;
+    slug: string;
+    description?: string;
+    imageUrl?: string | null;
+  } | null>(null);
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
@@ -332,7 +487,7 @@ function WorkspaceTab() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    void api<{ workspaces: typeof ws[] }>('/v1/workspaces')
+    void api<{ workspaces: (typeof ws)[] }>('/v1/workspaces')
       .then((d) => {
         const wsId = localStorage.getItem('agentis.workspace');
         const current = d.workspaces.find((x: any) => x?.id === wsId) ?? d.workspaces[0];
@@ -353,31 +508,41 @@ function WorkspaceTab() {
     try {
       await api(`/v1/workspaces/${ws.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ name, slug, description, ...(imageDataUrl ? { imageDataUrl } : {}) }),
+        body: JSON.stringify({
+          name,
+          slug,
+          description,
+          ...(imageDataUrl ? { imageDataUrl } : {}),
+        }),
       });
-      toast.success('Workspace updated');
+      toast.success(t('settings.workspace.updated'));
       setImageDataUrl(null);
-      setWs((prev) => prev ? { ...prev, name, slug, description } : null);
+      setWs((prev) => (prev ? { ...prev, name, slug, description } : null));
       setTimeout(() => window.location.reload(), 800);
-    } catch (e) { toast.error('Failed to update', apiErrorMessage(e)); }
-    finally { setSaving(false); }
+    } catch (e) {
+      toast.error(t('settings.workspace.updateFailed'), apiErrorMessage(e));
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function deleteWorkspace() {
     if (!ws) return;
     const ok = await confirm({
-      title: `Delete workspace "${ws.name}"?`,
-      body: 'This will permanently delete the workspace and all its agents, workflows, knowledge, and data. This action cannot be undone.',
-      confirmLabel: 'Delete workspace',
+      title: t('settings.workspace.deleteConfirmTitle', { name: ws.name }),
+      body: t('settings.workspace.deleteConfirmBody'),
+      confirmLabel: t('settings.workspace.delete'),
       tone: 'danger',
       typeToConfirm: ws.name,
     });
     if (!ok) return;
     try {
       await api(`/v1/workspaces/${ws.id}`, { method: 'DELETE' });
-      toast.success('Workspace deleted');
+      toast.success(t('settings.workspace.deleted'));
       window.location.reload();
-    } catch (e) { toast.error('Failed to delete', apiErrorMessage(e)); }
+    } catch (e) {
+      toast.error(t('settings.workspace.deleteFailed'), apiErrorMessage(e));
+    }
   }
 
   function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -389,21 +554,23 @@ function WorkspaceTab() {
   }
 
   if (loading) return <Skeleton height={300} />;
-  if (!ws) return <div className="text-[13px] text-text-muted">No workspace.</div>;
+  if (!ws) return <div className="text-[13px] text-text-muted">{t('settings.workspace.noWorkspace')}</div>;
 
   const previewImage = imageDataUrl ?? ws.imageUrl;
 
   return (
     <div className="max-w-xl space-y-5">
       <div>
-        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Workspace</h2>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          {t('settings.workspace.title')}
+        </h2>
         <div className="space-y-4 rounded-card border border-line bg-surface p-5">
           <div className="flex items-center gap-4">
             <button
               type="button"
               onClick={() => fileRef.current?.click()}
               className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-card border border-line bg-surface-2"
-              aria-label="Change workspace image"
+              aria-label={t('settings.workspace.imageLabel')}
             >
               {previewImage ? (
                 <img src={previewImage} alt="" className="h-full w-full object-cover" />
@@ -416,12 +583,18 @@ function WorkspaceTab() {
                 <Upload size={16} className="text-white" />
               </span>
             </button>
-            <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageChange} className="hidden" />
-            <div className="text-[12px] text-text-muted">Click to change workspace image</div>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={handleImageChange}
+              className="hidden"
+            />
+            <div className="text-[12px] text-text-muted">{t('settings.workspace.imageHint')}</div>
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Name</label>
+            <label className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.name')}</label>
             <input
               type="text"
               value={name}
@@ -430,7 +603,7 @@ function WorkspaceTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Slug</label>
+            <label className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.slug')}</label>
             <input
               type="text"
               value={slug}
@@ -439,7 +612,7 @@ function WorkspaceTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Description</label>
+            <label className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.description')}</label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -447,21 +620,34 @@ function WorkspaceTab() {
               className="w-full resize-none rounded-input border border-line bg-surface-2 px-3 py-2 text-[14px] text-text-primary focus:border-accent focus:outline-none"
             />
           </div>
-          <Button variant="primary" size="md" iconLeft={<Save size={12} />} disabled={saving} onClick={() => void save()}>
-            Save changes
+          <Button
+            variant="primary"
+            size="md"
+            iconLeft={<Save size={12} />}
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {t('settings.workspace.saveChanges')}
           </Button>
         </div>
       </div>
 
       <div>
-        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-danger">Danger zone</h2>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-danger">
+          {t('settings.workspace.dangerZone')}
+        </h2>
         <div className="space-y-3 rounded-card border border-danger/20 bg-danger-soft/30 p-5">
-          <div className="text-[13px] text-text-primary">Delete this workspace permanently.</div>
+          <div className="text-[13px] text-text-primary">{t('settings.workspace.deleteTitle')}</div>
           <div className="text-[12px] text-text-muted">
-            All agents, workflows, knowledge, and data inside it will be permanently deleted.
+            {t('settings.workspace.deleteDescription')}
           </div>
-          <Button variant="danger" size="md" iconLeft={<Trash2 size={12} />} onClick={() => void deleteWorkspace()}>
-            Delete workspace
+          <Button
+            variant="danger"
+            size="md"
+            iconLeft={<Trash2 size={12} />}
+            onClick={() => void deleteWorkspace()}
+          >
+            {t('settings.workspace.delete')}
           </Button>
         </div>
       </div>
@@ -494,13 +680,26 @@ function ConnectionsTab() {
     setLoading(true);
     try {
       const [g, c, a] = await Promise.allSettled([
-        api<{ gateways: Array<{ id: string; name: string; status: string; agentCount?: number }> }>('/v1/gateways'),
+        api<{ gateways: Array<{ id: string; name: string; status: string; agentCount?: number }> }>(
+          '/v1/gateways',
+        ),
         // NOTE: /v1/channels returns { connections: [...] }, NOT { channels }.
         // Reading the wrong key is why the list showed "No connections configured".
-        api<{ connections: Array<{ id: string; kind: string; name: string; status?: string; isDefault?: boolean; agentId?: string | null }> }>('/v1/channels'),
+        api<{
+          connections: Array<{
+            id: string;
+            kind: string;
+            name: string;
+            status?: string;
+            isDefault?: boolean;
+            agentId?: string | null;
+          }>;
+        }>('/v1/channels'),
         api<{ agents: Array<{ id: string; name: string }> }>('/v1/agents'),
       ]);
-      const agentName = new Map((a.status === 'fulfilled' ? a.value.agents ?? [] : []).map((x) => [x.id, x.name]));
+      const agentName = new Map(
+        (a.status === 'fulfilled' ? (a.value.agents ?? []) : []).map((x) => [x.id, x.name]),
+      );
       const merged: Connection[] = [];
       if (g.status === 'fulfilled') {
         for (const x of g.value.gateways ?? []) merged.push({ ...x, kind: 'gateway' });
@@ -508,17 +707,25 @@ function ConnectionsTab() {
       if (c.status === 'fulfilled') {
         for (const x of c.value.connections ?? []) {
           merged.push({
-            id: x.id, kind: x.kind as Connection['kind'], name: x.name, status: x.status, isDefault: x.isDefault,
+            id: x.id,
+            kind: x.kind as Connection['kind'],
+            name: x.name,
+            status: x.status,
+            isDefault: x.isDefault,
             owner: x.agentId ? (agentName.get(x.agentId) ?? 'Agent') : 'Workspace',
             agentId: x.agentId ?? null,
           });
         }
       }
       setItems(merged);
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    void refresh();
+  }, []);
 
   async function handleDelete(c: Connection) {
     const ok = await confirm({
@@ -533,63 +740,115 @@ function ConnectionsTab() {
       await api(path, { method: 'DELETE' });
       toast.success('Disconnected', c.name);
       void refresh();
-    } catch (e) { toast.error('Failed to disconnect', apiErrorMessage(e)); }
+    } catch (e) {
+      toast.error('Failed to disconnect', apiErrorMessage(e));
+    }
   }
 
   async function makeDefault(c: Connection) {
     try {
-      await api(`/v1/channels/${c.id}/default`, { method: 'POST', body: JSON.stringify({ default: true }) });
+      await api(`/v1/channels/${c.id}/default`, {
+        method: 'POST',
+        body: JSON.stringify({ default: true }),
+      });
       toast.success('Default set', `Deterministic ${c.kind} sends now use "${c.name}".`);
       void refresh();
-    } catch (e) { toast.error('Could not set default', apiErrorMessage(e)); }
+    } catch (e) {
+      toast.error('Could not set default', apiErrorMessage(e));
+    }
   }
 
   // WhatsApp relink — a disconnected/errored QR session needs a new device scan.
   // Kick the login session and poll for the QR + connected state (same endpoints
   // the connect flow uses), showing the QR in a modal above this settings modal.
   const relinkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [relink, setRelink] = useState<{ id: string; name: string; status: string; qrDataUrl?: string } | null>(null);
-  const stopRelinkPoll = () => { if (relinkPollRef.current) { clearInterval(relinkPollRef.current); relinkPollRef.current = null; } };
+  const [relink, setRelink] = useState<{
+    id: string;
+    name: string;
+    status: string;
+    qrDataUrl?: string;
+  } | null>(null);
+  const stopRelinkPoll = () => {
+    if (relinkPollRef.current) {
+      clearInterval(relinkPollRef.current);
+      relinkPollRef.current = null;
+    }
+  };
   useEffect(() => stopRelinkPoll, []);
 
   async function startRelink(c: Connection) {
     try {
-      const login = await api<{ status: string; qrDataUrl?: string }>(`/v1/channels/${c.id}/login`, { method: 'POST', body: '{}' });
+      const login = await api<{ status: string; qrDataUrl?: string }>(
+        `/v1/channels/${c.id}/login`,
+        { method: 'POST', body: '{}' },
+      );
       setRelink({ id: c.id, name: c.name, status: login.status, qrDataUrl: login.qrDataUrl });
       stopRelinkPoll();
       relinkPollRef.current = setInterval(() => {
         void (async () => {
           try {
-            const state = await api<{ status: string; qrDataUrl?: string }>(`/v1/channels/${c.id}/login`);
-            setRelink((prev) => (prev && prev.id === c.id ? { ...prev, status: state.status, qrDataUrl: state.qrDataUrl ?? prev.qrDataUrl } : prev));
+            const state = await api<{ status: string; qrDataUrl?: string }>(
+              `/v1/channels/${c.id}/login`,
+            );
+            setRelink((prev) =>
+              prev && prev.id === c.id
+                ? { ...prev, status: state.status, qrDataUrl: state.qrDataUrl ?? prev.qrDataUrl }
+                : prev,
+            );
             if (['open', 'active', 'connected'].includes(state.status)) {
               stopRelinkPoll();
               setRelink(null);
               toast.success('Reconnected', c.name);
               void refresh();
             }
-          } catch { /* keep polling */ }
+          } catch {
+            /* keep polling */
+          }
         })();
       }, 1000);
-    } catch (e) { toast.error('Could not start relink', apiErrorMessage(e)); }
+    } catch (e) {
+      toast.error('Could not start relink', apiErrorMessage(e));
+    }
   }
 
-  const RELINK_STATES = ['error', 'needs_action', 'degraded', 'paused', 'disconnected', 'logged_out'];
+  const RELINK_STATES = [
+    'error',
+    'needs_action',
+    'degraded',
+    'paused',
+    'disconnected',
+    'logged_out',
+  ];
 
   // A kind has "competing" connections when >1 of it exists — that's when a
   // default matters for deterministic sends.
-  const kindCounts = items.reduce<Record<string, number>>((acc, i) => { acc[i.kind] = (acc[i.kind] ?? 0) + 1; return acc; }, {});
+  const kindCounts = items.reduce<Record<string, number>>((acc, i) => {
+    acc[i.kind] = (acc[i.kind] ?? 0) + 1;
+    return acc;
+  }, {});
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Gateways &amp; channels</h2>
-        <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setAddOpen(true)}>Add connection</Button>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          Gateways &amp; channels
+        </h2>
+        <Button
+          variant="primary"
+          size="md"
+          iconLeft={<Plus size={14} />}
+          onClick={() => setAddOpen(true)}
+        >
+          Add connection
+        </Button>
       </div>
       <AddConnectionDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        onCreated={() => { setAddOpen(false); void refresh(); }}
+        onCreated={() => {
+          setAddOpen(false);
+          void refresh();
+        }}
       />
 
       {loading ? (
@@ -616,33 +875,57 @@ function ConnectionsTab() {
             return (
               <div key={c.id} className="rounded-card border border-line bg-surface">
                 <div className="flex items-center gap-3 px-4 py-3">
-                  <span className={`flex h-8 w-8 items-center justify-center rounded-card ${
-                    c.kind === 'gateway' ? 'bg-info-soft text-info'
-                      : c.kind === 'whatsapp' ? 'bg-success-soft text-success'
-                      : c.kind === 'telegram' ? 'bg-info-soft text-info'
-                      : c.kind === 'discord' ? 'bg-accent-soft text-accent'
-                      : c.kind === 'slack' ? 'bg-warn-soft text-warn'
-                      : 'bg-surface-2 text-text-secondary'
-                  }`}>
-                    {c.kind === 'gateway' ? <Plug size={14} /> : c.kind === 'whatsapp' ? <MessageCircle size={14} /> : c.kind === 'telegram' ? <MessageSquare size={14} /> : <Hash size={14} />}
+                  <span
+                    className={`flex h-8 w-8 items-center justify-center rounded-card ${
+                      c.kind === 'gateway'
+                        ? 'bg-info-soft text-info'
+                        : c.kind === 'whatsapp'
+                          ? 'bg-success-soft text-success'
+                          : c.kind === 'telegram'
+                            ? 'bg-info-soft text-info'
+                            : c.kind === 'discord'
+                              ? 'bg-accent-soft text-accent'
+                              : c.kind === 'slack'
+                                ? 'bg-warn-soft text-warn'
+                                : 'bg-surface-2 text-text-secondary'
+                    }`}
+                  >
+                    {c.kind === 'gateway' ? (
+                      <Plug size={14} />
+                    ) : c.kind === 'whatsapp' ? (
+                      <MessageCircle size={14} />
+                    ) : c.kind === 'telegram' ? (
+                      <MessageSquare size={14} />
+                    ) : (
+                      <Hash size={14} />
+                    )}
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="text-[13px] font-medium text-text-primary">{c.name}</span>
                       <StatusBadge status={c.status ?? 'unknown'} size="sm" />
                       {c.isDefault && (
-                        <span className="inline-flex items-center rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">Default</span>
+                        <span className="inline-flex items-center rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">
+                          Default
+                        </span>
                       )}
                     </div>
                     <div className="mt-0.5 text-[11px] capitalize text-text-muted">
                       {c.kind}
                       {c.owner ? ` · ${c.owner}` : ''}
-                      {c.agentCount != null ? ` · ${c.agentCount} agent${c.agentCount === 1 ? '' : 's'}` : ''}
+                      {c.agentCount != null
+                        ? ` · ${c.agentCount} agent${c.agentCount === 1 ? '' : 's'}`
+                        : ''}
                     </div>
                   </div>
                   {/* Only messaging channels with a sibling of the same kind need a default. */}
                   {canGovern && !c.isDefault && (kindCounts[c.kind] ?? 0) > 1 && (
-                    <Button variant="ghost" size="sm" onClick={() => void makeDefault(c)} title={`Use this for deterministic ${c.kind} sends`}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void makeDefault(c)}
+                      title={`Use this for deterministic ${c.kind} sends`}
+                    >
                       Set default
                     </Button>
                   )}
@@ -667,11 +950,22 @@ function ConnectionsTab() {
                     </Link>
                   )}
                   {c.kind === 'whatsapp' && RELINK_STATES.includes(c.status ?? '') && (
-                    <Button variant="secondary" size="sm" iconLeft={<RefreshCcw size={12} />} onClick={() => void startRelink(c)} title="Scan a new QR to reconnect this WhatsApp">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      iconLeft={<RefreshCcw size={12} />}
+                      onClick={() => void startRelink(c)}
+                      title="Scan a new QR to reconnect this WhatsApp"
+                    >
                       Relink
                     </Button>
                   )}
-                  <Button variant="ghost" size="sm" aria-label="Disconnect" onClick={() => void handleDelete(c)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label="Disconnect"
+                    onClick={() => void handleDelete(c)}
+                  >
                     <Trash2 size={12} />
                   </Button>
                 </div>
@@ -687,22 +981,47 @@ function ConnectionsTab() {
           className="animate-fade-in fixed inset-0 z-[110] flex items-center justify-center bg-overlay p-4"
           role="dialog"
           aria-modal="true"
-          onClick={() => { stopRelinkPoll(); setRelink(null); }}
+          onClick={() => {
+            stopRelinkPoll();
+            setRelink(null);
+          }}
         >
-          <div className="animate-scale-in w-full max-w-sm rounded-modal border border-line bg-surface p-5 text-center shadow-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="animate-scale-in w-full max-w-sm rounded-modal border border-line bg-surface p-5 text-center shadow-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
             <h3 className="text-subheading text-text-primary">Relink {relink.name}</h3>
             {['open', 'active', 'connected'].includes(relink.status) ? (
-              <div className="mt-4 flex flex-col items-center gap-2 text-success"><CheckCircle2 size={32} /> Connected</div>
+              <div className="mt-4 flex flex-col items-center gap-2 text-success">
+                <CheckCircle2 size={32} /> Connected
+              </div>
             ) : relink.qrDataUrl ? (
               <>
-                <img src={relink.qrDataUrl} alt="WhatsApp pairing QR" className="mx-auto mt-4 h-52 w-52 rounded-card border border-line bg-white p-2" />
-                <p className="mt-3 text-[12px] text-text-secondary">On your phone: WhatsApp → Linked devices → Link a device, then scan this code.</p>
+                <img
+                  src={relink.qrDataUrl}
+                  alt="WhatsApp pairing QR"
+                  className="mx-auto mt-4 h-52 w-52 rounded-card border border-line bg-white p-2"
+                />
+                <p className="mt-3 text-[12px] text-text-secondary">
+                  On your phone: WhatsApp → Linked devices → Link a device, then scan this code.
+                </p>
               </>
             ) : (
-              <div className="mt-6 flex items-center justify-center gap-2 text-text-muted"><Loader2 size={16} className="animate-spin" /> Generating QR…</div>
+              <div className="mt-6 flex items-center justify-center gap-2 text-text-muted">
+                <Loader2 size={16} className="animate-spin" /> Generating QR…
+              </div>
             )}
             <div className="mt-4">
-              <Button variant="ghost" size="sm" onClick={() => { stopRelinkPoll(); setRelink(null); }}>Close</Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  stopRelinkPoll();
+                  setRelink(null);
+                }}
+              >
+                Close
+              </Button>
             </div>
           </div>
         </div>
@@ -711,8 +1030,16 @@ function ConnectionsTab() {
   );
 }
 
-interface AgentOption { id: string; name: string; }
-interface Grant { id: string; agentId: string; status: string; scope: string; }
+interface AgentOption {
+  id: string;
+  name: string;
+}
+interface Grant {
+  id: string;
+  agentId: string;
+  status: string;
+  scope: string;
+}
 
 /**
  * Inline permissions panel for one connection (§3.3 grants). A connection with
@@ -736,7 +1063,9 @@ function ConnectionPermissions({ connectionId, owner }: { connectionId: string; 
     if (g.status === 'fulfilled') setGrants(g.value.grants ?? []);
   }
 
-  useEffect(() => { void refresh(); }, [connectionId]);
+  useEffect(() => {
+    void refresh();
+  }, [connectionId]);
 
   const activeGrants = grants.filter((g) => g.status === 'active');
   const restricted = activeGrants.length > 0;
@@ -749,24 +1078,35 @@ function ConnectionPermissions({ connectionId, owner }: { connectionId: string; 
       if (existing) {
         await api(`/v1/channels/${connectionId}/grants/${existing.id}`, { method: 'DELETE' });
       } else {
-        await api(`/v1/channels/${connectionId}/grants`, { method: 'POST', body: JSON.stringify({ agentId, scope: 'send' }) });
+        await api(`/v1/channels/${connectionId}/grants`, {
+          method: 'POST',
+          body: JSON.stringify({ agentId, scope: 'send' }),
+        });
       }
       await refresh();
-    } catch (e) { toast.error('Could not update permission', apiErrorMessage(e)); }
-    finally { setBusy(null); }
+    } catch (e) {
+      toast.error('Could not update permission', apiErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
   }
 
   return (
     <div className="border-t border-line bg-surface-2/60 px-4 py-3">
-      <div className={clsx(
-        'mb-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
-        restricted ? 'bg-warn-soft text-warn' : 'bg-success-soft text-success',
-      )}>
-        {restricted ? `Restricted — ${activeGrants.length} agent${activeGrants.length === 1 ? '' : 's'} allowed` : 'Open — every agent may send on this connection'}
+      <div
+        className={clsx(
+          'mb-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+          restricted ? 'bg-warn-soft text-warn' : 'bg-success-soft text-success',
+        )}
+      >
+        {restricted
+          ? `Restricted — ${activeGrants.length} agent${activeGrants.length === 1 ? '' : 's'} allowed`
+          : 'Open — every agent may send on this connection'}
       </div>
       <p className="mb-2 text-[11px] text-text-secondary">
         {owner ? `${owner} (the owner) always has access. ` : ''}
-        Check an agent to restrict this connection to only checked agents{owner ? ' plus the owner' : ''}. Leave everything unchecked to keep it open to all.
+        Check an agent to restrict this connection to only checked agents
+        {owner ? ' plus the owner' : ''}. Leave everything unchecked to keep it open to all.
       </p>
       {agents === null ? (
         <div className="text-[11px] text-text-muted">Loading agents…</div>
@@ -775,7 +1115,10 @@ function ConnectionPermissions({ connectionId, owner }: { connectionId: string; 
       ) : (
         <div className="grid grid-cols-2 gap-x-4 gap-y-1">
           {agents.map((a) => (
-            <label key={a.id} className="flex cursor-pointer items-center gap-2 py-0.5 text-[12px] text-text-primary">
+            <label
+              key={a.id}
+              className="flex cursor-pointer items-center gap-2 py-0.5 text-[12px] text-text-primary"
+            >
               <input
                 type="checkbox"
                 checked={grantedIds.has(a.id)}
@@ -802,7 +1145,10 @@ interface ApiKeyRow {
 }
 
 /** Expiry urgency → badge tone + label, shared between the list and the reveal dialog. */
-function expiryStatus(expiresAt?: string | null): { tone: 'muted' | 'success' | 'warn' | 'danger'; label: string } {
+function expiryStatus(expiresAt?: string | null): {
+  tone: 'muted' | 'success' | 'warn' | 'danger';
+  label: string;
+} {
   if (!expiresAt) return { tone: 'muted', label: 'No expiration' };
   const ms = new Date(expiresAt).getTime() - Date.now();
   const relative = formatDistanceToNow(new Date(expiresAt), { addSuffix: true });
@@ -817,29 +1163,43 @@ function ApiKeysTab() {
   const [loading, setLoading] = useState(true);
   const confirm = useConfirm();
   const [creatingOpen, setCreatingOpen] = useState(false);
-  const [revealedKey, setRevealedKey] = useState<{ name: string; secret: string; expiresAt: string | null } | null>(null);
+  const [revealedKey, setRevealedKey] = useState<{
+    name: string;
+    secret: string;
+    expiresAt: string | null;
+  } | null>(null);
 
   async function refresh() {
     try {
       const data = await api<{ keys: ApiKeyRow[] }>('/v1/auth/api-keys');
       setKeys(data.keys ?? []);
-    } catch { setKeys([]); }
-    finally { setLoading(false); }
+    } catch {
+      setKeys([]);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    void refresh();
+  }, []);
 
   async function createKey(name: string, expiresInDays: number | null) {
     if (!name.trim()) return;
     try {
-      const data = await api<{ key: { id: string; secret: string; expiresAt: string | null } }>('/v1/auth/api-keys', {
-        method: 'POST',
-        body: JSON.stringify({ name: name.trim(), expiresInDays }),
-      });
+      const data = await api<{ key: { id: string; secret: string; expiresAt: string | null } }>(
+        '/v1/auth/api-keys',
+        {
+          method: 'POST',
+          body: JSON.stringify({ name: name.trim(), expiresInDays }),
+        },
+      );
       setCreatingOpen(false);
       setRevealedKey({ name: name.trim(), secret: data.key.secret, expiresAt: data.key.expiresAt });
       void refresh();
-    } catch (e) { toast.error('Failed to create key', apiErrorMessage(e)); }
+    } catch (e) {
+      toast.error('Failed to create key', apiErrorMessage(e));
+    }
   }
 
   async function revoke(id: string) {
@@ -854,19 +1214,29 @@ function ApiKeysTab() {
       await api(`/v1/auth/api-keys/${id}`, { method: 'DELETE' });
       toast.success('Key revoked');
       void refresh();
-    } catch (e) { toast.error('Failed to revoke', apiErrorMessage(e)); }
+    } catch (e) {
+      toast.error('Failed to revoke', apiErrorMessage(e));
+    }
   }
 
   return (
     <div className="max-w-2xl space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">API Keys</h2>
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+            API Keys
+          </h2>
           <p className="mt-1 text-[12px] text-text-muted">
-            Authenticate programmatic access to Agentis. Give each key a limited lifetime so a forgotten or leaked key stops working on its own.
+            Authenticate programmatic access to Agentis. Give each key a limited lifetime so a
+            forgotten or leaked key stops working on its own.
           </p>
         </div>
-        <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setCreatingOpen(true)}>
+        <Button
+          variant="primary"
+          size="md"
+          iconLeft={<Plus size={14} />}
+          onClick={() => setCreatingOpen(true)}
+        >
           New key
         </Button>
       </div>
@@ -875,10 +1245,7 @@ function ApiKeysTab() {
         onClose={() => setCreatingOpen(false)}
         onCreate={createKey}
       />
-      <ApiKeyRevealDialog
-        keyValue={revealedKey}
-        onClose={() => setRevealedKey(null)}
-      />
+      <ApiKeyRevealDialog keyValue={revealedKey} onClose={() => setRevealedKey(null)} />
 
       {loading ? (
         <Skeleton height={150} />
@@ -895,22 +1262,39 @@ function ApiKeysTab() {
           {keys.map((k) => {
             const status = expiryStatus(k.expiresAt);
             return (
-              <div key={k.id} className="flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3">
+              <div
+                key={k.id}
+                className="flex items-center gap-3 rounded-card border border-line bg-surface px-4 py-3"
+              >
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-card bg-surface-2 text-text-secondary">
                   <Key size={14} />
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="text-[13px] font-medium text-text-primary">{k.name}</span>
-                    <StatusBadge tone={status.tone} label={status.label} size="sm" dot={status.tone !== 'muted'} />
+                    <StatusBadge
+                      tone={status.tone}
+                      label={status.label}
+                      size="sm"
+                      dot={status.tone !== 'muted'}
+                    />
                   </div>
                   <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-muted">
                     <span className="font-mono">{k.preview}</span>
                     <span>·</span>
-                    <span>{k.lastUsedAt ? `Last used ${formatDistanceToNow(new Date(k.lastUsedAt), { addSuffix: true })}` : 'Never used'}</span>
+                    <span>
+                      {k.lastUsedAt
+                        ? `Last used ${formatDistanceToNow(new Date(k.lastUsedAt), { addSuffix: true })}`
+                        : 'Never used'}
+                    </span>
                   </div>
                 </div>
-                <Button variant="danger" size="sm" iconLeft={<Trash2 size={11} />} onClick={() => void revoke(k.id)}>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  iconLeft={<Trash2 size={11} />}
+                  onClick={() => void revoke(k.id)}
+                >
                   Revoke
                 </Button>
               </div>
@@ -934,7 +1318,9 @@ const API_KEY_EXPIRY_OPTIONS: Array<{ value: string; label: string }> = [
 ];
 
 function ApiKeyCreateDialog({
-  open, onClose, onCreate,
+  open,
+  onClose,
+  onCreate,
 }: {
   open: boolean;
   onClose: () => void;
@@ -944,24 +1330,41 @@ function ApiKeyCreateDialog({
   const [expiry, setExpiry] = useState('90');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { if (open) { setName(''); setExpiry('90'); } }, [open]);
+  useEffect(() => {
+    if (open) {
+      setName('');
+      setExpiry('90');
+    }
+  }, [open]);
   if (!open) return null;
 
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
+    <div
+      className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4"
+      role="dialog"
+      aria-modal="true"
+    >
       <form
         onSubmit={async (e) => {
           e.preventDefault();
           if (!name.trim() || busy) return;
           setBusy(true);
-          try { await onCreate(name, expiry ? Number(expiry) : null); }
-          finally { setBusy(false); }
+          try {
+            await onCreate(name, expiry ? Number(expiry) : null);
+          } finally {
+            setBusy(false);
+          }
         }}
         className="animate-scale-in w-full max-w-sm rounded-modal border border-line bg-surface shadow-modal"
       >
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <h3 className="text-heading text-text-primary">New API key</h3>
-          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+          >
             <X size={16} />
           </button>
         </header>
@@ -987,7 +1390,9 @@ function ApiKeyCreateDialog({
               className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
             >
               {API_KEY_EXPIRY_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
               ))}
             </select>
             <span className="mt-1 block text-[11px] text-text-muted">
@@ -1003,12 +1408,16 @@ function ApiKeyCreateDialog({
             type="button"
             onClick={onClose}
             className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
-          >Cancel</button>
+          >
+            Cancel
+          </button>
           <button
             type="submit"
             disabled={!name.trim() || busy}
             className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
-          >{busy ? 'Creating…' : 'Create key'}</button>
+          >
+            {busy ? 'Creating…' : 'Create key'}
+          </button>
         </footer>
       </form>
     </div>
@@ -1016,7 +1425,8 @@ function ApiKeyCreateDialog({
 }
 
 function ApiKeyRevealDialog({
-  keyValue, onClose,
+  keyValue,
+  onClose,
 }: {
   keyValue: { name: string; secret: string; expiresAt: string | null } | null;
   onClose: () => void;
@@ -1026,11 +1436,20 @@ function ApiKeyRevealDialog({
   if (!keyValue) return null;
   const status = expiryStatus(keyValue.expiresAt);
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
+    <div
+      className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4"
+      role="dialog"
+      aria-modal="true"
+    >
       <div className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
           <h3 className="text-heading text-text-primary">Save your API key</h3>
-          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+          >
             <X size={16} />
           </button>
         </header>
@@ -1043,12 +1462,19 @@ function ApiKeyRevealDialog({
               <span className="text-[12px] text-text-muted">Key name</span>
               <div className="text-[13px] text-text-primary">{keyValue.name}</div>
             </div>
-            <StatusBadge tone={status.tone} label={status.label} size="sm" dot={status.tone !== 'muted'} />
+            <StatusBadge
+              tone={status.tone}
+              label={status.label}
+              size="sm"
+              dot={status.tone !== 'muted'}
+            />
           </div>
           <div className="space-y-1.5">
             <span className="text-[12px] text-text-muted">Secret</span>
             <div className="flex items-center gap-2">
-              <code className="flex-1 break-all rounded-input border border-line bg-surface-2 px-3 py-2 font-mono text-[12px] text-text-primary">{keyValue.secret}</code>
+              <code className="flex-1 break-all rounded-input border border-line bg-surface-2 px-3 py-2 font-mono text-[12px] text-text-primary">
+                {keyValue.secret}
+              </code>
               <Button
                 variant="secondary"
                 size="md"
@@ -1059,7 +1485,9 @@ function ApiKeyRevealDialog({
                     setCopied(true);
                     toast.success('Copied');
                     setTimeout(() => setCopied(false), 2000);
-                  } catch { /* ignore */ }
+                  } catch {
+                    /* ignore */
+                  }
                 }}
               >
                 {copied ? 'Copied' : 'Copy'}
@@ -1072,7 +1500,9 @@ function ApiKeyRevealDialog({
             type="button"
             onClick={onClose}
             className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover"
-          >Done</button>
+          >
+            Done
+          </button>
         </footer>
       </div>
     </div>
@@ -1088,12 +1518,54 @@ interface AddConnectionDialogProps {
 // `flow` drives the connect UI: 'qr' = scan a QR to pair (WhatsApp), 'token' =
 // paste a bot token, 'gateway' = provision compute, 'webhook' = inbound HTTP.
 const CONNECTION_KINDS = [
-  { kind: 'whatsapp', label: 'WhatsApp',         desc: 'Scan a QR to pair',    icon: MessageCircle, group: 'messaging', flow: 'qr' },
-  { kind: 'telegram', label: 'Telegram',         desc: 'Bot token',            icon: MessageSquare, group: 'messaging', flow: 'token' },
-  { kind: 'discord',  label: 'Discord',          desc: 'Bot token',            icon: Hash,          group: 'messaging', flow: 'token' },
-  { kind: 'slack',    label: 'Slack',            desc: 'Bot token',            icon: Hash,          group: 'messaging', flow: 'token' },
-  { kind: 'gateway',  label: 'OpenClaw Gateway', desc: 'Self-hosted compute',  icon: Plug,          group: 'compute',   flow: 'gateway' },
-  { kind: 'webhook',  label: 'Webhook',          desc: 'Inbound HTTP',         icon: WebhookIcon,   group: 'inbound',   flow: 'webhook' },
+  {
+    kind: 'whatsapp',
+    label: 'WhatsApp',
+    desc: 'Scan a QR to pair',
+    icon: MessageCircle,
+    group: 'messaging',
+    flow: 'qr',
+  },
+  {
+    kind: 'telegram',
+    label: 'Telegram',
+    desc: 'Bot token',
+    icon: MessageSquare,
+    group: 'messaging',
+    flow: 'token',
+  },
+  {
+    kind: 'discord',
+    label: 'Discord',
+    desc: 'Bot token',
+    icon: Hash,
+    group: 'messaging',
+    flow: 'token',
+  },
+  {
+    kind: 'slack',
+    label: 'Slack',
+    desc: 'Bot token',
+    icon: Hash,
+    group: 'messaging',
+    flow: 'token',
+  },
+  {
+    kind: 'gateway',
+    label: 'OpenClaw Gateway',
+    desc: 'Self-hosted compute',
+    icon: Plug,
+    group: 'compute',
+    flow: 'gateway',
+  },
+  {
+    kind: 'webhook',
+    label: 'Webhook',
+    desc: 'Inbound HTTP',
+    icon: WebhookIcon,
+    group: 'inbound',
+    flow: 'webhook',
+  },
 ] as const;
 
 const CONNECTION_GROUPS: Array<{ id: string; label: string }> = [
@@ -1104,7 +1576,9 @@ const CONNECTION_GROUPS: Array<{ id: string; label: string }> = [
 
 function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogProps) {
   const toast = useToast();
-  const [pickedKind, setPickedKind] = useState<typeof CONNECTION_KINDS[number]['kind'] | null>(null);
+  const [pickedKind, setPickedKind] = useState<(typeof CONNECTION_KINDS)[number]['kind'] | null>(
+    null,
+  );
   const [name, setName] = useState('');
   const [token, setToken] = useState('');
   const [gatewayUrl, setGatewayUrl] = useState('');
@@ -1114,18 +1588,34 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
   const [agentId, setAgentId] = useState('');
   // WhatsApp QR pairing sub-flow.
-  const [qr, setQr] = useState<{ connectionId: string; qrDataUrl?: string; qr?: string; status: string } | null>(null);
+  const [qr, setQr] = useState<{
+    connectionId: string;
+    qrDataUrl?: string;
+    qr?: string;
+    status: string;
+  } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const picked = pickedKind ? CONNECTION_KINDS.find((c) => c.kind === pickedKind) ?? null : null;
+  const picked = pickedKind ? (CONNECTION_KINDS.find((c) => c.kind === pickedKind) ?? null) : null;
   const needsAgent = picked?.flow === 'token' || picked?.flow === 'qr';
 
-  const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  const stopPoll = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
   useEffect(() => {
     if (open) {
-      setPickedKind(null); setName(''); setToken(''); setAgentId(''); setQr(null); stopPoll();
+      setPickedKind(null);
+      setName('');
+      setToken('');
+      setAgentId('');
+      setQr(null);
+      stopPoll();
       void api<{ agents: Array<{ id: string; name: string }> }>('/v1/agents')
-        .then((r) => setAgents(r.agents ?? [])).catch(() => setAgents([]));
+        .then((r) => setAgents(r.agents ?? []))
+        .catch(() => setAgents([]));
     }
     return stopPoll;
   }, [open]);
@@ -1138,14 +1628,21 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
     // not several seconds later.
     pollRef.current = setInterval(async () => {
       try {
-        const state = await api<{ connectionId: string; status: string; qr?: string; qrDataUrl?: string }>(`/v1/channels/${connectionId}/login`);
+        const state = await api<{
+          connectionId: string;
+          status: string;
+          qr?: string;
+          qrDataUrl?: string;
+        }>(`/v1/channels/${connectionId}/login`);
         setQr({ connectionId, status: state.status, qr: state.qr, qrDataUrl: state.qrDataUrl });
         if (state.status === 'open' || state.status === 'active' || state.status === 'connected') {
           stopPoll();
           toast.success('WhatsApp connected', name.trim());
           onCreated();
         }
-      } catch { /* transient; keep polling */ }
+      } catch {
+        /* transient; keep polling */
+      }
     }, 1000);
   }
 
@@ -1163,7 +1660,11 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
         // with only {name} hit a non-existent handler and 404'd).
         await api('/v1/gateways/pair', {
           method: 'POST',
-          body: JSON.stringify({ name: name.trim(), gatewayUrl: gatewayUrl.trim(), deviceToken: token.trim() }),
+          body: JSON.stringify({
+            name: name.trim(),
+            gatewayUrl: gatewayUrl.trim(),
+            deviceToken: token.trim(),
+          }),
         });
         toast.success('Gateway paired', name.trim());
         onCreated();
@@ -1171,16 +1672,32 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
         // WhatsApp: create the connection (QR-local, no token) owned by the chosen
         // agent, then start the login session and poll for the QR + connected state.
         const created = await api<{ connection: { id: string } }>('/v1/channels', {
-          method: 'POST', body: JSON.stringify({ kind: 'whatsapp', mode: 'qr_local', name: name.trim(), ...(agentId ? { agentId } : {}) }),
+          method: 'POST',
+          body: JSON.stringify({
+            kind: 'whatsapp',
+            mode: 'qr_local',
+            name: name.trim(),
+            ...(agentId ? { agentId } : {}),
+          }),
         });
         const id = created.connection.id;
-        const login = await api<{ connectionId: string; status: string; qr?: string; qrDataUrl?: string }>(`/v1/channels/${id}/login`, { method: 'POST', body: '{}' });
+        const login = await api<{
+          connectionId: string;
+          status: string;
+          qr?: string;
+          qrDataUrl?: string;
+        }>(`/v1/channels/${id}/login`, { method: 'POST', body: '{}' });
         setQr({ connectionId: id, status: login.status, qr: login.qr, qrDataUrl: login.qrDataUrl });
         beginQrPolling(id);
       } else {
         await api('/v1/channels', {
           method: 'POST',
-          body: JSON.stringify({ kind: pickedKind, name: name.trim(), ...(agentId ? { agentId } : {}), ...(token.trim() ? { token: token.trim() } : {}) }),
+          body: JSON.stringify({
+            kind: pickedKind,
+            name: name.trim(),
+            ...(agentId ? { agentId } : {}),
+            ...(token.trim() ? { token: token.trim() } : {}),
+          }),
         });
         toast.success('Connected', name.trim());
         onCreated();
@@ -1193,11 +1710,25 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
   }
 
   return (
-    <div className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
-      <form onSubmit={connect} className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
+    <div
+      className="animate-fade-in fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <form
+        onSubmit={connect}
+        className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal"
+      >
         <header className="flex items-center justify-between border-b border-line px-5 py-4">
-          <h3 className="text-heading text-text-primary">{qr ? 'Connect WhatsApp' : 'Add connection'}</h3>
-          <button type="button" onClick={onClose} aria-label="Close" className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary">
+          <h3 className="text-heading text-text-primary">
+            {qr ? 'Connect WhatsApp' : 'Add connection'}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="-m-1 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
+          >
             <X size={16} />
           </button>
         </header>
@@ -1205,16 +1736,31 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
           {qr ? (
             // WhatsApp QR pairing screen.
             <div className="flex flex-col items-center gap-3 text-center">
-              {(qr.status === 'open' || qr.status === 'active' || qr.status === 'connected') ? (
-                <><CheckCircle2 size={40} className="text-success" /><p className="text-[14px] text-text-primary">Connected!</p></>
+              {qr.status === 'open' || qr.status === 'active' || qr.status === 'connected' ? (
+                <>
+                  <CheckCircle2 size={40} className="text-success" />
+                  <p className="text-[14px] text-text-primary">Connected!</p>
+                </>
               ) : qr.qrDataUrl ? (
                 <>
-                  <img src={qr.qrDataUrl} alt="WhatsApp pairing QR" className="h-52 w-52 rounded-card border border-line bg-white p-2" />
-                  <p className="text-[13px] text-text-secondary">On your phone: <strong>WhatsApp → Settings → Linked Devices → Link a Device</strong>, then scan this code.</p>
-                  <p className="inline-flex items-center gap-1.5 text-[12px] text-text-muted"><Loader2 size={12} className="animate-spin" /> Waiting for scan…</p>
+                  <img
+                    src={qr.qrDataUrl}
+                    alt="WhatsApp pairing QR"
+                    className="h-52 w-52 rounded-card border border-line bg-white p-2"
+                  />
+                  <p className="text-[13px] text-text-secondary">
+                    On your phone:{' '}
+                    <strong>WhatsApp → Settings → Linked Devices → Link a Device</strong>, then scan
+                    this code.
+                  </p>
+                  <p className="inline-flex items-center gap-1.5 text-[12px] text-text-muted">
+                    <Loader2 size={12} className="animate-spin" /> Waiting for scan…
+                  </p>
                 </>
               ) : (
-                <p className="inline-flex items-center gap-1.5 py-8 text-[13px] text-text-muted"><Loader2 size={14} className="animate-spin" /> Generating pairing code…</p>
+                <p className="inline-flex items-center gap-1.5 py-8 text-[13px] text-text-muted">
+                  <Loader2 size={14} className="animate-spin" /> Generating pairing code…
+                </p>
               )}
             </div>
           ) : !pickedKind ? (
@@ -1224,13 +1770,19 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
                 if (items.length === 0) return null;
                 return (
                   <div key={g.id}>
-                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">{g.label}</p>
+                    <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                      {g.label}
+                    </p>
                     <div className="grid grid-cols-2 gap-2">
                       {items.map((c) => {
                         const Icon = c.icon;
                         return (
-                          <button key={c.kind} type="button" onClick={() => setPickedKind(c.kind)}
-                            className="flex flex-col items-start gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-left transition-colors hover:border-line-strong hover:bg-surface-3">
+                          <button
+                            key={c.kind}
+                            type="button"
+                            onClick={() => setPickedKind(c.kind)}
+                            className="flex flex-col items-start gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-left transition-colors hover:border-line-strong hover:bg-surface-3"
+                          >
                             <Icon size={16} className="text-text-secondary" />
                             <span className="text-subheading text-text-primary">{c.label}</span>
                             <span className="text-[11px] text-text-muted">{c.desc}</span>
@@ -1245,20 +1797,43 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
           ) : (
             <>
               <div>
-                <button type="button" onClick={() => setPickedKind(null)} className="text-[12px] text-text-muted hover:text-text-primary">← Back</button>
+                <button
+                  type="button"
+                  onClick={() => setPickedKind(null)}
+                  className="text-[12px] text-text-muted hover:text-text-primary"
+                >
+                  ← Back
+                </button>
               </div>
               <label className="block">
-                <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Name</span>
-                <input autoFocus type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder={`My ${picked?.label ?? pickedKind}`}
-                  className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
+                <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+                  Name
+                </span>
+                <input
+                  autoFocus
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder={`My ${picked?.label ?? pickedKind}`}
+                  className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                />
               </label>
               {needsAgent && (
                 <label className="block">
-                  <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Owner</span>
-                  <select value={agentId} onChange={(e) => setAgentId(e.target.value)}
-                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none">
+                  <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+                    Owner
+                  </span>
+                  <select
+                    value={agentId}
+                    onChange={(e) => setAgentId(e.target.value)}
+                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
+                  >
                     <option value="">Workspace — shared by all agents &amp; automation</option>
-                    {agents.map((a) => <option key={a.id} value={a.id}>Agent: {a.name}</option>)}
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        Agent: {a.name}
+                      </option>
+                    ))}
                   </select>
                   <span className="mt-1 block text-[11px] text-text-muted">
                     {agentId
@@ -1269,38 +1844,74 @@ function AddConnectionDialog({ open, onClose, onCreated }: AddConnectionDialogPr
               )}
               {picked?.flow === 'token' && (
                 <label className="block">
-                  <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Bot token</span>
-                  <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token"
-                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
+                  <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+                    Bot token
+                  </span>
+                  <input
+                    type="password"
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    placeholder="Paste token"
+                    className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                  />
                 </label>
               )}
               {picked?.flow === 'gateway' && (
                 <>
                   <label className="block">
-                    <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Gateway URL</span>
-                    <input type="text" value={gatewayUrl} onChange={(e) => setGatewayUrl(e.target.value)} placeholder="wss://gateway.example.com/agent"
-                      className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
-                    <span className="mt-1 block text-[11px] text-text-muted">Your OpenClaw gateway’s WebSocket URL. Agents connect through this.</span>
+                    <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+                      Gateway URL
+                    </span>
+                    <input
+                      type="text"
+                      value={gatewayUrl}
+                      onChange={(e) => setGatewayUrl(e.target.value)}
+                      placeholder="wss://gateway.example.com/agent"
+                      className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                    />
+                    <span className="mt-1 block text-[11px] text-text-muted">
+                      Your OpenClaw gateway’s WebSocket URL. Agents connect through this.
+                    </span>
                   </label>
                   <label className="block">
-                    <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">Device token</span>
-                    <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste the gateway device token"
-                      className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none" />
-                    <span className="mt-1 block text-[11px] text-text-muted">Stored encrypted; never leaves this workspace.</span>
+                    <span className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+                      Device token
+                    </span>
+                    <input
+                      type="password"
+                      value={token}
+                      onChange={(e) => setToken(e.target.value)}
+                      placeholder="Paste the gateway device token"
+                      className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 font-mono text-[13px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                    />
+                    <span className="mt-1 block text-[11px] text-text-muted">
+                      Stored encrypted; never leaves this workspace.
+                    </span>
                   </label>
                 </>
               )}
               {picked?.flow === 'qr' && (
-                <p className="text-[12px] text-text-muted">No token needed — you'll scan a QR code with WhatsApp on the next step.</p>
+                <p className="text-[12px] text-text-muted">
+                  No token needed — you'll scan a QR code with WhatsApp on the next step.
+                </p>
               )}
             </>
           )}
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-line bg-surface-2 px-5 py-3">
-          <button type="button" onClick={onClose} className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary">{qr ? 'Done' : 'Cancel'}</button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
+          >
+            {qr ? 'Done' : 'Cancel'}
+          </button>
           {!qr && (
-            <button type="submit" disabled={!pickedKind || !name.trim() || busy}
-              className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60">
+            <button
+              type="submit"
+              disabled={!pickedKind || !name.trim() || busy}
+              className="inline-flex h-9 items-center rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
+            >
               {busy ? 'Connecting…' : picked?.flow === 'qr' ? 'Get QR code' : 'Connect'}
             </button>
           )}
@@ -1359,7 +1970,9 @@ function BudgetTab() {
     }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    void refresh();
+  }, []);
 
   function startEdit(agent: BudgetAgentRow) {
     setEditingId(agent.id);
@@ -1369,7 +1982,8 @@ function BudgetTab() {
   async function saveEdit(agentId: string) {
     setSaving(true);
     const dollars = parseFloat(editValue);
-    const monthlyBudgetCents = isNaN(dollars) || editValue.trim() === '' ? null : Math.round(dollars * 100);
+    const monthlyBudgetCents =
+      isNaN(dollars) || editValue.trim() === '' ? null : Math.round(dollars * 100);
     try {
       await api(`/v1/budgets/agents/${agentId}`, {
         method: 'PATCH',
@@ -1395,9 +2009,15 @@ function BudgetTab() {
     );
   }
 
-  const totalSpend = data.agents.reduce((s, a) => s + Math.max(0, a.currentMonthSpendCents ?? 0), 0);
-  const allCapped = data.agents.length > 0 && data.agents.every((a) => a.monthlyBudgetCents != null);
-  const totalCap = allCapped ? data.agents.reduce((s, a) => s + (a.monthlyBudgetCents ?? 0), 0) : null;
+  const totalSpend = data.agents.reduce(
+    (s, a) => s + Math.max(0, a.currentMonthSpendCents ?? 0),
+    0,
+  );
+  const allCapped =
+    data.agents.length > 0 && data.agents.every((a) => a.monthlyBudgetCents != null);
+  const totalCap = allCapped
+    ? data.agents.reduce((s, a) => s + (a.monthlyBudgetCents ?? 0), 0)
+    : null;
   const recentEvents = [...data.events]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 20);
@@ -1412,23 +2032,33 @@ function BudgetTab() {
       <div className="grid grid-cols-3 gap-3">
         <div className="rounded-card border border-line bg-surface p-4">
           <div className="text-[11px] text-text-muted">This month's spend</div>
-          <div className="mt-1 text-[20px] font-semibold text-text-primary">{budgetMoney(totalSpend)}</div>
+          <div className="mt-1 text-[20px] font-semibold text-text-primary">
+            {budgetMoney(totalSpend)}
+          </div>
         </div>
         <div className="rounded-card border border-line bg-surface p-4">
           <div className="text-[11px] text-text-muted">Monthly cap</div>
           <div className="mt-1 text-[20px] font-semibold text-text-primary">
-            {totalCap != null ? budgetMoney(totalCap) : <span className="text-[14px] text-text-muted">None set</span>}
+            {totalCap != null ? (
+              budgetMoney(totalCap)
+            ) : (
+              <span className="text-[14px] text-text-muted">None set</span>
+            )}
           </div>
         </div>
         <div className="rounded-card border border-line bg-surface p-4">
           <div className="text-[11px] text-text-muted">Spend events</div>
-          <div className="mt-1 text-[20px] font-semibold text-text-primary">{data.events.length}</div>
+          <div className="mt-1 text-[20px] font-semibold text-text-primary">
+            {data.events.length}
+          </div>
         </div>
       </div>
 
       {/* Per-agent limits */}
       <div>
-        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Per-agent limits</h2>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          Per-agent limits
+        </h2>
         {data.agents.length === 0 ? (
           <div className="rounded-card border border-dashed border-line bg-surface/40 p-6 text-center text-[13px] text-text-muted">
             No agents in this workspace.
@@ -1441,10 +2071,17 @@ function BudgetTab() {
               const pct = cap != null && cap > 0 ? Math.min(100, (spend / cap) * 100) : 0;
               const isEditing = editingId === agent.id;
               return (
-                <div key={agent.id} className="rounded-card border border-line bg-surface px-4 py-3">
+                <div
+                  key={agent.id}
+                  className="rounded-card border border-line bg-surface px-4 py-3"
+                >
                   <div className="flex items-center gap-3">
-                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-text-primary">{agent.name}</span>
-                    <span className="text-[12px] text-text-secondary">{budgetMoney(spend)} this month</span>
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-text-primary">
+                      {agent.name}
+                    </span>
+                    <span className="text-[12px] text-text-secondary">
+                      {budgetMoney(spend)} this month
+                    </span>
                     {isEditing ? (
                       <div className="flex items-center gap-1.5">
                         <span className="text-[12px] text-text-muted">$</span>
@@ -1462,7 +2099,12 @@ function BudgetTab() {
                             if (e.key === 'Escape') setEditingId(null);
                           }}
                         />
-                        <Button variant="primary" size="sm" disabled={saving} onClick={() => void saveEdit(agent.id)}>
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={saving}
+                          onClick={() => void saveEdit(agent.id)}
+                        >
                           Save
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>
@@ -1500,7 +2142,9 @@ function BudgetTab() {
 
       {/* Recent spend events */}
       <div>
-        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">Recent spend events</h2>
+        <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+          Recent spend events
+        </h2>
         {recentEvents.length === 0 ? (
           <div className="rounded-card border border-dashed border-line bg-surface/40 p-6 text-center text-[13px] text-text-muted">
             No spend events yet.
@@ -1516,7 +2160,9 @@ function BudgetTab() {
                 <span className="min-w-0 flex-1 truncate text-[12px] text-text-secondary">
                   {agentName(event.agentId)}
                 </span>
-                <span className="text-[12px] font-medium text-text-primary">{budgetMoney(event.amountCents)}</span>
+                <span className="text-[12px] font-medium text-text-primary">
+                  {budgetMoney(event.amountCents)}
+                </span>
                 <span className="text-[11px] text-text-muted">
                   {new Date(event.createdAt).toLocaleDateString()}
                 </span>

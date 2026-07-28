@@ -1,17 +1,15 @@
 import { Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Search, Check, Plus, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
 import { LoginPage } from './pages/LoginPage';
-import { CommandPalette } from './components/CommandPalette';
 import { LiveStrip } from './components/LiveStrip';
 import { OnboardingStrip } from './components/OnboardingStrip';
 import { Sidebar } from './components/Sidebar';
 import { ChatPanelMount } from './components/chat/ChatPanelMount';
 import { RealtimeStatusIndicator } from './components/shared/RealtimeStatusIndicator';
 import { ChatPanelHeaderButton } from './components/chat/ChatPanelHeaderButton';
-import { NotificationPanel } from './components/shared/NotificationPanel';
-import { AvatarMenu } from './components/shared/AvatarMenu';
 import { BrandMark } from './components/shared/BrandMark';
 import { RunModalProvider } from './components/runs/RunModalProvider';
 import { ApprovalModalProvider } from './components/shared/ApprovalModalProvider';
@@ -39,7 +37,18 @@ import './components/shared/ThemeToggle';
 // putting ~100 KB raw of settings UI into the entry chunk for a surface nobody
 // sees at boot. It already renders null while closed; the cost was purely the
 // import. Mounted lazily on first open instead.
-const LazySettingsModal = lazy(() => import('./components/settings/SettingsModal').then((m) => ({ default: m.SettingsModal })));
+const LazySettingsModal = lazy(() =>
+  import('./components/settings/SettingsModal').then((m) => ({ default: m.SettingsModal })),
+);
+const LazyCommandPalette = lazy(() =>
+  import('./components/CommandPalette').then((m) => ({ default: m.CommandPalette })),
+);
+const LazyNotificationPanel = lazy(() =>
+  import('./components/shared/NotificationPanel').then((m) => ({ default: m.NotificationPanel })),
+);
+const LazyAvatarMenu = lazy(() =>
+  import('./components/shared/AvatarMenu').then((m) => ({ default: m.AvatarMenu })),
+);
 
 function SettingsModalMount() {
   const settingsOpen = useAgentisStore((s) => s.settingsOpen);
@@ -52,31 +61,58 @@ function SettingsModalMount() {
 }
 
 /** Full-screen brand boot/loading state — the mark breathes above a quiet label. */
-function BootScreen({ label }: { label: string }) {
+type BootLabel = 'app.loading' | 'app.opening' | 'app.waitingForServer';
+
+function BootScreen({ label }: { label: BootLabel }) {
+  const { t } = useTranslation();
   return (
     <div className="flex h-screen flex-col items-center justify-center gap-5 bg-canvas">
       <BrandMark size={48} className="s-pulse text-text-primary" />
-      <span className="text-[12px] tracking-wide text-text-muted">{label}</span>
+      <span className="text-[12px] tracking-wide text-text-muted">{t(label)}</span>
     </div>
   );
 }
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
 const AppsPage = lazy(() => import('./pages/AppsPage').then((m) => ({ default: m.AppsPage })));
-const AppEditorPage = lazy(() => import('./pages/AppEditorPage').then((m) => ({ default: m.AppEditorPage })));
-const WorkflowCanvasPage = lazy(() => import('./pages/WorkflowCanvasPage').then((m) => ({ default: m.WorkflowCanvasPage })));
-const PublicAppSurfacePage = lazy(() => import('./pages/PublicAppSurfacePage').then((m) => ({ default: m.PublicAppSurfacePage })));
-const GenUIShowcasePage = lazy(() => import('./pages/GenUIShowcasePage').then((m) => ({ default: m.GenUIShowcasePage })));
-const AgentsPage = lazy(() => import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })));
-const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })));
+const AppEditorPage = lazy(() =>
+  import('./pages/AppEditorPage').then((m) => ({ default: m.AppEditorPage })),
+);
+const WorkflowCanvasPage = lazy(() =>
+  import('./pages/WorkflowCanvasPage').then((m) => ({ default: m.WorkflowCanvasPage })),
+);
+const PublicAppSurfacePage = lazy(() =>
+  import('./pages/PublicAppSurfacePage').then((m) => ({ default: m.PublicAppSurfacePage })),
+);
+const GenUIShowcasePage = lazy(() =>
+  import('./pages/GenUIShowcasePage').then((m) => ({ default: m.GenUIShowcasePage })),
+);
+const AgentsPage = lazy(() =>
+  import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })),
+);
+const AgentDetailPage = lazy(() =>
+  import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })),
+);
 
-const PackagesPage = lazy(() => import('./pages/PackagesPage').then((m) => ({ default: m.PackagesPage })));
-const BrainPage = lazy(() => import('./pages/UnifiedBrainPage').then((m) => ({ default: m.UnifiedBrainPage })));
-const KnowledgeBasePage = lazy(() => import('./pages/KnowledgeBasePage').then((m) => ({ default: m.KnowledgeBasePage })));
-const HistoryPage = lazy(() => import('./pages/HistoryPage').then((m) => ({ default: m.HistoryPage })));
-const WorkspacesPage = lazy(() => import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })));
+const PackagesPage = lazy(() =>
+  import('./pages/PackagesPage').then((m) => ({ default: m.PackagesPage })),
+);
+const BrainPage = lazy(() =>
+  import('./pages/UnifiedBrainPage').then((m) => ({ default: m.UnifiedBrainPage })),
+);
+const KnowledgeBasePage = lazy(() =>
+  import('./pages/KnowledgeBasePage').then((m) => ({ default: m.KnowledgeBasePage })),
+);
+const HistoryPage = lazy(() =>
+  import('./pages/HistoryPage').then((m) => ({ default: m.HistoryPage })),
+);
+const WorkspacesPage = lazy(() =>
+  import('./pages/WorkspacesPage').then((m) => ({ default: m.WorkspacesPage })),
+);
 const ChatPage = lazy(() => import('./pages/ChatPage').then((m) => ({ default: m.ChatPage })));
-const ArtifactsPage = lazy(() => import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })));
+const ArtifactsPage = lazy(() =>
+  import('./pages/ArtifactsPage').then((m) => ({ default: m.ArtifactsPage })),
+);
 
 interface Workspace {
   id: string;
@@ -92,7 +128,10 @@ interface OperatorMe {
   avatarUrl?: string | null;
 }
 
-async function tryLaunchTokenAuth(token: string, options: { removeUrlToken?: boolean } = {}): Promise<boolean> {
+async function tryLaunchTokenAuth(
+  token: string,
+  options: { removeUrlToken?: boolean } = {},
+): Promise<boolean> {
   try {
     await loginWithLaunchToken(token);
     if (options.removeUrlToken) removeLaunchTokenFromUrl();
@@ -103,14 +142,14 @@ async function tryLaunchTokenAuth(token: string, options: { removeUrlToken?: boo
 }
 
 /** Shown while polling /healthz — the API binds its port late on big workspaces. */
-const SERVER_WAIT_LABEL = 'Waiting for the Agentis server…';
+const SERVER_WAIT_LABEL: BootLabel = 'app.waitingForServer';
 const SERVER_RETRY_MS = 1_500;
 
 export function App() {
   const location = useLocation();
   const [authed, setAuthed] = useState<boolean>(false);
   const [initializing, setInitializing] = useState<boolean>(true);
-  const [initializingLabel, setInitializingLabel] = useState<string>('Loading...');
+  const [initializingLabel, setInitializingLabel] = useState<BootLabel>('app.loading');
   const [ws, setWs] = useState<Workspace | null>(null);
   const [wsReady, setWsReady] = useState<boolean>(false);
   const [me, setMe] = useState<OperatorMe | null>(null);
@@ -143,9 +182,15 @@ export function App() {
       }
       const launchToken = urlToken ?? (!hasAccessToken ? getStoredLaunchToken() : null);
       if (launchToken) {
-        try { logout(); } catch { /* noop */ }
-        setInitializingLabel('Opening Agentis...');
-        const launched = await tryLaunchTokenAuth(launchToken, { removeUrlToken: Boolean(urlToken) });
+        try {
+          logout();
+        } catch {
+          /* noop */
+        }
+        setInitializingLabel('app.opening');
+        const launched = await tryLaunchTokenAuth(launchToken, {
+          removeUrlToken: Boolean(urlToken),
+        });
         if (cancelled) return;
         if (launched) {
           setStoredLaunchToken(launchToken);
@@ -161,8 +206,12 @@ export function App() {
       }
 
       if (!hasAccessToken && isLocalLaunchOrigin()) {
-        try { logout(); } catch { /* noop */ }
-        setInitializingLabel('Opening Agentis...');
+        try {
+          logout();
+        } catch {
+          /* noop */
+        }
+        setInitializingLabel('app.opening');
         const launched = await tryLaunchTokenAuth(LOCAL_BYPASS_LAUNCH_TOKEN);
         if (cancelled) return;
         if (launched) {
@@ -182,10 +231,12 @@ export function App() {
         return;
       }
       if (cancelled) return;
-      setInitializingLabel('Loading...');
+      setInitializingLabel('app.loading');
       setInitializing(false);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [initRetry]);
 
   useEffect(() => {
@@ -233,7 +284,7 @@ export function App() {
         logout();
         const launchToken = getStoredLaunchToken();
         if (launchToken) {
-          setInitializingLabel('Opening Agentis...');
+          setInitializingLabel('app.opening');
           const launched = await tryLaunchTokenAuth(launchToken);
           if (launched) {
             window.location.reload();
@@ -246,7 +297,9 @@ export function App() {
         setWsReady(true);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [authed, wsRetry]);
 
   if (location.pathname.startsWith('/public/apps/')) {
@@ -279,14 +332,28 @@ export function App() {
   if (!authed) {
     return (
       <Routes>
-        <Route path="*" element={<LoginPage onSuccess={() => { setWsReady(false); setAuthed(true); }} />} />
+        <Route
+          path="*"
+          element={
+            <LoginPage
+              onSuccess={() => {
+                setWsReady(false);
+                setAuthed(true);
+              }}
+            />
+          }
+        />
       </Routes>
     );
   }
 
   if (!wsReady) {
     // Shows the "waiting for server" message while /healthz polling is active.
-    return <BootScreen label={initializingLabel === SERVER_WAIT_LABEL ? SERVER_WAIT_LABEL : 'Loading…'} />;
+    return (
+      <BootScreen
+        label={initializingLabel === SERVER_WAIT_LABEL ? SERVER_WAIT_LABEL : 'app.loading'}
+      />
+    );
   }
 
   return (
@@ -294,70 +361,78 @@ export function App() {
       <ConfirmProvider>
         <RunModalProvider>
           <ApprovalModalProvider>
-          <Shell
-          workspaceName={ws?.name ?? '…'}
-          workspaceImage={ws?.imageUrl ?? null}
-          workspaceId={ws?.id ?? null}
-          operator={me}
-          onLogout={() => {
-            logout();
-            clearStoredLaunchToken();
-            useAgentisStore.getState().clearContext();
-            setAuthed(false);
-            setWsReady(false);
-          }}
-        >
-          <ErrorBoundary resetKey={location.pathname}>
-          <Suspense fallback={<RouteFallback />}>
-            <Routes>
-              <Route path="/" element={<Navigate to="/home" replace />} />
-              <Route path="/home" element={<HomePage />} />
-              <Route path="/agents" element={<AgentsPage />} />
-              <Route path="/agents/:id" element={<AgentDetailPage />} />
+            <Shell
+              workspaceName={ws?.name ?? '…'}
+              workspaceImage={ws?.imageUrl ?? null}
+              workspaceId={ws?.id ?? null}
+              operator={me}
+              onLogout={() => {
+                logout();
+                clearStoredLaunchToken();
+                useAgentisStore.getState().clearContext();
+                setAuthed(false);
+                setWsReady(false);
+              }}
+            >
+              <ErrorBoundary resetKey={location.pathname}>
+                <Suspense fallback={<RouteFallback />}>
+                  <Routes>
+                    <Route path="/" element={<Navigate to="/home" replace />} />
+                    <Route path="/home" element={<HomePage />} />
+                    <Route path="/agents" element={<AgentsPage />} />
+                    <Route path="/agents/:id" element={<AgentDetailPage />} />
 
-              <Route path="/apps" element={<AppsPage />} />
-              <Route path="/apps/workflows/:id" element={<WorkflowCanvasRoute />} />
-              <Route path="/apps/:id" element={<AppEditorPage />} />
-              <Route path="/apps/:id/build" element={<Navigate to="../" replace />} />
-              <Route path="/workflows" element={<Navigate to="/apps" replace />} />
-              <Route path="/workflows/build" element={<Navigate to="/apps" replace />} />
-              <Route path="/workflows/:id" element={<WorkflowLegacyRedirect />} />
-              <Route path="/brain/*" element={<BrainPage />} />
-              <Route path="/knowledge" element={<BrainPage />} />
-              <Route path="/knowledge/bases/:knowledgeBaseId" element={<KnowledgeBasePage />} />
-              <Route path="/assets" element={<ArtifactsPage />} />
-              {/* Legacy alias — chat/share links still point at /artifacts. */}
-              <Route path="/artifacts" element={<ArtifactsPage />} />
-              <Route path="/abilities" element={<Navigate to="/agents" replace />} />
-              <Route path="/abilities/:id" element={<Navigate to="/brain" replace />} />
-              <Route path="/packages" element={<PackagesPage />} />
-              <Route path="/history" element={<HistoryPage />} />
-              {/* Approvals no longer have a page — they open in a global review modal
+                    <Route path="/apps" element={<AppsPage />} />
+                    <Route path="/apps/workflows/:id" element={<WorkflowCanvasRoute />} />
+                    <Route path="/apps/:id" element={<AppEditorPage />} />
+                    <Route path="/apps/:id/build" element={<Navigate to="../" replace />} />
+                    <Route path="/workflows" element={<Navigate to="/apps" replace />} />
+                    <Route path="/workflows/build" element={<Navigate to="/apps" replace />} />
+                    <Route path="/workflows/:id" element={<WorkflowLegacyRedirect />} />
+                    <Route path="/brain/*" element={<BrainPage />} />
+                    <Route path="/knowledge" element={<BrainPage />} />
+                    <Route
+                      path="/knowledge/bases/:knowledgeBaseId"
+                      element={<KnowledgeBasePage />}
+                    />
+                    <Route path="/assets" element={<ArtifactsPage />} />
+                    {/* Legacy alias — chat/share links still point at /artifacts. */}
+                    <Route path="/artifacts" element={<ArtifactsPage />} />
+                    <Route path="/abilities" element={<Navigate to="/agents" replace />} />
+                    <Route path="/abilities/:id" element={<Navigate to="/brain" replace />} />
+                    <Route path="/packages" element={<PackagesPage />} />
+                    <Route path="/history" element={<HistoryPage />} />
+                    {/* Approvals no longer have a page — they open in a global review modal
                   (ApprovalModalProvider). Legacy links redirect home. */}
-              <Route path="/approvals" element={<Navigate to="/home" replace />} />
-              <Route path="/runs/:id" element={<RunRouteBridge />} />
-              <Route path="/chat" element={<ChatPage />} />
-              <Route path="/chat/agent/:agentId" element={<ChatPage />} />
-              <Route path="/workspaces" element={<WorkspacesPage />} />
-              <Route path="/settings" element={<Navigate to="/home" replace />} />
+                    <Route path="/approvals" element={<Navigate to="/home" replace />} />
+                    <Route path="/runs/:id" element={<RunRouteBridge />} />
+                    <Route path="/chat" element={<ChatPage />} />
+                    <Route path="/chat/agent/:agentId" element={<ChatPage />} />
+                    <Route path="/workspaces" element={<WorkspacesPage />} />
+                    <Route path="/settings" element={<Navigate to="/home" replace />} />
 
-              {/* Backward-compat redirects */}
-              <Route path="/fleet" element={<Navigate to="/home" replace />} />
-              <Route path="/runs" element={<Navigate to="/history?tab=runs" replace />} />
-              <Route path="/activity" element={<Navigate to="/history?tab=activity" replace />} />
-              <Route path="/spaces" element={<Navigate to="/home" replace />} />
-              <Route path="/spaces/:id" element={<Navigate to="/home" replace />} />
-              <Route path="/gateways" element={<Navigate to="/home" replace />} />
-              <Route path="/conversations" element={<ChatPage />} />
-              <Route path="/conversations/:agentId" element={<ChatPage />} />
-              <Route path="/settings/channels" element={<Navigate to="/home" replace />} />
-              <Route path="*" element={<Navigate to="/home" replace />} />
-            </Routes>
-          </Suspense>
-          </ErrorBoundary>
-          <CommandPalette />
-          <SettingsModalMount />
-          </Shell>
+                    {/* Backward-compat redirects */}
+                    <Route path="/fleet" element={<Navigate to="/home" replace />} />
+                    <Route path="/runs" element={<Navigate to="/history?tab=runs" replace />} />
+                    <Route
+                      path="/activity"
+                      element={<Navigate to="/history?tab=activity" replace />}
+                    />
+                    <Route path="/spaces" element={<Navigate to="/home" replace />} />
+                    <Route path="/spaces/:id" element={<Navigate to="/home" replace />} />
+                    <Route path="/gateways" element={<Navigate to="/home" replace />} />
+                    <Route path="/conversations" element={<ChatPage />} />
+                    <Route path="/conversations/:agentId" element={<ChatPage />} />
+                    <Route path="/settings/channels" element={<Navigate to="/home" replace />} />
+                    <Route path="*" element={<Navigate to="/home" replace />} />
+                  </Routes>
+                </Suspense>
+              </ErrorBoundary>
+              <Suspense fallback={null}>
+                <LazyCommandPalette />
+              </Suspense>
+              <SettingsModalMount />
+            </Shell>
           </ApprovalModalProvider>
         </RunModalProvider>
       </ConfirmProvider>
@@ -397,7 +472,10 @@ function WorkflowLegacyRedirect() {
  */
 function WorkflowCanvasRoute() {
   const { id } = useParams<{ id: string }>();
-  const [resolved, setResolved] = useState<{ loading: boolean; appId: string | null }>({ loading: true, appId: null });
+  const [resolved, setResolved] = useState<{ loading: boolean; appId: string | null }>({
+    loading: true,
+    appId: null,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -464,7 +542,10 @@ function Shell({
 
   return (
     <div className="flex h-full flex-col bg-canvas" data-agentis-shell>
-      <header data-agentis-shell-header className="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
+      <header
+        data-agentis-shell-header
+        className="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b border-line bg-surface px-4"
+      >
         <button
           onClick={() => nav('/home')}
           className="flex h-9 items-center text-text-primary"
@@ -492,14 +573,18 @@ function Shell({
             <Search size={14} />
           </button>
           <RealtimeStatusIndicator />
-          <NotificationPanel />
+          <Suspense fallback={null}>
+            <LazyNotificationPanel />
+          </Suspense>
           <ChatPanelHeaderButton />
-          <AvatarMenu
-            name={operator?.name ?? 'Operator'}
-            email={operator?.email}
-            imageUrl={operator?.avatarUrl ?? undefined}
-            onLogout={onLogout}
-          />
+          <Suspense fallback={null}>
+            <LazyAvatarMenu
+              name={operator?.name ?? 'Operator'}
+              email={operator?.email}
+              imageUrl={operator?.avatarUrl ?? undefined}
+              onLogout={onLogout}
+            />
+          </Suspense>
         </div>
       </header>
       <div data-agentis-onboarding-strip>
@@ -507,7 +592,9 @@ function Shell({
       </div>
       <div data-agentis-shell-layout className="flex min-h-0 min-w-0 flex-1">
         <Sidebar />
-        <main data-agentis-shell-main className="min-h-0 min-w-0 flex-1 overflow-auto">{children}</main>
+        <main data-agentis-shell-main className="min-h-0 min-w-0 flex-1 overflow-auto">
+          {children}
+        </main>
         <ChatPanelMount />
       </div>
       <div data-agentis-live-strip>
@@ -541,12 +628,16 @@ function WorkspaceSwitcher({
     if (!open) return;
     let cancelled = false;
     void api<{ workspaces: Workspace[] }>('/v1/workspaces')
-      .then((d) => { if (!cancelled) setItems(d.workspaces ?? []); })
+      .then((d) => {
+        if (!cancelled) setItems(d.workspaces ?? []);
+      })
       .catch(() => {});
     const onClick = (e: MouseEvent) => {
       if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
     window.addEventListener('mousedown', onClick);
     window.addEventListener('keydown', onKey);
     return () => {
@@ -557,7 +648,10 @@ function WorkspaceSwitcher({
   }, [open]);
 
   function pick(ws: Workspace) {
-    if (ws.id === workspaceId) { setOpen(false); return; }
+    if (ws.id === workspaceId) {
+      setOpen(false);
+      return;
+    }
     wsStore.set(ws.id);
     setOpen(false);
     // Hard reload to re-fetch all workspace-scoped data cleanly.
@@ -569,7 +663,11 @@ function WorkspaceSwitcher({
     const name = newName.trim();
     if (!name) return;
     try {
-      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `workspace-${Date.now().toString(36)}`;
+      const slug =
+        name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '') || `workspace-${Date.now().toString(36)}`;
       const res = await api<{ workspace: Workspace }>('/v1/workspaces', {
         method: 'POST',
         body: JSON.stringify({ name, slug }),
@@ -619,7 +717,9 @@ function WorkspaceSwitcher({
                     onClick={() => pick(w)}
                     className={clsx(
                       'flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors',
-                      isActive ? 'bg-surface-2 text-text-primary' : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
+                      isActive
+                        ? 'bg-surface-2 text-text-primary'
+                        : 'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
                     )}
                   >
                     {w.imageUrl ? (
@@ -644,7 +744,12 @@ function WorkspaceSwitcher({
                   type="text"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Escape') { setCreating(false); setNewName(''); } }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setCreating(false);
+                      setNewName('');
+                    }
+                  }}
                   placeholder="Workspace name"
                   className="h-7 flex-1 rounded-input border border-line bg-surface-2 px-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
                 />
@@ -667,7 +772,10 @@ function WorkspaceSwitcher({
             )}
             <button
               type="button"
-              onClick={() => { setOpen(false); setSettingsOpen(true, 'workspace'); }}
+              onClick={() => {
+                setOpen(false);
+                setSettingsOpen(true, 'workspace');
+              }}
               className="block w-full border-t border-line px-3 py-2 text-left text-[11px] text-text-muted hover:bg-surface-2 hover:text-text-primary"
             >
               Manage workspace settings →
@@ -678,6 +786,3 @@ function WorkspaceSwitcher({
     </div>
   );
 }
-
-
-

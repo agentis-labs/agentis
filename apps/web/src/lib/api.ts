@@ -6,6 +6,8 @@
  * to the login page.
  */
 
+import i18n from '../i18n';
+
 const ACCESS = 'agentis.access';
 const REFRESH = 'agentis.refresh';
 const WORKSPACE = 'agentis.workspace';
@@ -71,7 +73,12 @@ export interface ApiError {
  */
 function apiErrorDetail(details: unknown): string | null {
   if (!details || typeof details !== 'object') return null;
-  const d = details as { issues?: unknown; findings?: unknown; expected?: unknown; acknowledged?: unknown };
+  const d = details as {
+    issues?: unknown;
+    findings?: unknown;
+    expected?: unknown;
+    acknowledged?: unknown;
+  };
 
   if (Array.isArray(d.issues)) {
     const parts = d.issues
@@ -118,13 +125,23 @@ function apiErrorDetail(details: unknown): string | null {
 export function apiErrorMessage(error: unknown): string {
   if (error && typeof error === 'object') {
     const shaped = error as { message?: unknown; code?: unknown; details?: unknown };
-    const base = typeof shaped.message === 'string' && shaped.message.trim()
-      ? shaped.message.trim()
-      : null;
+    const base =
+      typeof shaped.message === 'string' && shaped.message.trim() ? shaped.message.trim() : null;
     const code = typeof shaped.code === 'string' && shaped.code.trim() ? shaped.code.trim() : null;
     const detail = apiErrorDetail(shaped.details);
     // Don't repeat detail the server already folded into the message.
-    const message = base && detail && !base.includes(detail) ? `${base} — ${detail}` : (base ?? detail);
+    const localized = code && i18n.exists(`errors.codes.${code}`)
+      ? String(i18n.t(`errors.codes.${code}` as never))
+      : null;
+    const fallback =
+      base && detail && !base.includes(detail) ? `${base} — ${detail}` : (base ?? detail);
+    // Keep server-provided diagnostic details, but use a locale-specific summary
+    // for error codes whose semantics are part of Agentis's public UI contract.
+    const message = localized
+      ? detail && !localized.includes(detail)
+        ? `${localized} — ${detail}`
+        : localized
+      : fallback;
     if (message && code) return `${message} (${code})`;
     if (message) return message;
     if (code) return code;
@@ -138,9 +155,10 @@ async function rawFetch(path: string, init: RequestInit = {}, retry = true): Pro
   const body = init.body;
   const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
   const isBinary =
-    (typeof Blob !== 'undefined' && body instanceof Blob)
-    || (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer);
-  if (!headers.has('content-type') && body && !isFormData && !isBinary) headers.set('content-type', 'application/json');
+    (typeof Blob !== 'undefined' && body instanceof Blob) ||
+    (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer);
+  if (!headers.has('content-type') && body && !isFormData && !isBinary)
+    headers.set('content-type', 'application/json');
   const access = tokens.access();
   if (access) headers.set('authorization', `Bearer ${access}`);
   const ws = workspace.get();
@@ -179,7 +197,9 @@ async function tryRefresh(): Promise<boolean> {
 export async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await rawFetch(path, init);
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
     throw body.error as ApiError;
   }
   if (res.status === 204) return undefined as T;
@@ -197,7 +217,10 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
  * live). The cache is keyed per workspace; a workspace switch hard-reloads the
  * app, so cross-workspace bleed is impossible.
  */
-interface CacheEntry { data: unknown; ts: number }
+interface CacheEntry {
+  data: unknown;
+  ts: number;
+}
 const responseCache = new Map<string, CacheEntry>();
 
 function cacheKey(path: string): string {
@@ -217,7 +240,10 @@ export function cachedAge(path: string): number {
 
 /** Drop cached responses (all, or those whose path includes `match`). */
 export function invalidateCache(match?: string): void {
-  if (!match) { responseCache.clear(); return; }
+  if (!match) {
+    responseCache.clear();
+    return;
+  }
   for (const key of responseCache.keys()) {
     if (key.includes(match)) responseCache.delete(key);
   }
@@ -237,7 +263,9 @@ export async function apiCached<T = unknown>(path: string, init: RequestInit = {
 export async function apiText(path: string, init: RequestInit = {}): Promise<string> {
   const res = await rawFetch(path, init);
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
     throw body.error as ApiError;
   }
   return res.text();
@@ -247,7 +275,9 @@ export async function apiText(path: string, init: RequestInit = {}): Promise<str
 export async function apiBlob(path: string, init: RequestInit = {}): Promise<Blob> {
   const res = await rawFetch(path, init);
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
     throw body.error as ApiError;
   }
   return res.blob();
@@ -262,7 +292,9 @@ export async function streamSse(
   headers.set('accept', 'text/event-stream');
   const res = await rawFetch(path, { ...init, headers });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: { code: 'INTERNAL_ERROR', message: res.statusText } }));
     throw body.error as ApiError;
   }
   if (!res.body) return;
@@ -293,7 +325,9 @@ export async function login(username: string, password: string) {
     body: JSON.stringify({ username, password }),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: { code: 'AUTH', message: 'Login failed' } }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: { code: 'AUTH', message: 'Login failed' } }));
     throw body.error;
   }
   const json = (await res.json()) as {
@@ -331,6 +365,3 @@ function emitSseEvent(raw: string, onEvent?: (event: string, data: unknown) => v
     onEvent(event, dataText);
   }
 }
-
-
-

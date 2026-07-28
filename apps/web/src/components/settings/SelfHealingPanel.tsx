@@ -1,6 +1,7 @@
 ﻿
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Wand2, Check, AlertCircle, ShieldCheck, Zap } from 'lucide-react';
 import { getSelfHealConfig, setSelfHealConfig, type SelfHealConfig } from '../../lib/automation';
 import { api, apiErrorMessage } from '../../lib/api';
@@ -9,6 +10,7 @@ import { useToast } from '../shared/Toast';
 interface HealerAgent { id: string; name: string; role?: string }
 
 export function SelfHealingPanel() {
+  const { t } = useTranslation();
   const toast = useToast();
   const [cfg, setCfg] = useState<SelfHealConfig | null>(null);
   const [agents, setAgents] = useState<HealerAgent[]>([]);
@@ -29,7 +31,7 @@ export function SelfHealingPanel() {
     try {
       const next = await setSelfHealConfig(patch);
       setCfg(next);
-      toast.success('Self-healing updated');
+      toast.success(t('settings.selfHealing.updated'));
     } catch (e) {
       setError(apiErrorMessage(e));
     } finally {
@@ -42,11 +44,8 @@ export function SelfHealingPanel() {
       <div className="flex items-start gap-3">
         <Wand2 size={18} className="mt-0.5 text-accent" />
         <div className="min-w-0 flex-1">
-          <h3 className="text-heading text-text-primary">Self-fixing workflows</h3>
-          <p className="mt-1 text-[12px] text-text-secondary">
-            When a step fails, an agent diagnoses why and repairs the workflow within budget —
-            preserving its intent and never fabricating data. Fixing workflows by hand is a nightmare; let your agents do it.
-          </p>
+          <h3 className="text-heading text-text-primary">{t('settings.selfHealing.title')}</h3>
+          <p className="mt-1 text-[12px] text-text-secondary">{t('settings.selfHealing.description')}</p>
         </div>
         <button
           type="button"
@@ -64,30 +63,30 @@ export function SelfHealingPanel() {
 
       {cfg?.enabled && (
         <div className="mt-4 space-y-3 border-t border-line pt-4">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Recovery autonomy</div>
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">{t('settings.selfHealing.recoveryAutonomy')}</div>
           <ModeOption
             icon={<ShieldCheck size={15} />}
             active={cfg.mode === 'guarded'}
             onClick={() => void save({ mode: 'guarded' })}
-            title="Guarded autonomous (recommended)"
-            body="Internal repairs across the full ladder apply immediately. Agentis pauses only when a repair changes an outward, irreversible, or unknown-effect action."
+            title={t('settings.selfHealing.guardedTitle')}
+            body={t('settings.selfHealing.guardedDescription')}
           />
           <ModeOption
             icon={<Zap size={15} />}
             active={cfg.mode === 'bypass'}
             onClick={() => void save({ mode: 'bypass' })}
-            title="Full bypass"
-            body="Certified, intent-preserving graph edits apply without asking, within budget — like a harness with permissions skipped."
+            title={t('settings.selfHealing.bypassTitle')}
+            body={t('settings.selfHealing.bypassDescription')}
           />
 
           <div className="flex items-center justify-between pt-1">
-            <span className="text-[12.5px] text-text-secondary">Max distinct plans per failure</span>
+            <span className="text-[12.5px] text-text-secondary">{t('settings.selfHealing.maxPlans')}</span>
             <select
               value={cfg.maxRepairPlans}
               disabled={saving}
               onChange={(e) => void save({ maxRepairPlans: Number(e.target.value) })}
               className="rounded-md border border-line bg-bg px-2 py-1 text-[13px]"
-              aria-label="Max repair plans"
+              aria-label={t('settings.selfHealing.maxPlansLabel')}
             >
               {[0, 1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
@@ -95,17 +94,17 @@ export function SelfHealingPanel() {
 
           <div className="flex items-center justify-between pt-1">
             <div className="min-w-0 pr-3">
-              <span className="text-[12.5px] text-text-secondary">Healing agent</span>
-              <p className="text-[11px] text-text-muted">Grounds the diagnosis and runs a step whose own agent goes offline.</p>
+              <span className="text-[12.5px] text-text-secondary">{t('settings.selfHealing.healingAgent')}</span>
+              <p className="text-[11px] text-text-muted">{t('settings.selfHealing.healingAgentDescription')}</p>
             </div>
             <select
               value={cfg.healerAgentId ?? ''}
               disabled={saving}
               onChange={(e) => void save({ healerAgentId: e.target.value || null })}
               className="max-w-[55%] shrink-0 truncate rounded-md border border-line bg-bg px-2 py-1 text-[13px]"
-              aria-label="Healing agent"
+              aria-label={t('settings.selfHealing.healingAgentLabel')}
             >
-              <option value="">Orchestrator (default)</option>
+              <option value="">{t('settings.selfHealing.orchestrator')}</option>
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>{a.name}{a.role ? ` · ${a.role}` : ''}</option>
               ))}

@@ -124,7 +124,6 @@ export function inferModelTierFromId(id: string | null | undefined): ModelTier {
     || lower.includes('standard')
     || lower.includes('gpt-5.4')
     || lower.includes('gpt-5.3')
-    || lower.includes('gpt-5.2')
     || lower.includes('gpt-4o')
     || lower.includes('gpt-4.1')
     || lower.includes('gemini')
@@ -337,19 +336,20 @@ function fallbackCandidatesFor(runtime: string | null, currentModel: string | nu
   const lower = `${runtime ?? ''} ${currentModel ?? ''}`.toLowerCase();
   if (lower.includes('claude') || lower.includes('anthropic')) {
     return [
+      fallbackCandidate('claude-opus-5', runtime, 'flagship'),
       fallbackCandidate('claude-sonnet-5', runtime, 'balanced'),
       fallbackCandidate('claude-haiku-4-5', runtime, 'fast'),
-      fallbackCandidate('claude-opus-4-8', runtime, 'flagship'),
-      fallbackCandidate('claude-opus-4-7', runtime, 'flagship'),
     ];
   }
   if (lower.includes('codex') || lower.includes('openai') || lower.includes('cursor') || lower.includes('gpt-')) {
     return [
+      fallbackCandidate('gpt-5.6-luna', runtime, 'flagship'),
+      fallbackCandidate('gpt-5.6-terra', runtime, 'flagship'),
+      fallbackCandidate('gpt-5.6-sol', runtime, 'flagship'),
+      fallbackCandidate('gpt-5.5', runtime, 'flagship'),
       fallbackCandidate('gpt-5.4', runtime, 'balanced'),
       fallbackCandidate('gpt-5.4-mini', runtime, 'fast'),
-      fallbackCandidate('gpt-5.5', runtime, 'flagship'),
       fallbackCandidate('gpt-5.3-codex', runtime, 'balanced'),
-      fallbackCandidate('gpt-5.2-codex', runtime, 'balanced'),
     ];
   }
   if (lower.includes('gemini') || lower.includes('antigravity') || lower.includes('google')) {

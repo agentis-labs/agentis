@@ -608,19 +608,7 @@ function AppCard({
       className="group relative rounded-card border border-line bg-surface p-4 text-left shadow-card transition-colors hover:border-line-strong hover:bg-surface-2"
     >
       <div className="flex items-start gap-3">
-        <span className={clsx('flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-card border', isLogic ? 'border-accent/20 bg-accent-soft text-accent' : 'border-line bg-canvas text-text-secondary')}>
-          {isLogic ? (
-            <Workflow size={17} />
-          ) : item.kind === 'app' && item.icon ? (
-            item.icon.startsWith('http://') || item.icon.startsWith('https://') || item.icon.startsWith('data:image/') ? (
-              <img src={item.icon} alt="" className="h-full w-full object-cover" />
-            ) : (
-              <span className="text-[18px]">{item.icon}</span>
-            )
-          ) : (
-            <Boxes size={17} />
-          )}
-        </span>
+        {isLogic && <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card border border-accent/20 bg-accent-soft text-accent"><Workflow size={17} /></span>}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <button

@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
@@ -27,23 +28,24 @@ import { useChatPanelStore } from './chat/ChatPanelStore';
 
 interface NavItem {
   to: string;
-  label: string;
+  labelKey: 'navigation.home' | 'navigation.apps' | 'navigation.agents' | 'navigation.brain' | 'navigation.assets';
   title?: string;
   icon: LucideIcon;
   badge?: 'liveAgents';
 }
 
 const NAV: NavItem[] = [
-  { to: '/home', label: 'Home', icon: HomeIcon },
-  { to: '/apps', label: 'Agentic Apps', title: 'Apps', icon: AppsIcon },
-  { to: '/agents', label: 'Agents', icon: Bot, badge: 'liveAgents' },
-  { to: '/brain', label: 'Brain', icon: BrainIcon },
-  { to: '/assets', label: 'Assets', icon: AssetsIcon },
+  { to: '/home', labelKey: 'navigation.home', icon: HomeIcon },
+  { to: '/apps', labelKey: 'navigation.apps', icon: AppsIcon },
+  { to: '/agents', labelKey: 'navigation.agents', icon: Bot, badge: 'liveAgents' },
+  { to: '/brain', labelKey: 'navigation.brain', icon: BrainIcon },
+  { to: '/assets', labelKey: 'navigation.assets', icon: AssetsIcon },
 ];
 
 const STORAGE_KEY = 'agentis.sidebar.collapsed';
 
 export function Sidebar() {
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem(STORAGE_KEY) === '1'; } catch { return false; }
   });
@@ -78,10 +80,10 @@ export function Sidebar() {
         type="button"
         onClick={() => setCollapsed((v) => !v)}
         className="flex h-9 shrink-0 items-center justify-center gap-2 border-t border-line text-[11px] text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary"
-        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        title={collapsed ? t('navigation.expandSidebar') : t('navigation.collapseSidebar')}
       >
         {collapsed ? <ChevronsRight size={14} /> : <ChevronsLeft size={14} />}
-        {!collapsed && <span>Collapse</span>}
+        {!collapsed && <span>{t('navigation.collapse')}</span>}
       </button>
     </aside>
   );
@@ -96,13 +98,14 @@ function SidebarLink({
   collapsed: boolean;
   counts: ReturnType<typeof useWorkspaceChromeData>['counts'];
 }) {
+  const { t } = useTranslation();
   const Icon = item.icon;
   const badge = item.badge ? counts[item.badge] : 0;
   return (
     <li>
       <NavLink
         to={item.to}
-        title={item.title ?? item.label}
+        title={t(item.labelKey)}
         className={({ isActive }) =>
           clsx(
             'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',
@@ -119,7 +122,7 @@ function SidebarLink({
               <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-accent" />
             )}
             <Icon size={16} className={clsx('shrink-0', isActive && 'text-accent')} />
-            {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
+            {!collapsed && <span className="flex-1 truncate">{t(item.labelKey)}</span>}
             {badge > 0 && !collapsed && (
               <span
                 className={clsx(

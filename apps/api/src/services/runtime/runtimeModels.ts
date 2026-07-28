@@ -159,12 +159,18 @@ function seedModelOptions(args: {
   runtimeDefaultModel: string | null;
   runtimeDefaultDetected: boolean;
 }): RuntimeModelOption[] {
-  const options: RuntimeModelOption[] = [];
-  if (args.configuredModel) options.push(configuredModelOption(args.configuredModel));
-  if (args.runtimeDefaultModel && args.runtimeDefaultModel !== args.configuredModel) {
+  // Keep the catalog order stable. The selected/configured model is a value,
+  // not a sorting signal; moving it to the top makes the picker jump every
+  // time the user changes models.
+  const options = fallbackModelOptions(args.adapterType);
+  const known = new Set(options.map((option) => option.id.toLowerCase()));
+  if (args.runtimeDefaultModel && !known.has(args.runtimeDefaultModel.toLowerCase())) {
     options.push(runtimeDefaultModelOption(args.adapterType, args.runtimeDefaultModel, args.runtimeDefaultDetected));
+    known.add(args.runtimeDefaultModel.toLowerCase());
   }
-  options.push(...fallbackModelOptions(args.adapterType));
+  if (args.configuredModel && !known.has(args.configuredModel.toLowerCase())) {
+    options.push(configuredModelOption(args.configuredModel));
+  }
   return options;
 }
 
@@ -361,31 +367,38 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
       // gpt-5.5 first + recommended: it's the model that works on both API-key
       // and ChatGPT-account Codex auth. The `*-codex` ids are rejected on a
       // ChatGPT account, so they're offered but not the default.
-      option('gpt-5.5', 'OpenAI', true),
+      option('gpt-5.6-sol', 'OpenAI'),
+      option('gpt-5.6-terra', 'OpenAI'),
+      option('gpt-5.6-luna', 'OpenAI'),
+      option('gpt-5.5', 'OpenAI'),
       option('gpt-5.4', 'OpenAI'),
       option('gpt-5.4-mini', 'OpenAI'),
       option('gpt-5.3-codex', 'OpenAI'),
-      option('gpt-5.2-codex', 'OpenAI'),
     ];
   }
   if (adapterType === 'claude_code') {
     return [
-      option('claude-sonnet-5', 'Anthropic', true),
-      option('claude-sonnet-4-6', 'Anthropic'),
+      option('claude-fable', 'Anthropic', true),
+      option('claude-opus-5', 'Anthropic'),
+      option('claude-sonnet-5', 'Anthropic'),
       option('claude-haiku-4-5', 'Anthropic'),
-      option('claude-opus-4-8', 'Anthropic'),
-      option('claude-opus-4-7', 'Anthropic'),
     ];
   }
   if (adapterType === 'antigravity') {
     // Antigravity's `agy models` uses display-name strings; these are the known
     // selectable models (Gemini + Claude + GPT-OSS) passed verbatim to `-m`.
     return [
-      option('Gemini 3.5 Flash (High)', 'Google Antigravity', true),
-      option('Gemini 3.1 Pro (High)', 'Google Antigravity'),
-      option('Claude Opus 4.6 (Thinking)', 'Google Antigravity'),
-      option('Claude Sonnet 4.6 (Thinking)', 'Google Antigravity'),
-      option('GPT-OSS 120B (Medium)', 'Google Antigravity'),
+      antigravityOption('Gemini 3.6 Flash (High)', 'Gemini 3.6 Flash', true),
+      antigravityOption('Gemini 3.6 Flash (Medium)', 'Gemini 3.6 Flash'),
+      antigravityOption('Gemini 3.6 Flash (Low)', 'Gemini 3.6 Flash'),
+      antigravityOption('Gemini 3.5 Flash (High)', 'Gemini 3.5 Flash'),
+      antigravityOption('Gemini 3.5 Flash (Medium)', 'Gemini 3.5 Flash'),
+      antigravityOption('Gemini 3.5 Flash (Low)', 'Gemini 3.5 Flash'),
+      antigravityOption('Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro'),
+      antigravityOption('Gemini 3.1 Pro (Low)', 'Gemini 3.1 Pro'),
+      antigravityOption('Claude Sonnet 4.6 (Thinking)', 'Claude Sonnet 4.6'),
+      antigravityOption('Claude Opus 4.6 (Thinking)', 'Claude Opus 4.6'),
+      antigravityOption('GPT-OSS 120B (Medium)', 'GPT-OSS 120B'),
     ];
   }
   return [];
@@ -406,6 +419,10 @@ function option(id: string, provider: string, recommended = false): RuntimeModel
     costRank: metadata.costRank,
     latencyRank: metadata.latencyRank,
   };
+}
+
+function antigravityOption(id: string, label: string, recommended = false): RuntimeModelOption {
+  return { ...option(id, 'Google Antigravity', recommended), label };
 }
 
 function routingOptionMetadata(id: string): Pick<RuntimeModelOption, 'capabilityHints' | 'costRank' | 'latencyRank'> {

@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import {
   ArrowLeft,
@@ -89,13 +90,6 @@ function workflowFilename(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'workflow';
 }
 
-const FACETS: ReadonlyArray<SegmentDef<AppFacet>> = [
-  { value: 'interface', label: 'Interface', icon: <LayoutGrid size={13} /> },
-  { value: 'workflow', label: 'Workflow', icon: <WorkflowIcon size={13} /> },
-  { value: 'data', label: 'Data', icon: <Database size={13} /> },
-  { value: 'brain', label: 'Brain', icon: <BrainCircuit size={13} /> },
-];
-
 // When the orchestrator builds/edits a workflow, these arrive on the workspace
 // room. The App view reacts so a created/edited workflow shows up LIVE instead of
 // only after a manual reload.
@@ -106,6 +100,7 @@ const BUILD_REVEAL_EVENTS = [
 ];
 
 export function AppEditorPage() {
+  const { t } = useTranslation();
   const { id = '' } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -134,6 +129,15 @@ export function AppEditorPage() {
   const [engineOpen, setEngineOpen] = useState(false);
   const [domains, setDomains] = useState<AppEngineDomain[]>([]);
   const [agents, setAgents] = useState<AppEngineAgent[]>([]);
+  const facets = useMemo<ReadonlyArray<SegmentDef<AppFacet>>>(
+    () => [
+      { value: 'interface', label: t('appEditor.interface'), icon: <LayoutGrid size={13} /> },
+      { value: 'workflow', label: t('appEditor.workflow'), icon: <WorkflowIcon size={13} /> },
+      { value: 'data', label: t('appEditor.data'), icon: <Database size={13} /> },
+      { value: 'brain', label: t('appEditor.brain'), icon: <BrainCircuit size={13} /> },
+    ],
+    [t],
+  );
 
   // Org options for the App Engine modal (Domain/Owner assignment). Auxiliary —
   // failure here must not block the editor, so it loads independently.
@@ -238,7 +242,7 @@ export function AppEditorPage() {
   const facetParam = searchParams.get('facet') as AppFacet | null;
   const defaultFacet: AppFacet = 'interface';
   const facet: AppFacet =
-    facetParam && FACETS.some((f) => f.value === facetParam) ? facetParam : defaultFacet;
+    facetParam && facets.some((f) => f.value === facetParam) ? facetParam : defaultFacet;
 
   const setFacet = useCallback((value: AppFacet) => {
     setSearchParams((params) => {
@@ -527,8 +531,8 @@ export function AppEditorPage() {
   if (error || !app) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-[13px] text-text-muted">
-        <span>{error ?? 'App not found'}</span>
-        <button type="button" onClick={() => navigate('/apps')} className="rounded-btn border border-line px-3 py-1 text-text-secondary hover:bg-canvas">Back to Apps</button>
+        <span>{error ?? t('appEditor.appNotFound')}</span>
+        <button type="button" onClick={() => navigate('/apps')} className="rounded-btn border border-line px-3 py-1 text-text-secondary hover:bg-canvas">{t('appEditor.backToApps')}</button>
       </div>
     );
   }
@@ -544,17 +548,6 @@ export function AppEditorPage() {
           <ArrowLeft size={12} /> Apps
         </button>
         <div className="mx-2 h-4 w-px bg-line" />
-        <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-md border border-line bg-canvas text-text-secondary">
-          {app.icon ? (
-            app.icon.startsWith('http://') || app.icon.startsWith('https://') || app.icon.startsWith('data:image/') ? (
-              <img src={app.icon} alt="" className="h-full w-full object-cover" />
-            ) : (
-              <span className="text-[15px]">{app.icon}</span>
-            )
-          ) : (
-            <Boxes size={14} />
-          )}
-        </span>
         {editingName ? (
           <input
             autoFocus
@@ -576,8 +569,8 @@ export function AppEditorPage() {
           type="button"
           onClick={() => setEngineOpen(true)}
           className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary"
-          title="App engine"
-          aria-label="App engine"
+          title={t('appEditor.appEngine')}
+          aria-label={t('appEditor.appEngine')}
         >
           <Settings size={13} />
         </button>
@@ -586,7 +579,7 @@ export function AppEditorPage() {
         <AppTeamStrip appId={app.id} />
         <div className="ml-auto flex min-w-0 items-center justify-end gap-2">
           {status ? <span className="max-w-[180px] truncate text-[11px] text-text-muted">{status}</span> : null}
-          <SegmentedControl segments={FACETS} value={facet} onChange={setFacet} size="sm" className="min-w-0 flex-wrap justify-end" />
+          <SegmentedControl segments={facets} value={facet} onChange={setFacet} size="sm" className="min-w-0 flex-wrap justify-end" />
         </div>
       </div>
 
@@ -681,6 +674,7 @@ function WorkflowFacet({
   onImport: (file: File) => void;
   onDelete: (workflowId: string) => void;
 }) {
+  const { t } = useTranslation();
   const confirm = useConfirm();
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
@@ -728,21 +722,21 @@ function WorkflowFacet({
             className="inline-flex h-7 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
           >
             {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-            Import workflow
+            {t('appEditor.importWorkflow')}
           </button>
         </div>
         <FacetEmpty
           icon={<WorkflowIcon size={30} />}
-          title="No workflow yet"
-          body="Create a workflow or import a versioned Workflow-as-Code YAML file. Imported workflows become part of this App."
-          action={{ label: 'Create workflow', busy, onClick: onAdd }}
+          title={t('appEditor.noWorkflow')}
+          body={t('appEditor.noWorkflowDescription')}
+          action={{ label: t('appEditor.createWorkflow'), busy, onClick: onAdd }}
         />
       </div>
     );
   }
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div role="tablist" aria-label="App workflows" className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-surface px-3 py-1.5">
+      <div role="tablist" aria-label={t('appEditor.appWorkflows')} className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-surface px-3 py-1.5">
         {workflows.map((wf) => (
           <div
             key={wf.id}
@@ -762,7 +756,7 @@ function WorkflowFacet({
                   if (event.key === 'Escape') setRenamingId(null);
                 }}
                 className="h-6 w-40 rounded-md border border-line bg-surface px-2 text-[12px] text-text-primary outline-none focus:border-accent"
-                aria-label="Workflow title"
+                aria-label={t('appEditor.workflowTitle')}
               />
             ) : (
               <button
@@ -782,8 +776,8 @@ function WorkflowFacet({
                 disabled={busy}
                 onClick={() => startRename(wf)}
                 className="rounded-btn p-1 text-text-muted opacity-0 hover:bg-canvas hover:text-text-primary group-hover:opacity-100 disabled:cursor-wait disabled:opacity-50"
-                title={`Rename ${wf.title}`}
-                aria-label={`Rename ${wf.title}`}
+                title={t('appEditor.renameWorkflow', { name: wf.title })}
+                aria-label={t('appEditor.renameWorkflow', { name: wf.title })}
               >
                 <Pencil size={11} />
               </button>
@@ -795,7 +789,7 @@ function WorkflowFacet({
                     type="button"
                     disabled={busy}
                     className={clsx("rounded-btn p-1 hover:bg-canvas disabled:cursor-wait disabled:opacity-50", menuOpenId === wf.id ? "opacity-100 text-text-primary" : "opacity-0 group-hover:opacity-100 text-text-muted")}
-                    title="More actions"
+                    title={t('appEditor.moreActions')}
                   >
                     <MoreVertical size={11} />
                   </button>
@@ -806,28 +800,28 @@ function WorkflowFacet({
                       onClick={() => startRename(wf)}
                       className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
                     >
-                      <Pencil size={12} /> Rename
+                      <Pencil size={12} /> {t('common.rename')}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                       onClick={() => onExport(wf)}
                       className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
                     >
-                      <Upload size={12} /> Export
+                      <Upload size={12} /> {t('common.export')}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator className="my-1 h-px bg-line" />
                     <DropdownMenu.Item
                       onClick={async () => {
                         const ok = await confirm({
-                          title: `Delete workflow "${wf.title}"?`,
-                          body: 'This action cannot be undone.',
+                          title: t('appEditor.deleteWorkflowTitle', { name: wf.title }),
+                          body: t('appEditor.deleteWorkflowDescription'),
                           tone: 'danger',
-                          confirmLabel: 'Delete',
+                          confirmLabel: t('common.delete'),
                         });
                         if (ok) onDelete(wf.id);
                       }}
                       className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-red-500 outline-none hover:bg-red-500/10 focus:bg-red-500/10"
                     >
-                      <Trash2 size={12} /> Delete
+                      <Trash2 size={12} /> {t('common.delete')}
                     </DropdownMenu.Item>
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>
@@ -852,8 +846,8 @@ function WorkflowFacet({
             <button
               type="button"
               disabled={busy}
-              aria-label="Add workflow"
-              title="Add workflow"
+              aria-label={t('appEditor.addWorkflow')}
+              title={t('appEditor.addWorkflow')}
               className="inline-flex h-7 shrink-0 items-center gap-1 rounded-btn border border-line px-2 text-[12px] text-text-secondary hover:bg-canvas disabled:opacity-50"
             >
               {busy ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
@@ -1662,6 +1656,3 @@ function uniqueName(base: string, existing: string[]): string {
   while (existing.includes(`${base}-${n}`)) n += 1;
   return `${base}-${n}`;
 }
-
-
-

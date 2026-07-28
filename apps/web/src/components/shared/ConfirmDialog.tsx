@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState, createContext, useContext } from 'react';
 import clsx from 'clsx';
 import { AlertTriangle, ShieldCheck, Info } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export type ConfirmTone = 'danger' | 'warn' | 'neutral';
 
@@ -29,6 +30,7 @@ interface ConfirmState extends ConfirmOptions {
 const ConfirmCtx = createContext<((opts: ConfirmOptions) => Promise<boolean>) | null>(null);
 
 export function ConfirmProvider({ children }: { children: React.ReactNode }) {
+  const { t } = useTranslation();
   const [state, setState] = useState<ConfirmState | null>(null);
   const [typed, setTyped] = useState('');
 
@@ -41,13 +43,16 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
-  const close = useCallback((ok: boolean) => {
-    if (!state) return;
-    if (ok && state.typeToConfirm && typed !== state.typeToConfirm) return; // gate
-    state.resolve(ok);
-    setState(null);
-    setTyped('');
-  }, [state, typed]);
+  const close = useCallback(
+    (ok: boolean) => {
+      if (!state) return;
+      if (ok && state.typeToConfirm && typed !== state.typeToConfirm) return; // gate
+      state.resolve(ok);
+      setState(null);
+      setTyped('');
+    },
+    [state, typed],
+  );
 
   useEffect(() => {
     if (!state) return;
@@ -60,21 +65,26 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   }, [state, close]);
 
   const tone = state?.tone ?? 'neutral';
-  const Icon = tone === 'danger' || tone === 'warn' ? AlertTriangle : tone === 'neutral' ? Info : ShieldCheck;
+  const Icon =
+    tone === 'danger' || tone === 'warn' ? AlertTriangle : tone === 'neutral' ? Info : ShieldCheck;
   const canConfirm = !state?.typeToConfirm || typed === state.typeToConfirm;
 
   return (
     <ConfirmCtx.Provider value={confirm}>
       {children}
       {state && (
-        <div className="animate-fade-in fixed inset-0 z-[130] flex items-center justify-center bg-overlay p-4" role="dialog" aria-modal="true">
+        <div
+          className="animate-fade-in fixed inset-0 z-[130] flex items-center justify-center bg-overlay p-4"
+          role="dialog"
+          aria-modal="true"
+        >
           <div className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal">
             <div className="flex items-start gap-3 px-5 pt-5">
               <span
                 className={clsx(
                   'flex h-9 w-9 shrink-0 items-center justify-center rounded-full',
                   tone === 'danger' && 'bg-danger-soft text-danger',
-                  tone === 'warn'   && 'bg-warn-soft text-warn',
+                  tone === 'warn' && 'bg-warn-soft text-warn',
                   tone === 'neutral' && 'bg-accent-soft text-accent',
                 )}
               >
@@ -83,12 +93,14 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
               <div className="min-w-0 flex-1">
                 <h3 className="text-subheading text-text-primary break-words">{state.title}</h3>
                 {state.body && (
-                  <div className="mt-1.5 text-[13px] leading-relaxed text-text-secondary break-words">{state.body}</div>
+                  <div className="mt-1.5 text-[13px] leading-relaxed text-text-secondary break-words">
+                    {state.body}
+                  </div>
                 )}
                 {state.typeToConfirm && (
                   <div className="mt-3 space-y-1.5">
                     <label className="text-[12px] text-text-muted">
-                      Type <span className="font-mono text-text-primary">{state.typeToConfirm}</span> to confirm:
+                      {t('confirm.typeToConfirm', { value: state.typeToConfirm })}
                     </label>
                     <input
                       autoFocus
@@ -108,7 +120,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
                 onClick={() => close(false)}
                 className="inline-flex h-9 items-center justify-center rounded-btn border border-line bg-transparent px-3 text-[13px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
               >
-                {state.cancelLabel ?? 'Cancel'}
+                {state.cancelLabel ?? t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -118,11 +130,11 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
                 className={clsx(
                   'inline-flex h-9 items-center justify-center rounded-btn px-3 text-[13px] font-medium transition-all disabled:cursor-not-allowed disabled:opacity-40',
                   tone === 'danger' && 'bg-danger text-white hover:bg-danger/90',
-                  tone === 'warn'   && 'bg-warn text-canvas hover:opacity-90',
+                  tone === 'warn' && 'bg-warn text-canvas hover:opacity-90',
                   tone === 'neutral' && 'bg-accent text-canvas hover:bg-accent-hover',
                 )}
               >
-                {state.confirmLabel ?? 'Confirm'}
+                {state.confirmLabel ?? t('common.confirm')}
               </button>
             </div>
           </div>
@@ -144,6 +156,3 @@ export function useConfirm() {
       ))
   );
 }
-
-
-

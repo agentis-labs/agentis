@@ -17,7 +17,7 @@ apps powered by a workflow engine. No lock-in.
 
 **No token tax. No data extraction. No forgetting.**
 
-> **Status: pre-release (0.2.x).** Agentis is already usable, but APIs may still change
+> **Status: pre-release (0.3.x).** Agentis is already usable, but APIs may still change
 > before 1.0.
 
 This package launches the whole local runtime: API, WebSocket bridge, workflow engine,

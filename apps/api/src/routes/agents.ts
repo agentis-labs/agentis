@@ -399,17 +399,19 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       const catalog = await listRuntimeModels(adapterType, agent.id, deps.db);
       const detectedRuntime = detectRuntimeState(adapterType);
       const config = recordFromUnknown(agent.config);
-      const detectedEffort = adapterType === 'codex'
-        ? stringOf(config.modelReasoningEffort) ?? detectedRuntime.reasoningEffort ?? baseContext.currentEffort
-        : undefined;
-      const detectedFastMode = adapterType === 'codex'
-        ? booleanOf(config.fastMode) ?? detectedRuntime.fastMode ?? baseContext.fastModeEnabled
-        : undefined;
       const currentModel = modelConfiguredOnAgent(agent)
         ?? detectedRuntime.model
         ?? baseContext.currentModel
         ?? catalog.defaultModel
         ?? 'unknown';
+      const detectedEffort = adapterType === 'codex'
+        ? stringOf(config.modelReasoningEffort) ?? detectedRuntime.reasoningEffort ?? baseContext.currentEffort
+        : adapterType === 'antigravity'
+          ? antigravityEffort(currentModel)
+          : undefined;
+      const detectedFastMode = adapterType === 'codex'
+        ? booleanOf(config.fastMode) ?? detectedRuntime.fastMode ?? baseContext.fastModeEnabled
+        : undefined;
 
       return c.json({
         ...baseContext,
@@ -421,6 +423,16 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
               fastModeEnabled: detectedFastMode,
               usage: undefined,
               contextWindow: undefined,
+            }
+          : {}),
+        ...(adapterType === 'antigravity'
+          ? {
+              efforts: [
+                { id: 'high', label: 'High' },
+                { id: 'medium', label: 'Medium' },
+                { id: 'low', label: 'Low' },
+              ],
+              currentEffort: detectedEffort,
             }
           : {}),
         models: mergeRuntimeContextModels(
@@ -700,6 +712,11 @@ function objectRecord(value: unknown): Record<string, unknown> {
 
 function recordFromUnknown(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function antigravityEffort(model: string): 'high' | 'medium' | 'low' | undefined {
+  const match = /\((high|medium|low)\)$/i.exec(model);
+  return match?.[1]?.toLowerCase() as 'high' | 'medium' | 'low' | undefined;
 }
 
 function stringOf(value: unknown): string | undefined {

@@ -10,6 +10,7 @@
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import i18n from '../../i18n';
 
 interface Props {
   children: ReactNode;
@@ -54,7 +55,7 @@ export class ErrorBoundary extends Component<Props, State> {
         <div className="flex items-center gap-2 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-danger">
           <AlertTriangle size={14} className="shrink-0" />
           <span className="min-w-0 flex-1 truncate">
-            {this.props.label ?? 'This section failed to render'}
+            {this.props.label ?? i18n.t('errors.boundary.section')}
             {error.message ? ` — ${error.message}` : ''}
           </span>
           <button
@@ -62,7 +63,7 @@ export class ErrorBoundary extends Component<Props, State> {
             onClick={() => this.setState({ error: null })}
             className="shrink-0 rounded border border-danger/40 px-1.5 py-0.5 text-[11px] font-medium hover:bg-danger/10"
           >
-            Retry
+            {i18n.t('common.retry')}
           </button>
         </div>
       );
@@ -74,11 +75,11 @@ export class ErrorBoundary extends Component<Props, State> {
         </span>
         <div className="max-w-md space-y-1.5">
           <h2 className="text-[15px] font-semibold text-text-primary">
-            {this.props.label ?? 'This view hit an error'}
+            {this.props.label ?? i18n.t('errors.boundary.view')}
           </h2>
           <p className="text-[13px] leading-relaxed text-text-secondary">
-            Something in this page failed to render. The rest of Agentis is still working —
-            use the sidebar to go elsewhere, or try again.
+            Something in this page failed to render. The rest of Agentis is still working — use the
+            sidebar to go elsewhere, or try again.
           </p>
           <p className="break-words font-mono text-[11px] text-text-muted">{error.message}</p>
         </div>
@@ -88,14 +89,14 @@ export class ErrorBoundary extends Component<Props, State> {
             onClick={() => this.setState({ error: null })}
             className="inline-flex h-8 items-center rounded-btn border border-line bg-surface-2 px-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-line-strong hover:text-text-primary"
           >
-            Try again
+            {i18n.t('common.retry')}
           </button>
           <button
             type="button"
             onClick={() => window.location.reload()}
             className="inline-flex h-8 items-center rounded-btn bg-accent px-3 text-[12px] font-medium text-on-accent transition-opacity hover:opacity-90"
           >
-            Reload app
+            {i18n.t('common.reloadApp')}
           </button>
         </div>
       </div>

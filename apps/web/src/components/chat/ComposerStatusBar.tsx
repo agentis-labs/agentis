@@ -105,7 +105,7 @@ export function ComposerStatusBar({ agentId, className }: Props) {
   const config = agent?.config ?? {};
   const adapterType = agent?.adapterType ?? null;
   const canEditModel = Boolean(agent && !saving);
-  const canEditEffort = adapterType === 'codex' && Boolean(context.efforts?.length) && !saving;
+  const canEditEffort = (adapterType === 'codex' || adapterType === 'antigravity') && Boolean(context.efforts?.length) && !saving;
   const canEditFastMode = adapterType === 'codex' && context.fastModeSupported && !saving;
   const showUsage = Boolean(context.usage?.length || context.contextWindow);
 
@@ -146,7 +146,12 @@ export function ComposerStatusBar({ agentId, className }: Props) {
   async function updateEffort(nextEffort: string) {
     const nextConfig = { ...config, modelReasoningEffort: nextEffort };
     setContext((current) => current ? { ...current, currentEffort: nextEffort } : current);
-    await patchRuntimeConfig(nextConfig);
+    if (adapterType === 'antigravity' && context?.currentModel) {
+      const baseModel = context.currentModel.replace(/\s*\((?:high|medium|low)\)$/i, '');
+      await patchRuntimeConfig(nextConfig, `${baseModel} (${nextEffort[0]?.toUpperCase()}${nextEffort.slice(1).toLowerCase()})`);
+    } else {
+      await patchRuntimeConfig(nextConfig);
+    }
   }
 
   async function toggleFastMode() {

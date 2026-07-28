@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Radar, AlertCircle } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
@@ -15,6 +16,7 @@ import { useToast } from '../shared/Toast';
 interface AutonomyState { enabled: boolean; master: boolean; effective: boolean }
 
 export function AutonomyPanel() {
+  const { t } = useTranslation();
   const toast = useToast();
   const [state, setState] = useState<AutonomyState | null>(null);
   const [saving, setSaving] = useState(false);
@@ -37,7 +39,7 @@ export function AutonomyPanel() {
         body: JSON.stringify({ enabled: !state.enabled }),
       });
       setState(next);
-      toast.success(next.enabled ? 'Autonomous manager enabled' : 'Autonomous manager disabled');
+      toast.success(next.enabled ? t('settings.autonomy.enabled') : t('settings.autonomy.disabled'));
     } catch (e) {
       setError(apiErrorMessage(e));
     } finally {
@@ -53,12 +55,8 @@ export function AutonomyPanel() {
       <div className="flex items-start gap-3">
         <Radar size={18} className="mt-0.5 text-accent" />
         <div className="min-w-0 flex-1">
-          <h3 className="text-heading text-text-primary">Autonomous manager heartbeat</h3>
-          <p className="mt-1 text-[12px] text-text-secondary">
-            On a cadence, your orchestrator and domain managers review what they own — failed runs, pending
-            approvals, stalled work — and act on it unbidden through their tools. Off = they still surface it in
-            chat, but wait for you.
-          </p>
+          <h3 className="text-heading text-text-primary">{t('settings.autonomy.title')}</h3>
+          <p className="mt-1 text-[12px] text-text-secondary">{t('settings.autonomy.description')}</p>
         </div>
         <button
           type="button"
@@ -76,15 +74,13 @@ export function AutonomyPanel() {
 
       {!master && (
         <p className="mt-3 rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-[12px] text-text-secondary">
-          The deployment master switch is off, so autonomy stays inactive even when enabled here. Set
-          <code className="mx-1 rounded bg-canvas/70 px-1 font-mono text-[11px]">AGENTIS_COMMAND_AUTONOMY=true</code>
-          on the server to arm it.
+          {t('settings.autonomy.masterOff', { variable: 'AGENTIS_COMMAND_AUTONOMY=true' })}
         </p>
       )}
 
       {master && enabled && (
         <p className="mt-3 flex items-center gap-1.5 text-[12px] text-accent">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent" /> Active — managers act autonomously within their scope.
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent" /> {t('settings.autonomy.active')}
         </p>
       )}
     </div>

@@ -28,7 +28,7 @@ import { apiErrorMessage } from '../../lib/api';
 import { useRealtime, rtSubscribe, subscribeRealtimeEvents, type RealtimeEnvelope } from '../../lib/realtime';
 import { RuntimeProvider, ViewRenderer, useDataRevision, useDataDeltas } from './ViewRenderer';
 import {
-  AgentFeedView, ApprovalsInboxView, OrchestrationPanelView, RunMonitorView, useAppWorkflows,
+  AgentFeedView, ApprovalsInboxView, OrchestrationPanelView, RunMonitorView, useAppRuns, useAppWorkflows,
 } from './blocks/opsBlocks';
 
 type ShellMode = 'full' | 'minimal' | 'none';
@@ -234,6 +234,9 @@ export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId
 /** Live ops status for the shell topbar: active runs + pending approvals. */
 function useOpsStatus(appId: string): { runningRuns: number; waitingRuns: number; pendingApprovals: number } {
   const { workflows } = useAppWorkflows(appId);
+  const workflowIds = useMemo(() => new Set((workflows ?? []).map((workflow) => workflow.id)), [workflows]);
+  const { runs } = useAppRuns(workflowIds, 100);
+  const runIds = useMemo(() => new Set(runs.map((run) => run.id)), [runs]);
   // A run parked WAITING/PAUSED (e.g. blocked on a rate limit, or paused by the
   // the shell pill never claims "running" for a run that is merely in-flight.
   const active = (workflows ?? []).filter((w) => w.activeRun && isActiveRunStatus(w.activeRun.status));
@@ -241,8 +244,10 @@ function useOpsStatus(appId: string): { runningRuns: number; waitingRuns: number
   const waitingRuns = active.length - runningRuns;
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const reload = useCallback(() => {
-    opsApi.listApprovals().then((rows) => setPendingApprovals(rows.length)).catch(() => undefined);
-  }, []);
+    opsApi.listApprovals()
+      .then((rows) => setPendingApprovals(rows.filter((approval) => !approval.runId || runIds.has(approval.runId)).length))
+      .catch(() => undefined);
+  }, [runIds]);
   useEffect(() => { reload(); }, [reload]);
   useRealtime(useMemo(() => [REALTIME_EVENTS.APPROVAL_REQUESTED, REALTIME_EVENTS.APPROVAL_RESOLVED], []), reload);
   return { runningRuns, waitingRuns, pendingApprovals };

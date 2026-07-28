@@ -51,6 +51,10 @@ export class TranscriptionService {
       part.set(input.bytes);
       form.append('file', new Blob([part], { type: input.mimeType }), filename);
       form.append('model', profile.model);
+      form.append(
+        'prompt',
+        'Transcribe verbatim with standard punctuation and capitalization. Preserve the speaker’s wording and do not rewrite or summarize.',
+      );
       const res = await fetchImpl(url, {
         method: 'POST',
         headers: profile.apiKey ? { authorization: `Bearer ${profile.apiKey}` } : {},

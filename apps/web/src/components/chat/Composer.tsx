@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { ArrowUp, Mic, MicOff, Paperclip, File, X, Eye, Loader2, Square } from 'lucide-react';
+import { ArrowUp, Mic, Paperclip, File as FileIcon, X, Eye, Loader2, Square } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { ComposerStatusBar } from './ComposerStatusBar';
@@ -148,9 +148,15 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
   const [highlight, setHighlight] = useState(0);
   const [useViewportContext, setUseViewportContext] = useState(true);
   const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [modelTranscriptionAvailable, setModelTranscriptionAvailable] = useState(false);
   const lastSent = useRef<string>('');
+  const speechBaseRef = useRef('');
   const taRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   // File Attachment State
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -211,46 +217,120 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
 
   const speechSupported =
     typeof window !== 'undefined' &&
-    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+    (
+      'SpeechRecognition' in window
+      || 'webkitSpeechRecognition' in window
+      || (typeof MediaRecorder !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia))
+    );
 
   const hasComposedInput = text.trim().length > 0 || attachments.length > 0;
 
-  const toggleRecording = useCallback(() => {
+  useEffect(() => {
+    void api<{ available: boolean }>('/v1/transcription/status')
+      .then(({ available }) => setModelTranscriptionAvailable(available))
+      .catch(() => setModelTranscriptionAvailable(false));
+  }, []);
+
+  const toggleRecording = useCallback(async () => {
     if (recording) {
       recognitionRef.current?.stop();
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
       setRecording(false);
       return;
     }
+    speechBaseRef.current = text;
+    audioChunksRef.current = [];
+    setRecording(true);
+
     if (!recognitionRef.current) {
       const SR =
         (window as any).SpeechRecognition ??
         (window as any).webkitSpeechRecognition;
-      if (!SR) return;
-      const recognition = new SR();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-      recognition.onresult = (event: SpeechRecognitionEvent) => {
-        let transcript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const item = event.results[i];
-          if (item && item[0]) {
-            transcript += item[0].transcript;
+      if (SR) {
+        const recognition = new SR();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+          const segments: Array<{ text: string; final: boolean }> = [];
+          // Rebuild the whole recognition session instead of appending only the
+          // changed range. Browsers can revise earlier chunks, and appending those
+          // revisions is what produced repeated phrases in the composer.
+          for (let i = 0; i < event.results.length; i++) {
+            const item = event.results[i];
+            if (item && item[0]) {
+              segments.push({ text: item[0].transcript, final: item.isFinal });
+            }
           }
-        }
-        if (transcript) {
-          setText((prev) => {
-            const sep = prev && !prev.endsWith(' ') ? ' ' : '';
-            return `${prev}${sep}${transcript}`;
-          });
-        }
-      };
-      recognition.onend = () => setRecording(false);
-      recognitionRef.current = recognition;
+          const transcript = formatRecognitionSegments(segments);
+          if (!transcript) return;
+          const base = speechBaseRef.current.trimEnd();
+          const sep = base && !base.endsWith(' ') ? ' ' : '';
+          setText(`${base}${sep}${transcript}`);
+        };
+        recognition.onend = () => {
+          if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') setRecording(false);
+        };
+        recognitionRef.current = recognition;
+      }
     }
-    recognitionRef.current?.start();
-    setRecording(true);
-  }, [recording]);
+    try {
+      recognitionRef.current?.start();
+    } catch {
+      // Recognition can reject a second start while its prior session closes.
+    }
+
+    if (!modelTranscriptionAvailable || typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const preferredType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
+        .find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = preferredType ? new MediaRecorder(stream, { mimeType: preferredType }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const mimeType = recorder.mimeType || 'audio/webm';
+        const audio = new Blob(audioChunksRef.current, { type: mimeType });
+        audioChunksRef.current = [];
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        setRecording(false);
+        if (audio.size === 0) return;
+
+        setTranscribing(true);
+        const form = new FormData();
+        const extension = mimeType.includes('ogg') ? 'ogg' : 'webm';
+        form.set('file', new File([audio], `dictation.${extension}`, { type: mimeType }));
+        void api<{ transcript: string }>('/v1/transcription', { method: 'POST', body: form })
+          .then(({ transcript }) => {
+            const base = speechBaseRef.current.trimEnd();
+            const sep = base && !base.endsWith(' ') ? ' ' : '';
+            setText(`${base}${sep}${transcript.trim()}`);
+          })
+          .catch(() => {
+            // Keep the immediate browser transcript if the provider rejects the audio.
+          })
+          .finally(() => setTranscribing(false));
+      };
+      recorder.start();
+    } catch {
+      // Permission denial or an unavailable recorder still leaves browser
+      // recognition active as the fallback.
+      if (!recognitionRef.current) setRecording(false);
+    }
+  }, [modelTranscriptionAvailable, recording, text]);
+
+  useEffect(() => () => {
+    recognitionRef.current?.stop();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
   const adjustHeight = useCallback(() => {
     const ta = taRef.current;
@@ -373,6 +453,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     // ChatGPT/Gemini-style queue-then-auto-continue: while a turn is running,
     // sending is NOT a no-op — the caller (ThreadView.handleSend) durably
     // queues the message and auto-dispatches it once the current turn ends.
+    if (transcribing) return;
     const value = text.trim();
     if (!value && attachments.length === 0) return;
     if (attachments.some((att) => att.loading)) return; // still uploading — the send button/Enter both route through here
@@ -531,7 +612,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                   />
                 ) : (
                   <div className="grid h-8 w-8 place-items-center rounded bg-surface text-text-muted">
-                    <File size={14} />
+                    <FileIcon size={14} />
                   </div>
                 )}
                 
@@ -619,16 +700,13 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                 onClick={toggleRecording}
                 aria-label={recording ? 'Stop recording' : 'Start voice dictation'}
                 className={clsx(
-                    "relative grid h-7 w-7 shrink-0 place-items-center rounded-md",
+                  "relative grid h-7 w-7 shrink-0 place-items-center rounded-md border-0 outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0",
                   recording
-                    ? "bg-danger/10 text-danger border border-danger/30"
-                    : "text-text-muted hover:text-text-primary hover:bg-surface-3/60"
+                    ? "text-blue-400 animate-pulse"
+                    : "text-text-muted hover:text-text-primary hover:bg-surface-3/60",
                 )}
               >
-                {recording && (
-                  <span className="absolute inset-0 rounded-xl border border-danger animate-ping opacity-75" />
-                )}
-                {recording ? <MicOff size={14} /> : <Mic size={14} />}
+                <Mic size={14} />
               </button>
             )}
             <button
@@ -643,25 +721,72 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                 }
                 void send();
               }}
-              disabled={isRunning && !hasComposedInput ? !onStop : (!hasComposedInput || attachments.some(a => a.loading))}
+              disabled={transcribing || (isRunning && !hasComposedInput ? !onStop : (!hasComposedInput || attachments.some(a => a.loading)))}
               aria-label={isRunning && !hasComposedInput ? 'Stop agent response' : isRunning ? 'Queue message' : 'Send message'}
               title={isRunning && hasComposedInput ? 'Queue this message — it will send once the current reply finishes' : undefined}
               className={clsx(
                 "grid h-7 w-7 shrink-0 place-items-center rounded-md",
-                isRunning && !hasComposedInput
+                transcribing
+                  ? "bg-surface-3 text-text-muted opacity-60 cursor-wait"
+                  : isRunning && !hasComposedInput
                   ? "bg-danger/12 text-danger ring-1 ring-danger/25 hover:bg-danger/18 active:scale-[0.97]"
                   : !hasComposedInput || attachments.some(a => a.loading)
                   ? "bg-surface-3 text-text-muted opacity-40 cursor-not-allowed"
                   : "bg-accent text-canvas active:scale-[0.97]"
               )}
             >
-              {isRunning && !hasComposedInput ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
+              {transcribing ? <Loader2 size={13} className="animate-spin" /> : isRunning && !hasComposedInput ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
             </button>
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+/** Merge browser recognition chunks while removing repeated overlap. */
+function formatRecognitionSegments(segments: Array<{ text: string; final: boolean }>): string {
+  const merged: Array<{ words: string[]; final: boolean }> = [];
+  for (const segment of segments) {
+    const words = segment.text.trim().replace(/\s+/g, ' ').split(' ').filter(Boolean);
+    if (words.length === 0) continue;
+
+    const flattened = merged.flatMap((entry) => entry.words);
+    const withoutLeadingFiller = /^(i|uh|um)$/i.test(words[0] ?? '') ? words.slice(1) : words;
+    if (
+      withoutLeadingFiller.length >= 3
+      && sameWords(flattened.slice(-withoutLeadingFiller.length), withoutLeadingFiller)
+    ) {
+      continue;
+    }
+
+    let overlap = Math.min(flattened.length, words.length);
+    while (overlap > 0 && !sameWords(flattened.slice(-overlap), words.slice(0, overlap))) {
+      overlap -= 1;
+    }
+    const uniqueWords = words.slice(overlap);
+    if (uniqueWords.length > 0) merged.push({ words: uniqueWords, final: segment.final });
+  }
+  return merged
+    .map(({ words, final }) => {
+      const phrase = words.join(' ');
+      return final ? punctuateFinalSpeechPhrase(phrase) : phrase;
+    })
+    .join(' ');
+}
+
+function punctuateFinalSpeechPhrase(value: string): string {
+  let phrase = value.trim().replace(/\s+/g, ' ');
+  if (!phrase) return '';
+  phrase = phrase.charAt(0).toUpperCase() + phrase.slice(1);
+  phrase = phrase.replace(/^(Hey|Hello|Hi)\s+/i, '$1, ');
+  const question = /^(?:(?:Hey|Hello|Hi),\s+)?(?:who|what|when|where|why|how|can|could|would|will|should|is|are|do|does|did|have|has|may|might)\b/i.test(phrase);
+  return phrase.replace(/[.!?]+$/, '') + (question ? '?' : '.');
+}
+
+function sameWords(left: string[], right: string[]): boolean {
+  return left.length === right.length
+    && left.every((word, index) => word.localeCompare(right[index] ?? '', undefined, { sensitivity: 'base' }) === 0);
 }
 
 

@@ -83,6 +83,7 @@ import { buildSovereigntyRoutes } from '../routes/sovereignty.js';
 import { buildSpecialistRoutes } from '../routes/specialists.js';
 import { buildStorageRoutes } from '../routes/storage.js';
 import { buildTaskRoutes } from '../routes/tasks.js';
+import { buildTranscriptionRoutes } from '../routes/transcription.js';
 import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
 import { buildTerminalRoutes } from '../routes/terminal.js';
 import { buildTestHarnessRoutes } from '../routes/testHarness.js';
@@ -153,6 +154,7 @@ import type { SpecialistMindService } from '../services/specialist/specialistMin
 import type { SpecialistRuntimeService } from '../services/specialist/specialistRuntimeService.js';
 import type { SpecialistTemplateService } from '../services/specialist/specialistTemplateService.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
+import { TranscriptionService } from '../services/transcriptionService.js';
 import type { WorkspaceModelConfigService } from '../services/workspace/workspaceModelConfigService.js';
 import type { WorkspaceMediaConfigService } from '../services/workspace/workspaceMediaConfigService.js';
 import { buildMediaConfigRoutes } from '../routes/mediaConfig.js';
@@ -398,6 +400,14 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/skills', buildSkillRoutes({ db: sqlite, auth, skills: skillService }));
   app.route('/v1/workspace/bundle', buildWorkspaceBundleRoutes({ db: sqlite, auth, bus, logger, dataDir: env.AGENTIS_DATA_DIR, signer: { privateKeyPem: secrets.jwtPrivateKeyPem, publicKeyPem: secrets.jwtPublicKeyPem }, episodes: episodicMemoryStore }));
   app.route('/v1/artifacts', buildArtifactRoutes({ db: sqlite, auth, bus, artifacts: artifactService, assets: assetStore }));
+  app.route('/v1/transcription', buildTranscriptionRoutes({
+    db: sqlite,
+    auth,
+    transcription: new TranscriptionService({
+      profile: () => orchestratorModelRouter.profile('transcription'),
+      logger,
+    }),
+  }));
   app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
   app.route('/v1/workspace/intelligence', buildWorkspaceIntelligenceRoutes({ db: sqlite, auth, intelligence: SharedIntelligence, backfill: embeddingBackfill, logger }));
   app.route('/v1/memory', buildMemoryRoutes({ db: sqlite, auth, memory: memoryStore, episodes: episodicMemoryStore, brainAsk }));

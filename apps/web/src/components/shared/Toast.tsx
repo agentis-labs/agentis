@@ -5,9 +5,18 @@
  * undo variant with action button + countdown for destructive operations.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import clsx from 'clsx';
 import { CheckCircle2, AlertTriangle, XCircle, Info, Undo2, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export type ToastTone = 'success' | 'warn' | 'danger' | 'info' | 'undo';
 
@@ -30,20 +39,20 @@ interface ToastApi {
   push: (t: ToastInput) => number;
   dismiss: (id: number) => void;
   success: (title: string, body?: string) => number;
-  error:   (title: string, body?: string) => number;
-  warn:    (title: string, body?: string) => number;
-  info:    (title: string, body?: string) => number;
-  undo:    (title: string, onUndo: () => void, body?: string) => number;
+  error: (title: string, body?: string) => number;
+  warn: (title: string, body?: string) => number;
+  info: (title: string, body?: string) => number;
+  undo: (title: string, onUndo: () => void, body?: string) => number;
 }
 
 const ToastCtx = createContext<ToastApi | null>(null);
 
 const DURATIONS: Record<ToastTone, number> = {
   success: 3000,
-  warn:    4000,
-  danger:  5000,
-  info:    3000,
-  undo:    5000,
+  warn: 4000,
+  danger: 5000,
+  info: 3000,
+  undo: 5000,
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -53,7 +62,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const dismiss = useCallback((id: number) => {
     const t = timerRef.current.get(id);
-    if (t) { window.clearTimeout(t); timerRef.current.delete(id); }
+    if (t) {
+      window.clearTimeout(t);
+      timerRef.current.delete(id);
+    }
     setItems((arr) => arr.filter((x) => x.id !== id));
   }, []);
 
@@ -74,16 +86,19 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [dismiss],
   );
 
-  const api = useMemo<ToastApi>(() => ({
-    push,
-    dismiss,
-    success: (title, body) => push({ title, body, tone: 'success' }),
-    error:   (title, body) => push({ title, body, tone: 'danger' }),
-    warn:    (title, body) => push({ title, body, tone: 'warn' }),
-    info:    (title, body) => push({ title, body, tone: 'info' }),
-    undo:    (title, onUndo, body) =>
-      push({ title, body, tone: 'undo', action: { label: 'Undo', onClick: onUndo } }),
-  }), [dismiss, push]);
+  const api = useMemo<ToastApi>(
+    () => ({
+      push,
+      dismiss,
+      success: (title, body) => push({ title, body, tone: 'success' }),
+      error: (title, body) => push({ title, body, tone: 'danger' }),
+      warn: (title, body) => push({ title, body, tone: 'warn' }),
+      info: (title, body) => push({ title, body, tone: 'info' }),
+      undo: (title, onUndo, body) =>
+        push({ title, body, tone: 'undo', action: { label: 'Undo', onClick: onUndo } }),
+    }),
+    [dismiss, push],
+  );
 
   return (
     <ToastCtx.Provider value={api}>
@@ -101,6 +116,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 }
 
 function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: () => void }) {
+  const { t } = useTranslation();
   const tone = item.tone ?? 'info';
   return (
     <div
@@ -114,10 +130,10 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: () => void
         className={clsx(
           'absolute inset-y-0 left-0 w-1',
           tone === 'success' && 'bg-accent',
-          tone === 'warn'    && 'bg-warn',
-          tone === 'danger'  && 'bg-danger',
-          tone === 'info'    && 'bg-info',
-          tone === 'undo'    && 'bg-accent',
+          tone === 'warn' && 'bg-warn',
+          tone === 'danger' && 'bg-danger',
+          tone === 'info' && 'bg-info',
+          tone === 'undo' && 'bg-accent',
         )}
       />
       <ToastIcon tone={tone} />
@@ -127,7 +143,10 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: () => void
         {item.action && (
           <button
             type="button"
-            onClick={() => { item.action!.onClick(); onDismiss(); }}
+            onClick={() => {
+              item.action!.onClick();
+              onDismiss();
+            }}
             className="mt-2 inline-flex items-center gap-1 rounded-btn bg-surface-2 px-2 py-1 text-[11px] font-medium text-accent hover:bg-surface-3"
           >
             <Undo2 size={11} /> {item.action.label}
@@ -137,7 +156,7 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: () => void
       <button
         type="button"
         onClick={onDismiss}
-        aria-label="Dismiss"
+        aria-label={t('common.dismiss')}
         className="-m-1 shrink-0 rounded-md p-1 text-text-muted hover:bg-surface-2 hover:text-text-primary"
       >
         <X size={12} />
@@ -150,15 +169,15 @@ function ToastIcon({ tone }: { tone: ToastTone }) {
   const cls = clsx(
     'mt-0.5 shrink-0',
     tone === 'success' && 'text-accent',
-    tone === 'warn'    && 'text-warn',
-    tone === 'danger'  && 'text-danger',
-    tone === 'info'    && 'text-info',
-    tone === 'undo'    && 'text-accent',
+    tone === 'warn' && 'text-warn',
+    tone === 'danger' && 'text-danger',
+    tone === 'info' && 'text-info',
+    tone === 'undo' && 'text-accent',
   );
   if (tone === 'success') return <CheckCircle2 size={16} className={cls} />;
-  if (tone === 'warn')    return <AlertTriangle size={16} className={cls} />;
-  if (tone === 'danger')  return <XCircle      size={16} className={cls} />;
-  if (tone === 'undo')    return <Undo2        size={16} className={cls} />;
+  if (tone === 'warn') return <AlertTriangle size={16} className={cls} />;
+  if (tone === 'danger') return <XCircle size={16} className={cls} />;
+  if (tone === 'undo') return <Undo2 size={16} className={cls} />;
   return <Info size={16} className={cls} />;
 }
 
@@ -184,6 +203,3 @@ export function useToast() {
   };
   return api;
 }
-
-
-
