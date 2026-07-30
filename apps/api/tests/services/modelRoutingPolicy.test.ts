@@ -5,7 +5,7 @@ import {
 } from '../../src/services/modelRoutingPolicy.js';
 
 describe('modelRoutingPolicy', () => {
-  it('routes simple Claude text work to balanced Sonnet instead of Opus', () => {
+  it('routes simple Claude text work to economical Haiku instead of Opus', () => {
     const decision = routeModelForTask({
       task: 'Write a short friendly product update email.',
       purpose: 'conversation',
@@ -16,8 +16,8 @@ describe('modelRoutingPolicy', () => {
     expect(decision.taskClass).toBe('simple_text');
     // Reconciled to the policy's current balanced-tier Claude id (source
     // upgraded claude-sonnet-4-6 → claude-sonnet-5; the test had gone stale).
-    expect(decision.selectedModel).toBe('claude-sonnet-5');
-    expect(decision.modelTier).toBe('balanced');
+    expect(decision.selectedModel).toBe('claude-haiku-4-5');
+    expect(decision.modelTier).toBe('fast');
     expect(decision.explicitPin).toBe(false);
     expect(decision.alternatives.some((alt) => alt.model === 'claude-opus-4-8')).toBe(true);
   });

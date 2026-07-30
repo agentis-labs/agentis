@@ -67,8 +67,19 @@ interface SnapshotCollection {
 
 type SnapshotRow = typeof schema.appLifecycleSnapshots.$inferSelect;
 
+export type AppWorkflowRevisionSink = (input: {
+  db: AgentisSqliteDb;
+  workspaceId: string;
+  userId: string;
+  appId: string;
+  workflows: AppManifest['workflows'];
+}) => void;
+
 export class AppLifecycle {
-  constructor(private readonly db: AgentisSqliteDb) {}
+  constructor(
+    private readonly db: AgentisSqliteDb,
+    private readonly workflowRevisionSink?: AppWorkflowRevisionSink,
+  ) {}
 
   planUpgrade(workspaceId: string, appId: string, nextManifest: AppManifest): AppUpgradePlan {
     const current = new AppPackager(this.db).toManifest(workspaceId, appId);
@@ -167,7 +178,7 @@ export class AppLifecycle {
 
     return this.db.transaction((tx) => {
       const db = tx as AgentisSqliteDb;
-      const lifecycle = new AppLifecycle(db);
+      const lifecycle = new AppLifecycle(db, this.workflowRevisionSink);
       const snapshotId = lifecycle.createSnapshot(workspaceId, appId, 'upgrade');
       lifecycle.applyMigrations(workspaceId, appId, parsed);
       lifecycle.validateRowsAgainstManifest(workspaceId, appId, parsed);
@@ -179,7 +190,7 @@ export class AppLifecycle {
   rollback(workspaceId: string, userId: string, appId: string, snapshotId: string): AppRollbackResult {
     return this.db.transaction((tx) => {
       const db = tx as AgentisSqliteDb;
-      const lifecycle = new AppLifecycle(db);
+      const lifecycle = new AppLifecycle(db, this.workflowRevisionSink);
       const snapshot = lifecycle.requireSnapshot(workspaceId, appId, snapshotId);
       const manifest = appManifestSchema.parse(snapshot.manifestJson);
       const collections = snapshotCollectionsSchema.parse(snapshot.collectionsJson);
@@ -285,23 +296,44 @@ export class AppLifecycle {
       ...(options.installedChecksum !== undefined ? { installedChecksum: options.installedChecksum } : {}),
     });
 
-    this.db.delete(schema.workflows).where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId))).run();
-    for (const workflow of manifest.workflows) {
-      const now = new Date().toISOString();
-      this.db
-        .insert(schema.workflows)
-        .values({
-          id: randomUUID(),
-          workspaceId,
-          userId,
-          appId,
-          title: workflow.title,
-          description: workflow.description ?? null,
-          graph: workflow.graph as WorkflowGraph,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .run();
+    if (this.workflowRevisionSink) {
+      this.workflowRevisionSink({
+        db: this.db,
+        workspaceId,
+        userId,
+        appId,
+        workflows: manifest.workflows,
+      });
+    } else {
+      // Non-API consumers cannot safely replace an established workflow graph:
+      // preserve matching and removed rows, and only add previously unseen
+      // workflows. The API supplies workflowRevisionSink so changed graphs
+      // become immutable candidates with proof gates.
+      const existingTitles = new Set(
+        this.db.select({ title: schema.workflows.title })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
+          .all()
+          .map((workflow) => workflow.title),
+      );
+      for (const workflow of manifest.workflows) {
+        if (existingTitles.has(workflow.title)) continue;
+        const now = new Date().toISOString();
+        this.db
+          .insert(schema.workflows)
+          .values({
+            id: randomUUID(),
+            workspaceId,
+            userId,
+            appId,
+            title: workflow.title,
+            description: workflow.description ?? null,
+            graph: workflow.graph as WorkflowGraph,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .run();
+      }
     }
 
     const datastore = new AppDatastore(this.db);

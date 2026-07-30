@@ -94,6 +94,12 @@ const CLI_HARNESSES: Array<{
 let _defaultProbeCache: { at: number; result: HarnessDetectionResult[] } | null = null;
 const HARNESS_PROBE_TTL_MS = 60_000;
 
+/** Commissioning is an operator-visible transition and must not be held hostage
+ * by the background probe cache after a CLI has just started or appeared on PATH. */
+export function invalidateHarnessProbeCache(): void {
+  _defaultProbeCache = null;
+}
+
 /**
  * Detect installed CLI harnesses. The default-environment probe is cached for a
  * short TTL: repeated callers (e.g. one call per agent create) must not re-spawn

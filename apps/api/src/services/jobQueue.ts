@@ -36,6 +36,7 @@ export interface WorkflowRunJobPayload {
   inputs: Record<string, unknown>;
   initialState: WorkflowRunState;
   graph: WorkflowGraph;
+  workflowRevisionId?: string | null;
 }
 
 export interface JobQueueBackend {

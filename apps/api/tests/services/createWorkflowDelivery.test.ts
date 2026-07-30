@@ -13,6 +13,7 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 import { createWorkflowFromDescription } from '../../src/services/agentisToolHandlers/build.js';
 import { SpecialistAgentService } from '../../src/services/specialist/specialistAgents.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 
 /** A minimal valid LLM-synthesized graph (trigger → agent_task → terminal). */
 function synthGraph(): WorkflowGraph {
@@ -223,7 +224,9 @@ describe('createWorkflowFromDescription — model-assisted creation', () => {
     expect(saved.title).toBe('Stable Workflow Title');
     expect(saved.description).toBe('Original durable purpose');
     expect((saved.graph as WorkflowGraph).nodes.map((node) => node.id)).toEqual(existing.nodes.map((node) => node.id));
-    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Updated Transform');
+    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Original Transform');
+    expect(new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, saved.id)?.graph.nodes
+      .find((node) => node.id === 'transform')?.title).toBe('Updated Transform');
     expect(synthesisUserPrompt).toContain('THIS IS AN IN-PLACE EDIT');
     expect(synthesisUserPrompt).toContain('CURRENT WORKFLOW GRAPH');
   });
@@ -267,7 +270,9 @@ describe('createWorkflowFromDescription — model-assisted creation', () => {
 
     const saved = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, 'workflow-agent-patch')).get()!;
     expect((result as { trace: { synthesis: string } }).trace.synthesis).toBe('agent_patch');
-    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Agent Authored Transform');
+    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Original Transform');
+    expect(new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, saved.id)?.graph.nodes
+      .find((node) => node.id === 'transform')?.title).toBe('Agent Authored Transform');
   });
 
   it('rejects destructive edit output and leaves the persisted workflow unchanged', async () => {

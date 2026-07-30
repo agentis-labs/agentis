@@ -76,6 +76,7 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       notifications: deriveChromeNotifications(approvals, failedRuns, agents),
       counts: {
         liveAgents,
+        totalAgents: fleetOverview.agents.total,
         activeRuns,
       },
     });

@@ -85,6 +85,14 @@ export function classifyModelTask(input: {
 export function inferModelTierFromId(id: string | null | undefined): ModelTier {
   const lower = (id ?? '').trim().toLowerCase();
   if (!lower) return 'auto';
+  // Curated profiles beat name heuristics. The 5.6 family names intentionally
+  // carry no "mini/fast" suffix, so inferring all three as the same tier makes
+  // economical per-task routing impossible.
+  if (lower === 'gpt-5.6-sol') return 'flagship';
+  if (lower === 'gpt-5.6-terra') return 'balanced';
+  if (lower === 'gpt-5.6-luna') return 'fast';
+  if (lower === 'claude-fable' || lower.includes('claude-opus')) return 'flagship';
+  if (lower.includes('claude-haiku')) return 'fast';
   if (
     lower === 'auto'
     || lower.includes('auto')
@@ -343,9 +351,9 @@ function fallbackCandidatesFor(runtime: string | null, currentModel: string | nu
   }
   if (lower.includes('codex') || lower.includes('openai') || lower.includes('cursor') || lower.includes('gpt-')) {
     return [
-      fallbackCandidate('gpt-5.6-luna', runtime, 'flagship'),
-      fallbackCandidate('gpt-5.6-terra', runtime, 'flagship'),
       fallbackCandidate('gpt-5.6-sol', runtime, 'flagship'),
+      fallbackCandidate('gpt-5.6-terra', runtime, 'balanced'),
+      fallbackCandidate('gpt-5.6-luna', runtime, 'fast'),
       fallbackCandidate('gpt-5.5', runtime, 'flagship'),
       fallbackCandidate('gpt-5.4', runtime, 'balanced'),
       fallbackCandidate('gpt-5.4-mini', runtime, 'fast'),
@@ -427,7 +435,7 @@ function selectCandidate(
 
 function tierPreferenceFor(taskClass: ModelTaskClass, text: string): ModelTier[] {
   if (taskClass === 'trivial') return ['fast', 'balanced', 'auto', 'flagship', 'custom'];
-  if (taskClass === 'simple_text') return ['balanced', 'fast', 'auto', 'flagship', 'custom'];
+  if (taskClass === 'simple_text') return ['fast', 'balanced', 'auto', 'flagship', 'custom'];
   if (taskClass === 'workflow_synthesis') {
     return matchesAny(text.toLowerCase(), COMPLEXITY_SIGNALS)
       ? ['flagship', 'balanced', 'fast', 'auto', 'custom']

@@ -18,6 +18,7 @@ import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBlueprintTools } from '../../src/services/agentisToolHandlers/blueprint.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import type { WorkflowGraph } from '@agentis/core';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 
 let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });
@@ -147,8 +148,9 @@ describe('findBlessedGraph + restore_blueprint', () => {
     expect(out.fromRunId).toBe(run);
 
     const saved = ctx.db.select().from(schema.workflows).all().find((w) => w.id === wf)!;
-    expect(graphContentHash(saved.graph as WorkflowGraph)).toBe(graphContentHash(goodGraph));
-    expect(saved.contentHash).toBe(graphContentHash(goodGraph));
+    expect(graphContentHash(saved.graph as WorkflowGraph)).toBe(graphContentHash(mangled));
+    const candidate = new WorkflowRevisionService(ctx.db).candidate(ws(), wf);
+    expect(graphContentHash(candidate!.graph)).toBe(graphContentHash(goodGraph));
 
     // Second call: already blessed → honest no-op naming the runtime-class hint.
     const again = await registry.execute(

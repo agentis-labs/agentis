@@ -312,10 +312,24 @@ type ViewNodeBase =
    * So the agent can build *anything* the typed grammar can't express — on-brand,
    * live, and safe. `collections` is the read allowlist (same as CustomView).
    */
-  | { type: 'CodeSurface'; code: string; collections?: string[]; height?: number; fullBleed?: boolean };
+  | { type: 'CodeSurface'; code: string; collections?: string[]; height?: number; fullBleed?: boolean }
+  | { type: 'ExtensionBlock'; pack: string; block: string; props?: Record<string, unknown>; bind?: DataBind };
 
 /** Any node, plus optional bounded visual intent. */
 export type ViewNode = ViewNodeBase & { nodeId?: string; style?: StyleIntent };
+
+/** Manifest exposed by a trusted, installed UI pack. Arbitrary npm imports are
+ * never accepted in interface specs; agents may only reference these ids. */
+export const uiPackManifestSchema = z.object({
+  id: z.string().min(1).max(120),
+  version: z.string().min(1).max(64),
+  blocks: z.array(z.object({
+    name: z.string().min(1).max(120),
+    description: z.string().max(500).optional(),
+    propsSchema: z.record(z.unknown()).optional(),
+  })).min(1),
+});
+export type UiPackManifest = z.infer<typeof uiPackManifestSchema>;
 
 // Spread into every object so `style` is accepted on any node without
 // changing the discriminated-union shape the renderer switches on.
@@ -443,6 +457,7 @@ export const viewNodeSchema: z.ZodType<ViewNode> = z.lazy(() =>
     }),
     z.object({ type: z.literal('CustomView'), html: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), fullBleed: z.boolean().optional(), ...styled }),
     z.object({ type: z.literal('CodeSurface'), code: z.string().max(200_000), collections: z.array(z.string()).optional(), height: z.number().int().positive().max(2000).optional(), fullBleed: z.boolean().optional(), ...styled }),
+    z.object({ type: z.literal('ExtensionBlock'), pack: z.string().min(1).max(120), block: z.string().min(1).max(120), props: z.record(z.unknown()).optional(), bind: dataBindSchema.optional(), ...styled }),
   ]) as z.ZodType<ViewNode>,
 );
 
@@ -614,5 +629,3 @@ export const upsertSurfaceSchema = z.object({
   actions: z.array(surfaceActionSchema).optional(),
   shareable: z.boolean().optional(),
 });
-
-

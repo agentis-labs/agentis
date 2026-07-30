@@ -66,6 +66,7 @@ import {
   WorkflowGraphMutationError,
   type WorkflowGraphMutationDiff,
 } from '../workflow/workflowGraphMutation.js';
+import { WorkflowRevisionService } from '../workflow/workflowRevisionService.js';
 
 /**
  * Conversation → last-built workflow id. A build conversation is bound to ONE
@@ -317,6 +318,7 @@ function acquireBuildSlot(workspaceId: string, latchKey: string | null): () => v
 }
 
 export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
+  deps = { ...deps, revisions: deps.revisions ?? new WorkflowRevisionService(deps.db) };
   type StoredWorkflow = typeof schema.workflows.$inferSelect;
   type StoredGraphRevision = {
     hash: string;
@@ -347,8 +349,14 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
   const loadStoredWorkflow = (workflowId: unknown, workspaceId: string): StoredWorkflow => {
     const wf = deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, String(workflowId))).get();
     if (!wf || wf.workspaceId !== workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${String(workflowId)} not found`);
-    return wf;
+    const candidate = deps.revisions?.candidate(workspaceId, wf.id);
+    return candidate
+      ? { ...wf, graph: candidate.graph, contentHash: candidate.revision.semanticHash }
+      : wf;
   };
+
+  const editableGraph = (wf: Pick<StoredWorkflow, 'id' | 'graph'>, workspaceId: string): WorkflowGraph =>
+    deps.revisions?.candidate(workspaceId, wf.id)?.graph ?? (wf.graph as WorkflowGraph);
 
   const validateStoredMutation = (
     wf: StoredWorkflow,
@@ -405,32 +413,20 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
     }
 
     const now = new Date().toISOString();
-    const currentSettings = ((input.wf.settings as Record<string, unknown>) ?? {});
-    const priorHistory = readGraphRevisionHistory(currentSettings);
-    const revisionEntry: StoredGraphRevision = {
-      hash: beforeHash,
-      replacedByHash: afterHash,
-      graph: input.wf.graph as WorkflowGraph,
-      createdAt: now,
-      operation: input.operation,
-      ...(input.actorId ? { actorId: input.actorId } : {}),
-    };
-    const revisionHistory = [revisionEntry, ...priorHistory.filter((entry) => entry.hash !== beforeHash)]
-      .slice(0, GRAPH_REVISION_HISTORY_LIMIT);
-    const result = deps.db.update(schema.workflows).set({
-      graph: input.graph,
-      contentHash: afterHash,
-      settings: {
-        ...currentSettings,
-        [GRAPH_REVISION_HISTORY_KEY]: revisionHistory,
-        intentManifest: deriveIntentManifest(input.graph, input.wf.description ?? input.wf.title),
-      },
-      updatedAt: now,
-    }).where(and(eq(schema.workflows.id, input.wf.id), eq(schema.workflows.updatedAt, input.wf.updatedAt))).run() as { changes?: number };
-    if (result.changes === 0) {
-      throw new AgentisError('GRAPH_REVISION_CONFLICT',
-        'Workflow changed while this mutation was being validated. Nothing was written; inspect the latest graph and rebase the mutation.');
+    if (!deps.revisions) {
+      throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
     }
+    const revisionHead = deps.revisions.candidate(input.wf.workspaceId, input.wf.id)?.revision
+      ?? deps.revisions.active(input.wf.workspaceId, input.wf.id).revision;
+    const created = deps.revisions.createCandidate({
+      workspaceId: input.wf.workspaceId,
+      workflowId: input.wf.id,
+      graph: input.graph,
+      baseRevisionId: revisionHead.id,
+      source: input.operation === 'rollback' ? 'rollback' : 'agent_build',
+      actor: { type: input.actorId ? 'agent' : 'system', id: input.actorId ?? null },
+      reason: `${input.operation} proposed through workflow graph tools`,
+    });
     const buildLoop = stampBuildLoop(deps.db, input.wf.id, {
       graphHash: graphContentHash(input.graph),
       validatedAt: new Date().toISOString(),
@@ -440,7 +436,10 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       workflowId: input.wf.id,
       operation: input.operation,
       committed: true,
-      patched: true,
+      patched: false,
+      candidate: true,
+      candidateRevisionId: created.revision.id,
+      activeRevisionId: deps.revisions.active(input.wf.workspaceId, input.wf.id).revision.id,
       revision: { ...revision, updatedAt: saved?.updatedAt ?? now },
       diff: input.diff,
       ...(input.deprecatedAlias ? {
@@ -451,6 +450,11 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       } : {}),
       selfHealInFlight: deps.engine.isSelfHealInFlight(input.wf.id),
       compass: compassForWorkflow({ workflowId: input.wf.id, graph: input.graph, settings: { buildLoop } }),
+      next: {
+        tool: 'agentis.workflow.deliver',
+        args: { workflowId: input.wf.id },
+        why: 'The edit is a candidate. Verify its exact hash with self-healing disabled before promotion.',
+      },
     };
   };
 
@@ -498,7 +502,12 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         if (deps.specialists && result.appId) {
           try {
             const store = new AppStore(deps.db);
-            const staffing = new AppStaffingService({ store, specialists: deps.specialists, logger: deps.logger });
+            const staffing = new AppStaffingService({
+              store,
+              specialists: deps.specialists,
+              logger: deps.logger,
+              commissionSpecialist: (workspaceId, agentId) => connectSpecialistRuntime(deps, workspaceId, agentId),
+            });
             await staffing.staffApp({
               workspaceId: ctx.workspaceId,
               userId: ctx.userId,
@@ -670,11 +679,27 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       },
       handler: async (args, ctx) => {
         const wf = loadStoredWorkflow(args.workflowId, ctx.workspaceId);
-        const currentHash = hashWorkflowGraph(wf.graph as WorkflowGraph);
+        if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
+        const active = deps.revisions.active(ctx.workspaceId, wf.id);
+        const candidate = deps.revisions.candidate(ctx.workspaceId, wf.id);
         return {
           workflowId: wf.id,
-          current: { hash: currentHash, updatedAt: wf.updatedAt },
-          revisions: readGraphRevisionHistory(wf.settings).map(({ graph: _graph, ...revision }) => revision),
+          current: {
+            activeRevisionId: active.revision.id,
+            activeHash: active.revision.semanticHash,
+            candidateRevisionId: candidate?.revision.id ?? null,
+            candidateHash: candidate?.revision.semanticHash ?? null,
+            updatedAt: wf.updatedAt,
+          },
+          revisions: deps.revisions.revisions(ctx.workspaceId, wf.id).map((revision) => ({
+            id: revision.id,
+            hash: revision.semanticHash,
+            source: revision.source,
+            reason: revision.reason,
+            status: revision.status,
+            trustState: revision.trustState,
+            createdAt: revision.createdAt,
+          })),
         };
       },
     },
@@ -706,17 +731,20 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           throw new AgentisError('GRAPH_REVISION_CONFLICT',
             `Workflow changed since rollback inspection: expected ${String(args.baseHash ?? '')}, current hash is ${currentHash}. Inspect revisions again.`);
         }
-        const target = readGraphRevisionHistory(wf.settings).find((revision) => revision.hash === targetHash);
+        if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
+        const target = deps.revisions.revisions(ctx.workspaceId, wf.id)
+          .find((revision) => revision.semanticHash === targetHash || revision.id === targetHash);
         if (!target) {
           throw new AgentisError('RESOURCE_NOT_FOUND',
             `Workflow revision ${targetHash} is not available in the bounded history. List revisions and choose a retained hash.`);
         }
-        validateWorkflowGraph(target.graph);
-        const diff = diffWorkflowGraphs(wf.graph as WorkflowGraph, target.graph);
+        const targetGraph = target.graphJson as WorkflowGraph;
+        validateWorkflowGraph(targetGraph);
+        const diff = diffWorkflowGraphs(wf.graph as WorkflowGraph, targetGraph);
         const dryRun = args.dryRun === true || args.confirm !== true;
         return commitStoredMutation({
           wf,
-          graph: target.graph,
+          graph: targetGraph,
           diff,
           baseHash: currentHash,
           dryRun,
@@ -1112,7 +1140,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             .where(eq(schema.workflows.id, String(args.workflowId)))
             .get() ?? null;
           if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
-          graph = wf.graph as WorkflowGraph;
+          graph = editableGraph(wf, ctx.workspaceId);
           workflowId = wf.id;
         } else {
           throw new AgentisError('VALIDATION_FAILED', 'agentis.workflow.dry_run requires a graph draft or a workflowId.');
@@ -1172,6 +1200,21 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         // hand back the compass so the agent's next move is explicit.
         let compass;
         if (wf) {
+          const candidateRevision = deps.revisions?.candidate(ctx.workspaceId, wf.id);
+          if (candidateRevision && candidateRevision.revision.semanticHash === graphContentHash(graph)) {
+            deps.revisions!.recordProof({
+              workspaceId: ctx.workspaceId,
+              workflowId: wf.id,
+              revisionId: candidateRevision.revision.id,
+              gate: 'dry_run',
+              status: dryOk ? 'passed' : 'failed',
+              evidence: {
+                blockingIssues: blocking,
+                assertions,
+                traceSummary: { executed, mocked, failed },
+              },
+            });
+          }
           const buildLoop = stampBuildLoop(deps.db, wf.id, {
             dryRun: {
               at: new Date().toISOString(),
@@ -1239,7 +1282,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           .where(eq(schema.workflows.id, String(args.workflowId)))
           .get();
         if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
-        const graph = wf.graph as WorkflowGraph;
+        const graph = editableGraph(wf, ctx.workspaceId);
         const state = readBuildLoop(wf.settings);
         const hash = graphContentHash(graph);
         const stage = deriveLoopStage(state, hash);
@@ -1301,7 +1344,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const wf = deps.db.select().from(schema.workflows)
           .where(eq(schema.workflows.id, String(args.workflowId))).get();
         if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
-        const graph = wf.graph as WorkflowGraph;
+        const graph = editableGraph(wf, ctx.workspaceId);
         const hash = graphContentHash(graph);
         const services = await runnableServicesForSpec(deps, ctx.workspaceId);
 
@@ -1341,10 +1384,24 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         deps.db.update(schema.workflows)
           .set({ settings: { ...((wf.settings as Record<string, unknown>) ?? {}), spec }, updatedAt: new Date().toISOString() })
           .where(eq(schema.workflows.id, wf.id)).run();
+        const revisionBase = deps.revisions?.candidate(ctx.workspaceId, wf.id)?.revision
+          ?? deps.revisions?.ensureWorkflow(ctx.workspaceId, wf.id).active;
+        const specCandidate = revisionBase && deps.revisions
+          ? deps.revisions.createCandidate({
+              workspaceId: ctx.workspaceId,
+              workflowId: wf.id,
+              graph,
+              baseRevisionId: revisionBase.id,
+              source: 'user_edit',
+              actor: { type: ctx.agentId ? 'agent' : 'user', id: ctx.agentId ?? ctx.userId },
+              reason: 'Updated workflow acceptance specification',
+            }).revision
+          : null;
         const worldly = spec.acceptance.filter((c) => c.verify !== 'judge').length;
         return {
           ok: true,
           workflowId: wf.id,
+          ...(specCandidate ? { candidateRevisionId: specCandidate.id } : {}),
           spec,
           worldlyChecks: worldly,
           ...(question ? { question } : {}),
@@ -1382,7 +1439,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const wf = deps.db.select().from(schema.workflows)
           .where(eq(schema.workflows.id, String(args.workflowId))).get();
         if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
-        const graph = wf.graph as WorkflowGraph;
+        const graph = editableGraph(wf, ctx.workspaceId);
         const settings = (wf.settings as Record<string, unknown>) ?? {};
         const action = typeof args.action === 'string' && args.action.trim() ? args.action.trim() : 'run';
         let suite = readWorkflowTests(settings);
@@ -1456,6 +1513,27 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const buildLoop = stampBuildLoop(deps.db, wf.id, {
           suite: { at: new Date().toISOString(), graphHash: hash, total: gating.length, passed: passedGating.length, ok },
         });
+        const candidateRevision = deps.revisions?.candidate(ctx.workspaceId, wf.id);
+        if (candidateRevision && candidateRevision.revision.semanticHash === hash) {
+          deps.revisions!.recordProof({
+            workspaceId: ctx.workspaceId,
+            workflowId: wf.id,
+            revisionId: candidateRevision.revision.id,
+            gate: 'regression',
+            status: ok ? 'passed' : 'failed',
+            evidence: {
+              total: results.length,
+              gating: gating.length,
+              passed: passedGating.length,
+              cases: results.map((result) => ({
+                id: result.id,
+                kind: result.kind,
+                gating: result.gating,
+                passed: result.passed,
+              })),
+            },
+          });
+        }
         return {
           ok,
           workflowId: wf.id,
@@ -1489,7 +1567,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const wf = deps.db.select().from(schema.workflows)
           .where(eq(schema.workflows.id, String(args.workflowId))).get();
         if (!wf || wf.workspaceId !== ctx.workspaceId) throw new Error(`workflow ${args.workflowId} not found`);
-        const graph = wf.graph as WorkflowGraph;
+        const graph = editableGraph(wf, ctx.workspaceId);
         const settings = (wf.settings as Record<string, unknown>) ?? {};
         const hash = graphContentHash(graph);
         const loop = readBuildLoop(settings);
@@ -1573,6 +1651,40 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const buildLoop = stampBuildLoop(deps.db, wf.id, {
           hardened: { at: new Date().toISOString(), graphHash: hash, specHash, ...(exportRef ? { exportRef } : {}) },
         });
+        const candidateRevision = deps.revisions?.candidate(ctx.workspaceId, wf.id);
+        let promotion;
+        let proofState;
+        if (candidateRevision && candidateRevision.revision.semanticHash === hash) {
+          // The legacy SWIFT gates above are stricter than the immutable proof
+          // gates. Mirror their exact evidence onto the candidate before the
+          // single promotion authority performs its compare-and-swap.
+          deps.revisions!.recordProof({
+            workspaceId: ctx.workspaceId,
+            workflowId: wf.id,
+            revisionId: candidateRevision.revision.id,
+            gate: 'dry_run',
+            status: 'passed',
+            evidence: { graphHash: hash, legacyBuildLoop: loop.dryRun },
+          });
+          deps.revisions!.recordProof({
+            workspaceId: ctx.workspaceId,
+            workflowId: wf.id,
+            revisionId: candidateRevision.revision.id,
+            gate: 'regression',
+            status: 'passed',
+            evidence: { graphHash: hash, suite: loop.suite },
+          });
+          proofState = deps.revisions!.proofState(ctx.workspaceId, wf.id, candidateRevision.revision.id);
+          if (proofState.readyForPromotion && !proofState.approvalRequired) {
+            promotion = deps.revisions!.promote({
+              workspaceId: ctx.workspaceId,
+              workflowId: wf.id,
+              revisionId: candidateRevision.revision.id,
+              expectedActiveRevisionId: deps.revisions!.active(ctx.workspaceId, wf.id).revision.id,
+              actor: { type: ctx.agentId ? 'agent' : 'system', id: ctx.agentId ?? null },
+            });
+          }
+        }
         recordWorkflowLesson(deps.memory, ctx.workspaceId, {
           failureMode: `Hardening record: "${wf.title}" (${wf.id})`,
           fix: `HARDENED at graph ${hash} on ${new Date().toISOString().slice(0, 10)}: objective "${spec!.objective}"; ${spec!.acceptance.length} acceptance check(s); suite ${loop.suite?.passed}/${loop.suite?.total}; frozen export ${exportRef ?? 'n/a'}. Any edit demotes — re-earn through dry-run → suite → accomplished debug run.`,
@@ -1582,9 +1694,22 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           hardened: true,
           graphHash: hash,
           specHash,
+          ...(candidateRevision ? { candidateRevisionId: candidateRevision.revision.id } : {}),
+          ...(promotion ? { promotion } : {}),
+          ...(proofState && !proofState.readyForPromotion
+            ? {
+                verifiedCandidate: true,
+                missingPromotionGates: proofState.missing,
+                promotionBlocked: proofState.required.includes('operator_approval')
+                  ? 'This workflow can send data outward or run code. An administrator must explicitly approve promotion.'
+                  : 'The candidate still lacks immutable proof gates.',
+              }
+            : {}),
           ...(exportRef ? { exportRef } : {}),
           compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { ...settings, buildLoop } }),
-          summary: `HARDENED at ${hash}. Frozen YAML export saved${exportRef ? ` (artifact ${exportRef})` : ''}. Unattended triggers may now arm; production runs keep being verified, and a deficient one demotes this stamp.`,
+          summary: promotion
+            ? `HARDENED and PROMOTED revision ${promotion.revisionId} at ${hash}. Frozen YAML export saved${exportRef ? ` (artifact ${exportRef})` : ''}.`
+            : `HARDENED candidate at ${hash}${proofState?.missing.length ? `; promotion awaits ${proofState.missing.join(', ')}` : ''}. Frozen YAML export saved${exportRef ? ` (artifact ${exportRef})` : ''}.`,
         };
       },
     },
@@ -1774,6 +1899,7 @@ function introducedRegressions(prior: WorkflowGraph, next: WorkflowGraph): strin
 }
 
 export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args: CreateWorkflowArgs) {
+  deps = { ...deps, revisions: deps.revisions ?? new WorkflowRevisionService(deps.db) };
   const description = args.description.trim();
   const appStore = new AppStore(deps.db);
   if (args.appId) appStore.get(args.workspaceId, args.appId); // ownership validation before model spend
@@ -1807,9 +1933,15 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     deduplicatedRequest = true;
     deps.logger.info('createWorkflow.dedup_reuse', { workspaceId: args.workspaceId, workflowId: existingWorkflowId, agentId: args.agentId ?? null, viaLatch: true });
   }
-  const existingWorkflow = existingWorkflowId
+  const storedExistingWorkflow = existingWorkflowId
     ? deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, existingWorkflowId)).get()
     : null;
+  const existingCandidate = storedExistingWorkflow && deps.revisions
+    ? deps.revisions.candidate(args.workspaceId, storedExistingWorkflow.id)
+    : null;
+  const existingWorkflow = storedExistingWorkflow && existingCandidate
+    ? { ...storedExistingWorkflow, graph: existingCandidate.graph, contentHash: existingCandidate.revision.semanticHash }
+    : storedExistingWorkflow;
   if (existingWorkflowId && (!existingWorkflow || existingWorkflow.workspaceId !== args.workspaceId)) {
     throw new Error(`workflow ${existingWorkflowId} not found`);
   }
@@ -1912,7 +2044,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       brief,
       args.signal,
       existingWorkflow
-        ? { title: existingWorkflow.title, graph: existingWorkflow.graph as WorkflowGraph }
+        ? { id: existingWorkflow.id, title: existingWorkflow.title, graph: existingWorkflow.graph as WorkflowGraph }
         : undefined,
     );
     if (!outcome.graph) {
@@ -2189,7 +2321,7 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   const emptyGraph: WorkflowGraph = { ...graph, nodes: [], edges: [] };
   // When streaming, persist an empty graph first so nodes animate in; otherwise
   // persist the full graph in one shot.
-  const initialGraph = args.stream ? emptyGraph : graph;
+  const initialGraph = emptyGraph;
   if (!existingWorkflow) {
     deps.db.insert(schema.workflows).values({
       id: workflowId,
@@ -2317,13 +2449,14 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
       .set({
         title,
         description: persistedDescription,
-        graph,
-        contentHash: hashWorkflowGraph(graph),
         settings: { ...((existingWorkflow?.settings as Record<string, unknown>) ?? {}), intentManifest },
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflows.id, workflowId))
       .run();
+  }
+  if (!deps.revisions) {
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
   }
   phase('complete', `${graph.nodes.length} node(s), ${repairs.length} repair(s), ${critiques.length} critique(s)`);
   publishCanvas(deps, pubCtx, REALTIME_EVENTS.CANVAS_BUILD_COMPLETE, {
@@ -2365,6 +2498,17 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
   } catch (err) {
     deps.logger.warn('createWorkflow.autoscope_failed', { workflowId, error: (err as Error).message });
   }
+  const revisionBase = deps.revisions.candidate(args.workspaceId, workflowId)?.revision
+    ?? deps.revisions.ensureWorkflow(args.workspaceId, workflowId).active;
+  const candidateRevision = deps.revisions.createCandidate({
+    workspaceId: args.workspaceId,
+    workflowId,
+    graph,
+    baseRevisionId: revisionBase.id,
+    source: 'agent_build',
+    actor: { type: args.agentId ? 'agent' : 'user', id: args.agentId ?? args.userId },
+    reason: existingWorkflow ? `Agent refinement: ${description}` : `Initial agent build: ${description}`,
+  }).revision;
 
   // PAVED-ROAD P1 — stamp durable loop-state (authored + gated at this graph
   // hash; prior dry-run/debug evidence goes stale by hash) and hand back the
@@ -2400,6 +2544,9 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     teamRoster,
     plan: brief.classification.archetype === 'enterprise' ? planWorkflow(description, brief.classification) : undefined,
     graph,
+    activeRevisionId: deps.revisions.active(args.workspaceId, workflowId).revision.id,
+    candidateRevisionId: candidateRevision.id,
+    trustState: 'candidate',
     health,
     trace,
     compass,
@@ -3879,7 +4026,7 @@ async function synthesizeWithLlm(
   completer: StructuredCompleter,
   brief?: CreationBrief,
   signal?: AbortSignal,
-  mutation?: { title: string; graph: WorkflowGraph },
+  mutation?: { id: string; title: string; graph: WorkflowGraph },
 ): Promise<SynthesisOutcome> {
   const runtime = completer;
   const inv = brief?.inventory;
@@ -3918,12 +4065,34 @@ async function synthesizeWithLlm(
     });
 
   const workspaceContext = inv?.workspaceContext ?? '';
+  let experienceDossier = '';
+  if (deps.workflowExperience) {
+    try {
+      const workflow = mutation
+        ? deps.db.select({
+            appId: schema.workflows.appId,
+            activeRevisionId: schema.workflows.activeRevisionId,
+            candidateRevisionId: schema.workflows.candidateRevisionId,
+          }).from(schema.workflows).where(eq(schema.workflows.id, mutation.id)).get()
+        : null;
+      experienceDossier = deps.workflowExperience.renderDossier({
+        workspaceId,
+        workflowId: mutation?.id ?? '__new_workflow__',
+        appId: workflow?.appId ?? null,
+        activeRevisionId: workflow?.activeRevisionId ?? null,
+        candidateRevisionId: workflow?.candidateRevisionId ?? null,
+      });
+    } catch (error) {
+      deps.logger.warn('workflow.synthesis_experience_failed', { workspaceId, error: (error as Error).message });
+    }
+  }
   // The architecture protocol (12 iron rules) prevents one-node collapse + phantom
   // wiring; the creation brief tells the model what this workspace can actually wire.
   const systemPrompt = `${SYNTHESIS_ARCHITECT_PREAMBLE}\n\n${SYNTHESIS_SYSTEM_PROMPT}`;
   const userPrompt = [
     workspaceContext ? `${workspaceContext}\n` : '',
     brief ? renderCreationBrief(brief) : '',
+    experienceDossier,
     // Phase 5 — feed the workspace's learned failure-mode lessons back into the
     // build so each new workflow is designed around mistakes past runs already hit.
     renderPlaybookLessons(recallWorkflowLessons(deps.memory, workspaceId)),

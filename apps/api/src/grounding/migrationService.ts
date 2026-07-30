@@ -20,6 +20,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { schema } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
 import type { ClaimService } from './claimService.js';
+import { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
 
 export interface MigrationServiceDeps {
   db: AgentisSqliteDb;
@@ -276,15 +277,27 @@ export class GroundingMigrationService {
     };
     if (!evidence.draft?.graph) throw new Error('No draft graph on the candidate — generate the draft first.');
     const workflowId = randomUUID();
+    const draftGraph = evidence.draft.graph;
     this.db.insert(schema.workflows).values({
       id: workflowId,
       workspaceId,
       userId: ownerUserId,
       title: `[Migration draft] ${evidence.draft.title ?? candidate.title}`,
       description: `Generated from observed work "${candidate.title}". Shadow verdict: ${evidence.comparison?.verdict ?? 'none'}. Review and arm a trigger to activate.`,
-      graph: evidence.draft.graph,
+      graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
       tags: ['migration-draft'],
     }).run();
+    const revisions = new WorkflowRevisionService(this.db);
+    const active = revisions.ensureWorkflow(workspaceId, workflowId).active;
+    revisions.createCandidate({
+      workspaceId,
+      workflowId,
+      graph: draftGraph as unknown as import('@agentis/core').WorkflowGraph,
+      baseRevisionId: active.id,
+      source: 'import',
+      actor: { type: 'user', id: ownerUserId },
+      reason: `Grounding migration draft for ${candidate.title}`,
+    });
     this.db.update(schema.groundingMigrationCandidates)
       .set({
         status: 'owner_approved',

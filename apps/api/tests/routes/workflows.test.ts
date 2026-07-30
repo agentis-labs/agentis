@@ -300,7 +300,7 @@ describe('workflow deployment', () => {
       headers: ctx.authHeaders,
     });
     expect(blocked.status).not.toBe(200);
-    expect(JSON.stringify(await blocked.json())).toMatch(/BLOCKED_LIFECYCLE_NOT_HARDENED/);
+    expect(JSON.stringify(await blocked.json())).toMatch(/WORKFLOW_REVISION_UNPROVEN|Unattended triggers require a proven active revision/);
 
     const publish = await app(runtime).request(`/v1/workflows/${id}/activate`, {
       method: 'POST',
@@ -696,7 +696,7 @@ describe('GET /v1/workflows/:id/output', () => {
 });
 
 describe('POST /v1/workflows/:id/run', () => {
-  it('repairs integration operations generically before dispatching the run', async () => {
+  it('stages integration-operation normalization as a candidate instead of mutating production at dispatch', async () => {
     const graph: WorkflowGraph = {
       version: 1,
       viewport: { x: 0, y: 0, zoom: 1 },
@@ -731,13 +731,13 @@ describe('POST /v1/workflows/:id/run', () => {
       headers: ctx.authHeaders,
       body: JSON.stringify({ inputs: {} }),
     });
-    expect(res.status).toBe(202);
-    expect(engine.startRun).toHaveBeenCalledTimes(1);
-    const call = engine.startRun.mock.calls[0]?.[0] as { graph: WorkflowGraph } | undefined;
-    expect((call?.graph.nodes.find((node) => node.id === 'send')?.config as { operationId?: string } | undefined)?.operationId).toBe('send_message');
+    expect(res.status).toBe(422);
+    expect(engine.startRun).not.toHaveBeenCalled();
+    const response = await res.json() as { error?: { details?: { candidateRevisionId?: string } } };
+    expect(response.error?.details?.candidateRevisionId).toBeTruthy();
     const persisted = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, id)).get();
     const send = ((persisted?.graph as WorkflowGraph).nodes.find((node) => node.id === 'send')?.config as { operationId?: string } | undefined);
-    expect(send?.operationId).toBe('send_message');
+    expect(send?.operationId).toBe('send_email');
   });
 });
 

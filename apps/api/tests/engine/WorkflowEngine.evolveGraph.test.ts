@@ -112,7 +112,9 @@ describe('WorkflowEngine.evolveGraph — the contract transaction', () => {
     expect(res.committed).toBe(true);
     if (res.committed) expect(res.newRevision).toBe(2);
     const wf = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, wfId)).get()!;
-    expect((wf.graph as WorkflowGraph).nodes.map((n) => n.id).sort()).toEqual(['A', 'P', 'T']);
+    expect((wf.graph as WorkflowGraph).nodes.map((n) => n.id).sort()).toEqual(['P', 'T']);
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect((run.graphSnapshot as WorkflowGraph).nodes.map((node) => node.id).sort()).toEqual(['A', 'P', 'T']);
   });
 
   it('rejects a NEW coupling break with a named regression (never commits)', async () => {
@@ -250,9 +252,11 @@ describe('WorkflowEngine — agent self-evolution e2e (M2)', () => {
 
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     expect(run.status).toBe('COMPLETED');
-    // The agent-authored node exists in the persisted graph AND executed.
-    const finalGraph = (ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, wfId)).get()!.graph) as WorkflowGraph;
+    // The agent-authored node exists only in this run's snapshot and executed.
+    const finalGraph = run.graphSnapshot as WorkflowGraph;
     expect(finalGraph.nodes.some((n) => n.id === 'X')).toBe(true);
+    const activeGraph = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, wfId)).get()!.graph as WorkflowGraph;
+    expect(activeGraph.nodes.some((node) => node.id === 'X')).toBe(false);
     const state = run.runState as { nodeStates: Record<string, { status: string; outputData?: { evolved?: boolean } }> };
     expect(state.nodeStates.X?.status).toBe('COMPLETED');
     expect(state.nodeStates.X?.outputData?.evolved).toBe(true);

@@ -2895,6 +2895,203 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_custom_providers_id ON oauth_custom_
 ALTER TABLE extensions ADD COLUMN credential_bindings TEXT NOT NULL DEFAULT '{}';
 `,
   },
+  {
+    version: 122,
+    name: 'proven_workflow_revisions',
+    sql: `
+CREATE TABLE workflow_graph_revisions (
+  id                       TEXT PRIMARY KEY,
+  workspace_id             TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id              TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  parent_revision_id       TEXT,
+  graph_json               TEXT NOT NULL,
+  semantic_hash            TEXT NOT NULL,
+  presentation_hash        TEXT NOT NULL,
+  source                   TEXT NOT NULL,
+  actor_type               TEXT NOT NULL DEFAULT 'system',
+  actor_id                 TEXT,
+  reason                   TEXT NOT NULL DEFAULT '',
+  change_summary_json      TEXT NOT NULL DEFAULT '{}',
+  spec_json                TEXT,
+  capability_manifest_json TEXT NOT NULL DEFAULT '{}',
+  proof_profile            TEXT NOT NULL DEFAULT 'standard',
+  status                   TEXT NOT NULL DEFAULT 'candidate',
+  trust_state              TEXT NOT NULL DEFAULT 'unverified',
+  verified_at              TEXT,
+  promoted_at              TEXT,
+  rejected_at              TEXT,
+  created_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at               TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_workflow_graph_revisions_workflow
+  ON workflow_graph_revisions(workspace_id, workflow_id, created_at);
+CREATE INDEX idx_workflow_graph_revisions_hash
+  ON workflow_graph_revisions(workspace_id, workflow_id, semantic_hash);
+CREATE INDEX idx_workflow_graph_revisions_status
+  ON workflow_graph_revisions(workspace_id, workflow_id, status);
+
+ALTER TABLE workflows ADD COLUMN active_revision_id TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL;
+ALTER TABLE workflows ADD COLUMN candidate_revision_id TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL;
+ALTER TABLE workflows ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'legacy_unverified';
+
+INSERT INTO workflow_graph_revisions (
+  id, workspace_id, workflow_id, graph_json, semantic_hash, presentation_hash,
+  source, actor_type, reason, proof_profile, status, trust_state
+)
+SELECT
+  'legacy-' || id,
+  workspace_id,
+  id,
+  graph,
+  COALESCE(content_hash, 'legacy-' || id),
+  COALESCE(content_hash, 'legacy-' || id),
+  'migration',
+  'system',
+  'Initial compatibility revision created during immutable-revision migration',
+  'legacy',
+  'active',
+  'legacy_unverified'
+FROM workflows
+WHERE EXISTS (
+  SELECT 1 FROM workspaces
+  WHERE workspaces.id = workflows.workspace_id
+);
+
+UPDATE workflows
+SET active_revision_id = 'legacy-' || id,
+    candidate_revision_id = NULL,
+    trust_state = 'legacy_unverified'
+WHERE EXISTS (
+  SELECT 1 FROM workflow_graph_revisions
+  WHERE workflow_graph_revisions.id = 'legacy-' || workflows.id
+);
+
+CREATE TABLE workflow_revision_proofs (
+  id                         TEXT PRIMARY KEY,
+  workspace_id               TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id                TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  revision_id                TEXT NOT NULL REFERENCES workflow_graph_revisions(id) ON DELETE CASCADE,
+  gate                       TEXT NOT NULL,
+  status                     TEXT NOT NULL,
+  semantic_hash              TEXT NOT NULL,
+  fixture_key                TEXT NOT NULL DEFAULT 'default',
+  run_id                     TEXT,
+  capability_catalog_version TEXT,
+  evidence_json              TEXT NOT NULL DEFAULT '{}',
+  created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_workflow_revision_proof_gate
+  ON workflow_revision_proofs(revision_id, gate, fixture_key);
+CREATE INDEX idx_workflow_revision_proofs_status
+  ON workflow_revision_proofs(revision_id, status);
+
+CREATE TABLE workflow_experiences (
+  id                      TEXT PRIMARY KEY,
+  workspace_id            TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id             TEXT REFERENCES workflows(id) ON DELETE CASCADE,
+  app_id                  TEXT REFERENCES apps(id) ON DELETE CASCADE,
+  agent_id                TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  revision_id             TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL,
+  scope_type              TEXT NOT NULL,
+  scope_id                TEXT NOT NULL,
+  applicability_key       TEXT NOT NULL,
+  kind                    TEXT NOT NULL,
+  status                  TEXT NOT NULL DEFAULT 'pending',
+  failure_fingerprint     TEXT,
+  failure_class           TEXT,
+  title                   TEXT NOT NULL,
+  root_cause              TEXT NOT NULL DEFAULT '',
+  repair_summary          TEXT NOT NULL DEFAULT '',
+  preconditions_json      TEXT NOT NULL DEFAULT '{}',
+  regression_fixture_json TEXT,
+  evidence_json           TEXT NOT NULL DEFAULT '{}',
+  confidence              REAL NOT NULL DEFAULT 0,
+  success_count           INTEGER NOT NULL DEFAULT 0,
+  supersedes_id           TEXT,
+  created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_workflow_experiences_scope
+  ON workflow_experiences(workspace_id, scope_type, scope_id, status);
+CREATE INDEX idx_workflow_experiences_fingerprint
+  ON workflow_experiences(workspace_id, workflow_id, failure_fingerprint);
+CREATE INDEX idx_workflow_experiences_applicability
+  ON workflow_experiences(workspace_id, scope_type, scope_id, applicability_key, status);
+
+CREATE TABLE workflow_repair_attempts (
+  id                    TEXT PRIMARY KEY,
+  workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workflow_id           TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  base_revision_id      TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL,
+  failure_fingerprint   TEXT NOT NULL,
+  run_id                TEXT,
+  node_id               TEXT,
+  status                TEXT NOT NULL DEFAULT 'proposed',
+  candidate_revision_id TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL,
+  attempt_count         INTEGER NOT NULL DEFAULT 1,
+  last_error            TEXT,
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_workflow_repair_attempt_fingerprint
+  ON workflow_repair_attempts(workspace_id, workflow_id, base_revision_id, failure_fingerprint);
+
+ALTER TABLE workflow_runs ADD COLUMN workflow_revision_id TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL;
+ALTER TABLE workflow_runs ADD COLUMN repaired_from_revision_id TEXT REFERENCES workflow_graph_revisions(id) ON DELETE SET NULL;
+CREATE INDEX idx_workflow_runs_revision ON workflow_runs(workflow_revision_id);
+`,
+  },
+  {
+    version: 123,
+    name: 'immutable_app_interfaces',
+    sql: `
+ALTER TABLE apps ADD COLUMN active_interface_revision_id TEXT;
+ALTER TABLE apps ADD COLUMN candidate_interface_revision_id TEXT;
+ALTER TABLE apps ADD COLUMN interface_trust_state TEXT NOT NULL DEFAULT 'legacy_unverified';
+
+CREATE TABLE app_interface_revisions (
+  id                 TEXT PRIMARY KEY,
+  workspace_id       TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id             TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  parent_revision_id TEXT,
+  pages_json         TEXT NOT NULL DEFAULT '[]',
+  semantic_hash      TEXT NOT NULL,
+  source             TEXT NOT NULL DEFAULT 'operator',
+  actor_type         TEXT NOT NULL DEFAULT 'user',
+  actor_id           TEXT,
+  reason             TEXT NOT NULL DEFAULT 'Interface update',
+  status             TEXT NOT NULL DEFAULT 'candidate',
+  trust_state        TEXT NOT NULL DEFAULT 'candidate',
+  verified_at        TEXT,
+  published_at       TEXT,
+  rejected_at        TEXT,
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_app_interface_revisions_app
+  ON app_interface_revisions(workspace_id, app_id, created_at);
+CREATE INDEX idx_app_interface_revisions_hash
+  ON app_interface_revisions(app_id, semantic_hash);
+
+CREATE TABLE app_interface_proofs (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id        TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+  revision_id   TEXT NOT NULL REFERENCES app_interface_revisions(id) ON DELETE CASCADE,
+  gate          TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  semantic_hash TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_app_interface_proof_gate
+  ON app_interface_proofs(revision_id, gate);
+CREATE INDEX idx_app_interface_proofs_revision
+  ON app_interface_proofs(revision_id, status);
+`,
+  },
 ];
 
 

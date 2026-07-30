@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@agentis/db/sqlite';
+import type { AgentAdapter } from '@agentis/core';
+import { eq } from 'drizzle-orm';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { buildAgentRoutes } from '../../src/routes/agents.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
@@ -145,6 +147,47 @@ describe('agent runtime routes', () => {
     );
     expect(closeResponse.status).toBe(204);
     expect(new RuntimeSessionStore(ctx.db).list(ctx.workspace.id, agentId)).toEqual([]);
+  });
+
+  it('presents Antigravity model and effort as separate controls', async () => {
+    ctx.db.update(schema.agents).set({
+      adapterType: 'antigravity',
+      runtimeModel: 'Gemini 3.6 Flash (High)',
+      config: { model: 'Gemini 3.6 Flash (High)', modelReasoningEffort: 'high' },
+      status: 'online',
+    }).where(eq(schema.agents.id, agentId)).run();
+    adapters.register(agentId, {
+      adapterType: 'antigravity',
+      connect: async () => {},
+      disconnect: async () => {},
+      healthCheck: async () => ({ isHealthy: true, checkedAt: new Date().toISOString() }),
+      capabilities: () => ({ interactiveChat: true }),
+      dispatchTask: async () => {},
+      cancelTask: async () => {},
+      onEvent: () => {},
+      getRuntimeContext: async () => ({
+        provider: 'antigravity',
+        models: [],
+        currentModel: 'Gemini 3.6 Flash (High)',
+        fastModeSupported: false,
+      }),
+    } as AgentAdapter);
+
+    const response = await app().request(`/v1/agents/${agentId}/runtime-context`, {
+      headers: ctx.authHeaders,
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      currentModel: string;
+      currentEffort: string;
+      models: Array<{ id: string; label: string }>;
+      efforts: Array<{ id: string; label: string }>;
+    };
+    expect(body.currentModel).toBe('Gemini 3.6 Flash');
+    expect(body.currentEffort).toBe('high');
+    expect(body.efforts.map((effort) => effort.label)).toEqual(['High', 'Medium', 'Low']);
+    expect(body.models.filter((model) => model.id === 'Gemini 3.6 Flash')).toHaveLength(1);
+    expect(body.models.some((model) => /\((?:High|Medium|Low)\)$/.test(model.label))).toBe(false);
   });
 });
 

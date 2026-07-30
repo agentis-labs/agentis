@@ -209,6 +209,18 @@ export interface ViewportContext {
     kind?: string;
   } | null;
   activeRunId?: string | null;
+  /**
+   * Exact App-interface lease captured from the visible URL. UI authoring tools
+   * must honor this target instead of guessing from an App-level ambient id.
+   */
+  appView?: {
+    appId: string;
+    page?: string;
+    mode?: 'live' | 'ask' | 'edit' | 'history' | 'code';
+    selectedNodeId?: string | null;
+    facet?: string | null;
+    targetLocked?: boolean;
+  } | null;
   metadata?: Record<string, unknown>;
 }
 

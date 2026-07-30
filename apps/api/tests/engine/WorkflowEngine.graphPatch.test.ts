@@ -102,7 +102,7 @@ function patch(overrides: Partial<WorkflowGraphPatch> = {}): WorkflowGraphPatch 
 }
 
 describe('WorkflowEngine.applyGraphPatch', () => {
-  it('adds nodes + edges, bumps revision, persists graph, emits event', async () => {
+  it('adds nodes + edges to the run snapshot, bumps revision, and emits an event without mutating production', async () => {
     const { wfId, runId } = seedRun();
     const events: string[] = [];
     ctx.bus.subscribe((m) => {
@@ -130,11 +130,13 @@ describe('WorkflowEngine.applyGraphPatch', () => {
 
     const wf = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, wfId)).get();
     const graph = wf!.graph as WorkflowGraph;
-    expect(graph.nodes.map((n) => n.id).sort()).toEqual(['A', 'T']);
-    expect(graph.edges.map((e) => e.id)).toEqual(['T-A']);
+    expect(graph.nodes.map((n) => n.id)).toEqual(['T']);
+    expect(graph.edges).toEqual([]);
 
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get();
     expect((run!.runState as { graphRevision: number }).graphRevision).toBe(2);
+    expect((run!.graphSnapshot as WorkflowGraph).nodes.map((node) => node.id).sort()).toEqual(['A', 'T']);
+    expect((run!.graphSnapshot as WorkflowGraph).edges.map((edge) => edge.id)).toEqual(['T-A']);
   });
 
   it('rejects with GRAPH_REVISION_CONFLICT when baseGraphRevision stale', async () => {

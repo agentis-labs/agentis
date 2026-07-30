@@ -19,7 +19,7 @@ describe('workspaceChromeData', () => {
           },
           latestActivity: { id: 'evt_1', summary: 'Agent checked in', createdAt: '2026-07-09T00:00:00.000Z' },
           notifications: [],
-          counts: { liveAgents: 3, activeRuns: 2 },
+          counts: { liveAgents: 3, totalAgents: 7, activeRuns: 2 },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
@@ -36,7 +36,7 @@ describe('workspaceChromeData', () => {
     expect(getWorkspaceChromeSnapshot()).toMatchObject({
       workspaceId: 'ws-chrome',
       loading: false,
-      counts: { liveAgents: 3, activeRuns: 2 },
+      counts: { liveAgents: 3, totalAgents: 7, activeRuns: 2 },
       latestActivity: { summary: 'Agent checked in' },
     });
   });

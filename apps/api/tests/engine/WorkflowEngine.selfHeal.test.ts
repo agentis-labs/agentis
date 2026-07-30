@@ -27,7 +27,6 @@ import { WorkspaceVolumeService } from '../../src/services/workspace/workspaceVo
 import { AgentToolRuntime } from '../../src/services/agent/agentToolRuntime.js';
 import { EvaluatorRuntime } from '../../src/services/evaluatorRuntime.js';
 import { SpecialistAgentService } from '../../src/services/specialist/specialistAgents.js';
-import { setSelfHealConfig } from '../../src/services/selfHealSettings.js';
 import { WorkflowSelfHealService, type SelfHealResult } from '../../src/services/workflow/workflowSelfHeal.js';
 import { setSelfHealConfig } from '../../src/services/selfHealSettings.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
@@ -143,7 +142,7 @@ function selfHealChatAdapter(args: {
   } as AgentAdapter;
 }
 
-function failingTaskAdapter(): AgentAdapter {
+function failingTaskAdapter(message = 'claude_code exited 1'): AgentAdapter {
   return {
     adapterType: 'claude_code',
     connect: async () => {},
@@ -151,7 +150,7 @@ function failingTaskAdapter(): AgentAdapter {
     healthCheck: async () => ({ isHealthy: true, checkedAt: new Date().toISOString() }),
     capabilities: () => ({ interactiveChat: false, toolCalling: false, toolForwarding: 'none' }),
     dispatchTask: async () => {
-      throw new Error('claude_code exited 1');
+      throw new Error(message);
     },
     cancelTask: async () => {},
     onEvent: () => {},
@@ -186,6 +185,24 @@ function graphWithPinnedMissingAdapter(): WorkflowGraph {
   } as WorkflowGraph;
 }
 
+function seedPinnedAgent(agentId = 'missing-agent'): void {
+  const now = new Date().toISOString();
+  ctx.db.insert(schema.agents).values({
+    id: agentId,
+    workspaceId: ctx.workspace.id,
+    ambientId: ctx.ambient.id,
+    userId: ctx.user.id,
+    name: 'Pinned specialist',
+    adapterType: 'claude_code',
+    capabilityTags: [],
+    config: {},
+    status: 'online',
+    role: 'specialist',
+    createdAt: now,
+    updatedAt: now,
+  }).run();
+}
+
 function runTo(engine: WorkflowEngine, graph: WorkflowGraph, isTerminal: (m: BusMessage) => boolean): Promise<string> {
   const wfId = randomUUID();
   ctx.db.insert(schema.workflows).values({ id: wfId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, title: 'sh', graph, settings: {} }).run();
@@ -204,7 +221,11 @@ function runTo(engine: WorkflowEngine, graph: WorkflowGraph, isTerminal: (m: Bus
       seen.push(m.envelope.event);
       if (isTerminal(m)) { clearTimeout(timer); off(); resolve(runId); }
     });
-    void engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph });
+    void engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph }).catch((error) => {
+      clearTimeout(timer);
+      off();
+      reject(error);
+    });
   });
 }
 
@@ -223,8 +244,13 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
     const runId = await runTo(engine, graphWithKeys(['location', 'budget']), completedOrFailed);
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
     expect(run.status).toBe('COMPLETED');
-    const state = run.runState as { nodeStates: Record<string, { outputData?: Record<string, unknown> }> };
+    const state = run.runState as {
+      nodeStates: Record<string, { outputData?: Record<string, unknown> }>;
+      selfHealIncidents?: Record<string, { trace?: Array<{ phase: string; summary: string }> }>;
+    };
     expect(state.nodeStates.A?.outputData?.location).toBe('Paris');
+    expect(state.selfHealIncidents?.A?.trace?.some((entry) => entry.phase === 'diagnose')).toBe(true);
+    expect(state.selfHealIncidents?.A?.trace?.some((entry) => entry.phase === 'verify')).toBe(true);
   });
 
   it('applies a certified structural patch autonomously, then completes (W7)', async () => {
@@ -291,6 +317,9 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
   });
 
   it('surfaces a self-heal approval when dispatch fails through the shared failure path', async () => {
+    seedPinnedAgent();
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register('missing-agent', failingTaskAdapter('OUTPUT_CONTRACT_VIOLATION: dispatch result omitted required fields'));
     const engine = buildEngine(async (input) => {
       const graph = (input as { graph: WorkflowGraph }).graph;
       const patchedGraph: WorkflowGraph = {
@@ -307,7 +336,7 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
         tier: 'minimal_patch',
         resumeNodeId: 'A',
       } as SelfHealResult;
-    });
+    }, { adapters });
     const waitForApproval = (m: BusMessage) => {
       const payload = m.envelope.payload as { status?: string };
       return (m.envelope.event === REALTIME_EVENTS.RUN_RUNNING && payload.status === 'WAITING') || completedOrFailed(m);
@@ -382,10 +411,8 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
     return orchestratorId;
   }
 
-  it('reroutes a runtime-blocked step to the orchestrator and proposes it for approval (default)', async () => {
-    // The step's pinned agent has no runtime. Deterministic runtime repair must
-    // re-route to the orchestrator (the default healer) WITHOUT spending an LLM
-    // call. In approve mode that surfaces as a one-click approval.
+  it('blocks a runtime-unready step before self-heal or paid work begins', async () => {
+    seedPinnedAgent();
     const orchestratorId = seedOrchestrator();
     let sawHeal = false;
     let resolvedOrchestrator = false;
@@ -401,21 +428,12 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
       },
     });
 
-    const waitForApproval = (m: BusMessage) => {
-      const payload = m.envelope.payload as { status?: string };
-      return (m.envelope.event === REALTIME_EVENTS.RUN_RUNNING && payload.status === 'WAITING') || completedOrFailed(m);
-    };
-    await runTo(engine, graphWithPinnedMissingAdapter(), waitForApproval);
-
+    await expect(runTo(engine, graphWithPinnedMissingAdapter(), completedOrFailed))
+      .rejects.toThrow(/no executable runtime/i);
     expect(sawHeal).toBe(false);
-    expect(resolvedOrchestrator).toBe(true);
+    expect(resolvedOrchestrator).toBe(false);
     const pending = new ApprovalInboxService(ctx.db, ctx.bus).list(ctx.workspace.id, 'pending');
-    expect(pending).toHaveLength(1);
-    expect(pending[0]!.source).toBe('self_heal');
-    const payload = pending[0]!.payload as { kind: string; nodeId: string; patch: { updateNodes: Array<{ id: string; config: { agentId?: string } }> } };
-    expect(payload.kind).toBe('graph_patch');
-    expect(payload.nodeId).toBe('A');
-    expect(payload.patch.updateNodes.find((n) => n.id === 'A')?.config.agentId).toBe(orchestratorId);
+    expect(pending).toHaveLength(0);
   });
 
   it('runs the full-power replan through the same chat executor and returns a validated repair graph', async () => {
@@ -468,7 +486,7 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
       toolRegistry: registry,
       resolveAgentRuntime: (_workspaceId, agentId) => {
         if (agentId === orchestratorId) return adapter;
-        if (agentId === failingAgentId) return failingTaskAdapter();
+        if (agentId === failingAgentId) return failingTaskAdapter('OUTPUT_CONTRACT_INVALID: declared output contract was not satisfied');
         return undefined;
       },
     });
@@ -511,7 +529,11 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
       adapters,
       evaluatorRuntime: null,
       resolveAgentRuntime: (_workspaceId, agentId) =>
-        agentId === orchestratorId ? adapter : agentId === failingAgentId ? failingTaskAdapter() : undefined,
+        agentId === orchestratorId
+          ? adapter
+          : agentId === failingAgentId
+            ? failingTaskAdapter('OUTPUT_CONTRACT_INVALID: declared output contract was not satisfied')
+            : undefined,
     });
 
     const runId = await runTo(engine, baseGraph, completedOrFailed);

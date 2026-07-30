@@ -11,6 +11,7 @@ import {
   type AgentisPackageContents,
   type PackageManifest,
   type PackageExportEnvelope,
+  type WorkflowGraph,
 } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { BrainReader, BrainWriter } from '@agentis/app';
@@ -45,6 +46,7 @@ export interface UsePackageResult {
 import type { Logger } from '../logger.js';
 import type { SkillService } from './skillService.js';
 import { ensureReportsToTarget, ensureSingleOrchestrator, ORCHESTRATOR_DEFAULT_COLOR } from './agent/agentCommission.js';
+import { WorkflowRevisionService } from './workflow/workflowRevisionService.js';
 
 export interface UsePackageOptions {
   agent?: {
@@ -323,7 +325,7 @@ export class PackagerService {
           registryVersion: null,
           title: contents.workflow.title,
           description: contents.workflow.description ?? row.description ?? null,
-          graph: contents.workflow.graph,
+          graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
           settings: contents.workflow.settings,
           maxConcurrentRuns: contents.workflow.maxConcurrentRuns ?? null,
           concurrencyOverflow: contents.workflow.concurrencyOverflow ?? 'queue',
@@ -333,6 +335,17 @@ export class PackagerService {
           updatedAt: now,
         })
         .run();
+      const revisions = new WorkflowRevisionService(this.deps.db);
+      const active = revisions.ensureWorkflow(scope.workspaceId, id).active;
+      revisions.createCandidate({
+        workspaceId: scope.workspaceId,
+        workflowId: id,
+        graph: contents.workflow.graph as WorkflowGraph,
+        baseRevisionId: active.id,
+        source: 'import',
+        actor: { type: 'user', id: scope.userId },
+        reason: `Installed workflow package ${row.name}`,
+      });
       return { kind: 'workflow', resourceId: id, path: `/workflows/${id}` };
     }
     if (contents.kind === 'agent') {
@@ -587,7 +600,7 @@ export class PackagerService {
           registryVersion: null,
           title: workflow.title,
           description: workflow.description ?? null,
-          graph,
+          graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
           settings: objectRecord(workflow.settings),
           maxConcurrentRuns: workflow.maxConcurrentRuns ?? null,
           concurrencyOverflow: workflow.concurrencyOverflow ?? 'queue',
@@ -597,6 +610,17 @@ export class PackagerService {
           updatedAt: now,
         })
         .run();
+      const revisions = new WorkflowRevisionService(this.deps.db);
+      const active = revisions.ensureWorkflow(scope.workspaceId, id).active;
+      revisions.createCandidate({
+        workspaceId: scope.workspaceId,
+        workflowId: id,
+        graph: graph as unknown as WorkflowGraph,
+        baseRevisionId: active.id,
+        source: 'import',
+        actor: { type: 'user', id: scope.userId },
+        reason: `Installed from Agentis package ${packageSlug}`,
+      });
       workflowIds.set(slug, id);
       workflowIds.set(this.slugFor(workflow.title), id);
     }

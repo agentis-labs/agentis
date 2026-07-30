@@ -401,6 +401,12 @@ export const workflows = sqliteTable('workflows', {
   graph: text('graph', { mode: 'json' }).notNull(),
   /** SHA-256 fingerprint of the canonical graph (divergence detection). Null until next save. */
   contentHash: text('content_hash'),
+  /** Immutable revision currently trusted for production execution. */
+  activeRevisionId: text('active_revision_id'),
+  /** Editable revision head. It never affects production until promoted. */
+  candidateRevisionId: text('candidate_revision_id'),
+  /** proven | candidate | legacy_unverified | break_glass. */
+  trustState: text('trust_state').notNull().default('legacy_unverified'),
   settings: text('settings', { mode: 'json' }).notNull().default(sql`'{}'`),
   isFromRegistry: integer('is_from_registry', { mode: 'boolean' }).notNull().default(false),
   maxConcurrentRuns: integer('max_concurrent_runs'),
@@ -411,6 +417,180 @@ export const workflows = sqliteTable('workflows', {
   tags: text('tags', { mode: 'json' }).notNull().default(sql`'[]'`),
   ...baseTimestamps(),
 });
+
+/**
+ * Immutable workflow source revisions. `workflows.graph` remains a
+ * compatibility mirror of the active row; this table is the source of truth.
+ */
+export const workflowGraphRevisions = sqliteTable(
+  'workflow_graph_revisions',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    parentRevisionId: text('parent_revision_id'),
+    graphJson: text('graph_json', { mode: 'json' }).notNull(),
+    semanticHash: text('semantic_hash').notNull(),
+    presentationHash: text('presentation_hash').notNull(),
+    source: text('source').notNull(),
+    actorType: text('actor_type').notNull().default('system'),
+    actorId: text('actor_id'),
+    reason: text('reason').notNull().default(''),
+    changeSummaryJson: text('change_summary_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    specJson: text('spec_json', { mode: 'json' }),
+    capabilityManifestJson: text('capability_manifest_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    proofProfile: text('proof_profile').notNull().default('standard'),
+    status: text('status').notNull().default('candidate'),
+    trustState: text('trust_state').notNull().default('unverified'),
+    verifiedAt: text('verified_at'),
+    promotedAt: text('promoted_at'),
+    rejectedAt: text('rejected_at'),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    workflowCreated: index('idx_workflow_graph_revisions_workflow').on(
+      table.workspaceId,
+      table.workflowId,
+      table.createdAt,
+    ),
+    workflowHash: index('idx_workflow_graph_revisions_hash').on(
+      table.workspaceId,
+      table.workflowId,
+      table.semanticHash,
+    ),
+    workflowStatus: index('idx_workflow_graph_revisions_status').on(
+      table.workspaceId,
+      table.workflowId,
+      table.status,
+    ),
+  }),
+);
+
+export const workflowRevisionProofs = sqliteTable(
+  'workflow_revision_proofs',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    revisionId: text('revision_id')
+      .notNull()
+      .references(() => workflowGraphRevisions.id, { onDelete: 'cascade' }),
+    gate: text('gate').notNull(),
+    status: text('status').notNull(),
+    semanticHash: text('semantic_hash').notNull(),
+    fixtureKey: text('fixture_key').notNull().default('default'),
+    runId: text('run_id'),
+    capabilityCatalogVersion: text('capability_catalog_version'),
+    evidenceJson: text('evidence_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    revisionGate: uniqueIndex('uq_workflow_revision_proof_gate').on(
+      table.revisionId,
+      table.gate,
+      table.fixtureKey,
+    ),
+    revisionStatus: index('idx_workflow_revision_proofs_status').on(table.revisionId, table.status),
+  }),
+);
+
+/**
+ * A durable, evidence-backed lesson. Raw failures are observations; only a
+ * verified repair or accomplished run may become an active experience.
+ */
+export const workflowExperiences = sqliteTable(
+  'workflow_experiences',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id').references(() => workflows.id, { onDelete: 'cascade' }),
+    appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'cascade' }),
+    agentId: text('agent_id').references((): AnySQLiteColumn => agents.id, { onDelete: 'set null' }),
+    revisionId: text('revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+    scopeType: text('scope_type').notNull(),
+    scopeId: text('scope_id').notNull(),
+    applicabilityKey: text('applicability_key').notNull(),
+    kind: text('kind').notNull(),
+    status: text('status').notNull().default('pending'),
+    failureFingerprint: text('failure_fingerprint'),
+    failureClass: text('failure_class'),
+    title: text('title').notNull(),
+    rootCause: text('root_cause').notNull().default(''),
+    repairSummary: text('repair_summary').notNull().default(''),
+    preconditionsJson: text('preconditions_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    regressionFixtureJson: text('regression_fixture_json', { mode: 'json' }),
+    evidenceJson: text('evidence_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    confidence: real('confidence').notNull().default(0),
+    successCount: integer('success_count').notNull().default(0),
+    supersedesId: text('supersedes_id'),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    scopeApplicability: index('idx_workflow_experiences_scope').on(
+      table.workspaceId,
+      table.scopeType,
+      table.scopeId,
+      table.status,
+    ),
+    workflowFingerprint: index('idx_workflow_experiences_fingerprint').on(
+      table.workspaceId,
+      table.workflowId,
+      table.failureFingerprint,
+    ),
+    activeApplicability: index('idx_workflow_experiences_applicability').on(
+      table.workspaceId,
+      table.scopeType,
+      table.scopeId,
+      table.applicabilityKey,
+      table.status,
+    ),
+  }),
+);
+
+/** Cross-run repair budget keyed by stable failure fingerprint and base revision. */
+export const workflowRepairAttempts = sqliteTable(
+  'workflow_repair_attempts',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    baseRevisionId: text('base_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+    failureFingerprint: text('failure_fingerprint').notNull(),
+    runId: text('run_id'),
+    nodeId: text('node_id'),
+    status: text('status').notNull().default('proposed'),
+    candidateRevisionId: text('candidate_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+    attemptCount: integer('attempt_count').notNull().default(1),
+    lastError: text('last_error'),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    fingerprintRevision: uniqueIndex('uq_workflow_repair_attempt_fingerprint').on(
+      table.workspaceId,
+      table.workflowId,
+      table.baseRevisionId,
+      table.failureFingerprint,
+    ),
+  }),
+);
 
 export const triggers = sqliteTable('triggers', {
   id: text('id').primaryKey(),
@@ -518,6 +698,10 @@ export const workflowRuns = sqliteTable('workflow_runs', {
   isEphemeral: integer('is_ephemeral', { mode: 'boolean' }).notNull().default(false),
   ephemeralTitle: text('ephemeral_title'),
   graphSnapshot: text('graph_snapshot', { mode: 'json' }),
+  /** Exact immutable source revision used to create this run. */
+  workflowRevisionId: text('workflow_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+  /** Base revision when this run was repaired locally. */
+  repairedFromRevisionId: text('repaired_from_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
   triggerId: text('trigger_id').references(() => triggers.id, { onDelete: 'set null' }),
   /** When this run was forked from a previous one (replay-from-node). */
   parentRunId: text('parent_run_id'),
@@ -2882,6 +3066,10 @@ export const apps = sqliteTable(
     /** draft | published | archived. */
     status: text('status').notNull().default('draft'),
     entrySurfaceId: text('entry_surface_id'),
+    /** Immutable App-interface pointers. Surfaces are the active projection. */
+    activeInterfaceRevisionId: text('active_interface_revision_id'),
+    candidateInterfaceRevisionId: text('candidate_interface_revision_id'),
+    interfaceTrustState: text('interface_trust_state').notNull().default('legacy_unverified'),
     icon: text('icon'),
     /** Domain (or Subdomain) this App is organized under. Its workflows inherit. */
     spaceId: text('domain_id').references((): AnySQLiteColumn => domains.id, { onDelete: 'set null' }),
@@ -3097,6 +3285,64 @@ export const appSurfaces = sqliteTable(
   },
   (table) => ({
     appName: uniqueIndex('idx_app_surfaces_app_name').on(table.appId, table.name),
+  }),
+);
+
+export const appInterfaceRevisions = sqliteTable(
+  'app_interface_revisions',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    parentRevisionId: text('parent_revision_id'),
+    /** Complete page snapshot. Keeping revisions self-contained makes publish/restore atomic. */
+    pagesJson: text('pages_json', { mode: 'json' }).notNull().default(sql`'[]'`),
+    semanticHash: text('semantic_hash').notNull(),
+    source: text('source').notNull().default('operator'),
+    actorType: text('actor_type').notNull().default('user'),
+    actorId: text('actor_id'),
+    reason: text('reason').notNull().default('Interface update'),
+    /** candidate | active | abandoned. */
+    status: text('status').notNull().default('candidate'),
+    /** legacy_unverified | candidate | verified | rejected. */
+    trustState: text('trust_state').notNull().default('candidate'),
+    verifiedAt: text('verified_at'),
+    publishedAt: text('published_at'),
+    rejectedAt: text('rejected_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byApp: index('idx_app_interface_revisions_app').on(table.workspaceId, table.appId, table.createdAt),
+    appHash: index('idx_app_interface_revisions_hash').on(table.appId, table.semanticHash),
+  }),
+);
+
+export const appInterfaceProofs = sqliteTable(
+  'app_interface_proofs',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    appId: text('app_id')
+      .notNull()
+      .references(() => apps.id, { onDelete: 'cascade' }),
+    revisionId: text('revision_id')
+      .notNull()
+      .references(() => appInterfaceRevisions.id, { onDelete: 'cascade' }),
+    gate: text('gate').notNull(),
+    status: text('status').notNull(),
+    semanticHash: text('semantic_hash').notNull(),
+    evidenceJson: text('evidence_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    revisionGate: uniqueIndex('uq_app_interface_proof_gate').on(table.revisionId, table.gate),
+    byRevision: index('idx_app_interface_proofs_revision').on(table.revisionId, table.status),
   }),
 );
 

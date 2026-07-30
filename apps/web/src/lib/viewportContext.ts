@@ -47,6 +47,16 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
       resourceId: derived.resourceId,
       resourceKind: derived.resourceKind,
       activeRunId: activeRun?.runId ?? null,
+      appView: derived.resourceKind === 'app' && derived.resourceId
+        ? {
+            appId: derived.resourceId,
+            ...(derived.page ? { page: derived.page } : {}),
+            ...(derived.mode ? { mode: derived.mode } : {}),
+            ...(derived.selectedNodeId ? { selectedNodeId: derived.selectedNodeId } : {}),
+            facet: derived.facet ?? null,
+            targetLocked: true,
+          }
+        : null,
     } satisfies ViewportContext;
   }, [activeRuns, ambientId, location.hash, location.pathname, location.search, runModal, workspaceId]);
 
@@ -66,7 +76,12 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
   return { context, label: formatViewportLabel(context, resolvedName) };
 }
 
-export function deriveSurface(pathname: string, search = ''): Pick<ViewportContext, 'surface' | 'resourceId' | 'resourceKind' | 'title'> {
+export function deriveSurface(pathname: string, search = ''): Pick<ViewportContext, 'surface' | 'resourceId' | 'resourceKind' | 'title'> & {
+  page?: string;
+  mode?: 'live' | 'edit' | 'history' | 'code';
+  selectedNodeId?: string;
+  facet?: string | null;
+} {
   const parts = pathname.split('/').filter(Boolean);
   const [root, id] = parts;
   if (!root || root === 'home') return { surface: 'home', title: 'Home' };
@@ -78,9 +93,25 @@ export function deriveSurface(pathname: string, search = ''): Pick<ViewportConte
     return { surface: 'workflow_detail', resourceKind: 'workflow', resourceId: parts[2], title: 'App logic' };
   }
   if (root === 'apps' && id) {
-    const facet = new URLSearchParams(search).get('facet');
+    const params = new URLSearchParams(search);
+    const facet = params.get('facet');
+    const page = params.get('page') ?? undefined;
+    const rawMode = params.get('mode');
+    const mode = rawMode && ['live', 'edit', 'history', 'code'].includes(rawMode)
+      ? rawMode as 'live' | 'edit' | 'history' | 'code'
+      : undefined;
+    const selectedNodeId = params.get('node') ?? undefined;
     const facetLabel = facet ? facet.charAt(0).toUpperCase() + facet.slice(1) : null;
-    return { surface: 'app_detail', resourceKind: 'app', resourceId: id, title: facetLabel ? `App · ${facetLabel}` : 'App' };
+    return {
+      surface: 'app_detail',
+      resourceKind: 'app',
+      resourceId: id,
+      title: page ? `App · ${page}` : facetLabel ? `App · ${facetLabel}` : 'App',
+      ...(page ? { page } : {}),
+      ...(mode ? { mode } : {}),
+      ...(selectedNodeId ? { selectedNodeId } : {}),
+      ...(facet ? { facet } : {}),
+    };
   }
   if (root === 'apps') return { surface: 'apps', title: 'Apps' };
   if (root === 'workflows' && id) return { surface: 'workflow_detail', resourceKind: 'workflow', resourceId: id, title: 'Workflow' };

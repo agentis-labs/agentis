@@ -13,6 +13,7 @@
  */
 
 import type { MemoryStore } from '../memory/memoryStore.js';
+import { classifyWorkflowFailure } from './workflowFailureClassification.js';
 
 export const WORKFLOW_PLAYBOOK_TAG = 'workflow_playbook';
 
@@ -81,14 +82,7 @@ export function recordWorkflowLesson(
  */
 export function isInstructiveFailure(error: string | undefined | null): boolean {
   if (!error) return false;
-  const e = error.toLowerCase();
-  // Transient / runtime-class — NOT a design lesson.
-  if (/\b(timeout|timed out|econnrefused|enotfound|enoent|socket hang|rate.?limit|429|credits?|quota|out of memory|oom|network error|fetch failed|aborted|econnreset|etimedout)\b/.test(e)) {
-    return false;
-  }
-  // Instructive: an explicit guard block, precondition, validation, or contract gap.
-  return /\b(block(ed)?|must (be|have|first|not)|before |require[ds]?|precondition|unresolved|missing|expected|invalid|validation|not allowed|forbidden|sufficiency|contract|placeholder|out of scope|dead[- ]?end)\b/.test(e)
-    || /(^|[^A-Z])[A-Z][A-Z0-9]{3,}(_[A-Z0-9]+)+\s*:/.test(error); // a CODE: message (BLOCKED_UNRESOLVED_BIO_LINK: …)
+  return classifyWorkflowFailure(error).learnerEligible;
 }
 
 /**

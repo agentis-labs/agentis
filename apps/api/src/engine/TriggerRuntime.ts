@@ -30,7 +30,7 @@ import { type JobQueueBackend, shouldQueueWorkflowRun } from '../services/jobQue
 import { buildInitialRunState } from './initialRunState.js';
 import { ListenerRuntime } from './ListenerRuntime.js';
 import { normalizeWorkflowGraph } from '../services/workflow/workflowGraphNormalization.js';
-import { hashWorkflowGraph } from '../services/graphHash.js';
+import type { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
 import { connectorFromConfig, verifyConnectorWebhook } from './triggerConnectors.js';
 
 interface CronLib {
@@ -75,6 +75,7 @@ export interface TriggerRuntimeDeps {
    * instead of the legacy adapter `createPersistentListener` path.
    */
   listenerRuntime?: ListenerRuntime;
+  revisions?: WorkflowRevisionService;
 }
 
 export class TriggerRuntime {
@@ -241,28 +242,36 @@ export class TriggerRuntime {
       .where(eq(schema.workflows.id, args.workflowId))
       .get();
     if (!workflow) throw new AgentisError('RESOURCE_NOT_FOUND', `workflow ${args.workflowId} missing`);
-    // Converge the stored graph on fire, mirroring the API `/run` path. The
-    // engine's `startRun` already normalizes for runtime correctness, but it only
-    // writes a per-run `graphSnapshot` — it never heals the canonical
-    // `workflows.graph`. Without this, a workflow whose synthesized config was
-    // repaired (e.g. an `operationId` rewritten to what the connector supports, a
-    // legacy router condition) keeps the stale draft in the DB forever, so the
-    // canvas/exports show a graph that differs from what every scheduled/webhook
-    // run actually executes. Normalize here to detect the repairs and persist them.
-    const normalized = normalizeWorkflowGraph(this.deps.db, args.workspaceId, workflow.graph as WorkflowGraph);
+    const activeRevision = this.deps.revisions?.active(args.workspaceId, workflow.id);
+    const activeGraph = (activeRevision?.graph ?? workflow.graph) as WorkflowGraph;
+    const workflowRevisionId = activeRevision?.revision.id ?? workflow.activeRevisionId ?? null;
+    const normalized = normalizeWorkflowGraph(this.deps.db, args.workspaceId, activeGraph);
     const graph = normalized.graph;
     if (normalized.repairs.length > 0) {
-      try {
-        this.deps.db
-          .update(schema.workflows)
-          .set({ graph, contentHash: hashWorkflowGraph(graph), updatedAt: new Date().toISOString() })
-          .where(eq(schema.workflows.id, workflow.id))
-          .run();
-      } catch (err) {
-        // Healing the stored row is best-effort — the run still uses the
-        // normalized graph in memory regardless.
-        this.deps.logger.warn('trigger.graph_heal_failed', { workflowId: workflow.id, err: (err as Error).message });
-      }
+      const existingCandidate = this.deps.revisions?.candidate(args.workspaceId, workflow.id);
+      const candidate = this.deps.revisions?.createCandidate({
+        workspaceId: args.workspaceId,
+        workflowId: workflow.id,
+        graph,
+        baseRevisionId: workflowRevisionId,
+        source: 'normalization',
+        actor: { type: 'system', id: 'trigger-runtime' },
+        reason: `Unattended trigger detected ${normalized.repairs.length} runtime normalization repair(s)`,
+        allowBranch: true,
+        setAsHead: !existingCandidate,
+      });
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'The active workflow requires normalization. The trigger was not fired; verify and promote the generated candidate first.',
+        {
+          httpStatus: 409,
+          details: {
+            code: 'TRIGGER_BLOCKED_ON_NORMALIZATION',
+            candidateRevisionId: candidate?.revision.id ?? null,
+            repairs: normalized.repairs,
+          },
+        },
+      );
     }
     const runId = randomUUID();
     const initialState = buildInitialRunState({
@@ -281,6 +290,8 @@ export class TriggerRuntime {
         userId: args.userId,
         status: 'CREATED',
         runState: initialState as unknown as object,
+        graphSnapshot: graph,
+        workflowRevisionId,
         replanCount: 0,
         triggerId: args.triggerId ?? null,
         parentRunId: null,
@@ -295,6 +306,7 @@ export class TriggerRuntime {
       inputs: args.inputs,
       initialState,
       graph,
+      workflowRevisionId,
     };
     // Durable dispatch: long-running / human-gated graphs go through the
     // queue so they survive a server restart. Everything else runs inline.

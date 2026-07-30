@@ -48,13 +48,21 @@ import type { AppGoalService } from '../app/appGoal.js';
 import type { StrategyService } from '../app/strategyService.js';
 import type { StrategyEvolutionService } from '../app/strategyEvolution.js';
 import type { DurableEntityService } from '../durableEntities.js';
+import type { CredentialVault } from '../credentialVault.js';
+import type { SkillMaterializer } from '../skillMaterializer.js';
+import type { WorkflowRevisionService } from '../workflow/workflowRevisionService.js';
+import type { WorkflowExperienceService } from '../workflow/workflowExperienceService.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
   logger: Logger;
   bus: EventBus;
   engine: WorkflowEngine;
+  revisions?: WorkflowRevisionService;
+  workflowExperience?: WorkflowExperienceService;
   adapters: AdapterManager;
+  vault?: CredentialVault;
+  skillMaterializer?: SkillMaterializer;
   ledger: LedgerService;
   scratchpad: ScratchpadService;
   approvals: ApprovalInboxService;

@@ -147,6 +147,38 @@ interface WorkflowDetail {
   variables?: Array<{ name: string; type: string; default?: unknown; label?: string }>;
   isReusable?: boolean;
   isInLibrary?: boolean;
+  activeRevision?: WorkflowRevisionSummary;
+  candidateRevision?: WorkflowRevisionSummary | null;
+  trustState?: string;
+}
+
+interface WorkflowRevisionSummary {
+  id: string;
+  parentRevisionId?: string | null;
+  semanticHash: string;
+  source: string;
+  reason: string;
+  status: string;
+  trustState: string;
+  proofProfile: string;
+  createdAt: string;
+  promotedAt?: string | null;
+}
+
+interface WorkflowRevisionProof {
+  required: string[];
+  passed: string[];
+  missing: string[];
+  failed: string[];
+  approvalRequired: boolean;
+  readyForPromotion: boolean;
+}
+
+interface WorkflowRevisionListResponse {
+  activeRevisionId: string;
+  candidateRevisionId: string | null;
+  trustState: string;
+  revisions: Array<WorkflowRevisionSummary & { proof: WorkflowRevisionProof }>;
 }
 interface ExtensionRow {
   id: string;
@@ -273,6 +305,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
   const [variablesOpen, setVariablesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>('saved');
+  const [revisionOpen, setRevisionOpen] = useState(false);
   const [knowledgeBaseCount, setKnowledgeBaseCount] = useState<number | null>(null);
   const [knowledgeChunkCount, setKnowledgeChunkCount] = useState<number | null>(null);
 
@@ -499,7 +532,10 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       setWf({ ...wf, graph: { ...wf.graph, nodes: nextNodes } });
       void api(`/v1/workflows/${wf.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ graph: { ...wf.graph, nodes: nextNodes } }),
+        body: JSON.stringify({
+          graph: { ...wf.graph, nodes: nextNodes },
+          baseRevisionId: wf.candidateRevision?.id ?? wf.activeRevision?.id,
+        }),
       }).catch(() => {});
     }
   }, [wf, extensions]);
@@ -1047,13 +1083,26 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     setSaveState('saving');
     const persist = async () => {
       try {
-        await api(`/v1/workflows/${current.id}`, {
+        const latest = wfRef.current;
+        const saved = await api<{
+          activeRevision: WorkflowRevisionSummary;
+          candidateRevision: WorkflowRevisionSummary | null;
+          trustState: string;
+        }>(`/v1/workflows/${current.id}`, {
           method: 'PATCH',
           body: JSON.stringify({
             graph: nextGraph,
             title: nextTitle,
+            baseRevisionId: latest?.candidateRevision?.id ?? latest?.activeRevision?.id,
           }),
         });
+        const revisionUpdate = {
+          activeRevision: saved.activeRevision,
+          candidateRevision: saved.candidateRevision,
+          trustState: saved.trustState,
+        };
+        wfRef.current = wfRef.current ? { ...wfRef.current, ...revisionUpdate } : wfRef.current;
+        setWf((previous) => previous ? { ...previous, ...revisionUpdate } : previous);
         lastSavedFingerprintRef.current = fingerprint;
         if (sequence === saveSequenceRef.current) {
           saveStateRef.current = 'saved';
@@ -1086,6 +1135,16 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       void saveNow();
     }, 1200);
   }, [saveNow]);
+
+  const refreshWorkflowRevision = useCallback(async () => {
+    if (!id) return;
+    const data = await api<{ workflow: WorkflowDetail }>(`/v1/workflows/${id}`);
+    wfRef.current = data.workflow;
+    setWf(data.workflow);
+    setTitleDraft(data.workflow.title);
+    lastSavedFingerprintRef.current = graphFingerprint(data.workflow.graph, data.workflow.title);
+    setSaveState('saved');
+  }, [id]);
 
   // Tidy — re-run the shared layered layout over the current graph, persist the
   // new positions, and frame the result. Makes any graph (AI-built or
@@ -1757,8 +1816,32 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
             {wf.title}
           </button>
         )}
-        <div className="flex items-center gap-1">
+        <div className="relative flex items-center gap-1">
           <SaveIndicator state={saveState} onRetry={() => void saveNow()} />
+          <button
+            type="button"
+            onClick={() => setRevisionOpen((open) => !open)}
+            className={clsx(
+              'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold tracking-wide transition-colors',
+              wf.candidateRevision
+                ? 'border-warn/30 bg-warn/10 text-warn hover:bg-warn/15'
+                : wf.trustState === 'proven'
+                  ? 'border-success/25 bg-success/10 text-success hover:bg-success/15'
+                  : 'border-line bg-surface-2 text-text-secondary hover:bg-surface-3',
+            )}
+            aria-expanded={revisionOpen}
+            title="Workflow revision and proof"
+          >
+            <GitBranch size={11} />
+            {wf.candidateRevision ? 'Candidate' : wf.trustState === 'proven' ? 'Proven' : 'Legacy'}
+          </button>
+          {revisionOpen && (
+            <WorkflowRevisionPopover
+              workflow={wf}
+              onClose={() => setRevisionOpen(false)}
+              onChanged={refreshWorkflowRevision}
+            />
+          )}
           <button
             type="button"
             onClick={(e) => {
@@ -2528,6 +2611,195 @@ function headerRunStatusIcon(status: WorkflowRunSummary['status'] | null): React
   if (status === 'failed') return <AlertCircle size={12} />;
   if (status === 'completed') return <CheckCircle2 size={12} />;
   return <Play size={12} />;
+}
+
+function WorkflowRevisionPopover({
+  workflow,
+  onClose,
+  onChanged,
+}: {
+  workflow: WorkflowDetail;
+  onClose: () => void;
+  onChanged: () => Promise<void>;
+}) {
+  const toast = useToast();
+  const [data, setData] = useState<WorkflowRevisionListResponse | null>(null);
+  const [busy, setBusy] = useState<'verify' | 'promote' | 'abandon' | 'refresh' | null>(null);
+  const candidate = data?.revisions.find((revision) => revision.id === data.candidateRevisionId) ?? null;
+  const active = data?.revisions.find((revision) => revision.id === data.activeRevisionId) ?? null;
+
+  const load = useCallback(async () => {
+    setBusy((current) => current ?? 'refresh');
+    try {
+      setData(await api<WorkflowRevisionListResponse>(`/v1/workflows/${workflow.id}/revisions`));
+    } catch (error) {
+      toast.error('Could not load revision proof', apiErrorMessage(error));
+    } finally {
+      setBusy((current) => current === 'refresh' ? null : current);
+    }
+  }, [toast, workflow.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const act = async (action: 'verify' | 'promote' | 'abandon') => {
+    if (!candidate) return;
+    setBusy(action);
+    try {
+      if (action === 'verify') {
+        const result = await api<{ runId: string }>(
+          `/v1/workflows/${workflow.id}/revisions/${candidate.id}/verify`,
+          { method: 'POST', body: '{}' },
+        );
+        toast.success('Clean verification started', 'Self-healing is disabled for this proof run.');
+        openRunModal({ runId: result.runId, workflowId: workflow.id, source: 'workflow-revision-proof' });
+      } else if (action === 'promote') {
+        await api(`/v1/workflows/${workflow.id}/revisions/${candidate.id}/promote`, {
+          method: 'POST',
+          body: JSON.stringify({ operatorApproval: candidate.proof.approvalRequired }),
+        });
+        toast.success('Revision promoted', 'Production now points to the proven candidate.');
+      } else {
+        await api(`/v1/workflows/${workflow.id}/revisions/${candidate.id}/abandon`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: 'Abandoned from the workflow revision control' }),
+        });
+        toast.success('Candidate abandoned', 'The canvas returned to the active production revision.');
+      }
+      await onChanged();
+      await load();
+    } catch (error) {
+      toast.error(
+        action === 'verify' ? 'Verification could not start' : action === 'promote' ? 'Promotion blocked' : 'Could not abandon candidate',
+        apiErrorMessage(error),
+      );
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="absolute left-0 top-9 z-[80] w-[390px] overflow-hidden rounded-xl border border-line bg-surface-1 shadow-2xl shadow-black/25">
+      <div className="border-b border-line bg-surface-2/70 px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">Production lineage</p>
+            <h3 className="mt-1 text-sm font-semibold text-text-primary">
+              {candidate ? 'Unverified work is isolated' : 'Production is protected'}
+            </h3>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-1 text-text-muted hover:bg-surface-3 hover:text-text-primary" aria-label="Close revision control">
+            <X size={14} />
+          </button>
+        </div>
+        <p className="mt-1.5 text-xs leading-5 text-text-secondary">
+          {candidate
+            ? 'Runs continue on the active revision until this exact candidate passes every proof gate.'
+            : 'Edits create a candidate. The active graph changes only after clean verification and promotion.'}
+        </p>
+      </div>
+
+      <div className="space-y-3 p-4">
+        <div className="grid grid-cols-2 gap-2">
+          <RevisionCard label="Active" revision={active} tone="active" />
+          <RevisionCard label="Candidate" revision={candidate} tone="candidate" />
+        </div>
+
+        {candidate && (
+          <div className="rounded-lg border border-line bg-canvas/25 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">Proof matrix</span>
+              <span className="font-mono text-[10px] text-text-muted">{candidate.semanticHash.slice(0, 10)}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {candidate.proof.required.map((gate) => {
+                const passed = candidate.proof.passed.includes(gate);
+                const failed = candidate.proof.failed.includes(gate);
+                return (
+                  <div key={gate} className="flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5">
+                    {passed ? <CheckCircle2 size={12} className="text-success" /> : <AlertCircle size={12} className={failed ? 'text-danger' : 'text-text-muted'} />}
+                    <span className={clsx('text-[11px]', passed ? 'text-text-primary' : failed ? 'text-danger' : 'text-text-secondary')}>
+                      {gate.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            {candidate.proof.approvalRequired && (
+              <p className="mt-2 text-[11px] leading-4 text-warn">
+                This revision can send data outward or run code. Administrator approval is the final gate.
+              </p>
+            )}
+          </div>
+        )}
+
+        {candidate ? (
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" loading={busy === 'verify'} onClick={() => void act('verify')}>
+              Verify cleanly
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              loading={busy === 'promote'}
+              disabled={!candidate.proof.readyForPromotion && !(candidate.proof.approvalRequired && candidate.proof.missing.every((gate) => gate === 'operator_approval'))}
+              onClick={() => void act('promote')}
+            >
+              {candidate.proof.approvalRequired ? 'Approve & promote' : 'Promote'}
+            </Button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => void act('abandon')} className="ml-auto text-xs font-medium text-danger hover:underline disabled:opacity-40">
+              Abandon
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => void load()} className="text-xs font-medium text-accent hover:underline">
+            Recheck revision state
+          </button>
+        )}
+
+        {data && data.revisions.length > 1 && (
+          <div className="border-t border-line pt-3">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted">Recent lineage</p>
+            <div className="space-y-1">
+              {data.revisions.slice(0, 4).map((revision) => (
+                <div key={revision.id} className="flex items-center gap-2 text-[11px]">
+                  <span className={clsx('h-1.5 w-1.5 rounded-full', revision.status === 'active' ? 'bg-success' : revision.status === 'candidate' ? 'bg-warn' : 'bg-text-muted/40')} />
+                  <span className="min-w-0 flex-1 truncate text-text-secondary">{revision.reason || revision.source}</span>
+                  <span className="font-mono text-text-muted">{revision.semanticHash.slice(0, 8)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RevisionCard({
+  label,
+  revision,
+  tone,
+}: {
+  label: string;
+  revision: (WorkflowRevisionSummary & { proof?: WorkflowRevisionProof }) | null;
+  tone: 'active' | 'candidate';
+}) {
+  return (
+    <div className={clsx('rounded-lg border p-2.5', tone === 'active' ? 'border-success/20 bg-success/5' : 'border-warn/20 bg-warn/5')}>
+      <p className={clsx('text-[10px] font-semibold uppercase tracking-wider', tone === 'active' ? 'text-success' : 'text-warn')}>{label}</p>
+      {revision ? (
+        <>
+          <p className="mt-1 truncate text-xs font-medium text-text-primary">{revision.reason || revision.source}</p>
+          <p className="mt-1 font-mono text-[10px] text-text-muted">{revision.semanticHash.slice(0, 10)}</p>
+        </>
+      ) : (
+        <p className="mt-2 text-xs text-text-muted">None</p>
+      )}
+    </div>
+  );
 }
 
 function SaveIndicator({ state, onRetry }: { state: SaveState; onRetry: () => void }) {
@@ -3705,4 +3977,3 @@ function KnowledgeCanvasCallout({ onOpen }: { onOpen: () => void }) {
     </div>
   );
 }
-

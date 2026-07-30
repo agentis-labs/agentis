@@ -17,7 +17,6 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { TriggerRuntime } from '../../engine/TriggerRuntime.js';
 import type { ActiveTrigger } from '../../engine/ActiveWorkflowRegistry.js';
-import { hashWorkflowGraph } from '../graphHash.js';
 import { normalizeExtensionManifest } from '../extensionRuntime.js';
 import { preflightWorkflow } from './workflowPreflight.js';
 import { deriveLoopStage, graphContentHash, readBuildLoop } from './workflowCompass.js';
@@ -90,8 +89,16 @@ export class WorkflowTriggerDeploymentService {
       // preflight above proves it CAN run; this gate proves it ACCOMPLISHES.
       // Override is explicit + audited — never silent.
       const stage = deriveLoopStage(readBuildLoop(workflow.settings), graphContentHash(graph));
-      if (stage !== 'hardened' && stage !== 'production') {
+      const revisionProven = workflow.trustState === 'proven' || workflow.trustState === 'break_glass';
+      if (!revisionProven || (stage !== 'hardened' && stage !== 'production')) {
         if (args.override?.ack?.trim()) {
+          const operator = this.db.select({ isAdmin: schema.users.isAdmin })
+            .from(schema.users)
+            .where(eq(schema.users.id, args.userId))
+            .get();
+          if (!operator?.isAdmin) {
+            throw new AgentisError('AUTH_FORBIDDEN', 'Only an administrator may arm an unproven unattended workflow.');
+          }
           this.db.insert(schema.auditEntries).values({
             id: randomUUID(),
             workspaceId: args.workspaceId,
@@ -102,7 +109,7 @@ export class WorkflowTriggerDeploymentService {
             action: 'trigger.armed_unhardened',
             actorType: 'user',
             actorId: args.userId,
-            inputSummary: `stage=${stage}`,
+            inputSummary: `stage=${stage}; revisionTrust=${workflow.trustState}`,
             outputSummary: `override ack: ${args.override.ack.slice(0, 300)}`,
             at: new Date().toISOString(),
           }).run();
@@ -185,12 +192,9 @@ export class WorkflowTriggerDeploymentService {
         .run();
     }
 
-    const nextGraph = linkTriggerNode(graph, triggerNode.id, triggerId, authored, runtimeConfig);
-    this.db
-      .update(schema.workflows)
-      .set({ graph: nextGraph, contentHash: hashWorkflowGraph(nextGraph), updatedAt: now })
-      .where(eq(schema.workflows.id, args.workflowId))
-      .run();
+    // The trigger row is the deployment record. Never write its generated id or
+    // runtime-normalized config back into the active graph: doing so used to
+    // mutate proven production bytes as a side effect of arming a trigger.
 
     if (triggerType === 'manual') {
       this.db
@@ -675,35 +679,6 @@ function validateSynthesizedListener(listener: ListenerConfig): Record<string, u
     });
   }
   return parsed.data as ListenerConfig as unknown as Record<string, unknown>;
-}
-
-function linkTriggerNode(
-  graph: WorkflowGraph,
-  nodeId: string,
-  triggerId: string,
-  authored: TriggerNodeConfig,
-  runtimeConfig: Record<string, unknown>,
-): WorkflowGraph {
-  return {
-    ...graph,
-    nodes: graph.nodes.map((node) => {
-      if (node.id !== nodeId || node.config.kind !== 'trigger') return node;
-      const nextConfig: TriggerNodeConfig = {
-        ...authored,
-        triggerId,
-        ...(authored.triggerType === 'cron'
-          ? {
-              schedule: String(runtimeConfig.expression),
-              timezone: String(runtimeConfig.timezone ?? 'UTC'),
-            }
-          : {}),
-        ...(effectiveTriggerType(authored.triggerType) === 'persistent_listener'
-          ? { listenerConfig: runtimeConfig as unknown as ListenerConfig }
-          : {}),
-      };
-      return { ...node, config: nextConfig };
-    }),
-  };
 }
 
 function pickCanonicalTrigger(

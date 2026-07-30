@@ -44,7 +44,16 @@ import type { EventBus } from '../event-bus.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentToolRuntime } from '../services/agent/agentToolRuntime.js';
 import { runPublishedWorkflow, startPublishedWorkflow } from '../engine/runPublishedWorkflow.js';
-import { buildAppStores, AppEnvironmentStore, AppLifecycle, AppPackager, AppTestHarness, computeAppClosure } from '@agentis/app';
+import {
+  buildAppStores,
+  AppEnvironmentStore,
+  AppLifecycle,
+  AppPackager,
+  AppTestHarness,
+  computeAppClosure,
+  type AppWorkflowRevisionSink,
+  type InterfacePageSnapshot,
+} from '@agentis/app';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { EpisodicBrainPort } from '../services/brain/brainExport.js';
 import { bundleFidelitySchema } from '@agentis/core';
@@ -77,6 +86,7 @@ import { validateAppConformance } from '../services/app/appDoctor.js';
 import { compileAppReadiness } from '../services/app/appCompiler.js';
 import { readWorkflowSpec } from '../services/workflow/workflowSpec.js';
 import { evaluateRunOutcome } from '../services/workflow/runOutcome.js';
+import { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
 import { repairAppConformance } from '../services/app/appDoctorRepair.js';
 import {
   deleteOrchestrationRule,
@@ -140,6 +150,12 @@ const addMemberSchema = z.object({
 const batchInsertSchema = z.object({ records: z.array(z.record(z.unknown())).min(1).max(10_000) });
 const adoptWorkflowSchema = z.object({ workflowId: z.string().min(1) });
 const renameSurfaceSchema = z.object({ name: z.string().trim().min(1).max(120) });
+const interfaceCandidateSchema = z.object({
+  pages: z.array(z.unknown()).min(1),
+  reason: z.string().trim().min(1).max(500).optional(),
+  baseRevisionId: z.string().optional(),
+  autoPublish: z.boolean().optional(),
+});
 const generateSurfaceRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(2000),
   surface: z.string().min(1).optional(),
@@ -312,11 +328,59 @@ function ensureAppDomain(db: AgentisSqliteDb, workspaceId: string, domainId: str
 
 export function buildAppRoutes(deps: AppRoutesDeps) {
   const app = new Hono<{ Variables: { user: { id: string } } }>();
-  const { store, data, surfaces } = buildAppStores(deps);
+  const { store, data, surfaces, interfaces } = buildAppStores(deps);
   const packager = new AppPackager(deps.db);
   const brainPort = deps.episodes ? new EpisodicBrainPort(deps.episodes) : undefined;
-  const lifecycle = new AppLifecycle(deps.db);
-  const environments = new AppEnvironmentStore(deps.db);
+  const workflowRevisions = new WorkflowRevisionService(deps.db);
+  const workflowRevisionSink: AppWorkflowRevisionSink = (input) => {
+    const revisionService = new WorkflowRevisionService(input.db);
+    const existingByTitle = new Map(
+      input.db.select().from(schema.workflows)
+        .where(and(
+          eq(schema.workflows.workspaceId, input.workspaceId),
+          eq(schema.workflows.appId, input.appId),
+        ))
+        .all()
+        .map((workflow) => [workflow.title, workflow] as const),
+    );
+    for (const manifestWorkflow of input.workflows) {
+      if (!manifestWorkflow.graph) {
+        throw new AgentisError('WORKFLOW_GRAPH_INVALID', `App workflow "${manifestWorkflow.title}" has no graph`);
+      }
+      let workflow = existingByTitle.get(manifestWorkflow.title);
+      if (!workflow) {
+        const id = randomUUID();
+        input.db.insert(schema.workflows).values({
+          id,
+          workspaceId: input.workspaceId,
+          userId: input.userId,
+          appId: input.appId,
+          title: manifestWorkflow.title,
+          description: manifestWorkflow.description ?? null,
+          graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+        }).run();
+        workflow = input.db.select().from(schema.workflows).where(eq(schema.workflows.id, id)).get()!;
+      } else {
+        input.db.update(schema.workflows).set({
+          description: manifestWorkflow.description ?? null,
+          updatedAt: new Date().toISOString(),
+        }).where(eq(schema.workflows.id, workflow.id)).run();
+      }
+      const base = revisionService.candidate(input.workspaceId, workflow.id)?.revision
+        ?? revisionService.ensureWorkflow(input.workspaceId, workflow.id).active;
+      revisionService.createCandidate({
+        workspaceId: input.workspaceId,
+        workflowId: workflow.id,
+        graph: manifestWorkflow.graph as WorkflowGraph,
+        baseRevisionId: base.id,
+        source: 'import',
+        actor: { type: 'user', id: input.userId },
+        reason: 'App lifecycle change retained as a verification candidate',
+      });
+    }
+  };
+  const lifecycle = new AppLifecycle(deps.db, workflowRevisionSink);
+  const environments = new AppEnvironmentStore(deps.db, workflowRevisionSink);
   const triggerDeployments = deps.triggerRuntime
     ? new WorkflowTriggerDeploymentService(deps.db, deps.triggerRuntime)
     : null;
@@ -414,21 +478,34 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     }
 
     let created: AppRecord | null = null;
+    const entryWorkflowId = randomUUID();
+    const initialEntryGraph = entryWorkflowGraph ?? { version: 1 as const, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } };
     deps.db.transaction(() => {
-      const entryWorkflowId = randomUUID();
       deps.db.insert(schema.workflows).values({
         id: entryWorkflowId,
         workspaceId: ws.workspaceId,
         ambientId: ws.ambientId ?? null,
         userId: user.id,
         title: entryWorkflowTitle ?? `${input.name} workflow`,
-        graph: entryWorkflowGraph ?? { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
+        graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
         settings: {},
         concurrencyOverflow: 'queue',
       }).run();
       created = store.create(ws.workspaceId, user.id, { ...input, entryWorkflowId });
     });
     if (!created) throw new AgentisError('INTERNAL_ERROR', 'Failed to create app workflow');
+    const base = workflowRevisions.ensureWorkflow(ws.workspaceId, entryWorkflowId).active;
+    if (initialEntryGraph.nodes.length > 0) {
+      workflowRevisions.createCandidate({
+        workspaceId: ws.workspaceId,
+        workflowId: entryWorkflowId,
+        graph: initialEntryGraph as unknown as WorkflowGraph,
+        baseRevisionId: base.id,
+        source: 'create',
+        actor: { type: 'user', id: user.id },
+        reason: 'Initial App entry workflow',
+      });
+    }
     return c.json({ data: await staffNewApp(created) }, 201);
   });
 
@@ -823,10 +900,21 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     const warnings = scanAppEnvelope(body.envelope);
     const preview = appendScanWarnings(packager.preview(body.envelope, ws.workspaceId), warnings);
     assertAppPermissionsAcknowledged(preview, body.permissionsAcknowledged);
+    const imported = packager.import(ws.workspaceId, user.id, body.envelope, {
+      ...(brainPort ? { brain: brainPort } : {}),
+    });
+    const importedWorkflows = deps.db.select({ id: schema.workflows.id })
+      .from(schema.workflows)
+      .where(and(
+        eq(schema.workflows.workspaceId, ws.workspaceId),
+        eq(schema.workflows.appId, imported.appId),
+      ))
+      .all();
+    for (const workflow of importedWorkflows) {
+      workflowRevisions.stageImportedLegacyAsCandidate(ws.workspaceId, workflow.id);
+    }
     return c.json({
-      data: packager.import(ws.workspaceId, user.id, body.envelope, {
-        ...(brainPort ? { brain: brainPort } : {}),
-      }),
+      data: imported,
     }, 201);
   });
 
@@ -1474,6 +1562,68 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   });
 
   // ── AG-UI surfaces (§4) ─────────────────────────────────────
+
+  app.get('/:id/interface', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: interfaces.state(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.get('/:id/interface/revisions', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: interfaces.list(ws.workspaceId, c.req.param('id')) });
+  });
+
+  app.get('/:id/interface/revisions/:revisionId', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: interfaces.get(ws.workspaceId, c.req.param('id'), c.req.param('revisionId')) });
+  });
+
+  app.post('/:id/interface/candidates', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = interfaceCandidateSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) throw validationError('Invalid interface candidate', parsed.error);
+    const candidate = interfaces.createCandidate(
+      ws.workspaceId,
+      c.req.param('id'),
+      parsed.data.pages as InterfacePageSnapshot[],
+      {
+        source: 'editor',
+        actorType: 'user',
+        actorId: c.get('user').id,
+        ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+        ...(parsed.data.baseRevisionId ? { baseRevisionId: parsed.data.baseRevisionId } : {}),
+      },
+    );
+    const verification = interfaces.verify(ws.workspaceId, c.req.param('id'), candidate.id);
+    if (candidate.status === 'active') {
+      return c.json({ data: { revision: candidate, verification, unchanged: true } }, 200);
+    }
+    if (parsed.data.autoPublish !== false && verification.passed) {
+      return c.json({ data: { revision: interfaces.publish(ws.workspaceId, c.req.param('id'), candidate.id), verification } }, 201);
+    }
+    return c.json({ data: { revision: candidate, verification } }, 201);
+  });
+
+  app.post('/:id/interface/revisions/:revisionId/verify', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: interfaces.verify(ws.workspaceId, c.req.param('id'), c.req.param('revisionId')) });
+  });
+
+  app.post('/:id/interface/revisions/:revisionId/publish', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: interfaces.publish(ws.workspaceId, c.req.param('id'), c.req.param('revisionId')) });
+  });
+
+  app.post('/:id/interface/revisions/:revisionId/restore', (c) => {
+    const ws = getWorkspace(c);
+    return c.json({ data: interfaces.restore(ws.workspaceId, c.req.param('id'), c.req.param('revisionId'), c.get('user').id) });
+  });
+
+  app.delete('/:id/interface/revisions/:revisionId', (c) => {
+    const ws = getWorkspace(c);
+    interfaces.abandon(ws.workspaceId, c.req.param('id'), c.req.param('revisionId'));
+    return c.json({ data: { ok: true } });
+  });
 
   app.get('/:id/surfaces', (c) => {
     const ws = getWorkspace(c);

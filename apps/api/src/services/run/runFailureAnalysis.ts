@@ -13,6 +13,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowGraph, WorkflowNode, WorkflowRunState } from '@agentis/core';
+import { classifyWorkflowFailure } from '../workflow/workflowFailureClassification.js';
 
 export interface FailureDiagnosis {
   runId: string;
@@ -26,6 +27,7 @@ export interface FailureDiagnosis {
   explanation: string;
   /** Concrete, ordered fix steps. */
   fixes: string[];
+  classification: ReturnType<typeof classifyWorkflowFailure>;
 }
 
 interface Rule {
@@ -120,10 +122,13 @@ export function analyzeRunFailure(db: AgentisSqliteDb, workspaceId: string, runI
   let graph: WorkflowGraph | null = null;
   if (row.workflowId) {
     const wf = db.select().from(schema.workflows).where(eq(schema.workflows.id, row.workflowId)).get();
-    graph = (wf?.graph as WorkflowGraph | undefined) ?? null;
+    graph = (row.graphSnapshot as WorkflowGraph | null | undefined)
+      ?? (wf?.graph as WorkflowGraph | undefined)
+      ?? null;
   }
   const node = (failedNodeId && graph?.nodes.find((n) => n.id === failedNodeId)) || null;
   const nodeKind = (node?.config as { kind?: string } | undefined)?.kind ?? node?.type ?? null;
+  const classification = classifyWorkflowFailure(error ?? 'unclassified workflow failure');
 
   if (!error) {
     return {
@@ -132,19 +137,23 @@ export function analyzeRunFailure(db: AgentisSqliteDb, workspaceId: string, runI
         ? `“${title(node)}” failed, but no error detail was recorded. Open the node to inspect its input.`
         : 'The run failed without a specific node error. Open the run to inspect its steps.',
       fixes: ['Open the run and inspect the failed step’s input/output.'],
+      classification,
     };
   }
 
   const rule = RULES.find((r) => r.match.test(error));
   if (rule) {
     const { explanation, fixes } = rule.describe(node, error);
-    return { runId, failedNodeId, failedNodeTitle: node?.title ?? null, nodeKind, error, recognized: true, explanation, fixes };
+    return { runId, failedNodeId, failedNodeTitle: node?.title ?? null, nodeKind, error, recognized: true, explanation, fixes, classification };
   }
 
   return {
     runId, failedNodeId, failedNodeTitle: node?.title ?? null, nodeKind, error, recognized: false,
     explanation: `“${title(node)}” failed: ${oneLine(error)}.`,
-    fixes: ['Open the node above to inspect its input, fix the cause, and re-run.'],
+    fixes: classification.operatorAction
+      ? [classification.operatorAction]
+      : ['Open the node above to inspect its input, fix the cause, and re-run.'],
+    classification,
   };
 }
 

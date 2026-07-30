@@ -35,6 +35,11 @@ import { buildTemplateContext, resolveTemplateDeep } from '../engine/templateRes
 import { WorkflowTriggerDeploymentService } from '../services/workflow/workflowTriggerDeployment.js';
 import { preflightWorkflow } from '../services/workflow/workflowPreflight.js';
 import { LOOP_STAGE_LABEL, compassForWorkflow, deriveLoopStage, detectProvenDivergence, graphContentHash, readBuildLoop } from '../services/workflow/workflowCompass.js';
+import { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
+import type { WorkflowExperienceService } from '../services/workflow/workflowExperienceService.js';
+import { readWorkflowTests, type WorkflowTestCase } from '../services/workflow/workflowTestGenerator.js';
+import { readWorkflowSpec } from '../services/workflow/workflowSpec.js';
+import { evalCondition } from '../engine/SafeConditionParser.js';
 
 export function buildWorkflowRoutes(deps: {
   db: AgentisSqliteDb;
@@ -42,6 +47,8 @@ export function buildWorkflowRoutes(deps: {
   engine: WorkflowEngine;
   bus: EventBus;
   triggerRuntime?: TriggerRuntime;
+  revisions?: WorkflowRevisionService;
+  experience?: WorkflowExperienceService;
   /** Optional: when provided, every create/update mirrors the workflow into Packages. */
   packager?: PackagerService;
 }) {
@@ -52,6 +59,14 @@ export function buildWorkflowRoutes(deps: {
 
   app.use('*', requireAuth(deps), requireWorkspace(deps));
   const deletedWorkflowsCache = new Map<string, any>();
+  const revisions = deps.revisions ?? new WorkflowRevisionService(deps.db);
+  const loadEditorWorkflow = (workspaceId: string, workflowId: string) => {
+    const workflow = loadWorkflow(deps.db, workspaceId, workflowId);
+    const candidate = revisions.candidate(workspaceId, workflowId);
+    return candidate
+      ? { ...workflow, graph: candidate.graph, editorRevisionId: candidate.revision.id }
+      : { ...workflow, editorRevisionId: workflow.activeRevisionId };
+  };
   const triggerDeployments = deps.triggerRuntime
     ? new WorkflowTriggerDeploymentService(deps.db, deps.triggerRuntime)
     : null;
@@ -117,13 +132,19 @@ export function buildWorkflowRoutes(deps: {
       ...(await c.req.json()),
       workspaceId: ws.workspaceId,
     });
-    const graph = (body.graph ?? {
+    const requestedGraph = (body.graph ?? {
       version: 1,
       nodes: [],
       edges: [],
       viewport: { x: 0, y: 0, zoom: 1 },
     }) as WorkflowGraph;
-    const normalizedGraph = normalizeWorkflowGraph(deps.db, ws.workspaceId, graph).graph;
+    const normalizedGraph = normalizeWorkflowGraph(deps.db, ws.workspaceId, requestedGraph).graph;
+    const emptyGraph: WorkflowGraph = {
+      version: 1,
+      nodes: [],
+      edges: [],
+      viewport: normalizedGraph.viewport ?? { x: 0, y: 0, zoom: 1 },
+    };
     const id = randomUUID();
     if (body.spaceId) ensureWorkflowSpace(deps.db, ws.workspaceId, body.spaceId);
     if (normalizedGraph.nodes.length > 0)
@@ -139,12 +160,24 @@ export function buildWorkflowRoutes(deps: {
         ownerAgentId: body.ownerAgentId ?? null,
         title: body.title,
         description: body.description?.trim() || null,
-        graph: normalizedGraph,
-        contentHash: hashWorkflowGraph(normalizedGraph),
+        graph: emptyGraph,
+        contentHash: hashWorkflowGraph(emptyGraph),
         settings: body.settings,
         concurrencyOverflow: 'queue',
       })
       .run();
+    const initial = revisions.ensureWorkflow(ws.workspaceId, id);
+    const candidate = normalizedGraph.nodes.length > 0
+      ? revisions.createCandidate({
+          workspaceId: ws.workspaceId,
+          workflowId: id,
+          graph: normalizedGraph,
+          baseRevisionId: initial.active.id,
+          source: 'create',
+          actor: { type: 'user', id: ws.user.id },
+          reason: 'Initial workflow implementation',
+        }).revision
+      : null;
     // 10.14: auto-save into the Packages library
     try {
       deps.packager?.mirrorWorkflow(
@@ -154,14 +187,276 @@ export function buildWorkflowRoutes(deps: {
     } catch {
       /* best-effort mirror */
     }
-    return c.json({ workflow: { id, ...body, graph: normalizedGraph } }, 201);
+    return c.json({
+      workflow: {
+        id,
+        ...body,
+        graph: candidate ? candidate.graphJson : emptyGraph,
+        contentHash: candidate?.semanticHash ?? initial.active.semanticHash,
+        activeRevision: presentRevision(initial.active),
+        candidateRevision: candidate ? presentRevision(candidate) : null,
+        trustState: candidate ? 'candidate' : 'legacy_unverified',
+      },
+    }, 201);
   });
 
   app.get('/:id', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
-    return c.json({ workflow: wf });
+    const wf = loadEditorWorkflow(ws.workspaceId, id);
+    revisions.reconcileLegacyWorkflow(ws.workspaceId, id);
+    const active = revisions.active(ws.workspaceId, id);
+    const candidate = revisions.candidate(ws.workspaceId, id);
+    return c.json({
+      workflow: {
+        ...wf,
+        graph: candidate?.graph ?? active.graph,
+        contentHash: candidate?.revision.semanticHash ?? active.revision.semanticHash,
+        activeGraphHash: active.revision.semanticHash,
+        activeRevision: presentRevision(active.revision),
+        candidateRevision: candidate ? presentRevision(candidate.revision) : null,
+        trustState: candidate ? 'candidate' : active.revision.trustState,
+      },
+    });
+  });
+
+  app.get('/:id/revisions', (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.param('id');
+    const workflow = revisions.active(ws.workspaceId, workflowId).workflow;
+    const rows = revisions.revisions(ws.workspaceId, workflowId);
+    return c.json({
+      activeRevisionId: workflow.activeRevisionId,
+      candidateRevisionId: workflow.candidateRevisionId,
+      trustState: workflow.trustState,
+      revisions: rows.map((revision) => ({
+        ...presentRevision(revision),
+        proof: revisions.proofState(ws.workspaceId, workflowId, revision.id),
+      })),
+    });
+  });
+
+  app.get('/:id/revisions/:revisionId', (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.param('id');
+    const revision = revisions.revision(ws.workspaceId, workflowId, c.req.param('revisionId'));
+    if (!revision) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow revision not found');
+    return c.json({
+      revision: {
+        ...presentRevision(revision),
+        graph: revision.graphJson,
+        changeSummary: revision.changeSummaryJson,
+        capabilityManifest: revision.capabilityManifestJson,
+        spec: revision.specJson,
+      },
+      proof: revisions.proofState(ws.workspaceId, workflowId, revision.id),
+    });
+  });
+
+  app.get('/:id/experience', (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.param('id');
+    const workflow = revisions.active(ws.workspaceId, workflowId).workflow;
+    return c.json({
+      dossier: deps.experience?.dossier({
+        workspaceId: ws.workspaceId,
+        workflowId,
+        appId: workflow.appId,
+        activeRevisionId: workflow.activeRevisionId,
+        candidateRevisionId: workflow.candidateRevisionId,
+      }) ?? null,
+    });
+  });
+
+  app.post('/:id/revisions/:revisionId/verify', async (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.param('id');
+    const revisionId = c.req.param('revisionId');
+    const revision = revisions.revision(ws.workspaceId, workflowId, revisionId);
+    if (!revision) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow revision not found');
+    if (revision.status === 'active') {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'The active revision is already deployed; verify a candidate revision.');
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { inputs?: Record<string, unknown> };
+    const inputs = body.inputs && typeof body.inputs === 'object' && !Array.isArray(body.inputs) ? body.inputs : {};
+    const graph = revision.graphJson as WorkflowGraph;
+    let staticError: string | null = null;
+    try {
+      validateWorkflowGraph(graph, { currentWorkflowId: workflowId });
+      const referenceErrors = validateGraphReferences(graph).filter((issue) => issue.severity === 'error');
+      if (referenceErrors.length > 0) throw new Error(referenceErrors.map((issue) => issue.message).join('; '));
+    } catch (error) {
+      staticError = (error as Error).message;
+    }
+    revisions.recordProof({
+      workspaceId: ws.workspaceId,
+      workflowId,
+      revisionId,
+      gate: 'static',
+      status: staticError ? 'failed' : 'passed',
+      evidence: staticError ? { error: staticError } : { validated: true },
+    });
+    if (staticError) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Static verification failed: ${staticError}`);
+    }
+
+    const report = preflightWorkflow({
+      db: deps.db,
+      workspaceId: ws.workspaceId,
+      workflowId,
+      graph,
+      inputs,
+      mode: 'canvas',
+    });
+    const capabilityIssues = report.issues.filter((issue) =>
+      /(?:CAPABILITY|CREDENTIAL|EXTENSION|INTEGRATION|AGENT_(?:NOT_FOUND|PAUSED|NO_RUNTIME)|OPERATION)/.test(issue.code)
+      && issue.severity === 'error');
+    revisions.recordProof({
+      workspaceId: ws.workspaceId,
+      workflowId,
+      revisionId,
+      gate: 'capability',
+      status: capabilityIssues.length === 0 ? 'passed' : 'failed',
+      evidence: { issues: capabilityIssues },
+    });
+    const blocking = report.issues.filter((issue) => issue.severity === 'error');
+    revisions.recordProof({
+      workspaceId: ws.workspaceId,
+      workflowId,
+      revisionId,
+      gate: 'dry_run',
+      status: blocking.length === 0 ? 'passed' : 'failed',
+      evidence: { status: report.status, issues: blocking, scenario: report.scenario },
+    });
+
+    const workflow = revisions.active(ws.workspaceId, workflowId).workflow;
+    const suite = readWorkflowTests(workflow.settings).filter((testCase) => testCase.origin !== 'generated');
+    const suiteResults = suite.map((testCase) =>
+      verifyRevisionCase(deps.db, ws.workspaceId, workflowId, graph, testCase));
+    const hasHappy = suite.some((testCase) => testCase.kind === 'happy');
+    const hasNonHappy = suite.some((testCase) => testCase.kind !== 'happy');
+    const regressionPassed = hasHappy && hasNonHappy && suiteResults.every((result) => result.passed);
+    revisions.recordProof({
+      workspaceId: ws.workspaceId,
+      workflowId,
+      revisionId,
+      gate: 'regression',
+      status: regressionPassed ? 'passed' : 'failed',
+      evidence: { hasHappy, hasNonHappy, results: suiteResults },
+    });
+    if (blocking.length > 0 || capabilityIssues.length > 0 || !regressionPassed) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'Candidate verification stopped before real execution because deterministic gates failed.',
+        {
+          details: {
+            proof: revisions.proofState(ws.workspaceId, workflowId, revisionId),
+            blocking,
+            suiteResults,
+          },
+        },
+      );
+    }
+
+    const runId = randomUUID();
+    const state = buildInitialRunState({ runId, workflowId, graph, inputs });
+    deps.db.insert(schema.workflowRuns).values({
+      id: runId,
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      workflowId,
+      userId: ws.user.id,
+      status: 'CREATED',
+      runState: state,
+      graphSnapshot: graph,
+      workflowRevisionId: revisionId,
+      triggerId: null,
+    }).run();
+    await deps.engine.startRun({
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      workflowId,
+      userId: ws.user.id,
+      triggerId: null,
+      inputs,
+      initialState: state,
+      graph,
+      workflowRevisionId: revisionId,
+      debugRun: true,
+    });
+    return c.json({
+      runId,
+      revisionId,
+      mode: 'debug',
+      selfHealEnabled: false,
+      proof: revisions.proofState(ws.workspaceId, workflowId, revisionId),
+    }, 202);
+  });
+
+  app.post('/:id/revisions/:revisionId/promote', async (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.param('id');
+    const body = (await c.req.json().catch(() => ({}))) as {
+      operatorApproval?: boolean;
+      overrideReason?: string;
+    };
+    const operator = deps.db.select({ isAdmin: schema.users.isAdmin })
+      .from(schema.users).where(eq(schema.users.id, ws.user.id)).get();
+    if (body.overrideReason?.trim() && !operator?.isAdmin) {
+      throw new AgentisError('AUTH_FORBIDDEN', 'Break-glass activation requires an administrator.');
+    }
+    const workflow = revisions.active(ws.workspaceId, workflowId).workflow;
+    if (!workflow.activeRevisionId) throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'Workflow has no active base revision');
+    const result = revisions.promote({
+      workspaceId: ws.workspaceId,
+      workflowId,
+      revisionId: c.req.param('revisionId'),
+      expectedActiveRevisionId: workflow.activeRevisionId,
+      actor: { type: 'user', id: ws.user.id },
+      operatorApproval: body.operatorApproval === true,
+      overrideReason: body.overrideReason,
+    });
+    try {
+      deps.packager?.mirrorWorkflow(
+        { workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id },
+        workflowId,
+      );
+    } catch {
+      /* best-effort mirror */
+    }
+    return c.json({ ok: true, promotion: result });
+  });
+
+  app.post('/:id/revisions/:revisionId/abandon', async (c) => {
+    const ws = getWorkspace(c);
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: string };
+    revisions.abandon({
+      workspaceId: ws.workspaceId,
+      workflowId: c.req.param('id'),
+      revisionId: c.req.param('revisionId'),
+      actor: { type: 'user', id: ws.user.id },
+      reason: body.reason?.trim() || 'Abandoned by operator',
+    });
+    return c.json({ ok: true });
+  });
+
+  app.post('/:id/revisions/:revisionId/restore', async (c) => {
+    const ws = getWorkspace(c);
+    const workflowId = c.req.param('id');
+    const source = revisions.revision(ws.workspaceId, workflowId, c.req.param('revisionId'));
+    if (!source) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow revision not found');
+    const workflow = revisions.active(ws.workspaceId, workflowId).workflow;
+    const restored = revisions.createCandidate({
+      workspaceId: ws.workspaceId,
+      workflowId,
+      graph: source.graphJson as WorkflowGraph,
+      baseRevisionId: workflow.candidateRevisionId ?? workflow.activeRevisionId,
+      source: 'rollback',
+      actor: { type: 'user', id: ws.user.id },
+      reason: `Restore revision ${source.id} as a new candidate`,
+      allowBranch: true,
+    });
+    return c.json({ ok: true, candidateRevision: presentRevision(restored.revision) });
   });
 
   /**
@@ -174,7 +469,7 @@ export function buildWorkflowRoutes(deps: {
   app.get('/:id/capabilities', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+    const wf = loadEditorWorkflow(ws.workspaceId, id);
     const graph = wf.graph as WorkflowGraph;
     return c.json({
       contentHash: (wf as { contentHash?: string | null }).contentHash ?? null,
@@ -192,7 +487,7 @@ export function buildWorkflowRoutes(deps: {
   app.get('/:id/lint', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+    const wf = loadEditorWorkflow(ws.workspaceId, id);
     const issues = validateGraphReferences(wf.graph as WorkflowGraph);
     return c.json({
       issues,
@@ -209,13 +504,13 @@ export function buildWorkflowRoutes(deps: {
   app.get('/:id/readiness', (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
+    const wf = loadEditorWorkflow(ws.workspaceId, id);
     return c.json(analyzeWorkflowReadiness(deps.db, ws.workspaceId, wf.graph as WorkflowGraph));
   });
 
   app.get('/:id/health', (c) => {
     const ws = getWorkspace(c);
-    const wf = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    const wf = loadEditorWorkflow(ws.workspaceId, c.req.param('id'));
     return c.json(preflightWorkflow({
       db: deps.db,
       workspaceId: ws.workspaceId,
@@ -226,7 +521,7 @@ export function buildWorkflowRoutes(deps: {
 
   app.post('/:id/preflight', async (c) => {
     const ws = getWorkspace(c);
-    const wf = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    const wf = loadEditorWorkflow(ws.workspaceId, c.req.param('id'));
     const body = (await c.req.json().catch(() => ({}))) as { inputs?: Record<string, unknown> };
     return c.json(preflightWorkflow({
       db: deps.db,
@@ -242,7 +537,7 @@ export function buildWorkflowRoutes(deps: {
   // the exact next step. Same substrate the agent tools read.
   app.get('/:id/loop-status', (c) => {
     const ws = getWorkspace(c);
-    const wf = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    const wf = loadEditorWorkflow(ws.workspaceId, c.req.param('id'));
     const graph = wf.graph as WorkflowGraph;
     const state = readBuildLoop(wf.settings);
     const hash = graphContentHash(graph);
@@ -269,6 +564,76 @@ export function buildWorkflowRoutes(deps: {
     });
   });
 
+  app.get('/:id/reliability', (c) => {
+    const ws = getWorkspace(c);
+    const workflow = loadWorkflow(deps.db, ws.workspaceId, c.req.param('id'));
+    const runs = deps.db.select({
+      id: schema.workflowRuns.id,
+      runState: schema.workflowRuns.runState,
+    }).from(schema.workflowRuns).where(and(
+      eq(schema.workflowRuns.workspaceId, ws.workspaceId),
+      eq(schema.workflowRuns.workflowId, workflow.id),
+    )).orderBy(desc(schema.workflowRuns.createdAt)).limit(200).all();
+    const fingerprintCounts = new Map<string, number>();
+    const failureClassCounts = new Map<string, number>();
+    let healedRuns = 0;
+    let repairPlans = 0;
+    let recurrentBlocks = 0;
+    for (const run of runs) {
+      const incidents = Object.values((run.runState as WorkflowRunState).selfHealIncidents ?? {});
+      if (incidents.length > 0) healedRuns += 1;
+      for (const incident of incidents) {
+        repairPlans += incident.plans?.length ?? 0;
+        if (incident.recurrent) recurrentBlocks += 1;
+        if (incident.failureFingerprint) {
+          fingerprintCounts.set(incident.failureFingerprint, (fingerprintCounts.get(incident.failureFingerprint) ?? 0) + 1);
+        }
+        if (incident.failureClass) {
+          failureClassCounts.set(incident.failureClass, (failureClassCounts.get(incident.failureClass) ?? 0) + 1);
+        }
+      }
+    }
+    const active = revisions.active(ws.workspaceId, workflow.id).revision;
+    const candidate = revisions.candidate(ws.workspaceId, workflow.id)?.revision ?? null;
+    const repairAttempts = deps.db.select().from(schema.workflowRepairAttempts).where(and(
+      eq(schema.workflowRepairAttempts.workspaceId, ws.workspaceId),
+      eq(schema.workflowRepairAttempts.workflowId, workflow.id),
+    )).all();
+    const selfHealRate = runs.length > 0 ? healedRuns / runs.length : 0;
+    const recurrence = [...fingerprintCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([fingerprint, count]) => ({ fingerprint, count }))
+      .sort((a, b) => b.count - a.count);
+    return c.json({
+      workflowId: workflow.id,
+      windowRuns: runs.length,
+      healedRuns,
+      selfHealRate,
+      repairPlans,
+      recurrentBlocks,
+      repairAttempts: repairAttempts.length,
+      verifiedRepairs: repairAttempts.filter((attempt) => attempt.status === 'verified').length,
+      recurrence,
+      failureClasses: Object.fromEntries(failureClassCounts),
+      activeRevision: {
+        ...presentRevision(active),
+        proof: revisions.proofState(ws.workspaceId, workflow.id, active.id),
+      },
+      candidateRevision: candidate
+        ? {
+            ...presentRevision(candidate),
+            proof: revisions.proofState(ws.workspaceId, workflow.id, candidate.id),
+          }
+        : null,
+      slo: {
+        targetSelfHealRate: 0.05,
+        healthy: selfHealRate <= 0.05,
+        targetRepeatedFingerprintCount: 0,
+        recurrenceHealthy: recurrence.length === 0,
+      },
+    });
+  });
+
   app.get('/:id/deployment', (c) => {
     const ws = getWorkspace(c);
     if (!triggerDeployments) {
@@ -284,6 +649,22 @@ export function buildWorkflowRoutes(deps: {
     }
     // SWIFT arming gate: an explicit override (audited) may arm an unhardened workflow.
     const body = (await c.req.json().catch(() => ({}))) as { override?: { ack?: string } };
+    const revisionState = revisions.active(ws.workspaceId, c.req.param('id'));
+    const trusted = revisionState.workflow.trustState === 'proven'
+      || revisionState.workflow.trustState === 'break_glass';
+    if (!trusted && !body.override?.ack?.trim()) {
+      throw new AgentisError(
+        'AUTH_FORBIDDEN',
+        'Unattended triggers require a proven active revision. Verify and promote the candidate, or use an audited override.',
+        {
+          details: {
+            code: 'WORKFLOW_REVISION_UNPROVEN',
+            activeRevisionId: revisionState.revision.id,
+            trustState: revisionState.workflow.trustState,
+          },
+        },
+      );
+    }
     const deployment = await triggerDeployments.activate({
       workspaceId: ws.workspaceId,
       workflowId: c.req.param('id'),
@@ -319,9 +700,11 @@ export function buildWorkflowRoutes(deps: {
     const normalizedGraph = body.graph
       ? normalizeWorkflowGraph(deps.db, ws.workspaceId, body.graph as WorkflowGraph).graph
       : undefined;
+    const specChanged = body.settings !== undefined
+      && JSON.stringify(readWorkflowSpec(body.settings))
+        !== JSON.stringify(readWorkflowSpec(wf.settings));
     if (normalizedGraph)
       validateWorkflowGraph(normalizedGraph, { currentWorkflowId: id, strict: false });
-    const nextGraph = normalizedGraph ?? (wf.graph as WorkflowGraph);
     deps.db
       .update(schema.workflows)
       .set({
@@ -332,13 +715,27 @@ export function buildWorkflowRoutes(deps: {
             : body.description?.trim() || null,
         spaceId: body.spaceId === undefined ? wf.spaceId : body.spaceId ?? null,
         ownerAgentId: body.ownerAgentId === undefined ? wf.ownerAgentId : body.ownerAgentId ?? null,
-        graph: nextGraph,
-        contentHash: hashWorkflowGraph(nextGraph),
         settings: body.settings ?? (wf.settings as Record<string, unknown>),
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflows.id, id))
       .run();
+    const selectedGraph = normalizedGraph
+      ?? revisions.candidate(ws.workspaceId, id)?.graph
+      ?? revisions.active(ws.workspaceId, id).graph;
+    const candidate = normalizedGraph || specChanged
+      ? revisions.createCandidate({
+          workspaceId: ws.workspaceId,
+          workflowId: id,
+          graph: selectedGraph,
+          baseRevisionId: body.baseRevisionId,
+          source: 'user_edit',
+          actor: { type: 'user', id: ws.user.id },
+          reason: normalizedGraph
+            ? 'Saved from the workflow editor'
+            : 'Updated workflow acceptance specification',
+        })
+      : null;
     // 10.14: keep the mirrored package in sync
     try {
       deps.packager?.mirrorWorkflow(
@@ -352,30 +749,77 @@ export function buildWorkflowRoutes(deps: {
     // blueprint/hardened graph, tell the editor NOW — it is UNVERIFIED until it is
     // re-proven, and a proven workflow only breaks when it changes. The save still
     // succeeds (non-blocking); the warning steers to re-verify (or restore) next.
-    const divergence = detectProvenDivergence(
-      readBuildLoop(body.settings ?? (wf.settings as Record<string, unknown>)),
-      graphContentHash(nextGraph), // MUST match how buildLoop stamps hash (semantic, not the DB row hash)
-      id,
-    );
-    return c.json({ ok: true, ...(divergence ? { divergence } : {}) });
+    const active = revisions.active(ws.workspaceId, id);
+    const currentCandidate = candidate?.revision ?? revisions.candidate(ws.workspaceId, id)?.revision ?? null;
+    return c.json({
+      ok: true,
+      activeRevision: presentRevision(active.revision),
+      candidateRevision: currentCandidate ? presentRevision(currentCandidate) : null,
+      trustState: currentCandidate ? 'candidate' : active.revision.trustState,
+      ...(candidate ? {
+        divergence: {
+          workflowId: id,
+          graphHash: candidate.revision.semanticHash,
+          protectedGraphHash: active.revision.semanticHash,
+          source: 'active_revision',
+          message: 'Saved as an unverified candidate. Production continues to use the active revision.',
+        },
+      } : {}),
+    });
   });
 
   app.post('/:id/run', async (c) => {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
-    const wf = loadWorkflow(deps.db, ws.workspaceId, id);
     const body = schemas.runWorkflowSchema.parse(await c.req.json().catch(() => ({})));
-
-    // `loadWorkflow` already normalized the graph and surfaced any repairs.
-    const graph = wf.graph;
+    const active = revisions.active(ws.workspaceId, id);
+    const selected = body.mode === 'debug'
+      ? body.revisionId
+        ? revisions.revision(ws.workspaceId, id, body.revisionId)
+        : revisions.candidate(ws.workspaceId, id)?.revision
+      : active.revision;
+    if (!selected) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        body.mode === 'debug' ? 'No candidate revision is available to verify.' : 'No active workflow revision is available.',
+      );
+    }
+    if (body.mode === 'active' && body.revisionId && body.revisionId !== active.revision.id) {
+      throw new AgentisError(
+        'AUTH_FORBIDDEN',
+        'Production runs always execute the active revision. Use mode "debug" to test a candidate.',
+      );
+    }
+    const rawGraph = selected.graphJson as WorkflowGraph;
+    const normalized = normalizeWorkflowGraph(deps.db, ws.workspaceId, rawGraph);
+    if (normalized.repairs.length > 0) {
+      const existingCandidate = revisions.candidate(ws.workspaceId, id);
+      const normalizedCandidate = revisions.createCandidate({
+        workspaceId: ws.workspaceId,
+        workflowId: id,
+        graph: normalized.graph,
+        baseRevisionId: selected.id,
+        source: 'normalization',
+        actor: { type: 'system', id: 'workflow-normalizer' },
+        reason: `Execution normalization proposed ${normalized.repairs.length} semantic repair(s).`,
+        allowBranch: true,
+        setAsHead: !existingCandidate || existingCandidate.revision.id === selected.id,
+      });
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'The selected revision requires normalization and cannot be changed at run time. Verify the generated normalization candidate first.',
+        { details: { candidateRevisionId: normalizedCandidate.revision.id, repairs: normalized.repairs } },
+      );
+    }
+    const graph = rawGraph;
     if (graph.nodes.length === 0) {
       throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'Cannot run an empty workflow');
     }
-    validateWorkflowGraph(graph, { currentWorkflowId: wf.id });
+    validateWorkflowGraph(graph, { currentWorkflowId: id });
     const health = preflightWorkflow({
       db: deps.db,
       workspaceId: ws.workspaceId,
-      workflowId: wf.id,
+      workflowId: id,
       graph,
       inputs: body.inputs,
       // Gate the REAL run against the EXACT input the engine will use — a missing
@@ -393,30 +837,10 @@ export function buildWorkflowRoutes(deps: {
     // Heal the stored row when the normalization actually changed something, so
     // the persisted graph matches what the engine will run (and so the next read
     // is a no-op). Skipping this left the database permanently out of sync.
-    if (wf.graphRepairs.length > 0) {
-      deps.db
-        .update(schema.workflows)
-        .set({
-          graph,
-          contentHash: hashWorkflowGraph(graph),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(schema.workflows.id, wf.id))
-        .run();
-      try {
-        deps.packager?.mirrorWorkflow(
-          { workspaceId: ws.workspaceId, ambientId: ws.ambientId ?? null, userId: ws.user.id },
-          wf.id,
-        );
-      } catch {
-        /* best-effort mirror */
-      }
-    }
-
     const runId = randomUUID();
     const state = buildInitialRunState({
       runId,
-      workflowId: wf.id,
+      workflowId: id,
       graph,
       inputs: body.inputs,
     });
@@ -427,40 +851,48 @@ export function buildWorkflowRoutes(deps: {
         id: runId,
         workspaceId: ws.workspaceId,
         ambientId: ws.ambientId,
-        workflowId: wf.id,
+        workflowId: id,
         userId: ws.user.id,
         status: 'CREATED',
         runState: state,
+        graphSnapshot: graph,
+        workflowRevisionId: selected.id,
         triggerId: body.triggerId ?? null,
       })
       .run();
-
     // V1-SPEC §12: announce the run to the workspace before the engine
     // emits its first node event, so the dashboard's run history can flip
     // to CREATED state immediately.
     deps.bus.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.RUN_CREATED, {
       runId,
-      workflowId: wf.id,
+      workflowId: id,
       ambientId: ws.ambientId,
     });
 
     await deps.engine.startRun({
       workspaceId: ws.workspaceId,
       ambientId: ws.ambientId,
-      workflowId: wf.id,
+      workflowId: id,
       userId: ws.user.id,
       triggerId: body.triggerId ?? null,
       inputs: body.inputs,
       initialState: state,
       graph,
+      workflowRevisionId: selected.id,
+      debugRun: body.mode === 'debug',
     });
 
     // SWIFT "warn previously": this HTTP run is always a production run (self-heal
     // ON). If the graph diverges from its PROVEN blueprint/hardened version, the run
     // is proceeding UNVERIFIED — surface that with the run id so the operator can
     // re-verify (deliver) or restore rather than trust an unproven change silently.
-    const divergence = detectProvenDivergence(readBuildLoop(wf.settings), graphContentHash(graph), wf.id);
-    return c.json({ runId, ...(divergence ? { divergence } : {}) }, 202);
+    return c.json({
+      runId,
+      revisionId: selected.id,
+      mode: body.mode,
+      selfHealEnabled: body.mode !== 'debug',
+      trustState: selected.trustState,
+    }, 202);
   });
 
   /**
@@ -677,6 +1109,7 @@ export function buildWorkflowRoutes(deps: {
         updatedAt: new Date().toISOString(),
       })
       .run();
+    revisions.ensureWorkflow(ws.workspaceId, id);
 
     try {
       deps.packager?.mirrorWorkflow(
@@ -1054,6 +1487,79 @@ function formatFinalNodeOutput(
   };
 }
 
+function presentRevision(revision: typeof schema.workflowGraphRevisions.$inferSelect) {
+  return {
+    id: revision.id,
+    workflowId: revision.workflowId,
+    parentRevisionId: revision.parentRevisionId,
+    semanticHash: revision.semanticHash,
+    presentationHash: revision.presentationHash,
+    source: revision.source,
+    reason: revision.reason,
+    status: revision.status,
+    trustState: revision.trustState,
+    proofProfile: revision.proofProfile,
+    verifiedAt: revision.verifiedAt,
+    promotedAt: revision.promotedAt,
+    rejectedAt: revision.rejectedAt,
+    createdAt: revision.createdAt,
+    updatedAt: revision.updatedAt,
+  };
+}
+
+function verifyRevisionCase(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  workflowId: string,
+  graph: WorkflowGraph,
+  testCase: WorkflowTestCase,
+) {
+  const report = preflightWorkflow({
+    db,
+    workspaceId,
+    workflowId,
+    graph,
+    inputs: testCase.inputs,
+    mode: 'canvas',
+  });
+
+  const blocking = report.issues.filter((issue) => issue.severity === 'error');
+  const nodes = Object.fromEntries(Object.entries(report.nodes).map(([nodeId, result]) => [nodeId, result.output ?? {}]));
+  const assertionFailures: string[] = [];
+  for (const assertion of testCase.assertions) {
+    const result = report.nodes[assertion.nodeId];
+    if (!result) {
+      assertionFailures.push(`node "${assertion.nodeId}" was not present`);
+      continue;
+    }
+    try {
+      const passed = evalCondition(assertion.expr, {
+        input: result.input ?? {},
+        inputs: result.input ?? {},
+        output: result.output ?? {},
+        nodes,
+        trigger: report.scenario.input,
+      });
+      if (!passed) assertionFailures.push(assertion.message ?? assertion.expr);
+    } catch (error) {
+      assertionFailures.push(`${assertion.expr}: ${(error as Error).message}`);
+    }
+  }
+  const expectsFailure = testCase.expectOutcome?.verdict === 'failed_checks'
+    || testCase.expectOutcome?.verdict === 'hollow';
+  const passed = expectsFailure
+    ? blocking.length > 0 || assertionFailures.length > 0
+    : blocking.length === 0 && assertionFailures.length === 0;
+  return {
+    id: testCase.id,
+    name: testCase.name,
+    kind: testCase.kind,
+    passed,
+    blocking: blocking.map((issue) => ({ code: issue.code, nodeId: issue.nodeId, message: issue.message })),
+    assertionFailures,
+  };
+}
+
 function loadWorkflow(db: AgentisSqliteDb, workspaceId: string, id: string) {
   const wf = db
     .select()
@@ -1061,13 +1567,10 @@ function loadWorkflow(db: AgentisSqliteDb, workspaceId: string, id: string) {
     .where(and(eq(schema.workflows.id, id), eq(schema.workflows.workspaceId, workspaceId)))
     .get();
   if (!wf) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow not found');
-  // Normalize on read so every consumer sees an engine-valid graph. Surface the
-  // repairs alongside the graph (instead of discarding them) so a caller that
-  // wants to heal the *stored* row — e.g. the run path — can persist the fix.
-  // Without this, the stored graph drifts permanently from what actually runs:
-  // each read re-normalizes in memory but the database keeps the stale draft.
-  const { graph, repairs } = normalizeWorkflowGraph(db, workspaceId, wf.graph as WorkflowGraph);
-  return { ...wf, graph, graphRepairs: repairs };
+  // Return the exact persisted active bytes. Compatibility normalization is a
+  // semantic mutation and must become a candidate, never an invisible read-time
+  // graph that differs from what the revision/proof UI displays.
+  return wf;
 }
 
 function ensureWorkflowSpace(db: AgentisSqliteDb, workspaceId: string, spaceId: string) {

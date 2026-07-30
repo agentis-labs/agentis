@@ -31,7 +31,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 
 type SurfaceRow = typeof schema.appSurfaces.$inferSelect;
 
-export type SurfaceEvent = 'render' | 'patch';
+export type SurfaceEvent = 'render' | 'patch' | 'delete';
 
 export interface AppSurfaceStoreDeps {
   db: AgentisSqliteDb;
@@ -146,7 +146,9 @@ export class AppSurfaceStore {
         })
         .where(eq(schema.appSurfaces.id, existing.id))
         .run();
-      return this.get(workspaceId, appId, data.name);
+      const surface = this.get(workspaceId, appId, data.name);
+      this.deps.emit?.({ appId, workspaceId, event: 'render', surfaceId: surface.id, revision: surface.revision, payload: { name: surface.name, view: surface.view, actions: surface.actions } });
+      return surface;
     }
     const id = randomUUID();
     this.db
@@ -165,7 +167,9 @@ export class AppSurfaceStore {
         updatedAt: now,
       })
       .run();
-    return this.get(workspaceId, appId, data.name);
+    const surface = this.get(workspaceId, appId, data.name);
+    this.deps.emit?.({ appId, workspaceId, event: 'render', surfaceId: surface.id, revision: surface.revision, payload: { name: surface.name, view: surface.view, actions: surface.actions } });
+    return surface;
   }
 
   rename(workspaceId: string, appId: string, currentName: string, nextName: string): AppSurface {
@@ -201,6 +205,7 @@ export class AppSurfaceStore {
     const existing = this.rowByName(appId, name);
     if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${name}`);
     this.db.delete(schema.appSurfaces).where(eq(schema.appSurfaces.id, existing.id)).run();
+    this.deps.emit?.({ appId, workspaceId, event: 'delete', surfaceId: existing.id, revision: existing.revision + 1, payload: { name } });
   }
 
   render(workspaceId: string, appId: string, name: string, view: unknown): AppSurface {
@@ -220,7 +225,7 @@ export class AppSurfaceStore {
     const existing = this.rowByName(appId, name);
     const now = new Date().toISOString();
     if (!existing) {
-      this.upsert(workspaceId, appId, { name, kind: 'page', view: repaired });
+      return this.upsert(workspaceId, appId, { name, kind: 'page', view: repaired });
     } else {
       this.db
         .update(schema.appSurfaces)
@@ -351,9 +356,10 @@ export class AppSurfaceStore {
     if (!existing) {
       return this.upsert(workspaceId, appId, { name, kind: 'page', actions: parsed });
     }
+    const nextRevision = existing.revision + 1;
     this.db
       .update(schema.appSurfaces)
-      .set({ actionsJson: parsed, updatedAt: new Date().toISOString() })
+      .set({ actionsJson: parsed, revision: nextRevision, updatedAt: new Date().toISOString() })
       .where(eq(schema.appSurfaces.id, existing.id))
       .run();
 
@@ -364,7 +370,7 @@ export class AppSurfaceStore {
       if (fixes.length > 0) {
         this.db
           .update(schema.appSurfaces)
-          .set({ viewJson: audited, revision: existing.revision + 1, updatedAt: new Date().toISOString() })
+          .set({ viewJson: audited, revision: nextRevision, updatedAt: new Date().toISOString() })
           .where(eq(schema.appSurfaces.id, existing.id))
           .run();
         const surface = this.get(workspaceId, appId, name);
@@ -372,7 +378,9 @@ export class AppSurfaceStore {
         return surface;
       }
     }
-    return this.get(workspaceId, appId, name);
+    const surface = this.get(workspaceId, appId, name);
+    this.deps.emit?.({ appId, workspaceId, event: 'render', surfaceId: surface.id, revision: surface.revision, payload: { view: surface.view, actions: surface.actions } });
+    return surface;
   }
 }
 
@@ -477,7 +485,9 @@ function setRegion(node: ViewNode, region: string, patch: { child?: ViewNode | n
 
 function containsCustomView(node: ViewNode): boolean {
   if (node.type === 'CustomView') return true;
-  if ('children' in node) return node.children.some(containsCustomView);
+  if (node.type === 'Tabs') return node.tabs.some((tab) => tab.children.some(containsCustomView));
+  if (node.type === 'Accordion') return node.sections.some((section) => section.children.some(containsCustomView));
+  if ('children' in node && Array.isArray(node.children)) return node.children.some(containsCustomView);
   if (node.type === 'List') return containsCustomView(node.item);
   if (node.type === 'Split') return containsCustomView(node.left) || containsCustomView(node.right);
   if (node.type === 'AgentRegion') return node.child ? containsCustomView(node.child) : false;

@@ -83,6 +83,13 @@ export class ChatToolExecutor {
     return Boolean(this.definition(name)?.mutating);
   }
 
+  /** Registry-backed definitions are the source of truth. The authored chat
+   * catalog may enrich these with examples, but it must never hide an executable
+   * orchestrator capability merely because a second list drifted. */
+  static registeredDefinitions(): AgentisToolDefinition[] {
+    return this.#deps?.registry.catalog().tools ?? [];
+  }
+
   static isMutating(name: string): boolean {
     if (name.startsWith('workflow.')) return true;
     return Boolean(this.definition(name)?.mutating);

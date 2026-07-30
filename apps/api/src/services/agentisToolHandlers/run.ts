@@ -94,13 +94,19 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         if (!wf || wf.workspaceId !== ctx.workspaceId) {
           throw new Error(`workflow ${args.workflowId} not found in workspace`);
         }
-        const graph = wf.graph as WorkflowGraph;
+        const debugRun = args.debugRun === true;
+        const selectedRevision = deps.revisions
+          ? debugRun
+            ? deps.revisions.candidate(ctx.workspaceId, wf.id) ?? deps.revisions.active(ctx.workspaceId, wf.id)
+            : deps.revisions.active(ctx.workspaceId, wf.id)
+          : null;
+        const graph = (selectedRevision?.graph ?? wf.graph) as WorkflowGraph;
+        const workflowRevisionId = selectedRevision?.revision.id ?? wf.activeRevisionId ?? null;
         const requestedWaitMode = typeof args.waitMode === 'string' ? args.waitMode : 'background';
         if (!['background', 'inline', 'auto'].includes(requestedWaitMode)) {
           throw new AgentisError('VALIDATION_FAILED', `unknown waitMode '${requestedWaitMode}'`);
         }
         const planId = args.planId ? String(args.planId) : args.taskId ? String(args.taskId) : null;
-        const debugRun = args.debugRun === true;
         if (wf.appId) {
           const compile = compileAppReadiness(deps.db, ctx.workspaceId, wf.appId, debugRun ? 'debug' : 'production');
           if (!compile.readyForExecution) {
@@ -221,6 +227,8 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           userId: ctx.userId,
           status: 'CREATED',
           runState: initialState,
+          graphSnapshot: graph,
+          workflowRevisionId,
           triggerId: null,
           ...(candidate ? {
             isReplay: true,
@@ -262,6 +270,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
             initialState,
             debugRun,
             graph,
+            workflowRevisionId,
           });
         } catch (err) {
           if (residentParked && ctx.agentId) {
@@ -297,6 +306,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
             ...snapshot,
             runId: handle.runId,
             workflowId: handle.workflowId,
+            workflowRevisionId,
             started: true,
             waitMode: 'inline',
             awaited: settled.resolved,
@@ -315,6 +325,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
         return {
           runId: handle.runId,
           workflowId: handle.workflowId,
+          workflowRevisionId,
           status: 'started',
           waitMode: 'background',
           residentSuspended: residentParked,
@@ -849,6 +860,7 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
             url: { type: 'string' },
             tags: { type: 'string' },
             knowledgeBaseId: { type: 'string' },
+            agentId: { type: 'string', description: 'Target specialist private knowledge scope.' },
           },
           required: ['title', 'content'],
         },
@@ -859,16 +871,23 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           throw new Error('Knowledge base service not available');
         }
 
+        const agentId = args.agentId ? String(args.agentId) : '';
+        if (agentId) {
+          const target = deps.db.select({ id: schema.agents.id }).from(schema.agents)
+            .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, ctx.workspaceId))).get();
+          if (!target) throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${agentId} not found in this workspace`);
+        }
         let kbId = args.knowledgeBaseId ? String(args.knowledgeBaseId) : '';
         if (!kbId) {
-          const bases = deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId);
+          const bases = deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId, agentId ? { scopeId: agentId } : undefined);
           if (bases.length > 0) {
             kbId = bases[0]!.id;
           } else {
             const defaultKb = deps.knowledgeBases.createKnowledgeBase({
               workspaceId: ctx.workspaceId,
-              name: 'Default Knowledge Base',
-              description: 'Automatically created for agent inputs',
+              ...(agentId ? { scopeId: agentId } : {}),
+              name: agentId ? 'Private specialist knowledge' : 'Default Knowledge Base',
+              description: agentId ? 'Private knowledge administered by the workspace orchestrator' : 'Automatically created for agent inputs',
             });
             kbId = defaultKb.id;
           }
@@ -890,6 +909,8 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           knowledgeBaseId: kbId,
           status: 'ready',
           chunks: doc.chunks,
+          scope: agentId ? 'agent' : 'workspace',
+          ...(agentId ? { agentId } : {}),
         };
       },
     },

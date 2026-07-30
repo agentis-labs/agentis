@@ -16,8 +16,10 @@ import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { findBlessedGraph } from '../workflow/workflowBlueprint.js';
 import { graphContentHash, readBuildLoop, stampBuildLoop } from '../workflow/workflowCompass.js';
+import { WorkflowRevisionService } from '../workflow/workflowRevisionService.js';
 
 export function registerBlueprintTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
+  deps = { ...deps, revisions: deps.revisions ?? new WorkflowRevisionService(deps.db) };
   registry.register(
     {
       id: 'agentis.workflow.restore_blueprint',
@@ -79,7 +81,10 @@ export function registerBlueprintTools(registry: AgentisToolRegistry, deps: Tool
         };
       }
 
-      const currentHash = graphContentHash(wf.graph as WorkflowGraph);
+      const selected = deps.revisions?.candidate(ctx.workspaceId, workflowId)
+        ?? deps.revisions?.active(ctx.workspaceId, workflowId);
+      const currentGraph = (selected?.graph ?? wf.graph) as WorkflowGraph;
+      const currentHash = graphContentHash(currentGraph);
       if (currentHash === blessed.graphHash) {
         return {
           restored: false,
@@ -90,16 +95,45 @@ export function registerBlueprintTools(registry: AgentisToolRegistry, deps: Tool
         };
       }
 
-      const current = wf.graph as WorkflowGraph;
       const blessedGraph = blessed.graph;
-      deps.db
-        .update(schema.workflows)
-        .set({ graph: blessedGraph as unknown as object, contentHash: blessed.graphHash, updatedAt: new Date().toISOString() })
-        .where(eq(schema.workflows.id, workflowId))
-        .run();
-      // Re-align the authored-hash stamp so the compass reads this hash as the
-      // saved state; the blueprint stamp itself is untouched (still blessed).
-      stampBuildLoop(deps.db, workflowId, { graphHash: blessed.graphHash, validatedAt: new Date().toISOString() });
+      const active = deps.revisions?.active(ctx.workspaceId, workflowId);
+      if (!deps.revisions || !active) throw new Error('workflow revision service is unavailable');
+      if (
+        selected
+        && selected.revision.id !== active.revision.id
+        && active.revision.semanticHash === blessed.graphHash
+      ) {
+        deps.revisions.abandon({
+          workspaceId: ctx.workspaceId,
+          workflowId,
+          revisionId: selected.revision.id,
+          actor: { type: ctx.userId ? 'user' : 'system', id: ctx.userId ?? null },
+          reason: `Restored blessed production revision from run ${blessed.runId}`,
+        });
+      } else {
+        const restored = deps.revisions.createCandidate({
+          workspaceId: ctx.workspaceId,
+          workflowId,
+          graph: blessedGraph,
+          baseRevisionId: selected?.revision.id ?? active.revision.id,
+          source: 'blueprint_restore',
+          actor: { type: ctx.userId ? 'user' : 'system', id: ctx.userId ?? null },
+          reason: `Restore blessed graph from ${blessed.source} run ${blessed.runId}`,
+        });
+        if (blessed.source !== 'explicit_run') {
+          for (const gate of ['regression', 'clean_debug', 'outcome'] as const) {
+            deps.revisions.recordProof({
+              workspaceId: ctx.workspaceId,
+              workflowId,
+              revisionId: restored.revision.id,
+              gate,
+              status: 'passed',
+              runId: blessed.runId,
+              evidence: { restoredFromAccomplishedRun: blessed.runId, source: blessed.source },
+            });
+          }
+        }
+      }
 
       const loop = readBuildLoop(wf.settings);
       deps.logger.info('workflow.blueprint_restored', {
@@ -118,10 +152,11 @@ export function registerBlueprintTools(registry: AgentisToolRegistry, deps: Tool
         source: blessed.source,
         graphHash: blessed.graphHash,
         replacedGraphHash: currentHash,
+        candidateRequiredVerification: active.revision.semanticHash !== blessed.graphHash,
         nodeCount: blessedGraph.nodes.length,
-        replacedNodeCount: current?.nodes?.length ?? 0,
+        replacedNodeCount: currentGraph.nodes.length,
         hardenedStampPresent: Boolean(loop.hardened),
-        note: 'Graph replaced with the production-proven bytes. Re-run the workflow; if the original failure was runtime-class (bad model/credential), fix that too or it will fail again for the same non-graph reason.',
+        note: 'The blessed bytes are now the selected candidate (or the divergent candidate was abandoned). Run clean verification before any required promotion.',
       };
     },
   );

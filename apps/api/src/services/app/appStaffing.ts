@@ -78,6 +78,8 @@ export interface AppStaffingDeps {
   store: AppStore;
   specialists: SpecialistAgentService;
   logger?: Logger;
+  /** Bind/recover the selected durable specialist after seating. */
+  commissionSpecialist?: (workspaceId: string, agentId: string) => void | Promise<void>;
 }
 
 export class AppStaffingService {
@@ -148,6 +150,7 @@ export class AppStaffingService {
         created = authored.created;
       }
 
+      await this.deps.commissionSpecialist?.(input.workspaceId, agentId);
       this.deps.store.addMember(input.workspaceId, input.appId, agentId, memberRole);
       return { agentId, functionalRole: role.role, memberRole, created };
     } catch (err) {

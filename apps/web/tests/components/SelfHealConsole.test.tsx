@@ -66,4 +66,33 @@ describe('SelfHealConsole', () => {
     expect(screen.getByText('Recovery ladder')).toBeInTheDocument();
     expect(screen.getByText('Verify')).toBeInTheDocument();
   });
+
+  it('renders the durable repair trace without depending on transient activity', () => {
+    render(<SelfHealConsole incident={incident({
+      status: 'APPLYING',
+      trace: [
+        {
+          id: 'trace-1',
+          phase: 'diagnose',
+          status: 'DIAGNOSING',
+          summary: 'Diagnosing the failure and collecting runtime evidence',
+          detail: 'The assigned runtime was still starting.',
+          attempt: 1,
+          createdAt: '2026-06-19T12:00:01.000Z',
+        },
+        {
+          id: 'trace-2',
+          phase: 'repair',
+          status: 'APPLYING',
+          summary: 'Applying the selected repair',
+          attempt: 1,
+          tier: 'deterministic',
+          createdAt: '2026-06-19T12:00:02.000Z',
+        },
+      ],
+    })} />);
+    expect(screen.getByText('Diagnosing the failure and collecting runtime evidence')).toBeInTheDocument();
+    expect(screen.getByText('The assigned runtime was still starting.')).toBeInTheDocument();
+    expect(screen.getByText('Applying the selected repair')).toBeInTheDocument();
+  });
 });

@@ -1323,6 +1323,50 @@ export interface WorkflowRunState {
   selfHealIncidents?: Record<string, WorkflowSelfHealIncident>;
 }
 
+export type WorkflowRevisionStatus =
+  | 'candidate'
+  | 'verifying'
+  | 'verified'
+  | 'active'
+  | 'rejected'
+  | 'superseded';
+
+export type WorkflowTrustState =
+  | 'proven'
+  | 'candidate'
+  | 'legacy_unverified'
+  | 'unverified'
+  | 'proven_equivalent'
+  | 'break_glass'
+  | 'rejected';
+
+export interface WorkflowRevisionSummary {
+  id: string;
+  workflowId: string;
+  parentRevisionId?: string | null;
+  semanticHash: string;
+  presentationHash: string;
+  source: string;
+  reason: string;
+  status: WorkflowRevisionStatus;
+  trustState: WorkflowTrustState;
+  proofProfile: string;
+  verifiedAt?: string | null;
+  promotedAt?: string | null;
+  createdAt: string;
+}
+
+export type WorkflowFailureClass =
+  | 'expected_business'
+  | 'human_policy'
+  | 'configuration_capability'
+  | 'transient_resource'
+  | 'data_contract'
+  | 'graph_design'
+  | 'platform'
+  | 'cancellation_propagated'
+  | 'unknown';
+
 /** How much autonomy the workspace grants the recovery ladder. */
 export type WorkflowRecoveryMode = 'guarded' | 'bypass';
 
@@ -1358,6 +1402,17 @@ export type WorkflowSelfHealIncidentStatus =
   | 'EXHAUSTED'
   | 'ROLLED_BACK';
 
+export interface WorkflowSelfHealTraceEntry {
+  id: string;
+  phase: 'diagnose' | 'inspect' | 'repair' | 'verify' | 'resume' | 'blocked';
+  status: WorkflowSelfHealIncidentStatus;
+  summary: string;
+  detail?: string;
+  attempt: number;
+  tier?: WorkflowRecoveryTier;
+  createdAt: string;
+}
+
 export interface WorkflowSelfHealIncident {
   /** Stable lineage key. Legacy incidents use their node id. */
   incidentId?: string;
@@ -1370,8 +1425,17 @@ export interface WorkflowSelfHealIncident {
   tier?: WorkflowRecoveryTier;
   /** Normalized root-cause signature; survives engine restarts and graph revisions. */
   failureFingerprint?: string;
+  failureClass?: WorkflowFailureClass;
+  /** Structural fixes are always scoped to this run until a separate replay proves a candidate. */
+  repairScope?: 'run_local';
+  baseRevisionId?: string;
+  candidateRevisionId?: string;
+  recurrent?: boolean;
   /** All distinct plans considered for this incident, in execution order. */
   plans?: WorkflowRepairPlanRecord[];
+  /** Durable, operator-safe reasoning trace. This is diagnostic evidence and
+   * actions, never hidden model chain-of-thought. */
+  trace?: WorkflowSelfHealTraceEntry[];
   error?: string;
   diagnosis?: string;
   reason?: string;

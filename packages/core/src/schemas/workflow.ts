@@ -553,11 +553,17 @@ export const updateWorkflowSchema = z.object({
   description: z.string().max(8000).nullable().optional(),
   graph: workflowGraphSchema.optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
+  /** Optimistic-concurrency base for semantic graph edits. */
+  baseRevisionId: z.string().min(1).optional(),
 });
 
 export const runWorkflowSchema = z.object({
   triggerId: z.string().uuid().optional(),
   inputs: z.record(z.string(), z.unknown()).default({}),
+  /** Production runs omit this and always resolve the active revision. */
+  revisionId: z.string().min(1).optional(),
+  /** Candidate revisions may only be executed through the explicit debug path. */
+  mode: z.enum(['active', 'debug']).default('active'),
 });
 
 export const workflowDeploymentStatusSchema = z.object({

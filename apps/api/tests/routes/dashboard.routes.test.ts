@@ -164,6 +164,19 @@ describe('/v1/dashboard/chrome', () => {
       role: 'specialist',
       colorHex: '#0ea5e9',
     }).run();
+    ctx.db.insert(schema.agents).values({
+      id: randomUUID(),
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Offline specialist',
+      adapterType: 'http',
+      config: {},
+      capabilityTags: [],
+      status: 'offline',
+      role: 'specialist',
+      colorHex: '#64748b',
+    }).run();
     ctx.db.insert(schema.activityEvents).values({
       id: randomUUID(),
       workspaceId: ctx.workspace.id,
@@ -194,7 +207,7 @@ describe('/v1/dashboard/chrome', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       workspaceId: string;
-      counts: { liveAgents: number };
+      counts: { liveAgents: number; totalAgents: number };
       fleet: {
         approvals: { pending: number };
         gateways: { total: number; connected: number };
@@ -213,6 +226,7 @@ describe('/v1/dashboard/chrome', () => {
 
     expect(body.workspaceId).toBe(ctx.workspace.id);
     expect(body.counts.liveAgents).toBe(1);
+    expect(body.counts.totalAgents).toBe(2);
     expect(body.fleet.approvals.pending).toBe(1);
     expect(body.fleet.runs.recent).toBeUndefined();
     expect(body.fleet.agents).toBeUndefined();

@@ -20,6 +20,7 @@ import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { ConversationSimulatorService } from '../../src/services/conversation/conversationSimulator.js';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { AgentAdapter, ChatDelta } from '@agentis/core';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 
 let ctx: TestContext;
 
@@ -518,8 +519,9 @@ describe('/v1/apps package install', () => {
     });
     expect(response.status).toBe(201);
     const body = (await response.json()) as { data: { id: string } };
-    const wf = ctx.db.select({ graph: schema.workflows.graph }).from(schema.workflows).where(eq(schema.workflows.appId, body.data.id)).get();
-    expect((wf?.graph as { nodes: unknown[] }).nodes).toHaveLength(2);
+    const wf = ctx.db.select({ id: schema.workflows.id, graph: schema.workflows.graph }).from(schema.workflows).where(eq(schema.workflows.appId, body.data.id)).get()!;
+    expect((wf.graph as { nodes: unknown[] }).nodes).toHaveLength(0);
+    expect(new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, wf.id)?.graph.nodes).toHaveLength(2);
   });
 
   it('promotes a bare workflow to one stable App-of-one', async () => {
@@ -1053,6 +1055,12 @@ describe('App workflow control plane (E0)', () => {
       graph: cronGraph,
       settings: { buildLoop: { hardened: { at: new Date().toISOString(), graphHash: graphContentHash(cronGraph as never), specHash: 'x' } } },
     }).where(eq(schema.workflows.id, cronWf)).run();
+    const active = new WorkflowRevisionService(ctx.db).ensureWorkflow(ctx.workspace.id, cronWf).active;
+    ctx.db.update(schema.workflowGraphRevisions).set({
+      trustState: 'proven',
+      proofProfile: 'legacy_proven',
+    }).where(eq(schema.workflowGraphRevisions.id, active.id)).run();
+    ctx.db.update(schema.workflows).set({ trustState: 'proven' }).where(eq(schema.workflows.id, cronWf)).run();
 
     // A mock trigger runtime that flips the DB row on activate/deactivate.
     const runtime = {

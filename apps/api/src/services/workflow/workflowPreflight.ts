@@ -343,6 +343,15 @@ function verifyExtensionSource(
     };
   }
   const manifest = row.manifest as ExtensionManifest | null;
+  const operationNames = (manifest?.operations ?? []).map((operation) => operation.name);
+  if (!operationNames.includes(config.operationName)) {
+    return {
+      ok: false,
+      code: 'EXTENSION_OPERATION_NOT_FOUND',
+      message: `Extension "${manifest?.slug ?? row.slug}" does not declare operation "${config.operationName}".`,
+      remediation: `Choose one of the declared operations: ${operationNames.join(', ') || '(none)'}.`,
+    };
+  }
   // Only node_worker extensions carry inline source we can statically check.
   if (!manifest || manifest.runtime !== 'node_worker') return { ok: true };
   const source = typeof manifest.source === 'string' ? manifest.source : '';
@@ -354,7 +363,7 @@ function verifyExtensionSource(
       remediation: 'Re-create the extension with valid source.',
     };
   }
-  const result = validateExtensionSource(source, (manifest.operations ?? []).map((operation) => operation.name));
+  const result = validateExtensionSource(source, operationNames);
   if (result.ok) return { ok: true };
   return { ok: false, code: result.issue.code, message: result.issue.message, remediation: result.issue.remediation };
 }
@@ -403,6 +412,15 @@ function verifyIntegrationContract(
   // Missing connector/operation ids are a different class, surfaced by graph
   // validation; nothing to probe against here.
   if (!integrationId || !operationId) return { ok: true };
+  if (defaultConnectorRegistry.has(integrationId)
+    && !defaultConnectorRegistry.get(integrationId).operations.includes(operationId)) {
+    return {
+      ok: false,
+      code: 'INTEGRATION_OPERATION_NOT_FOUND',
+      message: `Integration "${integrationId}" does not provide operation "${operationId}".`,
+      remediation: `Choose one of: ${defaultConnectorRegistry.get(integrationId).operations.join(', ')}.`,
+    };
+  }
   const contract = resolveOperationContract(deps, integrationId, operationId);
   if (!contract) return { ok: true };
   const params = isRecord(config.inputs) ? config.inputs : {};
@@ -502,11 +520,23 @@ function checkAgentBindings(
     if (!agent) {
       issues.push({
         code: 'AGENT_NOT_FOUND',
-        severity: 'warning',
+        severity: 'error',
         nodeId: node.id,
         nodeTitle: node.title,
         message: 'This step is pinned to an agent that no longer exists in this workspace.',
         remediation: 'Re-bind the step to an existing agent, or set a role so the engine resolves one.',
+        autoRepairable: false,
+      });
+      continue;
+    }
+    if (agent.isPaused) {
+      issues.push({
+        code: 'AGENT_PAUSED',
+        severity: 'error',
+        nodeId: node.id,
+        nodeTitle: node.title,
+        message: `Agent "${agent.name}" is paused and cannot execute this step.`,
+        remediation: 'Resume the existing specialist or re-bind the step to another online agent.',
         autoRepairable: false,
       });
       continue;

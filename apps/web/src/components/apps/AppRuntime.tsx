@@ -122,7 +122,12 @@ export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId
     },
     [appId],
   );
-  useRealtime(useMemo(() => [REALTIME_EVENTS.SURFACE_RENDER, REALTIME_EVENTS.SURFACE_PATCH], []), onSurfaceEvent);
+  useRealtime(useMemo(() => [
+    REALTIME_EVENTS.SURFACE_RENDER,
+    REALTIME_EVENTS.SURFACE_PATCH,
+    REALTIME_EVENTS.SURFACE_DELETED,
+    REALTIME_EVENTS.INTERFACE_PUBLISHED,
+  ], []), onSurfaceEvent);
 
   const invokeAction = useCallback(
     async (action: string, args?: Record<string, unknown>) => {

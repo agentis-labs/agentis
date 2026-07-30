@@ -12,11 +12,13 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { AppStore } from './appStore.js';
 import { AppDatastore } from './appDatastore.js';
 import { AppSurfaceStore } from './appSurfaceStore.js';
+import { AppInterfaceRevisionStore } from './appInterfaceRevisionStore.js';
 
 export interface AppStores {
   store: AppStore;
   data: AppDatastore;
   surfaces: AppSurfaceStore;
+  interfaces: AppInterfaceRevisionStore;
 }
 
 export interface AppRealtimePublisher {
@@ -50,17 +52,44 @@ export function buildAppStores(deps: { db: AgentisSqliteDb; bus?: AppRealtimePub
     bus.publish(REALTIME_ROOMS.app(e.appId), REALTIME_EVENTS.DATA_CHANGED, payload);
     bus.publish(REALTIME_ROOMS.workspace(e.workspaceId), REALTIME_EVENTS.DATA_CHANGED, payload);
   });
+  const interfaces = new AppInterfaceRevisionStore({
+    db: deps.db,
+    emit: (event, payload) => {
+      if (!bus) return;
+      const eventName = {
+        candidate: REALTIME_EVENTS.INTERFACE_CANDIDATE,
+        verified: REALTIME_EVENTS.INTERFACE_VERIFIED,
+        published: REALTIME_EVENTS.INTERFACE_PUBLISHED,
+        abandoned: REALTIME_EVENTS.INTERFACE_ABANDONED,
+      }[event];
+      const appId = String(payload.appId);
+      const workspaceId = String(payload.workspaceId);
+      bus.publish(REALTIME_ROOMS.app(appId), eventName, payload);
+      bus.publish(REALTIME_ROOMS.workspace(workspaceId), eventName, payload);
+    },
+  });
   const surfaces = new AppSurfaceStore({
     db: deps.db,
     emit: (e) => {
+      // Every mutation gets an immutable, deduplicated active snapshot. Existing
+      // low-level API calls therefore gain safe history without a flag day.
+      interfaces.capturePublished(e.workspaceId, e.appId, {
+        source: 'surface',
+        actorType: 'system',
+        reason: `Surface ${e.event}`,
+      });
       if (!bus) return;
-      const event = e.event === 'render' ? REALTIME_EVENTS.SURFACE_RENDER : REALTIME_EVENTS.SURFACE_PATCH;
+      const event = e.event === 'render'
+        ? REALTIME_EVENTS.SURFACE_RENDER
+        : e.event === 'patch'
+          ? REALTIME_EVENTS.SURFACE_PATCH
+          : REALTIME_EVENTS.SURFACE_DELETED;
       const payload = { appId: e.appId, surfaceId: e.surfaceId, revision: e.revision, ...(e.payload as object) };
       bus.publish(REALTIME_ROOMS.app(e.appId), event, payload);
       bus.publish(REALTIME_ROOMS.workspace(e.workspaceId), event, payload);
     },
   });
-  return { store, data, surfaces };
+  return { store, data, surfaces, interfaces };
 }
 
 

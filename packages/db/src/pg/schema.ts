@@ -86,6 +86,10 @@ export const workflows = pgTable('workflows', {
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
   graph: jsonb('graph').notNull(),
+  contentHash: text('content_hash'),
+  activeRevisionId: uuid('active_revision_id'),
+  candidateRevisionId: uuid('candidate_revision_id'),
+  trustState: text('trust_state').notNull().default('legacy_unverified'),
   settings: jsonb('settings').notNull().default(sql`'{}'::jsonb`),
   isPublishedToHub: boolean('is_published_to_hub').notNull().default(false),
   ...baseTimestamps(),
@@ -105,6 +109,9 @@ export const apps = pgTable('apps', {
   version: varchar('version', { length: 64 }).notNull().default('0.1.0'),
   status: text('status').notNull().default('draft'),
   entrySurfaceId: text('entry_surface_id'),
+  activeInterfaceRevisionId: uuid('active_interface_revision_id'),
+  candidateInterfaceRevisionId: uuid('candidate_interface_revision_id'),
+  interfaceTrustState: text('interface_trust_state').notNull().default('legacy_unverified'),
   icon: text('icon'),
   // Org placement (workflows inherit). FK targets live in the wider deferred PG
   // parity set, so these are plain uuids in the stub (enforced in SQLite).
@@ -174,6 +181,43 @@ export const appSurfaces = pgTable('app_surfaces', {
   ...baseTimestamps(),
 });
 
+export const appInterfaceRevisions = pgTable('app_interface_revisions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: uuid('app_id').notNull().references(() => apps.id, { onDelete: 'cascade' }),
+  parentRevisionId: uuid('parent_revision_id'),
+  pagesJson: jsonb('pages_json').notNull().default(sql`'[]'::jsonb`),
+  semanticHash: text('semantic_hash').notNull(),
+  source: text('source').notNull().default('operator'),
+  actorType: text('actor_type').notNull().default('user'),
+  actorId: text('actor_id'),
+  reason: text('reason').notNull().default('Interface update'),
+  status: text('status').notNull().default('candidate'),
+  trustState: text('trust_state').notNull().default('candidate'),
+  verifiedAt: timestamp('verified_at', { withTimezone: true }),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
+  rejectedAt: timestamp('rejected_at', { withTimezone: true }),
+  ...baseTimestamps(),
+}, (table) => ({
+  byApp: index('idx_app_interface_revisions_app').on(table.workspaceId, table.appId, table.createdAt),
+  appHash: index('idx_app_interface_revisions_hash').on(table.appId, table.semanticHash),
+}));
+
+export const appInterfaceProofs = pgTable('app_interface_proofs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: uuid('app_id').notNull().references(() => apps.id, { onDelete: 'cascade' }),
+  revisionId: uuid('revision_id').notNull().references(() => appInterfaceRevisions.id, { onDelete: 'cascade' }),
+  gate: text('gate').notNull(),
+  status: text('status').notNull(),
+  semanticHash: text('semantic_hash').notNull(),
+  evidenceJson: jsonb('evidence_json').notNull().default(sql`'{}'::jsonb`),
+  ...baseTimestamps(),
+}, (table) => ({
+  revisionGate: uniqueIndex('uq_app_interface_proof_gate').on(table.revisionId, table.gate),
+  byRevision: index('idx_app_interface_proofs_revision').on(table.revisionId, table.status),
+}));
+
 export const appLifecycleSnapshots = pgTable('app_lifecycle_snapshots', {
   id: uuid('id').primaryKey().defaultRandom(),
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
@@ -203,6 +247,110 @@ export const appEnvironments = pgTable('app_environments', {
   byApp: index('idx_app_environments_app').on(table.workspaceId, table.appId, table.kind),
 }));
 
+export const workflowGraphRevisions = pgTable('workflow_graph_revisions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: uuid('workflow_id').notNull().references(() => workflows.id, { onDelete: 'cascade' }),
+  parentRevisionId: uuid('parent_revision_id'),
+  graphJson: jsonb('graph_json').notNull(),
+  semanticHash: text('semantic_hash').notNull(),
+  presentationHash: text('presentation_hash').notNull(),
+  source: text('source').notNull(),
+  actorType: text('actor_type').notNull().default('system'),
+  actorId: text('actor_id'),
+  reason: text('reason').notNull().default(''),
+  changeSummaryJson: jsonb('change_summary_json').notNull().default(sql`'{}'::jsonb`),
+  specJson: jsonb('spec_json'),
+  capabilityManifestJson: jsonb('capability_manifest_json').notNull().default(sql`'{}'::jsonb`),
+  proofProfile: text('proof_profile').notNull().default('standard'),
+  status: text('status').notNull().default('candidate'),
+  trustState: text('trust_state').notNull().default('unverified'),
+  verifiedAt: timestamp('verified_at', { withTimezone: true }),
+  promotedAt: timestamp('promoted_at', { withTimezone: true }),
+  rejectedAt: timestamp('rejected_at', { withTimezone: true }),
+  ...baseTimestamps(),
+}, (table) => ({
+  workflowCreated: index('idx_workflow_graph_revisions_workflow').on(table.workspaceId, table.workflowId, table.createdAt),
+  workflowHash: index('idx_workflow_graph_revisions_hash').on(table.workspaceId, table.workflowId, table.semanticHash),
+  workflowStatus: index('idx_workflow_graph_revisions_status').on(table.workspaceId, table.workflowId, table.status),
+}));
+
+export const workflowRevisionProofs = pgTable('workflow_revision_proofs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: uuid('workflow_id').notNull().references(() => workflows.id, { onDelete: 'cascade' }),
+  revisionId: uuid('revision_id').notNull().references(() => workflowGraphRevisions.id, { onDelete: 'cascade' }),
+  gate: text('gate').notNull(),
+  status: text('status').notNull(),
+  semanticHash: text('semantic_hash').notNull(),
+  fixtureKey: text('fixture_key').notNull().default('default'),
+  runId: uuid('run_id'),
+  capabilityCatalogVersion: text('capability_catalog_version'),
+  evidenceJson: jsonb('evidence_json').notNull().default(sql`'{}'::jsonb`),
+  ...baseTimestamps(),
+}, (table) => ({
+  revisionGate: uniqueIndex('uq_workflow_revision_proof_gate').on(table.revisionId, table.gate, table.fixtureKey),
+  revisionStatus: index('idx_workflow_revision_proofs_status').on(table.revisionId, table.status),
+}));
+
+export const workflowExperiences = pgTable('workflow_experiences', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: uuid('workflow_id').references(() => workflows.id, { onDelete: 'cascade' }),
+  appId: uuid('app_id').references(() => apps.id, { onDelete: 'cascade' }),
+  agentId: uuid('agent_id'),
+  revisionId: uuid('revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+  scopeType: text('scope_type').notNull(),
+  scopeId: text('scope_id').notNull(),
+  applicabilityKey: text('applicability_key').notNull(),
+  kind: text('kind').notNull(),
+  status: text('status').notNull().default('pending'),
+  failureFingerprint: text('failure_fingerprint'),
+  failureClass: text('failure_class'),
+  title: text('title').notNull(),
+  rootCause: text('root_cause').notNull().default(''),
+  repairSummary: text('repair_summary').notNull().default(''),
+  preconditionsJson: jsonb('preconditions_json').notNull().default(sql`'{}'::jsonb`),
+  regressionFixtureJson: jsonb('regression_fixture_json'),
+  evidenceJson: jsonb('evidence_json').notNull().default(sql`'{}'::jsonb`),
+  confidence: real('confidence').notNull().default(0),
+  successCount: integer('success_count').notNull().default(0),
+  supersedesId: uuid('supersedes_id'),
+  ...baseTimestamps(),
+}, (table) => ({
+  scopeApplicability: index('idx_workflow_experiences_scope').on(table.workspaceId, table.scopeType, table.scopeId, table.status),
+  workflowFingerprint: index('idx_workflow_experiences_fingerprint').on(table.workspaceId, table.workflowId, table.failureFingerprint),
+  activeApplicability: index('idx_workflow_experiences_applicability').on(
+    table.workspaceId,
+    table.scopeType,
+    table.scopeId,
+    table.applicabilityKey,
+    table.status,
+  ),
+}));
+
+export const workflowRepairAttempts = pgTable('workflow_repair_attempts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  workflowId: uuid('workflow_id').notNull().references(() => workflows.id, { onDelete: 'cascade' }),
+  baseRevisionId: uuid('base_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+  failureFingerprint: text('failure_fingerprint').notNull(),
+  runId: uuid('run_id'),
+  nodeId: text('node_id'),
+  status: text('status').notNull().default('proposed'),
+  candidateRevisionId: uuid('candidate_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+  attemptCount: integer('attempt_count').notNull().default(1),
+  lastError: text('last_error'),
+  ...baseTimestamps(),
+}, (table) => ({
+  fingerprintRevision: uniqueIndex('uq_workflow_repair_attempt_fingerprint').on(
+    table.workspaceId,
+    table.workflowId,
+    table.baseRevisionId,
+    table.failureFingerprint,
+  ),
+}));
+
 export const workflowRuns = pgTable('workflow_runs', {
   id: uuid('id').primaryKey().defaultRandom(),
   workspaceId: uuid('workspace_id')
@@ -215,6 +363,9 @@ export const workflowRuns = pgTable('workflow_runs', {
   userId: uuid('user_id').notNull().references(() => users.id),
   status: text('status').notNull().default('CREATED'),
   runState: jsonb('run_state').notNull(),
+  graphSnapshot: jsonb('graph_snapshot'),
+  workflowRevisionId: uuid('workflow_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
+  repairedFromRevisionId: uuid('repaired_from_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
   replanCount: integer('replan_count').notNull().default(0),
   triggerId: uuid('trigger_id'),
   parentRunId: uuid('parent_run_id'),

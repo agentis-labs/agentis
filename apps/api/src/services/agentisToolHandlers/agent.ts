@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type AdapterType, type AgentisToolContext, type ChatMessage, type NormalizedTask, type RealtimeEventName } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, configuredAffordances, potentialAffordances, type AdapterType, type AgentAdapter, type AgentisToolContext, type ChatMessage, type NormalizedTask, type RealtimeEventName } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import { publishAgentWorkStep, publishChatDeltaProgress } from '../agent/agentWorkProgress.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { modelConfiguredOnAgent } from '../runtime/runtimeModels.js';
+import { listRuntimeModels, modelConfiguredOnAgent } from '../runtime/runtimeModels.js';
 import { renderRuntimeRoutingIntelligence, routeModelForTask } from '../modelRoutingPolicy.js';
+import { switchRuntime } from '../agent/agentCommission.js';
+import { detectHarnesses, invalidateHarnessProbeCache, type HarnessDetectionResult, type V1HarnessAdapterType } from '../harness/harnessProbe.js';
 
 const V1_ADAPTERS = new Set<AdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
 
@@ -106,6 +108,82 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     },
     {
       definition: {
+        id: 'agentis.agents.runtime.switch',
+        mcpExposed: true,
+        family: 'environment',
+        description:
+          'Rebind an EXISTING agent to a healthy native runtime without changing its identity, Brain, App membership, workflows, or hierarchy. Waits briefly for a requested runtime to appear; when allowed, selects a compatible healthy fallback. Never creates a replacement agent or an unconfigured HTTP placeholder.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string' },
+            adapterType: { type: 'string', enum: ['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http'] },
+            runtimeModel: { type: 'string' },
+            config: { type: 'object' },
+            requiredCapabilities: { type: 'array', items: { type: 'string' } },
+            allowFallback: { type: 'boolean', description: 'Default true.' },
+            waitMs: { type: 'number', description: 'Detection window, default/max 20000ms.' },
+          },
+          required: ['agentId'],
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.vault) throw new AgentisError('VALIDATION_FAILED', 'runtime commissioning is not available in this deployment');
+        const agentId = String(args.agentId ?? '').trim();
+        const existing = loadWorkspaceAgent(deps, ctx.workspaceId, agentId);
+        const requested = args.adapterType ? normalizeAdapterType(args.adapterType) as V1HarnessAdapterType : null;
+        const required = parseStringArray(args.requiredCapabilities);
+        const waitMs = Math.max(0, Math.min(20_000, Number(args.waitMs ?? 20_000)));
+        const allowFallback = args.allowFallback !== false;
+        const detections = await waitForRuntime(requested, waitMs);
+        const selected = selectHealthyRuntime(detections, requested, required, allowFallback);
+        if (!selected) {
+          return {
+            switched: false,
+            agentId,
+            unchanged: true,
+            requestedRuntime: requested,
+            warning: 'No compatible healthy runtime is currently available.',
+            probes: detections.map(presentDetection),
+          };
+        }
+        const supplied = args.config && typeof args.config === 'object' && !Array.isArray(args.config)
+          ? args.config as Record<string, unknown>
+          : {};
+        const config = {
+          ...(selected.config ?? {}),
+          ...(selected.adapterType === 'codex' && (required.includes('browser') || required.includes('computerUse')) ? { browser: true } : {}),
+          ...supplied,
+        };
+        const result = await switchRuntime({
+          db: deps.db,
+          vault: deps.vault,
+          adapters: deps.adapters,
+          logger: deps.logger,
+          bus: deps.bus,
+          skillMaterializer: deps.skillMaterializer,
+        }, ctx.workspaceId, agentId, {
+          adapterType: selected.adapterType,
+          config,
+          runtimeModel: typeof args.runtimeModel === 'string' ? args.runtimeModel : null,
+        });
+        return {
+          switched: result.status === 'online',
+          agentId,
+          identityPreserved: existing.id === result.id,
+          requestedRuntime: requested,
+          selectedRuntime: result.adapterType,
+          runtimeModel: result.runtimeModel,
+          status: result.status,
+          fallbackUsed: Boolean(requested && requested !== result.adapterType),
+          capabilities: configuredAffordances(result.adapterType, config),
+        };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.agents.delete',
         mcpExposed: true,
         family: 'environment',
@@ -193,6 +271,12 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           ? String(args.runtime)
           : registration?.adapter.adapterType ?? agent?.adapterType ?? null;
         const requiredAffordances = parseStringArray(args.requiredAffordances);
+        const runtimeType = runtime && V1_ADAPTERS.has(runtime as AdapterType)
+          ? runtime as V1HarnessAdapterType
+          : null;
+        const catalog = runtimeType
+          ? await listRuntimeModels(runtimeType, agentId, deps.db)
+          : null;
         const decision = deps.modelRouter && !agentId && !runtime
           ? deps.modelRouter.route({
               role: purpose.includes('synthesis') || purpose.includes('workflow') ? 'synthesis' : purpose.includes('evaluation') ? 'evaluation' : 'conversation',
@@ -208,15 +292,40 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
               runtime,
               explicitModel,
               currentModel: explicitModel,
+              candidateModels: catalog?.models.map((model) => ({
+                model: model.id,
+                runtime,
+                tier: model.tier,
+                source: model.source === 'runtime' || model.source === 'profile' ? 'runtime_detected' : model.source,
+                verified: model.verified,
+                costRank: model.costRank,
+                latencyRank: model.latencyRank,
+                capabilityHints: model.capabilityHints,
+                reason: model.description,
+              })),
               requiredAffordances,
             });
+        const detections = await detectHarnesses();
+        const healthyRuntimes = detections.filter((item) => item.status === 'found' && !item.needsConfig);
         return {
           ok: true,
           decision,
+          runtimeProfiles: healthyRuntimes.map((item) => ({
+            runtime: item.adapterType,
+            status: item.status,
+            affordances: potentialAffordances(item.adapterType),
+            selected: item.adapterType === runtime,
+          })),
           intelligence: renderRuntimeRoutingIntelligence({
             decision,
             requiredAffordances,
-            availableRuntimes: runtime ? [{ runtime, models: decision.selectedModel ? [decision.selectedModel] : [], affordances: requiredAffordances }] : undefined,
+            availableRuntimes: healthyRuntimes.map((item) => ({
+              runtime: item.adapterType,
+              models: item.adapterType === runtime ? catalog?.models.map((model) => model.id) ?? [] : [],
+              affordances: Object.entries(potentialAffordances(item.adapterType))
+                .filter(([, enabled]) => enabled)
+                .map(([key]) => key),
+            })),
           }),
         };
       },
@@ -258,6 +367,22 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         const runtimeConfig = args.runtimeConfig && typeof args.runtimeConfig === 'object' && !Array.isArray(args.runtimeConfig)
           ? args.runtimeConfig as Record<string, unknown>
           : undefined;
+        const requestedRuntime = args.adapterType ? normalizeAdapterType(args.adapterType) as V1HarnessAdapterType : null;
+        const runtimeDetections = deps.vault
+          ? await waitForRuntime(requestedRuntime, requestedRuntime ? 20_000 : 0)
+          : [];
+        const runtimeSelection = deps.vault
+          ? selectHealthyRuntime(runtimeDetections, requestedRuntime, [], true)
+          : null;
+        if (deps.vault && !runtimeSelection) {
+          return {
+            ok: false,
+            created: false,
+            warning: 'No healthy runtime is currently available, so no offline specialist placeholder was created.',
+            requestedRuntime,
+            probes: runtimeDetections.map(presentDetection),
+          };
+        }
         const result = await deps.specialists.authorSpecialist(ctx.workspaceId, ctx.userId, {
           role: args.role ? String(args.role) : undefined,
           name: args.name ? String(args.name) : undefined,
@@ -267,9 +392,23 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           tools: parseStringArray(args.tools),
           capabilityTags: parseStringArray(args.capabilityTags),
           source: 'generated',
-          ...(args.adapterType ? { adapterType: String(args.adapterType) } : {}),
-          ...(runtimeConfig ? { runtimeConfig } : {}),
+          ...((runtimeSelection?.adapterType ?? args.adapterType) ? { adapterType: String(runtimeSelection?.adapterType ?? args.adapterType) } : {}),
+          ...((runtimeSelection?.config || runtimeConfig) ? { runtimeConfig: { ...(runtimeSelection?.config ?? {}), ...(runtimeConfig ?? {}) } } : {}),
         });
+        const runtimeResult = deps.vault
+          ? await switchRuntime({
+              db: deps.db,
+              vault: deps.vault,
+              adapters: deps.adapters,
+              logger: deps.logger,
+              bus: deps.bus,
+              skillMaterializer: deps.skillMaterializer,
+            }, ctx.workspaceId, result.agentId, {
+              adapterType: runtimeSelection!.adapterType,
+              config: { ...(runtimeSelection!.config ?? {}), ...(runtimeConfig ?? {}) },
+              runtimeModel: typeof args.model === 'string' ? args.model : null,
+            })
+          : null;
         const profile = deps.specialistProfiles?.ensureFromDef(ctx.workspaceId, result.def, ctx.userId);
         const instanceId = deps.specialistRuntime?.ensureInstance({
           workspaceId: ctx.workspaceId,
@@ -307,6 +446,8 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           agentId: result.agentId,
           role: result.role,
           created: result.created,
+          updated: !result.created,
+          ...(runtimeResult ? { runtime: runtimeResult } : {}),
           ...(instanceId ? { specialistInstanceId: instanceId } : {}),
           name: result.def.name,
           delegateHint: `You can now delegate to this specialist by role "${result.role}".`,
@@ -338,14 +479,46 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         if (!deps.specialistRouter) {
           return { ok: false, error: 'specialist demand router not available in this deployment' };
         }
+        const wantsMaterialize = args.materialize !== false;
+        const detections = wantsMaterialize && deps.vault ? await waitForRuntime(null, 0) : [];
+        const selectedRuntime = wantsMaterialize && deps.vault
+          ? selectHealthyRuntime(detections, null, [], true)
+          : null;
         const route = await deps.specialistRouter.request(ctx.workspaceId, ctx.userId, {
           task: String(args.task ?? ''),
           modality: args.modality ? String(args.modality) : undefined,
           desiredTopology: typeof args.desiredTopology === 'string' ? args.desiredTopology as never : undefined,
-          materialize: typeof args.materialize === 'boolean' ? args.materialize : undefined,
+          materialize: wantsMaterialize && (!deps.vault || Boolean(selectedRuntime)),
           callerAgentId: ctx.agentId ?? null,
         });
-        return { ok: true, ...route, delegateHint: route.selectedAgentId ? `Delegate to agentId "${route.selectedAgentId}" or role "${route.selectedRole}".` : `Delegate by role "${route.selectedRole}".` };
+        let runtime: Awaited<ReturnType<typeof switchRuntime>> | null = null;
+        if (route.selectedAgentId && selectedRuntime && deps.vault && !deps.adapters.get(route.selectedAgentId)) {
+          runtime = await switchRuntime({
+            db: deps.db,
+            vault: deps.vault,
+            adapters: deps.adapters,
+            logger: deps.logger,
+            bus: deps.bus,
+            skillMaterializer: deps.skillMaterializer,
+          }, ctx.workspaceId, route.selectedAgentId, {
+            adapterType: selectedRuntime.adapterType,
+            config: selectedRuntime.config,
+          });
+        }
+        return {
+          ok: true,
+          ...route,
+          ...(runtime ? { runtime } : {}),
+          ...(wantsMaterialize && deps.vault && !selectedRuntime
+            ? {
+                warning: 'No healthy runtime is available. The role was selected without creating an offline placeholder.',
+                probes: detections.map(presentDetection),
+              }
+            : {}),
+          delegateHint: route.selectedAgentId
+            ? `Delegate to agentId "${route.selectedAgentId}" or role "${route.selectedRole}".`
+            : `Delegate by role "${route.selectedRole}".`,
+        };
       },
     },
     {
@@ -372,17 +545,44 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         if (agent.isPaused || agent.status === 'paused') {
           return { dispatched: false, agentId, reason: 'agent_paused', message: 'This agent is in standby mode. Disable standby before dispatching tasks.' };
         }
-        const registration = deps.adapters.get(agentId);
+        let registration = deps.adapters.get(agentId);
+        if (!registration && deps.resolveAgentRuntime) {
+          const inherited = deps.resolveAgentRuntime(
+            ctx.workspaceId,
+            agentId,
+            String(args.task),
+            modelConfiguredOnAgent(agent),
+          );
+          if (inherited) {
+            deps.adapters.register(agentId, inherited as AgentAdapter);
+            registration = deps.adapters.get(agentId);
+          }
+        }
         if (!registration) {
           return { dispatched: false, agentId, reason: 'adapter_unavailable', message: 'The agent exists but its harness is not connected.' };
         }
 
         const task = String(args.task);
+        const adapterType = registration.adapter.adapterType as V1HarnessAdapterType;
+        const catalog = V1_ADAPTERS.has(adapterType)
+          ? await listRuntimeModels(adapterType, agentId, deps.db)
+          : null;
         const routing = routeModelForTask({
           task,
           purpose: 'agent_dispatch',
           runtime: registration.adapter.adapterType ?? agent.adapterType ?? null,
           explicitModel: modelConfiguredOnAgent(agent),
+          candidateModels: catalog?.models.map((model) => ({
+            model: model.id,
+            runtime: adapterType,
+            tier: model.tier,
+            source: model.source === 'runtime' || model.source === 'profile' ? 'runtime_detected' : model.source,
+            verified: model.verified,
+            costRank: model.costRank,
+            latencyRank: model.latencyRank,
+            capabilityHints: model.capabilityHints,
+            reason: model.description,
+          })),
           requiredAffordances: Array.isArray(agent.capabilityTags) ? agent.capabilityTags.map(String) : [],
         });
         const preferredModel = routing.selectedModel;
@@ -475,11 +675,48 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
         autoExecute: true,
       },
       handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
+        const requestedName = String(args.name).trim();
+        const requestedRole = args.role ? String(args.role).trim() : null;
+        const existing = deps.db.select().from(schema.agents)
+          .where(eq(schema.agents.workspaceId, ctx.workspaceId))
+          .all()
+          .find((agent) =>
+            (requestedRole && agent.role === requestedRole)
+            || agent.name.trim().toLowerCase() === requestedName.toLowerCase());
+        if (existing) {
+          const set: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+          if (args.instructions !== undefined) set.instructions = String(args.instructions);
+          if (requestedRole) set.role = requestedRole;
+          if (args.runtimeModel !== undefined) set.runtimeModel = String(args.runtimeModel);
+          if (args.capabilityTags !== undefined) set.capabilityTags = parseStringArray(args.capabilityTags);
+          deps.db.update(schema.agents).set(set).where(eq(schema.agents.id, existing.id)).run();
+          let runtime: unknown = null;
+          if (deps.vault && (args.adapterType || !deps.adapters.get(existing.id))) {
+            runtime = await commissionAgentRuntime(deps, ctx.workspaceId, existing.id, {
+              requested: args.adapterType ? normalizeAdapterType(args.adapterType) as V1HarnessAdapterType : null,
+              config: args.config && typeof args.config === 'object' && !Array.isArray(args.config) ? args.config as Record<string, unknown> : undefined,
+              runtimeModel: typeof args.runtimeModel === 'string' ? args.runtimeModel : null,
+              waitMs: args.adapterType ? 20_000 : 0,
+            });
+          }
+          return { agent: loadWorkspaceAgent(deps, ctx.workspaceId, existing.id), created: false, updated: true, reused: true, runtime };
+        }
+        const requestedAdapter = args.adapterType ? normalizeAdapterType(args.adapterType) as V1HarnessAdapterType : null;
+        const detected = deps.vault
+          ? selectHealthyRuntime(await waitForRuntime(requestedAdapter, requestedAdapter ? 20_000 : 0), requestedAdapter, [], true)
+          : null;
+        if (deps.vault && !detected) {
+          return {
+            created: false,
+            warning: 'No healthy runtime is currently available, so no offline placeholder was created.',
+            requestedRuntime: requestedAdapter,
+          };
+        }
         const now = new Date().toISOString();
-        const adapterType = normalizeAdapterType(args.adapterType);
+        const adapterType = detected?.adapterType ?? normalizeAdapterType(args.adapterType);
         const config = args.config && typeof args.config === 'object' && !Array.isArray(args.config)
           ? args.config as Record<string, unknown>
-          : defaultConfig(adapterType);
+          : detected?.config ?? defaultConfig(adapterType);
         const agent = {
           id: randomUUID(),
           workspaceId: ctx.workspaceId,
@@ -487,7 +724,7 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           userId: ctx.userId,
           gatewayId: null,
           packageId: null,
-          name: String(args.name),
+          name: requestedName,
           adapterType,
           capabilityTags: parseStringArray(args.capabilityTags),
           config,
@@ -503,7 +740,26 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
           updatedAt: now,
         };
         deps.db.insert(schema.agents).values(agent).run();
-        return { agent, created: true, harnessConfigured: Boolean(args.config) };
+        const runtime = deps.vault
+          ? await switchRuntime({
+              db: deps.db,
+              vault: deps.vault,
+              adapters: deps.adapters,
+              logger: deps.logger,
+              bus: deps.bus,
+              skillMaterializer: deps.skillMaterializer,
+            }, ctx.workspaceId, agent.id, {
+              adapterType: adapterType as V1HarnessAdapterType,
+              config,
+              runtimeModel: typeof args.runtimeModel === 'string' ? args.runtimeModel : null,
+            })
+          : null;
+        return {
+          agent: loadWorkspaceAgent(deps, ctx.workspaceId, agent.id),
+          created: true,
+          harnessConfigured: Boolean(detected || args.config),
+          runtime,
+        };
       },
     };
   }
@@ -565,4 +821,81 @@ function parseStringArray(value: unknown): string[] {
   } catch {
     return value.split(',').map((item) => item.trim()).filter(Boolean);
   }
+}
+
+async function waitForRuntime(requested: V1HarnessAdapterType | null, waitMs: number): Promise<HarnessDetectionResult[]> {
+  const deadline = Date.now() + waitMs;
+  let detections: HarnessDetectionResult[] = [];
+  do {
+    invalidateHarnessProbeCache();
+    detections = await detectHarnesses();
+    const found = requested && detections.find((item) => item.adapterType === requested && item.status === 'found' && !item.needsConfig);
+    if (found || !requested) return detections;
+    if (Date.now() >= deadline) return detections;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, Math.max(1, deadline - Date.now()))));
+  } while (Date.now() <= deadline);
+  return detections;
+}
+
+function selectHealthyRuntime(
+  detections: HarnessDetectionResult[],
+  requested: V1HarnessAdapterType | null,
+  required: string[],
+  allowFallback: boolean,
+): HarnessDetectionResult | null {
+  const healthy = detections.filter((item) => item.status === 'found' && !item.needsConfig);
+  const supports = (item: HarnessDetectionResult) => {
+    const affordances = potentialAffordances(item.adapterType);
+    return required.every((key) => Boolean((affordances as Record<string, unknown>)[key]));
+  };
+  const exact = requested ? healthy.find((item) => item.adapterType === requested && supports(item)) : null;
+  if (exact) return exact;
+  if (requested && !allowFallback) return null;
+  const preference: V1HarnessAdapterType[] = ['codex', 'claude_code', 'hermes_agent', 'antigravity', 'cursor', 'openclaw', 'http'];
+  return healthy.filter(supports).sort((a, b) => preference.indexOf(a.adapterType) - preference.indexOf(b.adapterType))[0] ?? null;
+}
+
+function presentDetection(item: HarnessDetectionResult) {
+  return { adapterType: item.adapterType, status: item.status, needsConfig: Boolean(item.needsConfig), detail: item.detail ?? null };
+}
+
+async function commissionAgentRuntime(
+  deps: ToolHandlerDeps,
+  workspaceId: string,
+  agentId: string,
+  input: {
+    requested: V1HarnessAdapterType | null;
+    config?: Record<string, unknown>;
+    runtimeModel?: string | null;
+    waitMs: number;
+  },
+): Promise<Awaited<ReturnType<typeof switchRuntime>> | {
+  status: 'unavailable';
+  requestedRuntime: V1HarnessAdapterType | null;
+  warning: string;
+  probes: ReturnType<typeof presentDetection>[];
+}> {
+  if (!deps.vault) throw new AgentisError('VALIDATION_FAILED', 'runtime commissioning is not available in this deployment');
+  const detections = await waitForRuntime(input.requested, input.waitMs);
+  const selected = selectHealthyRuntime(detections, input.requested, [], true);
+  if (!selected) {
+    return {
+      status: 'unavailable',
+      requestedRuntime: input.requested,
+      warning: 'No healthy runtime is currently available. The existing agent was preserved unchanged.',
+      probes: detections.map(presentDetection),
+    };
+  }
+  return switchRuntime({
+    db: deps.db,
+    vault: deps.vault,
+    adapters: deps.adapters,
+    logger: deps.logger,
+    bus: deps.bus,
+    skillMaterializer: deps.skillMaterializer,
+  }, workspaceId, agentId, {
+    adapterType: selected.adapterType,
+    config: { ...(selected.config ?? {}), ...(input.config ?? {}) },
+    runtimeModel: input.runtimeModel ?? null,
+  });
 }

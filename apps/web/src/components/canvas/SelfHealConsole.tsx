@@ -128,7 +128,7 @@ export function SelfHealConsole({
   const isAwaiting = incident.status === 'AWAITING_APPROVAL' && Boolean(incident.approvalId);
   const isFailure = view.terminal === 'failure';
   const activeRung = ladderPosition(incident);
-  const repairActivity = useMemo(() => {
+  const fallbackActivity = useMemo(() => {
     const seen = new Set<string>();
     return activity
       .filter((item) => item.kind === 'agent' || item.kind === 'message' || item.kind === 'tool')
@@ -142,6 +142,16 @@ export function SelfHealConsole({
       })
       .slice(0, 4);
   }, [activity, incident.nodeId, thought]);
+  const repairTrace: NonNullable<WorkspaceSelfHealIncident['trace']> = incident.trace?.length
+    ? incident.trace
+    : fallbackActivity.map((item) => ({
+        id: item.id,
+        phase: item.kind === 'tool' ? 'repair' as const : 'inspect' as const,
+        status: incident.status,
+        summary: item.kind === 'tool' ? `Used ${item.tool ?? item.detail}` : item.detail ?? item.title,
+        attempt: incident.attempt,
+        createdAt: item.at,
+      }));
 
   return (
     <div
@@ -193,22 +203,50 @@ export function SelfHealConsole({
         </div>
       )}
 
-      {incident.tier && (
+      {(incident.tier || incident.failureClass || incident.repairScope) && (
         <div className="mx-3 mt-2 flex items-center justify-between gap-2 text-[10px] text-text-muted">
-          <span className="uppercase tracking-wider">{incident.tier.replace('_', ' ')}</span>
+          <div className="flex min-w-0 items-center gap-1.5">
+            {incident.failureClass && (
+              <span className="rounded-full border border-white/10 bg-surface/50 px-1.5 py-px uppercase tracking-wider">
+                {incident.failureClass.replace(/_/g, ' ')}
+              </span>
+            )}
+            {incident.repairScope === 'run_local' && (
+              <span className="rounded-full border border-accent/20 bg-accent/10 px-1.5 py-px font-medium text-accent">
+                run-only
+              </span>
+            )}
+            {incident.recurrent && (
+              <span className="rounded-full border border-warn/20 bg-warn/10 px-1.5 py-px font-medium text-warn">
+                repeat blocked
+              </span>
+            )}
+            {incident.tier && <span className="uppercase tracking-wider">{incident.tier.replace('_', ' ')}</span>}
+          </div>
           {incident.riskReason && <span className="truncate">{incident.riskReason}</span>}
         </div>
       )}
 
       {/* Phase line — Diagnose · Repair · Resolve */}
-      {repairActivity.length > 0 && (
+      {repairTrace.length > 0 && (
         <div className="mx-3 mt-2 border-t border-white/10 pt-2">
           <div className="mb-1.5 text-[9.5px] font-medium uppercase tracking-wider text-text-muted">Live orchestration</div>
-          <div className="space-y-1.5">
-            {repairActivity.map((item) => (
-              <div key={item.id} className="flex min-w-0 items-start gap-2 text-[10.5px] leading-4 text-text-secondary">
-                <span className={clsx('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', item.kind === 'tool' ? 'bg-accent' : 'bg-success')} />
-                <span className="min-w-0 break-words">{item.kind === 'tool' ? `Used ${item.tool ?? item.detail}` : item.detail}</span>
+          <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+            {repairTrace.map((entry, index) => (
+              <div key={entry.id} className="grid min-w-0 grid-cols-[4.25rem_1fr] gap-2 text-[10.5px] leading-4">
+                <div className="flex items-start gap-1.5 pt-px">
+                  <span className={clsx(
+                    'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
+                    entry.phase === 'blocked' ? 'bg-danger' : index === repairTrace.length - 1 && view.working ? 'sh-pulse bg-accent' : 'bg-success',
+                  )} />
+                  <span className="truncate font-mono text-[9px] uppercase tracking-wide text-text-muted">{entry.phase}</span>
+                </div>
+                <div className="min-w-0">
+                  <div className="break-words text-text-secondary">{entry.summary}</div>
+                  {entry.detail && entry.detail !== entry.summary && (
+                    <div className="mt-0.5 break-words text-[9.5px] text-text-muted">{entry.detail}</div>
+                  )}
+                </div>
               </div>
             ))}
           </div>

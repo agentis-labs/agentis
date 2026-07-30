@@ -32,6 +32,14 @@ describe('AppSurfaceStore', () => {
     // render() runs the layout floor (repairSurface), which always sets a root theme.
     expect(surface.view).toMatchObject(customView);
   });
+
+  it('blocks a policy-gated CustomView nested inside tabs', () => {
+    const app = apps.create(ctx.workspace.id, ctx.user.id, { name: 'Nested Custom View App' });
+    expect(() => surfaces.render(ctx.workspace.id, app.id, 'home', {
+      type: 'Tabs',
+      tabs: [{ label: 'Unsafe', children: [{ type: 'CustomView', html: '<script>bad()</script>' }] }],
+    })).toThrowError(/customCode/);
+  });
 });
 
 describe('AppSurfaceStore.performRegion (Phase M3 — performed surfaces)', () => {

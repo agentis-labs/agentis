@@ -187,6 +187,8 @@ import { EmbeddingProviderRegistry } from './services/embedding/embeddingProvide
 import { KnowledgeStore } from './services/knowledge/knowledgeStore.js';
 import { MemoryStore } from './services/memory/memoryStore.js';
 import { recordWorkflowLesson, distillFailureLesson, isInstructiveFailure } from './services/workflow/workflowPlaybook.js';
+import { WorkflowRevisionService } from './services/workflow/workflowRevisionService.js';
+import { WorkflowExperienceService } from './services/workflow/workflowExperienceService.js';
 import { SkillService } from './services/skillService.js';
 import { SkillMaterializer } from './services/skillMaterializer.js';
 import { EvaluatorExampleStore } from './services/evaluatorExampleStore.js';
@@ -609,6 +611,22 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     embeddings: abilityEmbeddings,
     vision: () => specialistVision,
   });
+  const workflowRevisions = new WorkflowRevisionService(sqlite);
+  const workflowExperience = new WorkflowExperienceService(sqlite, specialistMind);
+  for (const workflow of sqlite.select({
+    id: schema.workflows.id,
+    workspaceId: schema.workflows.workspaceId,
+  }).from(schema.workflows).all()) {
+    try {
+      workflowRevisions.reconcileLegacyWorkflow(workflow.workspaceId, workflow.id);
+    } catch (error) {
+      logger.warn('workflow.revision.legacy_reconcile_failed', {
+        workspaceId: workflow.workspaceId,
+        workflowId: workflow.id,
+        error: (error as Error).message,
+      });
+    }
+  }
   const specialistRuntime = new SpecialistRuntimeService(sqlite);
   const specialistEvals = new SpecialistEvalService(sqlite, specialistMind);
   const specialistRouter = new SpecialistDemandRouter({
@@ -691,6 +709,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     scratchpad,
     activity,
     approvals,
+    revisions: workflowRevisions,
+    workflowExperience,
     extensions,
     adapters,
     subflows,
@@ -854,6 +874,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const PeerProfiles = new PeerProfileService(sqlite, bus, logger);
   agentToolRuntimeDeps.memory = memoryStore;
   instinctEngine = new InstinctEngine(sqlite, bus, memoryStore, logger);
+  instinctEngine.bindWorkflowRevisionService(workflowRevisions);
   engineDeps.instincts = instinctEngine;
   engineDeps.sharedIntelligence = SharedIntelligence;
   const skillService = new SkillService(sqlite, memoryStore, SharedIntelligence, logger);
@@ -958,6 +979,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     bus,
     jobQueue,
     listenerRuntime,
+    revisions: workflowRevisions,
   });
   triggerRuntimeRef = triggerRuntime;
 
@@ -1085,7 +1107,11 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     logger,
     bus,
     engine,
+    revisions: workflowRevisions,
+    workflowExperience,
     adapters,
+    vault: credentialVault,
+    skillMaterializer,
     capabilityIndex,
     commandModel,
     // Same resolver the engine uses at dispatch — lets the build connect a freshly
@@ -1916,6 +1942,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     defaultCognitiveCompleter,
     embeddingBackfill,
     engine,
+    workflowRevisions,
+    workflowExperience,
     episodicMemoryStore,
     harnessMemoryIngestion,
     issues,
@@ -1939,6 +1967,21 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     voiceChannelAdapter,
     workspaceModelConfig,
     workspaceMediaConfigService,
+    commissionSpecialist: (workspaceId: string, agentId: string) => {
+      if (adapters.get(agentId)) return;
+      const runtime = agentRuntimeResolver?.(workspaceId, agentId, null, null);
+      if (!runtime) {
+        logger.warn('app.staffing.runtime_unavailable', { workspaceId, agentId });
+        return;
+      }
+      adapters.register(agentId, runtime);
+      sqlite.update(schema.agents).set({
+        adapterType: runtime.adapterType,
+        status: 'online',
+        lastHeartbeatAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }).where(eq(schema.agents.id, agentId)).run();
+    },
   });
 
   let httpServer: HttpServer | undefined;

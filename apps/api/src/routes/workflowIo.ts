@@ -20,12 +20,14 @@ import { validateWorkflowGraph } from '../engine/validateGraph.js';
 import { buildWorkspaceInventory, classifyIntent, planWorkflow } from '../services/creationPipeline.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
+import { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
 
 /** Existing unversioned exports remain importable while new files use WorkflowFile. */
 interface LegacyWorkflowDoc { name: string; description?: string | null; graph: WorkflowGraph }
 
 export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthService }) {
   const app = new Hono();
+  const revisions = new WorkflowRevisionService(deps.db);
   app.use('*', requireAuth(deps), requireWorkspace(deps));
 
   app.get('/:id/export', (c) => {
@@ -37,7 +39,7 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
       apiVersion: WORKFLOW_FILE_API_VERSION,
       kind: 'Workflow',
       metadata: { name: wf.title, description: wf.description ?? null },
-      spec: { graph: wf.graph as WorkflowGraph },
+      spec: { graph: revisions.candidate(ws.workspaceId, wf.id)?.graph ?? revisions.active(ws.workspaceId, wf.id).graph },
     };
     const yaml = stringify(doc, { lineWidth: 0 });
     return c.body(yaml, 200, { 'content-type': 'text/yaml; charset=utf-8', 'content-disposition': `attachment; filename="${slug(wf.title)}.workflow.yaml"` });
@@ -84,10 +86,27 @@ export function buildWorkflowIoRoutes(deps: { db: AgentisSqliteDb; auth: AuthSer
     const now = new Date().toISOString();
     deps.db.insert(schema.workflows).values({
       id, workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
-      title: doc.metadata.name || 'Imported workflow', description: doc.metadata.description?.trim() || null, graph,
+      title: doc.metadata.name || 'Imported workflow', description: doc.metadata.description?.trim() || null,
+      graph: { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
       settings: {}, concurrencyOverflow: 'queue', createdAt: now, updatedAt: now,
     }).run();
-    return c.json({ workflowId: id, title: doc.metadata.name || 'Imported workflow', nodeCount: graph.nodes.length }, 201);
+    const base = revisions.ensureWorkflow(ws.workspaceId, id).active;
+    const candidate = revisions.createCandidate({
+      workspaceId: ws.workspaceId,
+      workflowId: id,
+      graph,
+      baseRevisionId: base.id,
+      source: 'import',
+      actor: { type: 'user', id: ws.user.id },
+      reason: 'Imported from workflow YAML',
+    }).revision;
+    return c.json({
+      workflowId: id,
+      title: doc.metadata.name || 'Imported workflow',
+      nodeCount: graph.nodes.length,
+      activeRevisionId: base.id,
+      candidateRevisionId: candidate.id,
+    }, 201);
   });
 
   return app;

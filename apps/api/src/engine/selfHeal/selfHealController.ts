@@ -16,6 +16,7 @@ import { selfHealGuardDecision } from '../../services/workflow/workflowBlueprint
 import { graphContentHash, readBuildLoop } from '../../services/workflow/workflowCompass.js';
 import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../../services/workflow/workflowRecoveryPolicy.js';
 import { type DeepPlanArgs, type DeepPlanResult, type IntentAnchor, type RepairResourceContext } from '../../services/workflow/workflowSelfHeal.js';
+import { classifyWorkflowFailure, workflowFailureFingerprint } from '../../services/workflow/workflowFailureClassification.js';
 import { REALTIME_EVENTS, REALTIME_ROOMS, type AgentRequirements, type AgentRole, type AgentTaskNodeConfig, type AgentTool, type ChatDelta, type ReadyQueueItem, type ToolDefinition, type WorkflowGraph, type WorkflowGraphPatch, type WorkflowNode, type WorkflowRecoveryMode, type WorkflowSelfHealIncident } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { and, eq } from 'drizzle-orm';
@@ -55,6 +56,61 @@ export function isSelfHealControlToolAllowed(toolId: string): boolean {
 function selfHealMaxToolCalls(): number {
   const configured = Number(process.env.AGENTIS_SELF_HEAL_MAX_TOOL_CALLS);
   return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 48;
+}
+
+function selfHealTracePhase(
+  status: WorkflowSelfHealIncident['status'],
+): NonNullable<WorkflowSelfHealIncident['trace']>[number]['phase'] {
+  switch (status) {
+    case 'DIAGNOSING':
+      return 'diagnose';
+    case 'PLANNING':
+      return 'inspect';
+    case 'RETRYING':
+    case 'APPLYING':
+    case 'AWAITING_APPROVAL':
+      return 'repair';
+    case 'APPLIED':
+      return 'verify';
+    case 'ROLLED_BACK':
+      return 'resume';
+    case 'BLOCKED':
+    case 'EXHAUSTED':
+      return 'blocked';
+  }
+}
+
+function selfHealTraceSummary(
+  status: WorkflowSelfHealIncident['status'],
+  outcome?: WorkflowSelfHealIncident['outcome'],
+): string {
+  if (outcome) {
+    const labels: Record<NonNullable<WorkflowSelfHealIncident['outcome']>, string> = {
+      output_fixed: 'Invalid output was repaired and verified',
+      graph_patch_applied: 'Workflow repair was applied and verified',
+      graph_patch_awaiting_approval: 'A workflow patch is ready for operator approval',
+      retrying: 'Execution is retrying with the repaired context',
+      retry_awaiting_approval: 'A repaired retry is ready for operator approval',
+      runtime_rebound: 'The assigned runtime was reconnected',
+      runtime_rerouted: 'Execution was safely routed to another compatible runtime',
+      blocked: 'Repair stopped at an operator-safe boundary',
+      exhausted: 'Available repair strategies were exhausted',
+      rolled_back: 'Unsafe or ineffective repair was rolled back',
+    };
+    return labels[outcome];
+  }
+  const labels: Record<WorkflowSelfHealIncident['status'], string> = {
+    DIAGNOSING: 'Diagnosing the failure and collecting runtime evidence',
+    PLANNING: 'Selecting the smallest safe repair',
+    RETRYING: 'Retrying with the repaired execution context',
+    AWAITING_APPROVAL: 'Repair requires operator approval',
+    APPLYING: 'Applying the selected repair',
+    APPLIED: 'Repair applied; verification is running',
+    BLOCKED: 'Repair is blocked and needs operator action',
+    EXHAUSTED: 'No safe automated repair remains',
+    ROLLED_BACK: 'Repair was rolled back to the last checkpoint',
+  };
+  return labels[status];
 }
 
 export interface SelfHealHost {
@@ -146,6 +202,28 @@ export class SelfHealController {
     let cfg;
     try { cfg = getSelfHealConfig(this.host.deps.db, ctx.workspaceId); } catch { return { kind: 'none' }; }
     if (!cfg.enabled) return { kind: 'none' };
+    const classification = classifyWorkflowFailure(error);
+    const revisionKey = ctx.workflowRevisionId ?? graphContentHash(ctx.graph);
+    const failureFingerprint = workflowFailureFingerprint({
+      classification,
+      revisionKey,
+      node,
+      error,
+    });
+    const runtimeRebindCandidate = node.config.kind === 'agent_task' && isRuntimeBindingFailure(error);
+    if (!classification.graphRepairEligible && !runtimeRebindCandidate) {
+      this.host.deps.logger.info('engine.self_heal.ineligible_failure', {
+        runId: ctx.runId,
+        nodeId: node.id,
+        category: classification.category,
+        code: classification.canonicalCode,
+      });
+      return {
+        kind: 'none',
+        reason: `${classification.reason}${classification.operatorAction ? ` ${classification.operatorAction}` : ''}`,
+        diagnosis: `${classification.category}:${classification.canonicalCode}`,
+      };
+    }
     const attempts = selfHealAttemptCount(ctx, node.id);
     if (attempts >= cfg.maxRepairPlans) {
       return this.#blockSelfHeal(ctx, node, {
@@ -164,6 +242,10 @@ export class SelfHealController {
       attempt: attempts + 1,
       maxAttempts: cfg.maxRepairPlans,
       error,
+      failureFingerprint,
+      failureClass: classification.category,
+      repairScope: 'run_local',
+      baseRevisionId: ctx.workflowRevisionId ?? undefined,
     });
     this.host.emitWorkStep(ctx, node, 'thinking', 'Checking deterministic recovery options');
     await this.host.persistRun(ctx).catch(() => {});
@@ -176,6 +258,13 @@ export class SelfHealController {
     if (node.config.kind === 'agent_task' && isRuntimeBindingFailure(error)) {
       const runtimeRepair = await this.#repairNodeRuntime(ctx, node, error, cfg);
       if (runtimeRepair.kind !== 'none') return runtimeRepair;
+      if (!classification.graphRepairEligible) {
+        return {
+          kind: 'none',
+          reason: `${classification.reason}${classification.operatorAction ? ` ${classification.operatorAction}` : ''}`,
+          diagnosis: `${classification.category}:${classification.canonicalCode}`,
+        };
+      }
     }
 
     // ── CAPABILITY-AWARE (E4): a missing capability/provider/tool/binary is not a
@@ -251,6 +340,41 @@ export class SelfHealController {
       }
     } catch { /* the guard is best-effort — a read failure must never block healing */ }
 
+    if (this.host.deps.workflowExperience && ctx.workflowRevisionId) {
+      const reservation = this.host.deps.workflowExperience.reserveRepairAttempt({
+        workspaceId: ctx.workspaceId,
+        workflowId: ctx.workflowId,
+        baseRevisionId: ctx.workflowRevisionId,
+        failureFingerprint,
+        runId: ctx.runId,
+        nodeId: node.id,
+        error,
+      });
+      if (!reservation.allowed) {
+        this.recordSelfHealIncident(ctx, node, {
+          status: 'BLOCKED',
+          mode: cfg.mode,
+          attempt: attempts,
+          maxAttempts: cfg.maxRepairPlans,
+          error,
+          failureFingerprint,
+          failureClass: classification.category,
+          repairScope: 'run_local',
+          baseRevisionId: ctx.workflowRevisionId,
+          recurrent: true,
+          outcome: 'blocked',
+          reason: 'A prior repair attempt already owns this failure fingerprint and base revision.',
+        });
+        return {
+          kind: 'none',
+          reason:
+            'This exact failure fingerprint already has a repair attempt for the same active revision. '
+            + 'Agentis stopped before repeating the mutation; inspect the prior candidate and its proof result.',
+          diagnosis: `recurrent:${classification.category}:${classification.canonicalCode}`,
+        };
+      }
+    }
+
     const prompt = (node.config as { prompt?: string }).prompt ?? '';
     const completer = this.#resolveSelfHealCompleter(ctx, node, prompt, error, cfg);
     const intent: IntentAnchor = {
@@ -265,6 +389,10 @@ export class SelfHealController {
       attempt: attempts + 1,
       maxAttempts: cfg.maxRepairPlans,
       error,
+      failureFingerprint,
+      failureClass: classification.category,
+      repairScope: 'run_local',
+      baseRevisionId: ctx.workflowRevisionId ?? undefined,
       diagnosis: 'Orchestrator is repairing the workflow with the chat tool loop.',
     });
     await this.host.persistRun(ctx).catch(() => {});
@@ -1118,6 +1246,25 @@ export class SelfHealController {
     const current = ctx.state.selfHealIncidents?.[node.id];
     const status = update.status ?? current?.status ?? 'DIAGNOSING';
     const terminal = status === 'APPLIED' || status === 'BLOCKED' || status === 'EXHAUSTED';
+    const traceChanged = !current
+      || status !== current.status
+      || (update.diagnosis !== undefined && update.diagnosis !== current.diagnosis)
+      || (update.reason !== undefined && update.reason !== current.reason)
+      || (update.outcome !== undefined && update.outcome !== current.outcome);
+    const detail = update.diagnosis ?? update.reason ?? update.error ?? current?.diagnosis ?? current?.reason ?? current?.error;
+    const tier = update.tier ?? current?.tier;
+    const trace = traceChanged
+      ? [...(current?.trace ?? []), {
+          id: randomUUID(),
+          phase: selfHealTracePhase(status),
+          status,
+          summary: selfHealTraceSummary(status, update.outcome ?? current?.outcome),
+          attempt: update.attempt ?? current?.attempt ?? 0,
+          ...(detail ? { detail } : {}),
+          ...(tier ? { tier } : {}),
+          createdAt: now,
+        }].slice(-50)
+      : current?.trace;
     const incident: WorkflowSelfHealIncident = {
       ...current,
       incidentId: update.incidentId ?? current?.incidentId ?? node.id,
@@ -1132,7 +1279,13 @@ export class SelfHealController {
       reason: update.reason ?? current?.reason,
       tier: update.tier ?? current?.tier,
       failureFingerprint: update.failureFingerprint ?? current?.failureFingerprint ?? recoveryFailureFingerprint(node.id, update.error ?? current?.error ?? ''),
+      failureClass: update.failureClass ?? current?.failureClass,
+      repairScope: update.repairScope ?? current?.repairScope,
+      baseRevisionId: update.baseRevisionId ?? current?.baseRevisionId,
+      candidateRevisionId: update.candidateRevisionId ?? current?.candidateRevisionId,
+      recurrent: update.recurrent ?? current?.recurrent,
       plans: update.plans ?? current?.plans,
+      trace,
       riskReason: update.riskReason ?? current?.riskReason,
       approvalId: update.approvalId ?? current?.approvalId,
       checkpointId: update.checkpointId ?? current?.checkpointId,

@@ -103,6 +103,7 @@ export interface WorkspaceCompletedRun {
 }
 
 export interface WorkspaceSelfHealIncident {
+  incidentId?: string;
   nodeId: string;
   nodeTitle?: string;
   status: 'DIAGNOSING' | 'PLANNING' | 'RETRYING' | 'AWAITING_APPROVAL' | 'APPLYING' | 'APPLIED' | 'BLOCKED' | 'EXHAUSTED' | 'ROLLED_BACK';
@@ -110,6 +111,31 @@ export interface WorkspaceSelfHealIncident {
   attempt: number;
   maxAttempts: number;
   tier?: 'deterministic' | 'minimal_patch' | 'rebuild';
+  failureFingerprint?: string;
+  failureClass?: 'expected_business' | 'human_policy' | 'configuration_capability' | 'transient_resource' | 'data_contract' | 'graph_design' | 'platform' | 'cancellation_propagated' | 'unknown';
+  repairScope?: 'run_local';
+  baseRevisionId?: string;
+  candidateRevisionId?: string;
+  recurrent?: boolean;
+  plans?: Array<{
+    id: string;
+    tier: 'deterministic' | 'minimal_patch' | 'rebuild';
+    status: 'proposed' | 'approved' | 'applying' | 'applied' | 'rejected' | 'blocked' | 'rolled_back';
+    summary: string;
+    reason: string;
+    createdAt: string;
+    completedAt?: string;
+  }>;
+  trace?: Array<{
+    id: string;
+    phase: 'diagnose' | 'inspect' | 'repair' | 'verify' | 'resume' | 'blocked';
+    status: WorkspaceSelfHealIncident['status'];
+    summary: string;
+    detail?: string;
+    attempt: number;
+    tier?: 'deterministic' | 'minimal_patch' | 'rebuild';
+    createdAt: string;
+  }>;
   riskReason?: string;
   checkpointId?: string;
   error?: string;

@@ -4,10 +4,16 @@ import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { useWorkspaceChromeData } from '../lib/workspaceChromeData';
 import { useAgentisStore } from '../store/agentisStore';
+import { openApprovalModal } from '../lib/approvalModal';
 
 export function LiveStrip() {
   const { approvals, counts, fleet: snap, latestActivity: latest, loading } = useWorkspaceChromeData();
   const { setSettingsOpen } = useAgentisStore();
+  const firstApproval = approvals[0];
+
+  function reviewFirstApproval() {
+    if (firstApproval?.id) openApprovalModal({ approvalId: firstApproval.id });
+  }
 
   if (!snap) {
     if (loading) {
@@ -22,17 +28,17 @@ export function LiveStrip() {
       <div className="flex h-7 shrink-0 items-center gap-4 border-t border-line bg-surface px-3 text-[11px] text-text-muted">
         <Link to="/agents" className="flex items-center gap-1 hover:text-text-primary">
           <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', counts.liveAgents > 0 ? 'bg-emerald-500' : 'bg-white')} />
-          {counts.liveAgents} active {counts.liveAgents === 1 ? 'agent' : 'agents'}
+          {counts.liveAgents}/{counts.totalAgents} active {counts.totalAgents === 1 ? 'agent' : 'agents'}
         </Link>
         <Link to="/history?tab=runs" className="flex items-center gap-1 hover:text-text-primary">
           <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', counts.activeRuns > 0 ? 'bg-emerald-500' : 'bg-white')} />
           {counts.activeRuns} active {counts.activeRuns === 1 ? 'run' : 'runs'}
         </Link>
         {approvals.length > 0 && (
-          <Link to="/home" className="flex items-center gap-1 text-warn hover:text-text-primary">
+          <button type="button" onClick={reviewFirstApproval} className="flex items-center gap-1 text-warn hover:text-text-primary">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-warn" />
             {approvals.length} pending {approvals.length === 1 ? 'approval' : 'approvals'}
-          </Link>
+          </button>
         )}
         <button onClick={() => setSettingsOpen(true, 'channels')} className="flex items-center gap-1 hover:text-text-primary">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-white" />
@@ -54,17 +60,17 @@ export function LiveStrip() {
     <div className="flex h-7 shrink-0 items-center gap-4 border-t border-line bg-surface px-3 text-[11px] text-text-muted">
       <Link to="/agents" className="flex items-center gap-1 hover:text-text-primary">
         <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', counts.liveAgents > 0 ? 'bg-emerald-500' : 'bg-white')} />
-        {counts.liveAgents} active {counts.liveAgents === 1 ? 'agent' : 'agents'}
+        {counts.liveAgents}/{counts.totalAgents} active {counts.totalAgents === 1 ? 'agent' : 'agents'}
       </Link>
       <Link to="/history?tab=runs" className="flex items-center gap-1 hover:text-text-primary">
         <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', snap.runs.active > 0 ? 'bg-emerald-500' : 'bg-white')} />
         {snap.runs.active} active {snap.runs.active === 1 ? 'run' : 'runs'}
       </Link>
       {snap.approvals.pending > 0 && (
-        <Link to="/home" className="flex items-center gap-1 text-warn hover:text-text-primary">
+        <button type="button" onClick={reviewFirstApproval} className="flex items-center gap-1 text-warn hover:text-text-primary">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-warn" />
           {snap.approvals.pending} pending {snap.approvals.pending === 1 ? 'approval' : 'approvals'}
-        </Link>
+        </button>
       )}
       <button onClick={() => setSettingsOpen(true, 'channels')} className="flex items-center gap-1 hover:text-text-primary">
         <span className={clsx('inline-block h-1.5 w-1.5 rounded-full', gwDot)} />

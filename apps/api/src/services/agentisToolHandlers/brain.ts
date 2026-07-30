@@ -14,6 +14,8 @@
  */
 
 import { AgentisError, type AgentisToolContext, type KnowledgeAtomKind } from '@agentis/core';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 
@@ -46,8 +48,167 @@ function snippet(text: string, max = 300): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    : [];
+}
+
+function requireAgent(deps: ToolHandlerDeps, workspaceId: string, value: unknown): string {
+  const agentId = requireStr(value, 'agentId');
+  const row = deps.db.select({ id: schema.agents.id }).from(schema.agents)
+    .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, workspaceId))).get();
+  if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `agent ${agentId} not found in this workspace`);
+  return row.id;
+}
+
+function inspectAgentBrain(deps: ToolHandlerDeps, ctx: AgentisToolContext, agentId: string) {
+  const memories = deps.memory?.list({ workspaceId: ctx.workspaceId, scopeId: agentId, limit: 500 }) ?? [];
+  const skills = deps.skills?.listForScopes(ctx.workspaceId, [agentId]) ?? [];
+  const examples = (deps.skills?.listExamples(ctx.workspaceId) ?? []).filter((item) => item.scopeId === agentId);
+  const knowledgeBases = deps.knowledgeBases?.listKnowledgeBases(ctx.workspaceId, { scopeId: agentId }) ?? [];
+  const knowledge = knowledgeBases.flatMap((base) =>
+    (deps.knowledgeBases?.listDocuments(ctx.workspaceId, base.id) ?? []).map((doc) => ({
+      id: doc.id,
+      title: doc.name,
+      status: doc.status,
+      knowledgeBaseId: base.id,
+    })));
+  return {
+    agentId,
+    counts: { memories: memories.length, knowledge: knowledge.length, skills: skills.length, examples: examples.length },
+    memories: memories.map((item) => ({ id: item.id, title: item.title, kind: item.kind })),
+    knowledge,
+    skills: skills.map((item) => ({ id: item.id, slug: item.slug, name: item.name, confidence: item.confidence })),
+    examples: examples.map((item) => ({ id: item.id, title: item.title })),
+  };
+}
+
 export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
+    {
+      definition: {
+        id: 'agentis.agent.brain.inspect',
+        family: 'inspect',
+        mcpExposed: true,
+        description: 'Inspect one specialist private Brain across Memory, Knowledge, Skills, and Examples. Use after configuring a specialist; do not claim completion until the requested content is visible here.',
+        inputSchema: {
+          type: 'object',
+          properties: { agentId: { type: 'string' } },
+          required: ['agentId'],
+        },
+        mutating: false,
+      },
+      handler: (args, ctx) => inspectAgentBrain(deps, ctx, requireAgent(deps, ctx.workspaceId, args.agentId)),
+    },
+    {
+      definition: {
+        id: 'agentis.agent.brain.configure',
+        family: 'build',
+        mcpExposed: true,
+        description:
+          'Author or update a target specialist private Brain in one idempotent batch: durable memories, scoped knowledge documents, Living Skills, and worked examples. This is cross-agent administration; all content is stored under agentId, never the App/workspace Brain.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            agentId: { type: 'string' },
+            memories: { type: 'array', items: { type: 'object' } },
+            knowledge: { type: 'array', items: { type: 'object' } },
+            skills: { type: 'array', items: { type: 'object' } },
+            examples: { type: 'array', items: { type: 'object' } },
+          },
+          required: ['agentId'],
+        },
+        mutating: true,
+        autoExecute: true,
+      },
+      handler: async (args, ctx) => {
+        const agentId = requireAgent(deps, ctx.workspaceId, args.agentId);
+        if (!deps.memory || !deps.skills) throw new AgentisError('VALIDATION_FAILED', 'Brain memory and skills are not available');
+        const results = { memories: [] as string[], knowledge: [] as string[], skills: [] as string[], examples: [] as string[] };
+        for (const item of records(args.memories)) {
+          const title = requireStr(item.title, 'memories[].title');
+          const content = requireStr(item.content, 'memories[].content');
+          const existing = deps.memory.list({ workspaceId: ctx.workspaceId, scopeId: agentId, limit: 500 })
+            .find((row) => row.title.trim().toLowerCase() === title.toLowerCase());
+          if (existing) {
+            deps.memory.update(ctx.workspaceId, agentId, existing.id, { content });
+            results.memories.push(existing.id);
+          } else {
+            results.memories.push(deps.memory.write({
+              workspaceId: ctx.workspaceId,
+              scopeId: agentId,
+              kind: String(item.kind ?? 'rule') as 'rule',
+              source: 'operator',
+              title,
+              content,
+              trust: 0.9,
+              importance: Number(item.importance ?? 0.8),
+              tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
+            }));
+          }
+        }
+        const createdSkills = new Map<string, string>();
+        for (const item of records(args.skills)) {
+          const saved = deps.skills.upsertSkill({
+            workspaceId: ctx.workspaceId,
+            scopeId: agentId,
+            name: requireStr(item.name, 'skills[].name'),
+            description: requireStr(item.description, 'skills[].description'),
+            body: requireStr(item.body, 'skills[].body'),
+            source: 'agent',
+            ...(typeof item.slug === 'string' ? { slug: item.slug } : {}),
+          });
+          createdSkills.set(saved.slug, saved.id);
+          createdSkills.set(saved.name.toLowerCase(), saved.id);
+          results.skills.push(saved.id);
+        }
+        if (records(args.knowledge).length > 0) {
+          if (!deps.knowledgeBases) throw new AgentisError('VALIDATION_FAILED', 'knowledge bases are not available');
+          const base = deps.knowledgeBases.listKnowledgeBases(ctx.workspaceId, { scopeId: agentId })
+            .find((row) => row.scopeId === agentId)
+            ?? deps.knowledgeBases.createKnowledgeBase({ workspaceId: ctx.workspaceId, scopeId: agentId, name: 'Private specialist knowledge' });
+          const existingDocs = deps.knowledgeBases.listDocuments(ctx.workspaceId, base.id);
+          for (const item of records(args.knowledge)) {
+            const title = requireStr(item.title, 'knowledge[].title');
+            const existing = existingDocs.find((doc) => doc.name.trim().toLowerCase() === title.toLowerCase());
+            if (existing) { results.knowledge.push(existing.id); continue; }
+            const doc = await deps.knowledgeBases.addDocument({
+              workspaceId: ctx.workspaceId,
+              knowledgeBaseId: base.id,
+              name: title,
+              content: requireStr(item.content, 'knowledge[].content'),
+            });
+            results.knowledge.push(doc.id);
+          }
+        }
+        for (const item of records(args.examples)) {
+          const ref = requireStr(item.skill, 'examples[].skill');
+          const skillId = createdSkills.get(ref) ?? createdSkills.get(ref.toLowerCase())
+            ?? deps.skills.getByScopeAndSlug(ctx.workspaceId, agentId, ref)?.id;
+          if (!skillId) throw new AgentisError('RESOURCE_NOT_FOUND', `private skill "${ref}" not found for target agent`);
+          const inputText = requireStr(item.input, 'examples[].input');
+          const outputText = requireStr(item.output, 'examples[].output');
+          const expectedContent = `Task: ${inputText.slice(0, 4000)}\nResponse: ${outputText.slice(0, 8000)}`;
+          const existing = deps.skills.listLinkedExamples(ctx.workspaceId, skillId, 100)
+            .find((example) => example.content === expectedContent);
+          if (existing) {
+            results.examples.push(existing.id);
+            continue;
+          }
+          const id = deps.skills.promoteExample({
+            workspaceId: ctx.workspaceId,
+            skillId,
+            inputText,
+            outputText,
+            source: 'agent',
+          });
+          if (id) results.examples.push(id);
+        }
+        const materialized = deps.skillMaterializer?.materializeForAgent(ctx.workspaceId, agentId).materialized.length ?? 0;
+        return { configured: true, agentId, results, materialized, verification: inspectAgentBrain(deps, ctx, agentId) };
+      },
+    },
     {
       definition: {
         id: 'agentis.brain.search',
@@ -227,6 +388,7 @@ export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHand
               description: 'Who can recall it: "agent" (default) = private to you; "workspace" = shared with every agent here.',
             },
             slug: { type: 'string', description: 'Optional stable slug for idempotent updates. Defaults to a slug of the name.' },
+            agentId: { type: 'string', description: 'Target specialist Brain. Omit to use the calling agent.' },
           },
           required: ['name', 'description', 'body'],
         },
@@ -245,7 +407,11 @@ export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHand
         // shares it. Absent an agent identity, "agent" degrades to workspace-global
         // (a null scope) rather than silently dropping the skill.
         const scope = args.scope === 'workspace' ? 'workspace' : 'agent';
-        const scopeId = scope === 'workspace' ? null : (ctx.agentId ?? null);
+        const scopeId = scope === 'workspace'
+          ? null
+          : args.agentId
+            ? requireAgent(deps, ctx.workspaceId, args.agentId)
+            : (ctx.agentId ?? null);
         const slug = typeof args.slug === 'string' && args.slug.trim() ? args.slug.trim() : undefined;
         const before = deps.skills.getByScopeAndSlug(ctx.workspaceId, scopeId, slug ?? name);
         const saved = deps.skills.upsertSkill({

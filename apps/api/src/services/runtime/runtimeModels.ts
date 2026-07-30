@@ -352,7 +352,26 @@ function parseModelsResponse(
 function mergeModels(staticModels: RuntimeModelOption[], dynamicModels: RuntimeModelOption[]): RuntimeModelOption[] {
   const merged: RuntimeModelOption[] = [];
   const seen = new Set<string>();
-  for (const model of [...dynamicModels, ...staticModels]) {
+  const dynamicById = new Map(dynamicModels.map((model) => [model.id.toLowerCase(), model]));
+  // The curated catalog defines the stable power order. A selected model or an
+  // upstream API response must never jump a known entry to the top; dynamic data
+  // only enriches that entry with verified metadata.
+  for (const model of staticModels) {
+    const dynamic = dynamicById.get(model.id.toLowerCase());
+    const enriched = dynamic
+      ? { ...model, ...dynamic, label: model.label, recommended: model.recommended ?? dynamic.recommended }
+      : model;
+    merged.push(enriched);
+    seen.add(model.id.toLowerCase());
+  }
+  const tierOrder: Record<ModelTier, number> = { flagship: 0, balanced: 1, fast: 2, auto: 3, custom: 4 };
+  const additional = dynamicModels
+    .filter((model) => !seen.has(model.id.toLowerCase()))
+    .sort((a, b) => {
+      const tier = tierOrder[a.tier ?? inferModelTierFromId(a.id)] - tierOrder[b.tier ?? inferModelTierFromId(b.id)];
+      return tier || a.id.localeCompare(b.id);
+    });
+  for (const model of additional) {
     const key = model.id.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);

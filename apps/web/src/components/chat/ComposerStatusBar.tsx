@@ -123,7 +123,11 @@ export function ComposerStatusBar({ agentId, className }: Props) {
       setAgent({ ...agent, config: nextConfig, runtimeModel: runtimeModel ?? agent.runtimeModel ?? null });
       setContext((current) => current ? {
         ...current,
-        currentModel: runtimeModel === undefined ? current.currentModel : (runtimeModel || current.currentModel),
+        currentModel: runtimeModel === undefined
+          ? current.currentModel
+          : (adapterType === 'antigravity'
+              ? runtimeModel?.replace(/\s*\((?:high|medium|low)\)$/i, '') || current.currentModel
+              : runtimeModel || current.currentModel),
       } : current);
       window.dispatchEvent(new CustomEvent('agentis:agent-model-updated', {
         detail: { agentId: agent.id, model: runtimeModel ?? null },
@@ -136,19 +140,25 @@ export function ComposerStatusBar({ agentId, className }: Props) {
   }
 
   async function updateModel(nextModel: string) {
-    const nextConfig = { ...config };
-    if (nextModel) nextConfig.model = nextModel;
+    const nextConfig: Record<string, unknown> = { ...config };
+    const currentEffort = context?.currentEffort;
+    const runtimeModel = adapterType === 'antigravity' && nextModel && currentEffort
+      ? `${nextModel.replace(/\s*\((?:high|medium|low)\)$/i, '')} (${currentEffort[0]?.toUpperCase()}${currentEffort.slice(1).toLowerCase()})`
+      : nextModel;
+    if (runtimeModel) nextConfig.model = runtimeModel;
     else delete nextConfig.model;
     setContext((current) => current ? { ...current, currentModel: nextModel || current.currentModel } : current);
-    await patchRuntimeConfig(nextConfig, nextModel || null);
+    await patchRuntimeConfig(nextConfig, runtimeModel || null);
   }
 
   async function updateEffort(nextEffort: string) {
-    const nextConfig = { ...config, modelReasoningEffort: nextEffort };
+    const nextConfig: Record<string, unknown> = { ...config, modelReasoningEffort: nextEffort };
     setContext((current) => current ? { ...current, currentEffort: nextEffort } : current);
     if (adapterType === 'antigravity' && context?.currentModel) {
       const baseModel = context.currentModel.replace(/\s*\((?:high|medium|low)\)$/i, '');
-      await patchRuntimeConfig(nextConfig, `${baseModel} (${nextEffort[0]?.toUpperCase()}${nextEffort.slice(1).toLowerCase()})`);
+      const runtimeModel = `${baseModel} (${nextEffort[0]?.toUpperCase()}${nextEffort.slice(1).toLowerCase()})`;
+      nextConfig.model = runtimeModel;
+      await patchRuntimeConfig(nextConfig, runtimeModel);
     } else {
       await patchRuntimeConfig(nextConfig);
     }

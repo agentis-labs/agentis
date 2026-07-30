@@ -412,6 +412,19 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       const detectedFastMode = adapterType === 'codex'
         ? booleanOf(config.fastMode) ?? detectedRuntime.fastMode ?? baseContext.fastModeEnabled
         : undefined;
+      const presentedCurrentModel = adapterType === 'antigravity'
+        ? antigravityBaseModel(currentModel)
+        : currentModel;
+      const catalogModels = catalog.models.map((model) => ({
+        id: adapterType === 'antigravity' ? antigravityBaseModel(model.id) : model.id,
+        label: adapterType === 'antigravity' ? antigravityBaseModel(model.label) : model.label,
+        recommended: model.recommended,
+        source: model.source,
+        verified: model.verified,
+      }));
+      const presentedModels = adapterType === 'antigravity'
+        ? catalogModels.filter((model, index, all) => all.findIndex((candidate) => candidate.id === model.id) === index)
+        : catalogModels;
 
       return c.json({
         ...baseContext,
@@ -436,16 +449,10 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
             }
           : {}),
         models: mergeRuntimeContextModels(
-          catalog.models.map((model) => ({
-            id: model.id,
-            label: model.label,
-            recommended: model.recommended,
-            source: model.source,
-            verified: model.verified,
-          })),
-          currentModel,
+          presentedModels,
+          presentedCurrentModel,
         ),
-        currentModel,
+        currentModel: presentedCurrentModel,
       });
     } catch (err) {
       deps.logger.error('agents.runtime_context_failed', { agentId: id, err: (err as Error).message });
@@ -717,6 +724,10 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
 function antigravityEffort(model: string): 'high' | 'medium' | 'low' | undefined {
   const match = /\((high|medium|low)\)$/i.exec(model);
   return match?.[1]?.toLowerCase() as 'high' | 'medium' | 'low' | undefined;
+}
+
+function antigravityBaseModel(model: string): string {
+  return model.replace(/\s*\((?:high|medium|low)\)$/i, '').trim();
 }
 
 function stringOf(value: unknown): string | undefined {

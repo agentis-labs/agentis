@@ -14,6 +14,7 @@
 
 import {
   AgentisError,
+  applyUiPatchOps,
   appWorkflowBindingSchema,
   collectionSchemaSchema,
   createAppSchema,
@@ -34,7 +35,7 @@ import { and, eq, sql as sqlOp } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
-import { buildAppStores, type AppStores } from '@agentis/app';
+import { buildAppStores, type AppStores, type InterfacePageSnapshot } from '@agentis/app';
 import { publishAgentCreation } from '../agent/agentWorkProgress.js';
 import { generateSurfaceView, generateSurfacePatch } from '../surfaceGenerator.js';
 import { resolveSynthesisCompleter } from './build.js';
@@ -71,6 +72,63 @@ function resolveWorkflowId(args: Record<string, unknown>, ctx: AgentisToolContex
 function str(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new AgentisError('VALIDATION_FAILED', `'${name}' must be a non-empty string`);
   return value;
+}
+
+function removeInterfaceNode(node: import('@agentis/core').ViewNode, nodeId: string): { node: import('@agentis/core').ViewNode; removed: boolean } {
+  if (node.type === 'Split') {
+    if (node.left.nodeId === nodeId) return { node: node.right, removed: true };
+    if (node.right.nodeId === nodeId) return { node: node.left, removed: true };
+    const left = removeInterfaceNode(node.left, nodeId);
+    if (left.removed) return { node: { ...node, left: left.node }, removed: true };
+    const right = removeInterfaceNode(node.right, nodeId);
+    return right.removed ? { node: { ...node, right: right.node }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'List') {
+    const child = removeInterfaceNode(node.item, nodeId);
+    return child.removed ? { node: { ...node, item: child.node }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'AgentRegion' && node.child) {
+    if (node.child.nodeId === nodeId) return { node: { ...node, child: undefined }, removed: true };
+    const child = removeInterfaceNode(node.child, nodeId);
+    return child.removed ? { node: { ...node, child: child.node }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'Tabs') {
+    let removed = false;
+    const tabs = node.tabs.map((tab) => ({
+      ...tab,
+      children: tab.children.flatMap((child) => {
+        if (child.nodeId === nodeId) { removed = true; return []; }
+        const result = removeInterfaceNode(child, nodeId);
+        if (result.removed) removed = true;
+        return [result.node];
+      }),
+    }));
+    return removed ? { node: { ...node, tabs }, removed: true } : { node, removed: false };
+  }
+  if (node.type === 'Accordion') {
+    let removed = false;
+    const sections = node.sections.map((section) => ({
+      ...section,
+      children: section.children.flatMap((child) => {
+        if (child.nodeId === nodeId) { removed = true; return []; }
+        const result = removeInterfaceNode(child, nodeId);
+        if (result.removed) removed = true;
+        return [result.node];
+      }),
+    }));
+    return removed ? { node: { ...node, sections }, removed: true } : { node, removed: false };
+  }
+  if ('children' in node && Array.isArray(node.children)) {
+    let removed = false;
+    const children = node.children.flatMap((child) => {
+      if (child.nodeId === nodeId) { removed = true; return []; }
+      const result = removeInterfaceNode(child, nodeId);
+      if (result.removed) removed = true;
+      return [result.node];
+    });
+    return removed ? { node: { ...node, children } as import('@agentis/core').ViewNode, removed: true } : { node, removed: false };
+  }
+  return { node, removed: false };
 }
 
 function obj(value: unknown, name: string): Record<string, unknown> {
@@ -192,7 +250,7 @@ const chainItemSchema = z.object({
 
 export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   const stores: AppStores = buildAppStores({ db: deps.db, bus: deps.bus });
-  const { store, data, surfaces } = stores;
+  const { store, data, surfaces, interfaces } = stores;
 
   /** Publish a workflow-binding change to the workflow + app + workspace rooms so
    *  the canvas / App control plane / home refetch the new order live. */
@@ -225,6 +283,56 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
     }
     const list = apps.slice(0, 10).map((app) => `${app.name} (appId: ${app.id})`).join('; ');
     throw new AgentisError('VALIDATION_FAILED', `no App in context — pass "appId". Available apps: ${list}.`);
+  };
+
+  /** UI writes are leased to the exact App visible when the turn began. */
+  const resolveUiAppId = (args: Record<string, unknown>, ctx: AgentisToolContext): string => {
+    const viewed = ctx.viewport?.appView?.appId
+      ?? (ctx.viewport?.resourceKind === 'app' ? ctx.viewport.resourceId : undefined);
+    const explicit = typeof args.appId === 'string' && args.appId.trim() ? args.appId.trim() : undefined;
+    if (viewed && explicit && viewed !== explicit && ctx.viewport?.appView?.targetLocked !== false) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `UI target mismatch: the operator is viewing App ${viewed}, but this call targets ${explicit}. Re-observe the viewport before editing another App.`,
+      );
+    }
+    return viewed ?? resolveAppId(args, ctx);
+  };
+
+  const resolveSurfaceName = (args: Record<string, unknown>, ctx: AgentisToolContext, fallback = 'home'): string => {
+    if (typeof args.surface === 'string' && args.surface.trim()) return args.surface.trim();
+    if (ctx.viewport?.appView?.page?.trim()) return ctx.viewport.appView.page.trim();
+    return fallback;
+  };
+
+  const applyVerifiedInterface = (
+    ctx: AgentisToolContext,
+    appId: string,
+    reason: string,
+    mutate: (pages: InterfacePageSnapshot[]) => void,
+  ) => {
+    const state = interfaces.state(ctx.workspaceId, appId);
+    const pages: InterfacePageSnapshot[] = structuredClone(state.active.pages);
+    mutate(pages);
+    const candidate = interfaces.createCandidate(ctx.workspaceId, appId, pages, {
+      source: 'agent',
+      actorType: 'agent',
+      ...(ctx.agentId ? { actorId: ctx.agentId } : {}),
+      reason,
+      baseRevisionId: state.active.id,
+    });
+    if (candidate.status === 'active') return { revision: candidate, verification: null, unchanged: true };
+    const verification = interfaces.verify(ctx.workspaceId, appId, candidate.id);
+    if (!verification.passed) {
+      throw new AgentisError(
+        'VALIDATION_FAILED',
+        `interface candidate failed verification and was not published: ${verification.proofs
+          .filter((proof) => proof.status === 'failed')
+          .map((proof) => `${proof.gate}: ${JSON.stringify(proof.evidence)}`)
+          .join('; ')}`,
+      );
+    }
+    return { revision: interfaces.publish(ctx.workspaceId, appId, candidate.id), verification, unchanged: false };
   };
 
   registry.registerMany([
@@ -885,6 +993,98 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
     },
     {
       definition: {
+        id: 'agentis.ui.apply',
+        family: 'app',
+        description:
+          'Atomically apply a verified interface plan across one or more pages. This is the preferred authoring tool for builds and rebuilds: all page changes stay in an isolated candidate, pass schema/operability/navigation/runtime gates, then publish together. On failure the live App remains untouched. Each change is { surface?, view?, actions?, kind?, shareable?, renameTo?, delete? }; omit surface to target the exact page currently viewed. Returns the immutable revision and proof gates.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ...appIdProp,
+            reason: { type: 'string', description: 'Short intent for interface history.' },
+            baseRevisionId: { type: 'string', description: 'Optional optimistic-lock revision from ui.inspect.' },
+            changes: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  surface: { type: 'string' },
+                  renameTo: { type: 'string' },
+                  kind: { type: 'string', enum: ['page', 'dashboard', 'thread', 'embed', 'public'] },
+                  view: { type: 'object' },
+                  actions: { type: 'array' },
+                  shareable: { type: 'boolean' },
+                  delete: { type: 'boolean' },
+                },
+              },
+            },
+          },
+          required: ['changes'],
+        },
+        mutating: true,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: (args, ctx) => {
+        const appId = resolveUiAppId(args, ctx);
+        const state = interfaces.state(ctx.workspaceId, appId);
+        const pages: InterfacePageSnapshot[] = structuredClone(state.active.pages);
+        const changes = z.array(z.object({
+          surface: z.string().optional(),
+          renameTo: z.string().trim().min(1).max(120).optional(),
+          kind: z.enum(['page', 'dashboard', 'thread', 'embed', 'public']).optional(),
+          view: viewNodeSchema.optional(),
+          actions: z.array(surfaceActionSchema).optional(),
+          shareable: z.boolean().optional(),
+          delete: z.boolean().optional(),
+        })).min(1).parse(args.changes);
+        for (const change of changes) {
+          const surfaceName = change.surface?.trim() || resolveSurfaceName(args, ctx);
+          const index = pages.findIndex((page) => page.name === surfaceName);
+          if (change.delete) {
+            if (index < 0) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${surfaceName}`);
+            pages.splice(index, 1);
+            continue;
+          }
+          const current = index >= 0 ? pages[index]! : {
+            id: '',
+            name: surfaceName,
+            kind: 'page' as const,
+            view: null,
+            actions: [],
+            shareable: false,
+          };
+          const next: InterfacePageSnapshot = {
+            ...current,
+            ...(change.renameTo ? { name: change.renameTo } : {}),
+            ...(change.kind ? { kind: change.kind } : {}),
+            ...(change.view ? { view: change.view } : {}),
+            ...(change.actions ? { actions: change.actions } : {}),
+            ...(change.shareable !== undefined ? { shareable: change.shareable } : {}),
+          };
+          if (index >= 0) pages[index] = next;
+          else pages.push(next);
+        }
+        const candidate = interfaces.createCandidate(ctx.workspaceId, appId, pages, {
+          source: 'agent',
+          actorType: 'agent',
+          actorId: ctx.agentId,
+          reason: typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : 'Agent interface update',
+          baseRevisionId: typeof args.baseRevisionId === 'string' ? args.baseRevisionId : state.active.id,
+        });
+        if (candidate.status === 'active') {
+          return { published: false, unchanged: true, revision: candidate };
+        }
+        const verification = interfaces.verify(ctx.workspaceId, appId, candidate.id);
+        if (!verification.passed) {
+          return { published: false, revision: candidate, verification, liveInterfaceUnchanged: true };
+        }
+        const published = interfaces.publish(ctx.workspaceId, appId, candidate.id);
+        return { published: true, revision: published, verification };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.ui.render',
         family: 'app',
         description:
@@ -894,16 +1094,23 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           '• Data, bound to collections via { bind: { collection, query?, sort?, limit?, live? } } — Kanban (real drag update + governed transitions + state-aware right-click contextActions/cardActions), RecordMaster, Table (columns + rowActions), List, StatusBoard, Timeline, Funnel, Calendar, Inbox, Chart.\n' +
           '• Agent-native — ActivityStream (your live work feed), Narrative, ConversationThread, ChatThread.\n' +
           '• Rich content — DocumentViewer, CodeViewer, MediaGallery, MapView, Image, Avatar, Badge. CodeSurface/CustomView render your own sandboxed JS/HTML for anything bespoke.\n' +
-          '• PIXEL-PERFECT tier — CodeSurface is a first-class, co-equal path (not a fallback): reach for it when you want full design control or the typed composites would look generic. It renders full-bleed and auto-heights to a whole dashboard page, on-brand in light AND dark, with a rich ui kit (cards, grids, metric tiles with depth, status pills, area/line/bar/donut charts) and the agentis bridge (data.query, actions.invoke, state, navigation). Requires the App\'s custom-code policy. Keep typed nodes for operable/editable/data-bound apps.\n' +
+          '• PIXEL-PERFECT tier — CodeSurface is a first-class, co-equal path (not a fallback): reach for it when you want full design control or the typed composites would look generic. It renders full-bleed and auto-heights to a whole dashboard page, on-brand in light AND dark, with a rich ui kit (cards, grids, metric tiles with depth, status pills, area/line/bar/donut charts) and the agentis bridge (data.query, actions.invoke, state, navigation). It runs by default in a hardened null-origin, zero-egress sandbox; raw CustomView HTML remains policy-gated. Keep typed nodes for operable/editable/data-bound apps.\n' +
           '• Inputs — Form (fields + submit action), Button (action). Declare every button/form action first with ui.action_schema (kind: workflow | tool | data).\n' +
           'Compose for the operating model you designed: lead with the KPIs that matter, then the pipeline/board, gates/approvals queues, validation status, and an activity rail (ActivityStream) in a Split. Replaces the surface view. Prefer this over a generic scaffold — a capable agent authoring the interface directly is how Agentis ships powerful apps.',
-        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, view: { type: 'object' } }, required: ['surface', 'view'] },
+        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string', description: 'Page to replace. Omit to use the exact page currently viewed.' }, view: { type: 'object' } }, required: ['view'] },
         mutating: true,
         autoExecute: true,
       },
       handler: (args, ctx) => {
-        const result = surfaces.render(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), viewNodeSchema.parse(args.view));
-        return { rendered: true, surface: result.name, revision: result.revision };
+        const appId = resolveUiAppId(args, ctx);
+        const surfaceName = resolveSurfaceName(args, ctx);
+        const view = viewNodeSchema.parse(args.view);
+        const result = applyVerifiedInterface(ctx, appId, `Render ${surfaceName}`, (pages) => {
+          const index = pages.findIndex((page) => page.name === surfaceName);
+          if (index >= 0) pages[index] = { ...pages[index]!, view };
+          else pages.push({ id: '', name: surfaceName, kind: 'page', view, actions: [], shareable: false });
+        });
+        return { rendered: true, surface: surfaceName, interfaceRevisionId: result.revision.id, verification: result.verification };
       },
     },
     {
@@ -911,14 +1118,23 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.ui.patch',
         family: 'app',
         description: 'Mutate part of an existing surface view by path. Inspect first; for deletion prefer agentis.ui.remove with a stable nodeId. ops: [{ op: "set"|"insert"|"remove", path, value?|node? }].',
-        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, ops: { type: 'array' } }, required: ['surface', 'ops'] },
+        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string', description: 'Page to patch. Omit to use the exact page currently viewed.' }, ops: { type: 'array' } }, required: ['ops'] },
         mutating: true,
         autoExecute: true,
       },
       handler: (args, ctx) => {
         const ops = z.array(uiPatchOpSchema).min(1).parse(args.ops);
-        const result = surfaces.patch(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), ops);
-        return { patched: true, surface: result.name, revision: result.revision };
+        const appId = resolveUiAppId(args, ctx);
+        const surfaceName = resolveSurfaceName(args, ctx);
+        const result = applyVerifiedInterface(ctx, appId, `Patch ${surfaceName}`, (pages) => {
+          const index = pages.findIndex((page) => page.name === surfaceName);
+          if (index < 0 || !pages[index]!.view) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${surfaceName}`);
+          pages[index] = {
+            ...pages[index]!,
+            view: viewNodeSchema.parse(applyUiPatchOps(structuredClone(pages[index]!.view), ops)),
+          };
+        });
+        return { patched: true, surface: surfaceName, interfaceRevisionId: result.revision.id, verification: result.verification };
       },
     },
     {
@@ -938,12 +1154,19 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         mutating: false,
       },
       handler: (args, ctx) => {
-        const appId = resolveAppId(args, ctx);
+        const appId = resolveUiAppId(args, ctx);
+        const interfaceState = interfaces.state(ctx.workspaceId, appId);
         const selected = typeof args.surface === 'string' && args.surface.trim()
           ? [surfaces.get(ctx.workspaceId, appId, args.surface.trim())]
-          : surfaces.list(ctx.workspaceId, appId);
+          : ctx.viewport?.appView?.page
+            ? [surfaces.get(ctx.workspaceId, appId, ctx.viewport.appView.page)]
+            : surfaces.list(ctx.workspaceId, appId);
         return {
           appId,
+          target: { appId, page: ctx.viewport?.appView?.page ?? null, locked: ctx.viewport?.appView?.targetLocked === true },
+          activeInterfaceRevisionId: interfaceState.active.id,
+          candidateInterfaceRevisionId: interfaceState.candidate?.id ?? null,
+          trustState: interfaceState.trustState,
           surfaces: selected.map((surface) => ({
             name: surface.name,
             kind: surface.kind,
@@ -971,14 +1194,13 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
             deleteSurface: { type: 'boolean', description: 'Delete the entire surface instead of one component.' },
             confirmSurfaceName: { type: 'string', description: 'For whole-surface deletion, must exactly equal surface.' },
           },
-          required: ['surface'],
         },
         mutating: true,
         autoExecute: true,
       },
       handler: (args, ctx) => {
-        const appId = resolveAppId(args, ctx);
-        const surface = str(args.surface, 'surface');
+        const appId = resolveUiAppId(args, ctx);
+        const surface = resolveSurfaceName(args, ctx);
         if (args.deleteSurface === true) {
           if (args.confirmSurfaceName !== surface) {
             const current = surfaces.get(ctx.workspaceId, appId, surface);
@@ -991,12 +1213,23 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
               instruction: `call again with deleteSurface:true and confirmSurfaceName:"${surface}"`,
             };
           }
-          surfaces.delete(ctx.workspaceId, appId, surface);
-          return { deleted: true, surface };
+          const result = applyVerifiedInterface(ctx, appId, `Delete ${surface}`, (pages) => {
+            const index = pages.findIndex((page) => page.name === surface);
+            if (index < 0) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${surface}`);
+            pages.splice(index, 1);
+          });
+          return { deleted: true, surface, interfaceRevisionId: result.revision.id, verification: result.verification };
         }
         const nodeId = str(args.nodeId, 'nodeId');
-        const result = surfaces.removeNode(ctx.workspaceId, appId, surface, nodeId);
-        return { removed: true, surface, nodeId, revision: result.revision };
+        const result = applyVerifiedInterface(ctx, appId, `Remove ${nodeId} from ${surface}`, (pages) => {
+          const index = pages.findIndex((page) => page.name === surface);
+          if (index < 0 || !pages[index]!.view) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${surface}`);
+          if (pages[index]!.view?.nodeId === nodeId) throw new AgentisError('VALIDATION_FAILED', 'the root component cannot be removed');
+          const removed = removeInterfaceNode(pages[index]!.view!, nodeId);
+          if (!removed.removed) throw new AgentisError('RESOURCE_NOT_FOUND', `surface component not found: ${nodeId}`);
+          pages[index] = { ...pages[index]!, view: removed.node };
+        });
+        return { removed: true, surface, nodeId, interfaceRevisionId: result.revision.id, verification: result.verification };
       },
     },
     {
@@ -1005,14 +1238,14 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         family: 'app',
         description:
           'Edit an App surface by INSTRUCTION, like talking to a designer who re-renders as you speak — "show only deals over $20k", "put the funnel above the activity feed", "make the board group by stage". A design model reads the surface\'s CURRENT tree + the App\'s collections and emits a minimal SurfacePatch (set/insert/remove ops) that is applied live and re-renders in place. Preferred over hand-authoring ui.patch op paths for natural-language layout/filter/restyle requests. Returns the ops applied (empty when no design model is configured or the instruction can\'t be satisfied — then fall back to ui.render / ui.patch).',
-        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, instruction: { type: 'string', description: 'Plain-language change to make to the surface.' } }, required: ['surface', 'instruction'] },
+        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string', description: 'Page to edit. Omit to use the page currently viewed.' }, instruction: { type: 'string', description: 'Plain-language change to make to the surface.' } }, required: ['instruction'] },
         mutating: true,
         autoExecute: true,
         mcpExposed: true,
       },
       handler: async (args, ctx) => {
-        const appId = resolveAppId(args, ctx);
-        const surfaceName = str(args.surface, 'surface');
+        const appId = resolveUiAppId(args, ctx);
+        const surfaceName = resolveSurfaceName(args, ctx);
         const instruction = str(args.instruction, 'instruction');
         const current = surfaces.get(ctx.workspaceId, appId, surfaceName);
         if (current.view == null) throw new AgentisError('VALIDATION_FAILED', `surface ${surfaceName} has no view to compose against; call ui.render first`);
@@ -1030,8 +1263,15 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         if (generated.ops.length === 0) {
           return { composed: false, surface: surfaceName, ops: 0, source: generated.source, reason: completer ? 'no change derived from the instruction' : 'no design model configured' };
         }
-        const result = surfaces.patch(ctx.workspaceId, appId, surfaceName, generated.ops);
-        return { composed: true, surface: result.name, revision: result.revision, ops: generated.ops.length, source: generated.source };
+        const result = applyVerifiedInterface(ctx, appId, `Compose ${surfaceName}: ${instruction.slice(0, 160)}`, (pages) => {
+          const index = pages.findIndex((page) => page.name === surfaceName);
+          if (index < 0 || !pages[index]!.view) throw new AgentisError('RESOURCE_NOT_FOUND', `surface not found: ${surfaceName}`);
+          pages[index] = {
+            ...pages[index]!,
+            view: viewNodeSchema.parse(applyUiPatchOps(structuredClone(pages[index]!.view), generated.ops)),
+          };
+        });
+        return { composed: true, surface: surfaceName, interfaceRevisionId: result.revision.id, verification: result.verification, ops: generated.ops.length, source: generated.source };
       },
     },
     {
@@ -1051,16 +1291,16 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
             pin: { type: 'boolean', description: 'Freeze this into the stored surface so it persists across reloads.' },
             clear: { type: 'boolean', description: 'Dismiss the region (no view needed).' },
           },
-          required: ['surface', 'region'],
+          required: ['region'],
         },
         mutating: true,
         autoExecute: true,
         mcpExposed: true,
       },
       handler: (args, ctx) => {
-        const appId = resolveAppId(args, ctx);
+        const appId = resolveUiAppId(args, ctx);
         const parsed = uiPerformRegionSchema.parse({
-          surface: args.surface,
+          surface: resolveSurfaceName(args, ctx),
           region: args.region,
           ...(args.view !== undefined ? { view: args.view } : {}),
           ...(args.reason !== undefined ? { reason: args.reason } : {}),
@@ -1082,14 +1322,20 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         id: 'agentis.ui.action_schema',
         family: 'app',
         description: 'Declare the actions a surface\'s buttons/forms may invoke. Each resolves to a workflow run, an agent tool, or a datastore op ("collection.insert" etc).',
-        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string' }, actions: { type: 'array' } }, required: ['surface', 'actions'] },
+        inputSchema: { type: 'object', properties: { ...appIdProp, surface: { type: 'string', description: 'Page whose actions are declared. Omit to use the page currently viewed.' }, actions: { type: 'array' } }, required: ['actions'] },
         mutating: true,
         autoExecute: true,
       },
       handler: (args, ctx) => {
         const actions = z.array(surfaceActionSchema).parse(args.actions);
-        surfaces.setActions(ctx.workspaceId, resolveAppId(args, ctx), str(args.surface, 'surface'), actions);
-        return { ok: true, actions: actions.length };
+        const appId = resolveUiAppId(args, ctx);
+        const surfaceName = resolveSurfaceName(args, ctx);
+        const result = applyVerifiedInterface(ctx, appId, `Declare actions for ${surfaceName}`, (pages) => {
+          const index = pages.findIndex((page) => page.name === surfaceName);
+          if (index >= 0) pages[index] = { ...pages[index]!, actions };
+          else pages.push({ id: '', name: surfaceName, kind: 'page', view: null, actions, shareable: false });
+        });
+        return { ok: true, actions: actions.length, interfaceRevisionId: result.revision.id, verification: result.verification };
       },
     },
     {

@@ -380,12 +380,26 @@ function ensureScoped(deps: ToolHandlerDeps, ctx: DeliverCtx, workflowId: string
     const current = (settings as Record<string, unknown> | null) ?? {};
     if (readWorkflowSpec(current)) return;
     const row = deps.db.select({ graph: schema.workflows.graph }).from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get();
-    const graph = row?.graph as WorkflowGraph | undefined;
+    const graph = deps.revisions?.candidate(ctx.workspaceId, workflowId)?.graph
+      ?? row?.graph as WorkflowGraph | undefined;
     if (!graph) return;
     const derived = deriveSpecDraft({ description: goal, graph });
     const spec: WorkflowSpec = { ...derived.spec, verification: 'probes_only', reconciledHash: graphContentHash(graph) };
     if (validateWorkflowSpec(spec, { graph }).length === 0) {
       deps.db.update(schema.workflows).set({ settings: { ...current, spec }, updatedAt: new Date().toISOString() }).where(eq(schema.workflows.id, workflowId)).run();
+      const base = deps.revisions?.candidate(ctx.workspaceId, workflowId)?.revision
+        ?? deps.revisions?.ensureWorkflow(ctx.workspaceId, workflowId).active;
+      if (base && deps.revisions) {
+        deps.revisions.createCandidate({
+          workspaceId: ctx.workspaceId,
+          workflowId,
+          graph,
+          baseRevisionId: base.id,
+          source: 'agent_build',
+          actor: { type: 'agent', id: ctx.agentId },
+          reason: 'Delivery loop derived an acceptance specification',
+        });
+      }
     }
   } catch { /* best-effort scope */ }
 }
@@ -394,7 +408,9 @@ function compassOf(deps: ToolHandlerDeps, ctx: DeliverCtx, workflowId: string): 
   try {
     const row = deps.db.select().from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get();
     if (!row) return undefined;
-    return compassForWorkflow({ workflowId, graph: row.graph as WorkflowGraph, settings: row.settings });
+    const graph = deps.revisions?.candidate(ctx.workspaceId, workflowId)?.graph
+      ?? row.graph as WorkflowGraph;
+    return compassForWorkflow({ workflowId, graph, settings: row.settings });
   } catch { return undefined; }
 }
 

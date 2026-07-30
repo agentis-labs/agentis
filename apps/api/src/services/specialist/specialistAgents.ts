@@ -161,17 +161,24 @@ export class SpecialistAgentService {
   #upsert(workspaceId: string, userId: string, spec: SpecialistDefinition, existingId: string | null, runtime?: SpecialistRuntimeSeed): string {
     if (!existingId) return this.#create(workspaceId, userId, spec, runtime);
     const existing = this.db
-      .select({ config: schema.agents.config })
+      .select({ config: schema.agents.config, adapterType: schema.agents.adapterType })
       .from(schema.agents)
       .where(eq(schema.agents.id, existingId))
       .get();
     const prevConfig = (existing?.config && typeof existing.config === 'object' ? existing.config : {}) as Record<string, unknown>;
+    const runtimeConfig = runtime
+      ? existing?.adapterType === runtime.adapterType
+        ? { ...prevConfig, ...(runtime.config ?? {}) }
+        : { ...(runtime.config ?? {}) }
+      : prevConfig;
     this.db.update(schema.agents).set({
       name: spec.name,
       description: spec.description,
       capabilityTags: spec.capabilityTags,
-      // Preserve operator-set adapter/runtime keys; refresh the specialist hints.
-      config: { ...prevConfig, specialist: true, specialistSource: spec.source ?? 'generated', defaultModel: spec.defaultModel, tools: spec.tools },
+      ...(runtime ? { adapterType: runtime.adapterType } : {}),
+      // Preserve operator-set runtime keys unless an explicit replacement was
+      // requested; always refresh the specialist identity hints.
+      config: { ...runtimeConfig, specialist: true, specialistSource: spec.source ?? 'generated', defaultModel: spec.defaultModel, tools: spec.tools },
       colorHex: spec.colorHex,
       instructions: spec.systemPrompt,
       avatarGlyph: spec.avatarGlyph,

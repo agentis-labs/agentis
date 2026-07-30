@@ -32,6 +32,18 @@ describe('deriveSurface', () => {
     expect(deriveSurface('/workflows/wf-1')).toMatchObject({ surface: 'workflow_detail', resourceKind: 'workflow', resourceId: 'wf-1' });
   });
 
+  it('captures the exact App page, editor mode, and selected component', () => {
+    expect(deriveSurface('/apps/app-123', '?facet=interface&page=Pipeline&mode=edit&node=kanban-main')).toMatchObject({
+      surface: 'app_detail',
+      resourceId: 'app-123',
+      page: 'Pipeline',
+      mode: 'edit',
+      selectedNodeId: 'kanban-main',
+      facet: 'interface',
+      title: 'App · Pipeline',
+    });
+  });
+
   it('never returns the inert "unknown" surface for app routes', () => {
     for (const route of ['/apps', '/apps/x', '/apps/x?facet=interface', '/workflows', '/workflows/y']) {
       const [path, search] = route.split('?');

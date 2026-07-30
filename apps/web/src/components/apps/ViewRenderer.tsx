@@ -37,6 +37,7 @@ import { DataChart, Sparkline as SparkSvg, type ChartSeries } from './charts';
 import { CODE_SURFACE_KIT, CODE_SURFACE_TOKENS } from './codeSurfaceKit';
 import { matchesRecordPredicate, recordActionLabel, visibleRecordActions } from './recordActions';
 import { registerBlock, getBlock, type BlockContext, type ResolveScope } from './blocks/registry';
+import { getUiPackBlock } from './uiPackRegistry';
 // Side-effect registrations on the open block seam. These modules import shared
 // helpers back from this file (cycle-safe: they dereference them only at render
 // time) and register the live-ops + archetype composite kinds. WorkflowControl
@@ -1173,12 +1174,12 @@ function CustomViewFrame({ node }: { node: Extract<ViewNode, { type: 'CustomView
 
 /** The full-power tier: agent JS + the Agentis kit, in the same hardened sandbox. */
 function CodeSurfaceFrame({ node }: { node: Extract<ViewNode, { type: 'CodeSurface' }> }) {
-  const { allowCustomCode, surfaceActions } = useRuntime();
+  const { surfaceActions } = useRuntime();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const allowed = useMemo(() => new Set(node.collections ?? []), [node.collections]);
   const allowedActions = useMemo(() => new Set(surfaceActions.map((a) => a.name)), [surfaceActions]);
-  useSandboxBridge(frameRef, allowed, allowedActions, allowCustomCode);
+  useSandboxBridge(frameRef, allowed, allowedActions, true);
   const surfaceVars = useSurfaceVars(hostRef);
   // Auto-height by default (grow to content — a whole dashboard page); a set
   // `height` opts back into a fixed box.
@@ -1203,11 +1204,32 @@ function CodeSurfaceFrame({ node }: { node: Extract<ViewNode, { type: 'CodeSurfa
     return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}"><style>${CODE_SURFACE_TOKENS}${surfaceVars}</style></head><body>${body}</body></html>`;
   }, [node.code, surfaceVars]);
 
-  if (!allowCustomCode) return <SandboxBlocked label="Code surface blocked by app policy — enable custom-coded views in the App engine." />;
+  // CodeSurface is always confined to a null-origin, zero-egress iframe and its
+  // collection/action allowlists. The separate `customCode` policy continues to
+  // govern raw CustomView HTML, while this hardened authoring tier is available
+  // to every App by default.
   return (
     <div ref={hostRef} className={node.fullBleed ? undefined : 'rounded-card border border-line overflow-hidden'}>
       <iframe title="Code surface" ref={frameRef} sandbox="allow-scripts" srcDoc={surfaceVars ? srcDoc : undefined} className="w-full bg-canvas" style={{ height: auto ? (grown ?? 360) : node.height, display: 'block' }} />
     </div>
+  );
+}
+
+function ExtensionBlockView({ node }: { node: Extract<ViewNode, { type: 'ExtensionBlock' }> }) {
+  const Block = getUiPackBlock(node.pack, node.block);
+  if (!Block) {
+    return (
+      <div className="rounded-card border border-dashed border-line bg-surface px-4 py-6 text-center">
+        <Wrench size={18} className="mx-auto text-text-muted" />
+        <div className="mt-2 text-[12px] font-medium text-text-primary">UI pack unavailable</div>
+        <div className="mt-1 text-[11px] text-text-muted">{node.pack} · {node.block}</div>
+      </div>
+    );
+  }
+  return (
+    <ErrorBoundary>
+      <Block props={node.props ?? {}} rows={[]} />
+    </ErrorBoundary>
   );
 }
 
@@ -3050,6 +3072,7 @@ registerBlock('Calendar', (node) => (node.type === 'Calendar' ? <CalendarView no
 // 'WorkflowControl' registers in ./blocks/opsBlocks (aliased to OrchestrationPanel).
 registerBlock('CustomView', (node) => (node.type === 'CustomView' ? <CustomViewFrame node={node} /> : null));
 registerBlock('CodeSurface', (node) => (node.type === 'CodeSurface' ? <CodeSurfaceFrame node={node} /> : null));
+registerBlock('ExtensionBlock', (node) => (node.type === 'ExtensionBlock' ? <ExtensionBlockView node={node} /> : null));
 
 // Legacy kinds from removed grammar eras heal in place on READ (stored trees
 // upgrade at the persistence seam on their next write — see core genuiAudit).

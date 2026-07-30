@@ -153,6 +153,8 @@ import type { SpecialistEvalService } from '../services/specialist/specialistEva
 import type { SpecialistMindService } from '../services/specialist/specialistMindService.js';
 import type { SpecialistRuntimeService } from '../services/specialist/specialistRuntimeService.js';
 import type { SpecialistTemplateService } from '../services/specialist/specialistTemplateService.js';
+import type { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
+import type { WorkflowExperienceService } from '../services/workflow/workflowExperienceService.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
 import { TranscriptionService } from '../services/transcriptionService.js';
 import type { WorkspaceModelConfigService } from '../services/workspace/workspaceModelConfigService.js';
@@ -189,6 +191,8 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   defaultCognitiveCompleter: StructuredCompleter;
   embeddingBackfill: EmbeddingBackfillService;
   engine: WorkflowEngine;
+  workflowRevisions: WorkflowRevisionService;
+  workflowExperience: WorkflowExperienceService;
   episodicMemoryStore: EpisodicMemoryStore;
   harnessMemoryIngestion: HarnessMemoryIngestionService;
   issues: IssueService;
@@ -213,6 +217,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   voiceChannelAdapter: VoiceChannelAdapter;
   workspaceModelConfig: WorkspaceModelConfigService;
   workspaceMediaConfigService: WorkspaceMediaConfigService;
+  commissionSpecialist?: (workspaceId: string, agentId: string) => void | Promise<void>;
 };
 
 export function wireRoutes(deps: WireRoutesDeps) {
@@ -377,6 +382,8 @@ export function wireRoutes(deps: WireRoutesDeps) {
     bus,
     packager: sharedPackager,
     triggerRuntime,
+    revisions: deps.workflowRevisions,
+    experience: deps.workflowExperience,
   }));
   app.route('/v1/workflows', buildAnalyticsRoutes({ db: sqlite, auth }));
   app.route('/v1/workflows', buildWorkflowIoRoutes({ db: sqlite, auth }));
@@ -509,7 +516,12 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations, harnessMemoryIngestion, mcpHarness, skillMaterializer, episodes: episodicMemoryStore }));
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
   app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
-  const appStaffing = new AppStaffingService({ store: appStores.store, specialists: specialistAgents, logger });
+  const appStaffing = new AppStaffingService({
+    store: appStores.store,
+    specialists: specialistAgents,
+    logger,
+    commissionSpecialist: deps.commissionSpecialist,
+  });
   // Live co-presence (G9) — ephemeral operator presence roster over the realtime bus.
   const appPresence = new AppPresenceService({ bus, logger });
   appPresence.start();

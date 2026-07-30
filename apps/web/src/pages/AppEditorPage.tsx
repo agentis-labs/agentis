@@ -25,15 +25,16 @@ import {
   Database,
   Download,
   Eye,
+  History,
   LayoutGrid,
   Loader2,
+  MessageSquare,
   MoreVertical,
   Pencil,
   Plus,
   Save,
   Settings,
   Sparkles,
-  SquareStack,
   Trash2,
   Upload,
   X,
@@ -50,7 +51,6 @@ import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime
 import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
-import { AppTeamStrip } from '../components/apps/AppTeamStrip';
 import { AppDataGrid } from '../components/apps/AppDataGrid';
 import { AppEngineModal, type AppEngineDomain, type AppEngineAgent } from '../components/apps/AppEngineModal';
 import { SurfaceCanvas } from '../components/apps/SurfaceCanvas';
@@ -98,6 +98,12 @@ const BUILD_REVEAL_EVENTS = [
   REALTIME_EVENTS.CANVAS_NODE_PLACED,
   REALTIME_EVENTS.CANVAS_BUILD_COMPLETE,
 ];
+const INTERFACE_REVEAL_EVENTS = [
+  REALTIME_EVENTS.SURFACE_RENDER,
+  REALTIME_EVENTS.SURFACE_PATCH,
+  REALTIME_EVENTS.SURFACE_DELETED,
+  REALTIME_EVENTS.INTERFACE_PUBLISHED,
+];
 
 export function AppEditorPage() {
   const { t } = useTranslation();
@@ -122,7 +128,6 @@ export function AppEditorPage() {
   const [selectedSurface, setSelectedSurface] = useState<string | null>(null);
   const [surfaceDraft, setSurfaceDraft] = useState('');
   const [surfaceActionsDraft, setSurfaceActionsDraft] = useState<SurfaceAction[]>([]);
-  const [generating, setGenerating] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
   const [nameDraft, setNameDraft] = useState('');
   const [editingName, setEditingName] = useState(false);
@@ -223,6 +228,15 @@ export function AppEditorPage() {
       setCanvasReloadKey((k) => k + 1);
       revealedBuildRef.current = null; // let the next build reveal again
     }
+  });
+
+  // Surface creation/deletion/replacement and atomic interface publishes update
+  // the editor immediately, including changes made by a chat agent.
+  useRealtime(INTERFACE_REVEAL_EVENTS, (env: RealtimeEnvelope) => {
+    const payload = (env.payload ?? {}) as { appId?: string };
+    if (payload.appId !== id) return;
+    void load();
+    setPreviewKey((key) => key + 1);
   });
 
   // Deep-link from the /home canvas highlight ("Settings") opens straight into
@@ -489,22 +503,6 @@ export function AppEditorPage() {
     }
   }, [currentSurface, id, load, surfaces]);
 
-  const generateSurface = useCallback(async (prompt: string) => {
-    if (!currentSurface) return;
-    setGenerating(true);
-    setStatus(null);
-    try {
-      const result = await appsApi.generateSurface(id, { prompt, surface: currentSurface.name });
-      setSurfaceDraft(JSON.stringify(result.view, null, 2));
-      setSurfaceActionsDraft(result.actions ?? []);
-      setStatus(result.source === 'model' ? 'Generated — review and Save' : 'Drafted a starter — review and Save');
-    } catch (e) {
-      setStatus(apiErrorMessage(e));
-    } finally {
-      setGenerating(false);
-    }
-  }, [currentSurface, id]);
-
   const deleteWorkflow = useCallback(async (workflowId: string) => {
     setBusy('workflow');
     setStatus(null);
@@ -575,8 +573,6 @@ export function AppEditorPage() {
           <Settings size={13} />
         </button>
         <span className="text-[11px] text-text-muted">v{app.version} · {app.status}</span>
-        <div className="mx-1 h-4 w-px bg-line" />
-        <AppTeamStrip appId={app.id} />
         <div className="ml-auto flex min-w-0 items-center justify-end gap-2">
           {status ? <span className="max-w-[180px] truncate text-[11px] text-text-muted">{status}</span> : null}
           <SegmentedControl segments={facets} value={facet} onChange={setFacet} size="sm" className="min-w-0 flex-wrap justify-end" />
@@ -611,7 +607,6 @@ export function AppEditorPage() {
             draft={surfaceDraft}
             actions={surfaceActionsDraft}
             busy={busy === 'surface-save'}
-            generating={generating}
             previewKey={previewKey}
             creating={busy === 'surface'}
             collections={collections}
@@ -621,7 +616,6 @@ export function AppEditorPage() {
             onCreate={() => void createSurface()}
             onRename={renameSurface}
             onSave={() => void saveSurface()}
-            onGenerate={generateSurface}
             onUpdateSurface={(patch) => void updateSurfaceMeta(patch)}
             onDuplicateSurface={() => void duplicateSurface()}
             onDeleteSurface={(name) => void deleteSurface(name)}
@@ -880,7 +874,19 @@ function WorkflowFacet({
 
 // ── Interface facet — the living app (Live) with Edit/Code as opt-in modes ──
 
-type BuilderMode = 'live' | 'edit' | 'code';
+type BuilderMode = 'live' | 'edit' | 'history' | 'code';
+
+interface InterfaceHistoryItem {
+  id: string;
+  reason: string;
+  source: string;
+  actorType: string;
+  status: 'candidate' | 'active' | 'abandoned';
+  trustState: string;
+  createdAt: string;
+  publishedAt: string | null;
+  pages: Array<{ name: string }>;
+}
 
 function InterfaceFacet({
   appId,
@@ -890,7 +896,6 @@ function InterfaceFacet({
   draft,
   actions,
   busy,
-  generating,
   creating,
   collections,
   previewKey,
@@ -900,7 +905,6 @@ function InterfaceFacet({
   onCreate,
   onRename,
   onSave,
-  onGenerate,
   onUpdateSurface,
   onDuplicateSurface,
   onDeleteSurface,
@@ -912,7 +916,6 @@ function InterfaceFacet({
   draft: string;
   actions: SurfaceAction[];
   busy: boolean;
-  generating: boolean;
   creating: boolean;
   collections: CollectionInfo[];
   previewKey: number;
@@ -922,19 +925,20 @@ function InterfaceFacet({
   onCreate: () => void;
   onRename: (currentName: string, nextName: string) => Promise<void>;
   onSave: () => void;
-  onGenerate: (prompt: string) => Promise<void>;
   onUpdateSurface: (patch: { kind?: SurfaceKind; shareable?: boolean }) => void;
   onDuplicateSurface: () => void;
   onDeleteSurface: (surfaceName: string) => void;
 }) {
   const confirm = useConfirm();
+  const [, setInterfaceParams] = useSearchParams();
   const [mode, setMode] = useState<BuilderMode>('live');
+  const [history, setHistory] = useState<InterfaceHistoryItem[]>([]);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [renamingSurface, setRenamingSurface] = useState<string | null>(null);
   const [surfaceNameDraft, setSurfaceNameDraft] = useState('');
   const [menuOpenSurface, setMenuOpenSurface] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<number[]>([]);
-  const [prompt, setPrompt] = useState('');
   const view = parseViewDraft(draft);
   const selectedNode = view ? getNodeAtPath(view, selectedPath) : null;
 
@@ -946,6 +950,38 @@ function InterfaceFacet({
     setMode(empty ? 'edit' : 'live');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
+
+  useEffect(() => {
+    setInterfaceParams((params) => {
+      const next = new URLSearchParams(params);
+      next.set('facet', 'interface');
+      next.set('mode', mode);
+      if (selected) next.set('page', selected);
+      else next.delete('page');
+      if (selectedNode?.nodeId) next.set('node', selectedNode.nodeId);
+      else next.delete('node');
+      return next;
+    }, { replace: true });
+  }, [mode, selected, selectedNode?.nodeId, setInterfaceParams]);
+
+  useEffect(() => {
+    if (mode !== 'history') return;
+    setHistoryBusy(true);
+    void api<{ data: InterfaceHistoryItem[] }>(`/v1/apps/${encodeURIComponent(appId)}/interface/revisions`)
+      .then((response) => setHistory(response.data))
+      .catch(() => setHistory([]))
+      .finally(() => setHistoryBusy(false));
+  }, [appId, mode, previewKey]);
+
+  async function restoreRevision(revisionId: string) {
+    setHistoryBusy(true);
+    try {
+      await api(`/v1/apps/${encodeURIComponent(appId)}/interface/revisions/${encodeURIComponent(revisionId)}/restore`, { method: 'POST' });
+      setMode('live');
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
 
   function setView(next: ViewNode) {
     onDraftChange(JSON.stringify(next, null, 2));
@@ -991,13 +1027,27 @@ function InterfaceFacet({
     setRenamingSurface(null);
   }
 
-  async function submitPrompt(event: { preventDefault: () => void }) {
-    event.preventDefault();
-    const value = prompt.trim();
-    if (!value || generating) return;
-    setSelectedPath([]);
-    await onGenerate(value);
-    setPrompt('');
+  function openPageChat(surfaceName: string) {
+    window.dispatchEvent(new CustomEvent('agentis:chat-panel-open', {
+      detail: {
+        mode: 'docked',
+        initialViewportOverride: {
+          surface: 'app_detail',
+          route: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+          title: `App · ${surfaceName}`,
+          resourceId: appId,
+          resourceKind: 'app',
+          appView: {
+            appId,
+            page: surfaceName,
+            mode: 'live',
+            ...(selectedNode?.nodeId ? { selectedNodeId: selectedNode.nodeId } : {}),
+            facet: 'interface',
+            targetLocked: true,
+          },
+        },
+      },
+    }));
   }
 
   if (surfaces.length === 0) {
@@ -1108,19 +1158,79 @@ function InterfaceFacet({
                       </button>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Portal>
-                      <DropdownMenu.Content align="start" className="z-50 min-w-[150px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
-                        <DropdownMenu.Item
-                          onClick={() => { onSelect(surface.name); setSelectedPath([]); setTimeout(() => setMode('edit'), 0); }}
-                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
-                        >
-                          <SquareStack size={12} /> Edit
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item
-                          onClick={() => { onSelect(surface.name); setSelectedPath([]); setTimeout(() => setMode('code'), 0); }}
-                          className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent"
-                        >
-                          <Code2 size={12} /> Edit code
-                        </DropdownMenu.Item>
+                      <DropdownMenu.Content align="start" className="z-50 min-w-[180px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
+                        <DropdownMenu.Label className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                          Open in
+                        </DropdownMenu.Label>
+                        {([
+                          ['live', 'Live', Eye],
+                          ['ask', 'Ask agent', MessageSquare],
+                          ['edit', 'Edit', Pencil],
+                          ['history', 'History', History],
+                          ['code', 'Edit code', Code2],
+                        ] as const).map(([nextMode, label, Icon]) => (
+                          <DropdownMenu.Item
+                            key={nextMode}
+                            onClick={() => {
+                              onSelect(surface.name);
+                              setSelectedPath([]);
+                              if (nextMode === 'ask') {
+                                openPageChat(surface.name);
+                              } else {
+                                setTimeout(() => setMode(nextMode), 0);
+                              }
+                            }}
+                            className={clsx(
+                              'flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent',
+                              selected === surface.name && mode === nextMode && 'text-accent',
+                            )}
+                          >
+                            <Icon size={12} /> {label}
+                          </DropdownMenu.Item>
+                        ))}
+                        {selected === surface.name && mode === 'edit' && view ? (
+                          <DropdownMenu.Sub>
+                            <DropdownMenu.SubTrigger className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent">
+                              <Sparkles size={12} /> Look
+                              <ChevronRight size={12} className="ml-auto" />
+                            </DropdownMenu.SubTrigger>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.SubContent sideOffset={4} className="z-[60] min-w-[170px] rounded-md border border-line bg-surface-2 p-1 text-[12px] shadow-lg animate-in fade-in zoom-in-95">
+                                <DropdownMenu.RadioGroup
+                                  value={view.style?.design ?? ''}
+                                  onValueChange={(design) => setView({
+                                    ...view,
+                                    style: {
+                                      ...view.style,
+                                      ...(design ? { design: design as DesignLanguage } : { design: undefined }),
+                                    },
+                                  })}
+                                >
+                                  <DropdownMenu.RadioItem value="" className="cursor-pointer rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent">
+                                    Automatic
+                                  </DropdownMenu.RadioItem>
+                                  {DESIGN_LANGUAGES.map((design) => (
+                                    <DropdownMenu.RadioItem key={design.id} value={design.id} className="cursor-pointer rounded-sm px-2 py-1.5 outline-none hover:bg-accent-soft hover:text-accent focus:bg-accent-soft focus:text-accent">
+                                      {design.label}
+                                    </DropdownMenu.RadioItem>
+                                  ))}
+                                </DropdownMenu.RadioGroup>
+                              </DropdownMenu.SubContent>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu.Sub>
+                        ) : null}
+                        {selected === surface.name && (mode === 'edit' || mode === 'code') ? (
+                          <DropdownMenu.Item
+                            disabled={!current || busy}
+                            onSelect={(event) => {
+                              event.preventDefault();
+                              void onSave();
+                            }}
+                            className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 font-medium text-accent outline-none hover:bg-accent-soft focus:bg-accent-soft data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+                          >
+                            {busy ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Publish
+                          </DropdownMenu.Item>
+                        ) : null}
                         <DropdownMenu.Separator className="my-1 h-px bg-line" />
                         <DropdownMenu.Item
                           onClick={() => { setRenamingSurface(surface.name); setSurfaceNameDraft(surface.name); }}
@@ -1165,83 +1275,37 @@ function InterfaceFacet({
         )}
       </aside>
 
-      {/* Main column: contextual edit toolbar (only when editing) + body. */}
+      {/* Main column. Page modes and edit actions live in each page's overflow menu. */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {mode !== 'live' ? (
-          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-3 py-2">
-            {mode === 'edit' && view ? (
-              <div className="flex items-center gap-1.5" title="Surface look — applies to the whole surface">
-                <select
-                  aria-label="Surface theme"
-                  value={view.style?.theme ?? 'analytics'}
-                  onChange={(event) => setView({ ...view, style: { ...view.style, theme: event.target.value as 'operations' | 'analytics' | 'product' | 'editorial' } })}
-                  className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
-                >
-                  <option value="operations">Operations</option>
-                  <option value="analytics">Analytics</option>
-                  <option value="product">Product</option>
-                  <option value="editorial">Editorial</option>
-                </select>
-                <select
-                  aria-label="Surface design language"
-                  title="Design language — the whole look (radii, elevation, gradients, type scale)"
-                  value={view.style?.design ?? ''}
-                  onChange={(event) => setView({ ...view, style: { ...view.style, ...(event.target.value ? { design: event.target.value as DesignLanguage } : { design: undefined }) } })}
-                  className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
-                >
-                  <option value="">Auto (by theme)</option>
-                  {DESIGN_LANGUAGES.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
-                </select>
-                <select
-                  aria-label="Surface density"
-                  value={view.style?.density ?? 'comfortable'}
-                  onChange={(event) => setView({ ...view, style: { ...view.style, density: event.target.value as 'comfortable' | 'compact' } })}
-                  className="h-7 rounded-btn border border-line bg-canvas px-1.5 text-[12px] text-text-secondary outline-none focus:border-accent"
-                >
-                  <option value="comfortable">Comfortable</option>
-                  <option value="compact">Compact</option>
-                </select>
-              </div>
-            ) : null}
-
-            {mode === 'edit' ? (
-              <form onSubmit={(event) => void submitPrompt(event)} className="ml-auto flex min-w-[220px] flex-1 items-center gap-1.5 sm:max-w-md">
-                <div className="relative flex-1">
-                  <Sparkles size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
-                  <input
-                    value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
-                    placeholder="Describe a surface for the agent to build…"
-                    aria-label="Describe a surface"
-                    className="h-8 w-full rounded-btn border border-line bg-canvas pl-7 pr-2 text-[12px] text-text-primary outline-none focus:border-accent"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={generating || !prompt.trim()}
-                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn border border-line bg-surface px-2.5 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:opacity-50"
-                >
-                  {generating ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} Generate
-                </button>
-              </form>
-            ) : (
-              <div className="ml-auto" />
-            )}
-
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={!current || busy}
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-btn bg-accent px-3 text-[12px] font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-50"
-            >
-              {busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} Save
-            </button>
-          </div>
-        ) : null}
-
         {/* Body */}
         <div className="min-h-0 flex-1 overflow-hidden">
-          {mode === 'code' ? (
+          {mode === 'history' ? (
+            <div className="h-full overflow-auto bg-canvas p-6">
+              <div className="mx-auto max-w-3xl">
+                <h2 className="text-lg font-semibold text-text-primary">Interface history</h2>
+                <p className="mt-1 text-[13px] text-text-muted">Every published interface is immutable. Restore creates and verifies a new revision.</p>
+                <div className="mt-5 space-y-2">
+                  {historyBusy ? <div className="py-12 text-center text-text-muted"><Loader2 size={18} className="mx-auto animate-spin" /></div> : history.map((item) => (
+                    <div key={item.id} className="flex items-center gap-4 rounded-card border border-line bg-surface px-4 py-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-[13px] font-medium text-text-primary">{item.reason}</span>
+                          {item.status === 'active' ? <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">Active</span> : null}
+                        </div>
+                        <div className="mt-1 text-[11px] text-text-muted">{item.pages.length} page{item.pages.length === 1 ? '' : 's'} · {item.source} · {new Date(item.createdAt).toLocaleString()}</div>
+                      </div>
+                      {item.status !== 'active' ? (
+                        <button type="button" disabled={historyBusy} onClick={() => void restoreRevision(item.id)} className="h-8 rounded-btn border border-line px-3 text-[12px] font-medium text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:opacity-50">
+                          Restore
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                  {!historyBusy && history.length === 0 ? <div className="rounded-card border border-dashed border-line p-10 text-center text-[13px] text-text-muted">No interface revisions yet.</div> : null}
+                </div>
+              </div>
+            </div>
+          ) : mode === 'code' ? (
           <textarea
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}

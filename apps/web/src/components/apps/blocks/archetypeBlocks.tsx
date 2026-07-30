@@ -201,6 +201,7 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
   const [openCard, setOpenCard] = useState<Row | null>(null);
   const [menu, setMenu] = useState<RecordMenuState | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState('');
   const { uiState } = useRuntime();
   const rowsRef = useRef(rows);
   useEffect(() => { rowsRef.current = rows; setOverrides({}); }, [rows]);
@@ -275,12 +276,14 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
 
   return (
     <div className="flex gap-3 overflow-x-auto pb-1.5">
+      <span className="sr-only" aria-live="polite">{announcement}</span>
       {order.map((key, colIndex) => {
         const cards = byColumn.get(key) ?? [];
         const tone = toneFromStatus(key);
         return (
           <div
             key={key}
+            data-kanban-column={key}
             className={clsx(
               's-round flex w-[276px] shrink-0 flex-col bg-canvas/40 ring-1 transition-shadow',
               dragOver === key ? 'ring-accent/60 shadow-[0_0_0_1px_var(--color-accent)]' : 'ring-line',
@@ -340,6 +343,22 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                     aria-grabbed={draggingId === id}
                     onDragStart={(e) => { setDraggingId(id); e.dataTransfer.setData(DRAG_MIME, id); e.dataTransfer.effectAllowed = 'move'; }}
                     onDragEnd={() => { setDraggingId(null); setDragOver(null); setDropIndex(null); }}
+                    onPointerDown={(e) => {
+                      if (!draggable || e.pointerType !== 'touch') return;
+                      setDraggingId(id);
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    }}
+                    onPointerUp={(e) => {
+                      if (!draggable || e.pointerType !== 'touch' || draggingId !== id) return;
+                      const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-kanban-column]');
+                      const target = hit?.dataset.kanbanColumn;
+                      setDraggingId(null);
+                      if (target && (target === key ? Boolean(node.orderField) : canMove(row, target))) {
+                        void moveCardTo(id, target, byColumn.get(target)?.length ?? 0);
+                        setAnnouncement(`${title} moved to ${node.columnLabels?.[target] ?? humanize(target)}.`);
+                      }
+                    }}
+                    onPointerCancel={() => setDraggingId(null)}
                     onDragOver={(e) => {
                       if (!draggable || !draggingId) return;
                       const dragged = rows.find((r) => rowId(r) === draggingId);
@@ -358,6 +377,43 @@ function KanbanView({ node }: { node: Extract<ViewNode, { type: 'Kanban' }> }) {
                     onClick={() => setOpenCard(row)}
                     onContextMenu={(e) => { e.preventDefault(); setMenu({ row, x: e.clientX, y: e.clientY }); }}
                     onKeyDown={(e) => {
+                      if (draggable && (e.key === ' ' || e.key === 'Spacebar')) {
+                        e.preventDefault();
+                        const next = draggingId === id ? null : id;
+                        setDraggingId(next);
+                        setAnnouncement(next ? `${title} grabbed. Use arrow keys to move, Space to drop.` : `${title} dropped in ${node.columnLabels?.[key] ?? humanize(key)}.`);
+                        return;
+                      }
+                      if (draggingId === id && e.key === 'Escape') {
+                        e.preventDefault();
+                        setDraggingId(null);
+                        setAnnouncement(`Move cancelled for ${title}.`);
+                        return;
+                      }
+                      if (draggingId === id && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                        e.preventDefault();
+                        const direction = e.key === 'ArrowLeft' ? -1 : 1;
+                        let targetIndex = colIndex + direction;
+                        while (targetIndex >= 0 && targetIndex < order.length) {
+                          const target = order[targetIndex]!;
+                          if (canMove(row, target)) {
+                            void moveCardTo(id, target, byColumn.get(target)?.length ?? 0);
+                            setDraggingId(null);
+                            setAnnouncement(`${title} moved to ${node.columnLabels?.[target] ?? humanize(target)}.`);
+                            break;
+                          }
+                          targetIndex += direction;
+                        }
+                        return;
+                      }
+                      if (draggingId === id && node.orderField && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+                        e.preventDefault();
+                        const target = Math.max(0, Math.min(cards.length, cardPos + (e.key === 'ArrowUp' ? -1 : 2)));
+                        void moveCardTo(id, key, target);
+                        setDraggingId(null);
+                        setAnnouncement(`${title} reordered in ${node.columnLabels?.[key] ?? humanize(key)}.`);
+                        return;
+                      }
                       if (e.key === 'Enter') setOpenCard(row);
                       if (e.key === 'F10' && e.shiftKey) {
                         e.preventDefault();

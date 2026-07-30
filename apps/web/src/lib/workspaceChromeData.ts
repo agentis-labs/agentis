@@ -19,6 +19,7 @@ export interface WorkspaceChromeSnapshot {
   notifications: WorkspaceNotification[];
   counts: {
     liveAgents: number;
+    totalAgents: number;
     activeRuns: number;
   };
   updatedAt: number;
@@ -32,6 +33,7 @@ interface WorkspaceChromeResponse {
   notifications?: WorkspaceNotification[];
   counts?: {
     liveAgents?: number;
+    totalAgents?: number;
     activeRuns?: number;
   };
 }
@@ -43,7 +45,7 @@ const EMPTY_CHROME_SNAPSHOT: WorkspaceChromeSnapshot = {
   fleet: null,
   latestActivity: null,
   notifications: [],
-  counts: { liveAgents: 0, activeRuns: 0 },
+  counts: { liveAgents: 0, totalAgents: 0, activeRuns: 0 },
   updatedAt: 0,
 };
 
@@ -88,6 +90,7 @@ function keepPreviousForWorkspace(workspaceId: string | null): WorkspaceChromeSn
 
 function normalizeChromeResponse(response: WorkspaceChromeResponse, workspaceId: string): WorkspaceChromeSnapshot {
   const liveAgents = Number(response.counts?.liveAgents ?? 0);
+  const totalAgents = Number(response.counts?.totalAgents ?? liveAgents);
   const activeRuns = Number(response.counts?.activeRuns ?? response.fleet?.runs.active ?? 0);
   return {
     workspaceId,
@@ -98,6 +101,7 @@ function normalizeChromeResponse(response: WorkspaceChromeResponse, workspaceId:
     notifications: response.notifications ?? [],
     counts: {
       liveAgents: Number.isFinite(liveAgents) ? liveAgents : 0,
+      totalAgents: Number.isFinite(totalAgents) ? totalAgents : 0,
       activeRuns: Number.isFinite(activeRuns) ? activeRuns : 0,
     },
     updatedAt: Date.now(),

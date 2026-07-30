@@ -703,6 +703,10 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
           type: 'string',
           description: 'JSON array of string tags.',
         },
+        agentId: {
+          type: 'string',
+          description: 'Target specialist private knowledge scope. Omit for workspace knowledge.',
+        },
       },
       required: ['title', 'content'],
     },

@@ -17,6 +17,7 @@ import type { IssueService } from './issues.js';
 import type { SkillService } from './skillService.js';
 import { analyzeRunFailure } from './run/runFailureAnalysis.js';
 import type { RunVerdict } from './workflow/workflowVerdict.js';
+import type { WorkflowRevisionService } from './workflow/workflowRevisionService.js';
 
 export interface InstinctProposal {
   workspaceId: string;
@@ -36,6 +37,7 @@ export class InstinctEngine {
   #issues?: IssueService;
   /** Living Skills — late-bound; links failure lessons onto the run's active skills. */
   #skills?: SkillService;
+  #revisions?: WorkflowRevisionService;
 
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -53,6 +55,10 @@ export class InstinctEngine {
   /** Wire the skill library so failure lessons attach to the run's active skills. */
   bindSkillService(skills: SkillService): void {
     this.#skills = skills;
+  }
+
+  bindWorkflowRevisionService(revisions: WorkflowRevisionService): void {
+    this.#revisions = revisions;
   }
 
   /** Called by the engine after a run reaches FAILED. Best-effort; never throws. */
@@ -290,7 +296,9 @@ export class InstinctEngine {
       .where(and(eq(schema.workflows.id, args.workflowId), eq(schema.workflows.workspaceId, args.workspaceId)))
       .get();
     if (!wf) return { applied: false, reason: 'workflow not found' };
-    const graph = wf.graph as unknown as WorkflowGraph;
+    const selected = this.#revisions?.candidate(args.workspaceId, args.workflowId)
+      ?? this.#revisions?.active(args.workspaceId, args.workflowId);
+    const graph = (selected?.graph ?? wf.graph) as unknown as WorkflowGraph;
     const node = graph.nodes.find((n) => n.id === args.nodeId);
     if (!node) return { applied: false, reason: `node ${args.nodeId} not found` };
 
@@ -308,10 +316,18 @@ export class InstinctEngine {
     } catch (err) {
       return { applied: false, reason: `patch invalid: ${(err as Error).message}` };
     }
-    this.db.update(schema.workflows)
-      .set({ graph: next as unknown as object, updatedAt: new Date().toISOString() })
-      .where(eq(schema.workflows.id, args.workflowId))
-      .run();
+    const candidate = this.#revisions?.createCandidate({
+      workspaceId: args.workspaceId,
+      workflowId: args.workflowId,
+      graph: next,
+      baseRevisionId: selected?.revision.id,
+      source: 'instinct',
+      actor: { type: 'system', id: 'instinct-engine' },
+      reason: `Operator-approved reliability instinct for ${args.nodeId}: ${args.rootCause}`,
+    });
+    if (!candidate) {
+      return { applied: false, reason: 'workflow revision service is unavailable' };
+    }
 
     this.memory.write({
       workspaceId: args.workspaceId,
@@ -319,7 +335,7 @@ export class InstinctEngine {
       kind: 'pattern',
       source: 'system',
       title: `Auto-patch applied: ${args.nodeId}`,
-      content: `Auto-patched "${args.nodeId}" for ${args.rootCause}. Verify the next run.`,
+      content: `Created candidate ${candidate.revision.id} for "${args.nodeId}" and ${args.rootCause}. Verify it with self-healing disabled before promotion.`,
       trust: 0.8,
       importance: 0.68,
       tags: ['instinct', 'effective_pattern', args.rootCause],
@@ -331,7 +347,7 @@ export class InstinctEngine {
       },
     });
     this.logger?.info('instinct.applied', { ...args });
-    return { applied: true };
+    return { applied: true, reason: `candidate ${candidate.revision.id} created; verification required` };
   }
 }
 

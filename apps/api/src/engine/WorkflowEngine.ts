@@ -179,7 +179,14 @@ import { buildTemplateContext, resolveTemplate, resolveTemplateDeep, readTemplat
 import { readDotPath } from './dotPath.js';
 import { NodeExecutorController, type NodeExecutorHost } from './executors/nodeExecutors.js';
 import { SelfHealController, type SelfHealHost } from './selfHeal/selfHealController.js';
-import { isSelfHealableNode, declaredOutputKeys, graphDiffPatch, stringValue, toolInputSchemaToChatParameters } from './selfHeal/selfHealHelpers.js';
+import {
+  isRuntimeBindingFailure,
+  isSelfHealableNode,
+  declaredOutputKeys,
+  graphDiffPatch,
+  stringValue,
+  toolInputSchemaToChatParameters,
+} from './selfHeal/selfHealHelpers.js';
 export { capabilityGapReason } from './selfHeal/selfHealHelpers.js';
 import { sleep, backoffMs, redactUrl, asString } from './executorHelpers.js';
 import { ConvergeLoopController, type LoopEngineHost } from './convergeLoop.js';
@@ -195,6 +202,9 @@ import { normalizeWorkflowGraph } from '../services/workflow/workflowGraphNormal
 import { getCustomIntegrationManifest } from '../services/integrationRegistry.js';
 import { routeModelForTask } from '../services/modelRoutingPolicy.js';
 import { artifactPolicyFromUnknown } from '../services/artifactRetentionPolicy.js';
+import type { WorkflowRevisionService } from '../services/workflow/workflowRevisionService.js';
+import type { WorkflowExperienceService } from '../services/workflow/workflowExperienceService.js';
+import { classifyWorkflowFailure, workflowFailureFingerprint } from '../services/workflow/workflowFailureClassification.js';
 
 export interface EngineDeps {
   db: AgentisSqliteDb;
@@ -204,6 +214,10 @@ export interface EngineDeps {
   scratchpad: ScratchpadService;
   activity: ActivityFeedService;
   approvals: ApprovalInboxService;
+  /** Immutable active/candidate workflow revision authority. */
+  revisions?: WorkflowRevisionService;
+  /** Evidence-backed workflow/app/role experience ledger. */
+  workflowExperience?: WorkflowExperienceService;
   extensions: ExtensionRuntime;
   adapters: AdapterManager;
   subflows?: SubflowExecutor;
@@ -411,6 +425,8 @@ export interface StartRunArgs {
   inputs: Record<string, unknown>;
   initialState: WorkflowRunState;
   graph: WorkflowGraph;
+  /** Exact immutable revision whose graph is being executed. */
+  workflowRevisionId?: string | null;
   /** P1.2: when true, suppress self-heal + fallback recovery so a debugging agent
    *  observes the RAW per-node failure. For test/debug runs, not production. */
   debugRun?: boolean;
@@ -510,7 +526,16 @@ export class WorkflowEngine {
 
   async startRun(args: StartRunArgs): Promise<RunHandle> {
     const normalized = normalizeWorkflowGraph(this.deps.db, args.workspaceId, args.graph);
-    const graph = normalized.graph;
+    let graph = normalized.graph;
+    let workflowRevisionId = args.workflowRevisionId ?? null;
+    if (!workflowRevisionId && this.deps.revisions) {
+      try {
+        workflowRevisionId = this.deps.revisions.active(args.workspaceId, args.workflowId).revision.id;
+      } catch {
+        // Ephemeral/internal workflows are allowed to execute without a durable
+        // workflow revision. Persisted workflows are resolved above.
+      }
+    }
     // P1.2: mark a debug/test run so self-heal + fallback recovery are suppressed
     // and the agent observes the RAW per-node failure instead of a healed result.
     if (args.debugRun) this.#debugRuns.add(args.initialState.runId);
@@ -520,8 +545,49 @@ export class WorkflowEngine {
         workflowId: args.workflowId,
         repairs: normalized.repairs,
       });
+      if (this.deps.revisions) {
+        const existingCandidate = this.deps.revisions.candidate(args.workspaceId, args.workflowId);
+        const normalizedCandidate = this.deps.revisions.createCandidate({
+          workspaceId: args.workspaceId,
+          workflowId: args.workflowId,
+          graph,
+          baseRevisionId: workflowRevisionId,
+          source: 'normalization',
+          actor: { type: 'system' },
+          reason: `Runtime normalization found ${normalized.repairs.length} compatibility repair(s)`,
+          allowBranch: true,
+          setAsHead: !existingCandidate || existingCandidate.revision.id === workflowRevisionId,
+        });
+        workflowRevisionId = normalizedCandidate.revision.id;
+        graph = normalizedCandidate.revision.graphJson as WorkflowGraph;
+        if (!args.debugRun) {
+          throw new AgentisError(
+            'WORKFLOW_GRAPH_INVALID',
+            'The production revision required normalization. A candidate was created; verify it with a clean debug run before promotion.',
+            {
+              httpStatus: 409,
+              details: {
+                code: 'WORKFLOW_NORMALIZATION_CANDIDATE_CREATED',
+                candidateRevisionId: normalizedCandidate.revision.id,
+                repairs: normalized.repairs,
+              },
+            },
+          );
+        }
+      }
     }
     validateWorkflowGraph(graph, { currentWorkflowId: args.workflowId });
+    try {
+      this.#preparePinnedAgentRuntimes(args.workspaceId, graph);
+    } catch (error) {
+      const now = new Date().toISOString();
+      this.deps.db
+        .update(schema.workflowRuns)
+        .set({ status: 'FAILED', completedAt: now, updatedAt: now })
+        .where(eq(schema.workflowRuns.id, args.initialState.runId))
+        .run();
+      throw error;
+    }
     const ctx: RunningContext = {
       runId: args.initialState.runId,
       workflowId: args.workflowId,
@@ -530,6 +596,7 @@ export class WorkflowEngine {
       ambientId: args.ambientId,
       conversationId: args.conversationId ?? null,
       userId: args.userId,
+      workflowRevisionId,
       graph,
       downstreamEdges: buildDownstreamEdges(graph),
       state: args.initialState,
@@ -547,6 +614,7 @@ export class WorkflowEngine {
       .update(schema.workflowRuns)
       .set({
         graphSnapshot: graph as unknown as object,
+        workflowRevisionId,
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflowRuns.id, ctx.runId));
@@ -1844,7 +1912,7 @@ export class WorkflowEngine {
    * Used by the planner/replan flow, in-canvas user edits, and hub package
    * updates that need to splice nodes into a running workflow. Validates
    * cycles + node references on the merged graph, increments the run's
-   * `graphRevision`, persists the merged graph back to the workflow row,
+   * `graphRevision`, persists the merged graph only to the run snapshot,
    * mutates the live `RunningContext.graph` so subsequent ticks see the
    * change, and emits `workflow.graph_patched` on the run room.
    */
@@ -1872,7 +1940,9 @@ export class WorkflowEngine {
       );
     }
 
-    const baseGraph = ctx?.graph ?? (run.workflowId ? this.#loadWorkflowGraph(run.workflowId) : run.graphSnapshot as WorkflowGraph | null);
+    const baseGraph = ctx?.graph
+      ?? (run.graphSnapshot as WorkflowGraph | null)
+      ?? (run.workflowId ? this.#loadWorkflowGraph(run.workflowId) : null);
     if (!baseGraph) {
       throw new AgentisError('WORKFLOW_RUN_INVALID_STATE', 'Run has no saved workflow or graph snapshot to patch');
     }
@@ -1893,21 +1963,21 @@ export class WorkflowEngine {
 
     const newRevision = currentRevision + 1;
 
-    if (run.workflowId) {
-      await this.deps.db
-        .update(schema.workflows)
-        .set({ graph: merged as unknown as object, updatedAt: new Date().toISOString() })
-        .where(eq(schema.workflows.id, run.workflowId));
-    }
-    // The run snapshot is the immutable source for Inspect/history/replay. Keep
-    // it current even when the repair is also promoted to the saved workflow.
+    // Run-local repair/evolution is deliberately isolated. A successful terminal
+    // run may create a candidate revision, but only clean verification can
+    // promote it; this method never mutates the active workflow.
     await this.deps.db
       .update(schema.workflowRuns)
-      .set({ graphSnapshot: merged as unknown as object, updatedAt: new Date().toISOString() })
+      .set({
+        graphSnapshot: merged as unknown as object,
+        repairedFromRevisionId: run.repairedFromRevisionId ?? run.workflowRevisionId ?? null,
+        updatedAt: new Date().toISOString(),
+      })
       .where(eq(schema.workflowRuns.id, run.id));
 
     if (ctx) {
       ctx.graph = merged;
+      ctx.repairedFromRevisionId ??= run.repairedFromRevisionId ?? run.workflowRevisionId ?? null;
       ctx.downstreamEdges = buildDownstreamEdges(merged);
       ctx.state.graphRevision = newRevision;
       await this.#persistRun(ctx);
@@ -2010,7 +2080,9 @@ export class WorkflowEngine {
       }]);
     }
 
-    const baseGraph = ctx?.graph ?? (run.workflowId ? this.#loadWorkflowGraph(run.workflowId) : (run.graphSnapshot as WorkflowGraph | null));
+    const baseGraph = ctx?.graph
+      ?? (run.graphSnapshot as WorkflowGraph | null)
+      ?? (run.workflowId ? this.#loadWorkflowGraph(run.workflowId) : null);
     if (!baseGraph) return reject('invalid', [{ code: 'STRUCTURAL', message: 'Run has no graph to evolve' }]);
 
     // Never let an evolution rewrite the spine that is already running or done —
@@ -4184,11 +4256,30 @@ export class WorkflowEngine {
           const graph = normalizeWorkflowGraph(this.deps.db, ctx.workspaceId, y.graph as unknown as WorkflowGraph).graph;
           validateWorkflowGraph(graph, { strict: true });
           const workflowId = randomUUID();
+          const initialGraph: WorkflowGraph = this.deps.revisions
+            ? { version: 1, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } }
+            : graph;
           this.deps.db.insert(schema.workflows).values({
             id: workflowId, workspaceId: ctx.workspaceId, ambientId: ctx.ambientId,
-            userId: ctx.userId, title: y.title.slice(0, 200), graph: graph as unknown as object, settings: {},
+            userId: ctx.userId, title: y.title.slice(0, 200), graph: initialGraph as unknown as object, settings: {},
           }).run();
-          payload = { ok: true, workflowId, title: y.title };
+          const candidate = this.deps.revisions
+            ? this.deps.revisions.createCandidate({
+                workspaceId: ctx.workspaceId,
+                workflowId,
+                graph,
+                baseRevisionId: this.deps.revisions.ensureWorkflow(ctx.workspaceId, workflowId).active.id,
+                source: 'agent_build',
+                actor: { type: 'agent', id: runCtx.agentId },
+                reason: `Created by running agent ${runCtx.agentId}`,
+              }).revision
+            : null;
+          payload = {
+            ok: true,
+            workflowId,
+            title: y.title,
+            ...(candidate ? { candidateRevisionId: candidate.id, verificationRequired: true } : {}),
+          };
         } catch (err) {
           payload = { ok: false, error: `invalid workflow: ${(err as Error).message}` };
         }
@@ -4389,6 +4480,71 @@ export class WorkflowEngine {
 
   #agentHasConnectedRuntime(agentId: string): boolean {
     return Boolean(this.deps.adapters.get(agentId));
+  }
+
+  /**
+   * Resolve every explicit specialist binding before the run becomes RUNNING.
+   * This closes the old failure mode where a workflow started successfully and
+   * then spent its self-heal budget discovering that its assigned HTTP/CLI agent
+   * was merely a database placeholder. Runtime inheritance is attempted once;
+   * if neither a bound runtime nor the workspace session model can execute the
+   * node, the run is rejected at the readiness boundary with a precise message.
+   */
+  #preparePinnedAgentRuntimes(workspaceId: string, graph: WorkflowGraph): void {
+    for (const node of graph.nodes) {
+      if (node.config.kind !== 'agent_task' && node.config.kind !== 'agent_session') continue;
+      const config = node.config;
+      const agentId = config.agentId?.trim();
+      if (!agentId) continue;
+      const row = this.deps.db
+        .select({
+          id: schema.agents.id,
+          name: schema.agents.name,
+          isPaused: schema.agents.isPaused,
+          status: schema.agents.status,
+        })
+        .from(schema.agents)
+        .where(and(eq(schema.agents.id, agentId), eq(schema.agents.workspaceId, workspaceId)))
+        .get();
+      if (!row) {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `${node.title || node.id}: assigned specialist ${agentId} no longer exists. Re-bind this step before running.`,
+        );
+      }
+      if (row.isPaused || row.status === 'paused') {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `${node.title || node.id}: assigned specialist "${row.name}" is paused. Resume or re-bind it before running.`,
+        );
+      }
+
+      if (!this.deps.adapters.get(agentId)) {
+        const runtime = this.deps.resolveAgentRuntime?.(
+          workspaceId,
+          agentId,
+          config.prompt,
+          this.#agentConfiguredModel(agentId),
+        );
+        if (runtime) this.deps.adapters.register(agentId, runtime);
+      }
+
+      const registration = this.deps.adapters.get(agentId);
+      const canUseManagedSession = Boolean(this.deps.sessions && this.deps.sessionRuntime?.canRun(workspaceId));
+      if (!registration && !canUseManagedSession) {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `${node.title || node.id}: assigned specialist "${row.name}" has no executable runtime. Connect an available runtime or configure a workspace model before running.`,
+        );
+      }
+      if (registration && hasAgentRequirements(config.requires)
+        && !adapterSatisfiesRequirements(registration.adapter.capabilities?.(), config.requires)) {
+        throw new AgentisError(
+          'WORKFLOW_GRAPH_INVALID',
+          `${node.title || node.id}: "${row.name}" is online but its runtime lacks ${describeAgentRequirements(config.requires)}.`,
+        );
+      }
+    }
   }
 
   #isSoftPinnedSpecialist(agentId: string): boolean {
@@ -4845,6 +5001,36 @@ export class WorkflowEngine {
     } catch (err) {
       this.deps.logger.warn('engine.capability_manifest.failed', { runId: ctx.runId, err: (err as Error).message });
     }
+
+    let workflowExperienceBlock = '';
+    if (this.deps.workflowExperience && ctx.workflowId) {
+      try {
+        const workflow = this.deps.db.select({
+          appId: schema.workflows.appId,
+          activeRevisionId: schema.workflows.activeRevisionId,
+          candidateRevisionId: schema.workflows.candidateRevisionId,
+        }).from(schema.workflows).where(and(
+          eq(schema.workflows.id, ctx.workflowId),
+          eq(schema.workflows.workspaceId, ctx.workspaceId),
+        )).get();
+        const role = agentId
+          ? this.deps.db.select({ role: schema.agents.role }).from(schema.agents).where(eq(schema.agents.id, agentId)).get()?.role
+          : null;
+        if (workflow) {
+          workflowExperienceBlock = this.deps.workflowExperience.renderDossier({
+            workspaceId: ctx.workspaceId,
+            workflowId: ctx.workflowId,
+            appId: workflow.appId,
+            agentId: agentId ?? null,
+            specialistRole: role ?? null,
+            activeRevisionId: workflow.activeRevisionId,
+            candidateRevisionId: workflow.candidateRevisionId,
+          });
+        }
+      } catch (err) {
+        this.deps.logger.warn('engine.workflow_experience.failed', { runId: ctx.runId, err: (err as Error).message });
+      }
+    }
     // A workflow-bound orchestrator/manager needs the same scoped command model
     // as chat: inventory, work in motion, failures, approvals, and recent deltas.
     let commandBriefingBlock = '';
@@ -4857,7 +5043,7 @@ export class WorkflowEngine {
       this.deps.logger.warn('engine.command_briefing.failed', { runId: ctx.runId, err: (err as Error).message });
     }
     return {
-      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, connectionsBlock, capabilityManifestBlock, commandBriefingBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
+      prompt: [agentIdentityBlock, operatingManualBlock, evolutionBlock, workflowExperienceBlock, connectionsBlock, capabilityManifestBlock, commandBriefingBlock, rolePrompt, peerContext, block, brainBlock, specialistMindBlock, spaceContext, agentMemory, personalBrain, skillBlock, prompt].filter(Boolean).join('\n\n'),
     };
   }
 
@@ -4886,6 +5072,205 @@ export class WorkflowEngine {
     } catch (err) {
       this.deps.logger.warn('engine.live_plan_block.failed', { runId: ctx.runId, err: (err as Error).message });
       return '';
+    }
+  }
+
+  /**
+   * Translate terminal execution evidence into immutable revision proof.
+   * Repaired production runs can only propose candidates; a fresh debug run
+   * (self-heal disabled by construction) is what certifies the exact candidate.
+   */
+  async #recordRevisionOutcome(
+    ctx: RunningContext,
+    status: WorkflowRunStatus,
+    verdict: RunVerdict | null,
+  ): Promise<void> {
+    if (!this.deps.revisions || !ctx.workflowId) return;
+    const isDebug = this.#debugRuns.has(ctx.runId);
+    const clean = status === 'COMPLETED'
+      && ctx.state.failedNodeIds.length === 0
+      && (!verdict || verdict.outcome === 'accomplished');
+    const workflow = this.deps.db.select({
+      appId: schema.workflows.appId,
+      settings: schema.workflows.settings,
+      activeRevisionId: schema.workflows.activeRevisionId,
+      candidateRevisionId: schema.workflows.candidateRevisionId,
+    }).from(schema.workflows).where(and(
+      eq(schema.workflows.id, ctx.workflowId),
+      eq(schema.workflows.workspaceId, ctx.workspaceId),
+    )).get();
+    if (!workflow) return;
+
+    if (isDebug && ctx.workflowRevisionId) {
+      this.deps.revisions.recordProof({
+        workspaceId: ctx.workspaceId,
+        workflowId: ctx.workflowId,
+        revisionId: ctx.workflowRevisionId,
+        gate: 'clean_debug',
+        status: clean ? 'passed' : 'failed',
+        runId: ctx.runId,
+        evidence: { status, failedNodeIds: ctx.state.failedNodeIds, selfHealDisabled: true },
+      });
+      this.deps.revisions.recordProof({
+        workspaceId: ctx.workspaceId,
+        workflowId: ctx.workflowId,
+        revisionId: ctx.workflowRevisionId,
+        gate: 'outcome',
+        status: verdict?.outcome === 'accomplished' ? 'passed' : 'failed',
+        runId: ctx.runId,
+        evidence: {
+          verdict: verdict?.outcome ?? null,
+          deficiencies: verdict?.deficiencies ?? [],
+          reason: verdict ? undefined : 'No world/outcome specification was evaluated.',
+        },
+      });
+
+      if (clean) {
+        const repairAttempts = this.deps.db.select().from(schema.workflowRepairAttempts).where(and(
+          eq(schema.workflowRepairAttempts.workspaceId, ctx.workspaceId),
+          eq(schema.workflowRepairAttempts.workflowId, ctx.workflowId),
+          eq(schema.workflowRepairAttempts.candidateRevisionId, ctx.workflowRevisionId),
+        )).all();
+        for (const attempt of repairAttempts) {
+          const classification = classifyWorkflowFailure(attempt.lastError ?? 'workflow graph defect');
+          this.deps.revisions.recordProof({
+            workspaceId: ctx.workspaceId,
+            workflowId: ctx.workflowId,
+            revisionId: ctx.workflowRevisionId,
+            gate: 'regression',
+            status: 'passed',
+            fixtureKey: attempt.failureFingerprint,
+            runId: ctx.runId,
+            evidence: {
+              failureFingerprint: attempt.failureFingerprint,
+              nodeId: attempt.nodeId,
+              assertion: 'The original failure did not recur during the clean replay.',
+            },
+          });
+          this.deps.workflowExperience?.completeRepairAttempt({
+            workspaceId: ctx.workspaceId,
+            workflowId: ctx.workflowId,
+            baseRevisionId: attempt.baseRevisionId ?? workflow.activeRevisionId ?? ctx.workflowRevisionId,
+            failureFingerprint: attempt.failureFingerprint,
+            status: 'verified',
+            candidateRevisionId: ctx.workflowRevisionId,
+          });
+          this.deps.workflowExperience?.recordVerifiedRepair({
+            context: {
+              workspaceId: ctx.workspaceId,
+              workflowId: ctx.workflowId,
+              appId: workflow.appId,
+              activeRevisionId: workflow.activeRevisionId,
+              candidateRevisionId: ctx.workflowRevisionId,
+            },
+            baseRevisionId: attempt.baseRevisionId ?? workflow.activeRevisionId ?? ctx.workflowRevisionId,
+            candidateRevisionId: ctx.workflowRevisionId,
+            fingerprint: attempt.failureFingerprint,
+            classification,
+            rootCause: classification.reason,
+            repairSummary: `Run-local repair produced candidate ${ctx.workflowRevisionId}; clean replay ${ctx.runId} completed with self-healing disabled.`,
+            proofRunId: ctx.runId,
+            regressionFixture: {
+              fingerprint: attempt.failureFingerprint,
+              nodeId: attempt.nodeId,
+              expected: 'no recurrence and accomplished outcome',
+            },
+          });
+        }
+      }
+
+      const proof = this.deps.revisions.proofState(ctx.workspaceId, ctx.workflowId, ctx.workflowRevisionId);
+      if (proof.readyForPromotion && !proof.approvalRequired && workflow.activeRevisionId) {
+        this.deps.revisions.promote({
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
+          revisionId: ctx.workflowRevisionId,
+          expectedActiveRevisionId: workflow.activeRevisionId,
+          actor: { type: 'system', id: 'verification-engine' },
+        });
+      }
+    }
+
+    // A production recovery is useful evidence but never proof of its own patch.
+    // Only create the candidate after the repaired execution actually accomplishes
+    // its objective, then require the clean replay above.
+    const ranDifferentGraph = Boolean(
+      ctx.repairedFromRevisionId
+      && workflow.activeRevisionId
+      && graphContentHash(ctx.graph)
+        !== this.deps.revisions.revision(ctx.workspaceId, ctx.workflowId, workflow.activeRevisionId)?.semanticHash,
+    );
+    const structuralIncidents = Object.values(ctx.state.selfHealIncidents ?? {})
+      .filter((incident) => incident.outcome === 'graph_patch_applied' && incident.failureFingerprint);
+    if (!isDebug && ranDifferentGraph && verdict?.outcome !== 'accomplished' && workflow.activeRevisionId) {
+      for (const incident of structuralIncidents) {
+        const fingerprint = incident.failureFingerprint!;
+        this.deps.workflowExperience?.completeRepairAttempt({
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
+          baseRevisionId: workflow.activeRevisionId,
+          failureFingerprint: fingerprint,
+          status: 'rejected',
+        });
+        this.deps.workflowExperience?.recordRejectedRepair({
+          context: {
+            workspaceId: ctx.workspaceId,
+            workflowId: ctx.workflowId,
+            appId: workflow.appId,
+            activeRevisionId: workflow.activeRevisionId,
+            candidateRevisionId: workflow.candidateRevisionId,
+          },
+          revisionId: workflow.activeRevisionId,
+          fingerprint,
+          title: `Rejected run-local repair for ${incident.nodeTitle ?? incident.nodeId}`,
+          repairSummary: incident.diagnosis ?? incident.reason ?? 'The repaired execution did not accomplish its objective.',
+          evidence: { runId: ctx.runId, status, verdict: verdict?.outcome ?? null },
+        });
+      }
+    }
+    if (!isDebug && ranDifferentGraph && verdict?.outcome === 'accomplished' && workflow.activeRevisionId) {
+      const created = this.deps.revisions.createCandidate({
+        workspaceId: ctx.workspaceId,
+        workflowId: ctx.workflowId,
+        graph: ctx.graph,
+        baseRevisionId: workflow.activeRevisionId,
+        source: structuralIncidents.length > 0 ? 'self_heal' : 'agent_evolve',
+        actor: { type: 'system', id: structuralIncidents.length > 0 ? 'self-heal' : 'evolution-engine' },
+        reason: `Recovered run ${ctx.runId} accomplished its objective; clean replay is still required.`,
+        allowBranch: true,
+        setAsHead: !workflow.candidateRevisionId,
+      });
+      for (const incident of structuralIncidents) {
+        const fingerprint = incident.failureFingerprint!;
+        this.deps.workflowExperience?.completeRepairAttempt({
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
+          baseRevisionId: workflow.activeRevisionId,
+          failureFingerprint: fingerprint,
+          status: 'candidate',
+          candidateRevisionId: created.revision.id,
+        });
+      }
+    }
+
+    if (ctx.workflowRevisionId && verdict?.outcome === 'accomplished') {
+      const revision = this.deps.revisions.revision(ctx.workspaceId, ctx.workflowId, ctx.workflowRevisionId);
+      if (revision) {
+        await this.deps.workflowExperience?.recordAccomplished({
+          context: {
+            workspaceId: ctx.workspaceId,
+            workflowId: ctx.workflowId,
+            appId: workflow.appId,
+            activeRevisionId: workflow.activeRevisionId,
+            candidateRevisionId: workflow.candidateRevisionId,
+          },
+          revisionId: revision.id,
+          semanticHash: revision.semanticHash,
+          graph: revision.graphJson as WorkflowGraph,
+          runId: ctx.runId,
+          objective: readWorkflowSpec(workflow.settings)?.objective ?? null,
+        });
+      }
     }
   }
 
@@ -7134,7 +7519,7 @@ export class WorkflowEngine {
     const state = run.runState as unknown as WorkflowRunState | null;
     if (!state) return null;
     try {
-      const graph = this.#loadWorkflowGraph(run.workflowId);
+      const graph = (run.graphSnapshot as WorkflowGraph | null) ?? this.#loadWorkflowGraph(run.workflowId);
       return {
         runId: run.id,
         workflowId: run.workflowId,
@@ -7143,6 +7528,8 @@ export class WorkflowEngine {
         ambientId: run.ambientId,
         conversationId: run.conversationId ?? null,
         userId: run.userId,
+        workflowRevisionId: run.workflowRevisionId ?? null,
+        repairedFromRevisionId: run.repairedFromRevisionId ?? null,
         graph,
         downstreamEdges: buildDownstreamEdges(graph),
         state,
@@ -7167,6 +7554,37 @@ export class WorkflowEngine {
     // (a catch branch can't fix "no credits"). This is the fix for runs that used
     // to either hang as "running" forever or fail opaquely on an out-of-credits model.
     const node = ctx.graph.nodes.find((candidate) => candidate.id === nodeId);
+    const classification = classifyWorkflowFailure(error);
+    if (node && this.deps.workflowExperience) {
+      try {
+        const workflow = this.deps.db.select({ appId: schema.workflows.appId })
+          .from(schema.workflows)
+          .where(and(eq(schema.workflows.id, ctx.workflowId), eq(schema.workflows.workspaceId, ctx.workspaceId)))
+          .get();
+        const revisionKey = ctx.workflowRevisionId ?? graphContentHash(ctx.graph);
+        this.deps.workflowExperience.recordFailureObservation({
+          context: {
+            workspaceId: ctx.workspaceId,
+            workflowId: ctx.workflowId,
+            appId: workflow?.appId ?? null,
+            agentId: (node.config as { agentId?: string }).agentId ?? null,
+          },
+          revisionId: ctx.workflowRevisionId ?? null,
+          node,
+          error,
+          fingerprint: workflowFailureFingerprint({ classification, revisionKey, node, error }),
+          classification,
+          runId: ctx.runId,
+          inputs: ns.inputData,
+        });
+      } catch (recordError) {
+        this.deps.logger.warn('engine.workflow_failure_observation.failed', {
+          runId: ctx.runId,
+          nodeId,
+          error: (recordError as Error).message,
+        });
+      }
+    }
     const recoverableModelFailure = isRecoverableModelError(error);
     // Organ 4 — failure taxonomy: a RESOURCE failure on an AGENT node (rate/usage
     // limit, quota, auth/captcha wall, transient 5xx/network) is NOT a logic bug.
@@ -7183,8 +7601,11 @@ export class WorkflowEngine {
     // pass). It is not a bug: never run the self-heal ladder or retries on it
     // — the "repair" a healer derives for an approval gate is always wrong.
     // Error-edge routing below still applies (a graph may catch the block).
-    const policyBlock = isPolicyBlockError(error);
-    if (!isSelfHealTerminalError(error) && !policyBlock) {
+    const policyBlock = classification.category === 'human_policy'
+      || classification.category === 'expected_business'
+      || isPolicyBlockError(error);
+    const runtimeBindingFailure = Boolean(node && isRuntimeBindingFailure(error));
+    if (!isSelfHealTerminalError(error) && !policyBlock && (classification.graphRepairEligible || runtimeBindingFailure)) {
       if (node && isSelfHealableNode(node)) {
         const heal = await this.#selfHeal.runSelfHeal(ctx, node, {}, error);
         if (heal.kind === 'structural_applied' || heal.kind === 'awaiting_approval') return;
@@ -7223,7 +7644,7 @@ export class WorkflowEngine {
     // / validation / contract) as a workspace playbook lesson, which build_workflow
     // already recalls so the next build wires a corrective loop instead of a hard
     // stop. Must never break the failure path.
-    if (node && this.deps.recordFailureLesson) {
+    if (node && classification.learnerEligible && this.deps.recordFailureLesson) {
       try {
         this.deps.recordFailureLesson({
           workspaceId: ctx.workspaceId,
@@ -7787,6 +8208,15 @@ export class WorkflowEngine {
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflowRuns.id, ctx.runId));
+    if (finishing) {
+      await this.#recordRevisionOutcome(ctx, status, runVerdict).catch((error) => {
+        this.deps.logger.warn('workflow.revision.outcome_failed', {
+          runId: ctx.runId,
+          workflowId: ctx.workflowId,
+          error: (error as Error).message,
+        });
+      });
+    }
     // A finished run's periodic recovery snapshots are dead weight — they exist
     // only to cold-resume an in-flight run and are never read once terminal.
     if (finishing) {
@@ -7858,7 +8288,7 @@ export class WorkflowEngine {
               at: new Date().toISOString(),
               runId: ctx.runId,
               status,
-              graphHash: graphContentHash(wfRow.graph as WorkflowGraph),
+              graphHash: graphContentHash(ctx.graph),
               ...(runVerdict ? { verdict: runVerdict.outcome } : {}),
             };
             const isDebug = this.#debugRuns.has(ctx.runId);
@@ -8481,6 +8911,10 @@ export interface RunningContext {
   ambientId: string | null;
   conversationId: string | null;
   userId: string;
+  /** Immutable revision selected at run start. */
+  workflowRevisionId?: string | null;
+  /** Set when the run graph diverges through a local repair/evolution. */
+  repairedFromRevisionId?: string | null;
   graph: WorkflowGraph;
   downstreamEdges: Map<string, WorkflowEdge[]>;
   state: WorkflowRunState;

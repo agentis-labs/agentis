@@ -250,6 +250,27 @@ describe('preflightWorkflow', () => {
     expect(report.nodes.ext?.status).toBe('mocked');
   });
 
+  it('blocks an extension operation that is absent from the installed manifest', async () => {
+    const ctx = await createTestContext();
+    const extId = seedExtension(ctx.db, ctx.workspace.id, ctx.user.id, 'export async function execute() { return {}; }');
+    const graph = extensionGraph(extId);
+    const extensionNode = graph.nodes.find((node) => node.id === 'ext')!;
+    extensionNode.config = { ...extensionNode.config, operationName: 'invented_operation' };
+    const report = preflightWorkflow({
+      db: ctx.db,
+      workspaceId: ctx.workspace.id,
+      workflowId: 'wf-ext-unknown-operation',
+      graph,
+    });
+
+    expect(report.status).toBe('blocked');
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      nodeId: 'ext',
+      code: 'EXTENSION_OPERATION_NOT_FOUND',
+      severity: 'error',
+    }));
+  });
+
   it('blocks when an extension_task references an extension that does not exist', async () => {
     const ctx = await createTestContext();
     const report = preflightWorkflow({

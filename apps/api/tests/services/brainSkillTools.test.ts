@@ -1,4 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { schema } from '@agentis/db/sqlite';
 import type { AgentisToolContext } from '@agentis/core';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBrainTools } from '../../src/services/agentisToolHandlers/brain.js';
@@ -26,7 +28,13 @@ beforeEach(async () => {
   memory.setEpisodicStore(episodes);
   skills = new SkillService(ctx.db, memory, brain, ctx.logger);
   registry = new AgentisToolRegistry({ logger: ctx.logger });
-  registerBrainTools(registry, { logger: ctx.logger, sharedIntelligence: brain, skills } as unknown as ToolHandlerDeps);
+  registerBrainTools(registry, {
+    db: ctx.db,
+    logger: ctx.logger,
+    sharedIntelligence: brain,
+    skills,
+    memory,
+  } as unknown as ToolHandlerDeps);
 });
 
 afterEach(() => ctx.close());
@@ -150,5 +158,69 @@ describe('agentis.skill.create', () => {
     );
     expect(res.ok).toBe(false);
     expect(res.errorCode).toBe('VALIDATION_FAILED');
+  });
+});
+
+describe('specialist private Brain administration', () => {
+  it('configures and verifies another specialist Brain idempotently', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Prospector',
+      adapterType: 'codex',
+      capabilityTags: ['research'],
+      config: {},
+      status: 'online',
+      role: 'prospector',
+    }).run();
+
+    const configure = () => registry.execute({
+      toolId: 'agentis.agent.brain.configure',
+      arguments: {
+        agentId,
+        memories: [{ title: 'ICP boundary', content: 'Only qualify companies with a verified service area.', kind: 'rule' }],
+        skills: [{
+          name: 'Qualify a prospect',
+          description: 'Determine whether a prospect fits the ICP.',
+          body: '1. Verify geography.\n2. Verify need.\n3. Record evidence.',
+        }],
+        examples: [{
+          skill: 'qualify-a-prospect',
+          input: 'A local clinic requests lead generation.',
+          output: 'Qualified after geography and need are verified.',
+        }],
+      },
+    }, toolCtx());
+
+    const first = await configure();
+    expect(first.ok).toBe(true);
+    const firstVerification = (first.output as { verification: { counts: Record<string, number> } }).verification;
+    expect(firstVerification.counts.memories).toBe(1);
+    expect(firstVerification.counts.skills).toBe(1);
+    expect(firstVerification.counts.examples).toBe(1);
+
+    const second = await configure();
+    expect(second.ok).toBe(true);
+    const inspect = await registry.execute({
+      toolId: 'agentis.agent.brain.inspect',
+      arguments: { agentId },
+    }, toolCtx());
+    expect(inspect.ok).toBe(true);
+    const counts = (inspect.output as { counts: Record<string, number> }).counts;
+    expect(counts.memories).toBe(1);
+    expect(counts.skills).toBe(1);
+    expect(counts.examples).toBe(1);
+  });
+
+  it('rejects cross-workspace or missing specialist targets', async () => {
+    const result = await registry.execute({
+      toolId: 'agentis.agent.brain.configure',
+      arguments: { agentId: randomUUID(), memories: [{ title: 'x', content: 'y' }] },
+    }, toolCtx());
+    expect(result.ok).toBe(false);
+    expect(result.errorCode).toBe('RESOURCE_NOT_FOUND');
   });
 });

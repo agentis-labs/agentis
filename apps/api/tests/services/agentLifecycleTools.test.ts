@@ -97,3 +97,25 @@ describe('agentis.agents.delete', () => {
     expect(res.errorMessage).toMatch(/not found/i);
   });
 });
+
+describe('agent creation identity safety', () => {
+  it('updates and reuses an existing role instead of duplicating it', async () => {
+    const existingId = seedAgent('Prospector', { role: 'prospector', instructions: 'Old brief' });
+    const result = await registry.execute({
+      toolId: 'agentis.agents.create',
+      arguments: {
+        name: 'Prospector v2',
+        role: 'prospector',
+        instructions: 'New brief',
+        runtimeModel: 'gpt-5.6-terra',
+      },
+    }, toolCtx());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toMatchObject({ created: false, reused: true });
+    const agents = ctx.db.select().from(schema.agents).where(eq(schema.agents.workspaceId, ctx.workspace.id)).all();
+    expect(agents.filter((agent) => agent.role === 'prospector')).toHaveLength(1);
+    expect(row(existingId)?.instructions).toBe('New brief');
+    expect(row(existingId)?.runtimeModel).toBe('gpt-5.6-terra');
+  });
+});

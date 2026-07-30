@@ -11,7 +11,7 @@ import {
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { AppLifecycle, type AppUpgradeResult } from './appLifecycle.js';
+import { AppLifecycle, type AppUpgradeResult, type AppWorkflowRevisionSink } from './appLifecycle.js';
 import { AppPackager } from './appPackager.js';
 import { AppStore } from './appStore.js';
 
@@ -30,7 +30,10 @@ export interface AppEnvironmentPromotionResult {
  * rollback retain the same invariants as a package upgrade.
  */
 export class AppEnvironmentStore {
-  constructor(private readonly db: AgentisSqliteDb) {}
+  constructor(
+    private readonly db: AgentisSqliteDb,
+    private readonly workflowRevisionSink?: AppWorkflowRevisionSink,
+  ) {}
 
   list(workspaceId: string, appId: string): AppEnvironment[] {
     this.requireApp(workspaceId, appId);
@@ -150,7 +153,8 @@ export class AppEnvironmentStore {
     if (!input.applyToRuntime) return { environment };
 
     const checksum = new AppPackager(this.db).serialize(source.manifest).checksum;
-    const runtimeUpgrade = new AppLifecycle(this.db).upgrade(workspaceId, userId, appId, source.manifest, { installedChecksum: checksum });
+    const runtimeUpgrade = new AppLifecycle(this.db, this.workflowRevisionSink)
+      .upgrade(workspaceId, userId, appId, source.manifest, { installedChecksum: checksum });
     return { environment, runtimeUpgrade };
   }
 

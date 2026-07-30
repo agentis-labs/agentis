@@ -142,6 +142,11 @@ export const REALTIME_EVENTS = {
   // SURFACE_RENDER: full ViewNode tree replaced. SURFACE_PATCH: fine-grained ops.
   SURFACE_RENDER: 'app.surface_render',
   SURFACE_PATCH: 'app.surface_patch',
+  SURFACE_DELETED: 'app.surface_deleted',
+  INTERFACE_CANDIDATE: 'app.interface_candidate',
+  INTERFACE_VERIFIED: 'app.interface_verified',
+  INTERFACE_PUBLISHED: 'app.interface_published',
+  INTERFACE_ABANDONED: 'app.interface_abandoned',
   // App Datastore (§5) — a record changed; bound views refetch. { appId, collection, op, id }.
   DATA_CHANGED: 'app.data_changed',
   // App lifecycle — the App ENTITY or its workflow membership/binding changed

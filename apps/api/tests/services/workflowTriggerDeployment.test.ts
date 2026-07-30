@@ -7,6 +7,7 @@ import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 import { WorkflowTriggerDeploymentService } from '../../src/services/workflow/workflowTriggerDeployment.js';
 import { graphContentHash } from '../../src/services/workflow/workflowCompass.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 
 let ctx: TestContext;
 let activate: ReturnType<typeof vi.fn>;
@@ -46,6 +47,12 @@ function seedWorkflow(graph: WorkflowGraph, appId: string | null = null): string
     // swiftLifecycle.test.ts.
     settings: { buildLoop: { hardened: { at: new Date().toISOString(), graphHash: graphContentHash(graph), specHash: 'test' } } },
   }).run();
+  const active = new WorkflowRevisionService(ctx.db).ensureWorkflow(ctx.workspace.id, id).active;
+  ctx.db.update(schema.workflowGraphRevisions).set({
+    trustState: 'proven',
+    proofProfile: 'legacy_proven',
+  }).where(eq(schema.workflowGraphRevisions.id, active.id)).run();
+  ctx.db.update(schema.workflows).set({ trustState: 'proven' }).where(eq(schema.workflows.id, id)).run();
   return id;
 }
 
@@ -87,8 +94,9 @@ describe('WorkflowTriggerDeploymentService', () => {
     });
     expect(activate).toHaveBeenCalledOnce();
     const workflow = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get()!;
-    const trigger = (workflow.graph as WorkflowGraph).nodes[0]!.config;
-    expect(trigger).toMatchObject({ triggerId: deployment.triggerId, schedule: '*/5 * * * *' });
+    const trigger = (workflow.graph as WorkflowGraph).nodes[0]!.config as { triggerId?: string; schedule?: string };
+    expect(trigger).toMatchObject({ schedule: '*/5 * * * *' });
+    expect(trigger.triggerId).toBeUndefined();
   });
 
   it('activates an extension-backed persistent listener and exposes health', async () => {

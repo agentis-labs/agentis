@@ -179,7 +179,8 @@ describe('<AppEditorPage />', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Heading' }));
     expect(screen.getAllByText('New heading').length).toBeGreaterThan(0);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Publish' }));
     await waitFor(() => {
       expect(lastSavedView).toMatchObject({ type: 'Stack', children: [{ type: 'Heading', value: 'New heading' }] });
     });
@@ -226,7 +227,8 @@ describe('<AppEditorPage />', () => {
     // The create form renders the collection field, and its insert action is declared.
     expect((await screen.findAllByText('Title')).length).toBeGreaterThan(0);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Publish' }));
     await waitFor(() => {
       expect(JSON.stringify(lastSavedView)).toContain('"type":"Form"');
       expect(lastSavedActions).toEqual(
@@ -257,7 +259,7 @@ describe('<AppEditorPage />', () => {
     }
   });
 
-  it('generates a surface from the AI prompt and loads it into the canvas', async () => {
+  it('opens the main chat with the exact selected page context', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? 'GET';
@@ -268,27 +270,26 @@ describe('<AppEditorPage />', () => {
       if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [surfaceRow('surface')] });
       if (path === '/v1/apps/app-1/collections' && method === 'GET') return jsonResponse({ data: [] });
       if (path === '/v1/apps/app-1/workflows' && method === 'GET') return jsonResponse({ data: [] });
-      if (path === '/v1/apps/app-1/surfaces/generate' && method === 'POST') {
-        return jsonResponse({
-          data: {
-            view: { type: 'Stack', children: [{ type: 'Heading', value: 'AI heading' }] },
-            actions: [],
-            source: 'model',
-          },
-        });
-      }
       throw new Error(`Unexpected request: ${method} ${path}`);
     });
 
     vi.stubGlobal('fetch', fetchMock);
     renderEditor('interface');
+    const openChat = vi.fn();
+    window.addEventListener('agentis:chat-panel-open', openChat, { once: true });
 
     await userEvent.click((await screen.findAllByRole('button', { name: 'More actions' }))[0]!);
-    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
-    await userEvent.type(screen.getByLabelText('Describe a surface'), 'a dashboard');
-    await userEvent.click(screen.getByRole('button', { name: 'Generate' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Ask agent' }));
 
-    expect((await screen.findAllByText('AI heading')).length).toBeGreaterThan(0);
+    expect(openChat).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.objectContaining({
+        initialViewportOverride: expect.objectContaining({
+          resourceId: 'app-1',
+          appView: expect.objectContaining({ appId: 'app-1', page: 'surface', targetLocked: true }),
+        }),
+      }),
+    }));
+    expect(screen.queryByLabelText('Describe a surface')).not.toBeInTheDocument();
   });
 
   it('renders the activity stream without an operator command line', async () => {

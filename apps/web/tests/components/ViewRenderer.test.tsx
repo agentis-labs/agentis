@@ -98,14 +98,10 @@ describe('ViewRenderer', () => {
     expect(container.querySelector('h2')?.className).toContain('text-[24px]');
   });
 
-  it('CodeSurface mounts a sandboxed iframe when policy allows, blocks otherwise', () => {
+  it('CodeSurface always mounts in the hardened sandbox (raw CustomView remains policy-gated)', () => {
     const node: ViewNode = { type: 'CodeSurface', code: 'root.appendChild(ui.heading("Hi"))', collections: ['orders'] };
-    const blocked = renderNode(node);
-    expect(blocked.container.querySelector('iframe')).toBeNull();
-    expect(blocked.getByText(/blocked by app policy/i)).toBeTruthy();
-
-    const allowed = renderNode(node, [], { allowCustomCode: true });
-    const frame = allowed.container.querySelector('iframe[title="Code surface"]') as HTMLIFrameElement | null;
+    const rendered = renderNode(node);
+    const frame = rendered.container.querySelector('iframe[title="Code surface"]') as HTMLIFrameElement | null;
     expect(frame).toBeTruthy();
     // Hardened: null-origin sandbox, zero network egress, kit + bridge injected.
     expect(frame?.getAttribute('sandbox')).toBe('allow-scripts');

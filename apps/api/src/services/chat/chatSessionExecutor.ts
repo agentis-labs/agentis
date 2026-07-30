@@ -266,14 +266,35 @@ export class ChatSessionExecutor {
           .from(schema.workflows)
           .where(and(eq(schema.workflows.appId, viewport.resourceId), eq(schema.workflows.workspaceId, workspaceId)))
           .all();
+        const surfaces = db
+          .select({
+            id: schema.appSurfaces.id,
+            name: schema.appSurfaces.name,
+            kind: schema.appSurfaces.kind,
+            revision: schema.appSurfaces.revision,
+            view: schema.appSurfaces.viewJson,
+          })
+          .from(schema.appSurfaces)
+          .where(and(eq(schema.appSurfaces.appId, viewport.resourceId), eq(schema.appSurfaces.workspaceId, workspaceId)))
+          .all();
+        const requestedPage = viewport.appView?.page;
+        const currentSurface = requestedPage ? surfaces.find((surface) => surface.name === requestedPage) : undefined;
         if (!app && workflows.length === 0) return viewport;
         return {
           ...viewport,
+          appView: {
+            appId: viewport.resourceId,
+            ...(viewport.appView ?? {}),
+            ...(currentSurface ? { page: currentSurface.name } : {}),
+            targetLocked: true,
+          },
           metadata: {
             ...viewport.metadata,
             appId: viewport.resourceId,
             appName: app?.name ?? null,
             workflows,
+            surfaces: surfaces.map(({ view: _view, ...surface }) => surface),
+            currentSurface: currentSurface ?? null,
             // A one-workflow App makes that workflow unambiguously "this workflow".
             workflowId: workflows.length === 1 ? workflows[0]!.id : viewport.metadata?.workflowId,
           },
@@ -369,7 +390,17 @@ export class ChatSessionExecutor {
     const registered = ChatToolExecutor.registeredIds();
     if (registered.size === 0) return tools;
     const kept = tools.filter((tool) => tool.name.startsWith('workflow.') || registered.has(tool.name));
-    const dropped = tools.length - kept.length;
+    const present = new Set(kept.map((tool) => tool.name));
+    for (const definition of ChatToolExecutor.registeredDefinitions()) {
+      if (present.has(definition.id)) continue;
+      kept.push({
+        name: definition.id,
+        description: definition.description,
+        parameters: definition.inputSchema as ToolDefinition['parameters'],
+      });
+      present.add(definition.id);
+    }
+    const dropped = tools.length - tools.filter((tool) => tool.name.startsWith('workflow.') || registered.has(tool.name)).length;
     if (dropped > 0) {
       this.#deps.logger?.debug?.('chat.catalog.filtered_unregistered', { dropped });
     }
