@@ -227,7 +227,7 @@ export function routeModelForTask(input: ModelRoutingInput): ModelRoutingDecisio
     };
   }
 
-  const preference = tierPreferenceFor(taskClass, `${input.purpose ?? ''}\n${input.task ?? ''}`);
+  const preference = tierPreferenceFor(taskClass, `${input.purpose ?? ''}\n${input.task ?? ''}`, input.role);
   const desiredCapability = inferDesiredCapability({
     task: input.task,
     purpose: input.purpose,
@@ -433,8 +433,9 @@ function selectCandidate(
   return ranked[0]!;
 }
 
-function tierPreferenceFor(taskClass: ModelTaskClass, text: string): ModelTier[] {
+function tierPreferenceFor(taskClass: ModelTaskClass, text: string, role?: string | null): ModelTier[] {
   if (taskClass === 'trivial') return ['fast', 'balanced', 'auto', 'flagship', 'custom'];
+  if (taskClass === 'simple_text' && role === 'conversation') return ['balanced', 'fast', 'auto', 'flagship', 'custom'];
   if (taskClass === 'simple_text') return ['fast', 'balanced', 'auto', 'flagship', 'custom'];
   if (taskClass === 'workflow_synthesis') {
     return matchesAny(text.toLowerCase(), COMPLEXITY_SIGNALS)

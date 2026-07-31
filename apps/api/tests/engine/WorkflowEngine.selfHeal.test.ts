@@ -428,8 +428,9 @@ describe('WorkflowEngine — self-healing (W7/W5.0)', () => {
       },
     });
 
-    await expect(runTo(engine, graphWithPinnedMissingAdapter(), completedOrFailed))
-      .rejects.toThrow(/no executable runtime/i);
+    const runId = await runTo(engine, graphWithPinnedMissingAdapter(), completedOrFailed);
+    expect(ctx.db.select({ status: schema.workflowRuns.status }).from(schema.workflowRuns)
+      .where(eq(schema.workflowRuns.id, runId)).get()?.status).toBe('FAILED');
     expect(sawHeal).toBe(false);
     expect(resolvedOrchestrator).toBe(false);
     const pending = new ApprovalInboxService(ctx.db, ctx.bus).list(ctx.workspace.id, 'pending');
