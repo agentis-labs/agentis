@@ -13,6 +13,7 @@ import { createWorkflowFromDescription, registerBuildTools } from '../../src/ser
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { hashWorkflowGraph } from '../../src/services/graphHash.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 import {
   applyLegacyWorkflowPatchDraft,
   applyWorkflowGraphOperations,
@@ -122,10 +123,12 @@ describe('stored workflow graph tools', () => {
       revision: { beforeHash: baseHash },
     });
     const saved = ctx.db.select().from(schema.workflows).all().find((row) => row.id === workflowId)!;
-    expect(saved.contentHash).toBe(hashWorkflowGraph(saved.graph as WorkflowGraph));
-    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')).toMatchObject({
+    const candidate = new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflowId)!;
+    expect(candidate.revision.semanticHash).toBe((changed.output as { revision: { afterHash: string } }).revision.afterHash);
+    expect((candidate.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')).toMatchObject({
       title: 'Changed safely', type: 'transform', config: { timeoutMs: 5000 },
     });
+    expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Transform');
 
     const stale = await registry.execute({
       id: 'stale', toolId: 'agentis.workflow.graph.patch', arguments: {
@@ -135,8 +138,8 @@ describe('stored workflow graph tools', () => {
     }, toolContext());
     expect(stale.ok).toBe(false);
     expect(stale.errorCode).toBe('GRAPH_REVISION_CONFLICT');
-    expect((ctx.db.select().from(schema.workflows).all().find((row) => row.id === workflowId)!.graph as WorkflowGraph)
-      .nodes.find((node) => node.id === 'transform')?.title).toBe('Changed safely');
+    expect(new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflowId)!.graph.nodes
+      .find((node) => node.id === 'transform')?.title).toBe('Changed safely');
   });
 
   it('previews a validated mutation without writing', async () => {
@@ -169,10 +172,12 @@ describe('stored workflow graph tools', () => {
       id: 'list-revisions', toolId: 'agentis.workflow.graph.revisions', arguments: { workflowId },
     }, toolContext());
     expect(listed.ok).toBe(true);
-    expect(listed.output).toMatchObject({
-      current: { hash: changedHash },
-      revisions: [{ hash: originalHash, replacedByHash: changedHash, operation: 'patch' }],
-    });
+    expect(listed.output).toMatchObject({ current: { activeHash: originalHash, candidateHash: changedHash } });
+    expect((listed.output as { revisions: Array<{ hash: string; status: string }> }).revisions)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ hash: originalHash, status: 'active' }),
+        expect.objectContaining({ hash: changedHash, status: 'candidate' }),
+      ]));
     expect(JSON.stringify(listed.output)).not.toContain('"graph"');
 
     const preview = await registry.execute({
@@ -182,8 +187,8 @@ describe('stored workflow graph tools', () => {
     }, toolContext());
     expect(preview.ok).toBe(true);
     expect(preview.output).toMatchObject({ committed: false, preview: true, operation: 'rollback' });
-    expect((ctx.db.select().from(schema.workflows).all().find((row) => row.id === workflowId)!.graph as WorkflowGraph)
-      .nodes.find((node) => node.id === 'transform')?.title).toBe('Revision two');
+    expect(new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflowId)!.graph.nodes
+      .find((node) => node.id === 'transform')?.title).toBe('Revision two');
 
     const stale = await registry.execute({
       id: 'rollback-stale', toolId: 'agentis.workflow.graph.rollback', arguments: {
@@ -202,8 +207,8 @@ describe('stored workflow graph tools', () => {
     expect(restored.output).toMatchObject({ committed: true, operation: 'rollback', revision: { afterHash: originalHash } });
     const saved = ctx.db.select().from(schema.workflows).all().find((row) => row.id === workflowId)!;
     expect((saved.graph as WorkflowGraph).nodes.find((node) => node.id === 'transform')?.title).toBe('Transform');
-    const history = ((saved.settings as Record<string, unknown>).workflowGraphRevisionHistory as Array<Record<string, unknown>>);
-    expect(history.some((revision) => revision.hash === changedHash && revision.operation === 'rollback')).toBe(true);
+    expect(new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflowId)!.graph.nodes
+      .find((node) => node.id === 'transform')?.title).toBe('Transform');
   });
 
   it('never corrupts a working graph across repeated approval-bypass repair attempts', async () => {

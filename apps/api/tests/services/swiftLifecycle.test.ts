@@ -27,6 +27,7 @@ import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/dep
 import type { ExtensionRuntime } from '../../src/services/extensionRuntime.js';
 import { graphContentHash, readBuildLoop, stampBuildLoop } from '../../src/services/workflow/workflowCompass.js';
 import { WorkflowTriggerDeploymentService } from '../../src/services/workflow/workflowTriggerDeployment.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -266,6 +267,12 @@ describe('the arming gate (SWIFT-T)', () => {
   it('arms cleanly once the workflow is hardened at the current graph', async () => {
     const wfId = seedWorkflow(storeGraph('cron'));
     const graph = wfRow(wfId).graph as WorkflowGraph;
+    // The deployment gate reads immutable revision trust. This fixture
+    // represents the proof promotion that precedes the hardened stamp.
+    const revisions = new WorkflowRevisionService(ctx.db);
+    const active = revisions.ensureWorkflow(ctx.workspace.id, wfId).active;
+    ctx.db.update(schema.workflows).set({ trustState: 'proven' }).where(eq(schema.workflows.id, wfId)).run();
+    ctx.db.update(schema.workflowGraphRevisions).set({ trustState: 'proven', status: 'active' }).where(eq(schema.workflowGraphRevisions.id, active.id)).run();
     stampBuildLoop(ctx.db, wfId, { hardened: { at: 't', graphHash: graphContentHash(graph), specHash: 's1' } });
     const deployments = new WorkflowTriggerDeploymentService(ctx.db, fakeRuntime);
     const deployment = await deployments.activate({

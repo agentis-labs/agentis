@@ -25,7 +25,7 @@ and a live product surface they can operate with you.
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org)
 ![Status](https://img.shields.io/badge/status-1.0.0%20stable-brightgreen.svg)
 
-> **Status: 1.0.0 stable.** Agentis is now in public release, and the CLI,
+> **Status: 1.0.1 stable.** Agentis is now in public release, and the CLI,
 > dashboard, and core runtime are ready for production use across 1.x updates.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fagentis-labs%2Fagentis)

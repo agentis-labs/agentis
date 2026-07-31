@@ -586,7 +586,16 @@ export class WorkflowEngine {
         .set({ status: 'FAILED', completedAt: now, updatedAt: now })
         .where(eq(schema.workflowRuns.id, args.initialState.runId))
         .run();
-      throw error;
+      const payload = {
+        runId: args.initialState.runId,
+        status: 'FAILED' as const,
+        workflowId: args.workflowId,
+        workspaceId: args.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      this.deps.bus.publish(REALTIME_ROOMS.run(args.initialState.runId), REALTIME_EVENTS.RUN_FAILED, payload);
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(args.workspaceId), REALTIME_EVENTS.RUN_FAILED, payload);
+      return { runId: args.initialState.runId, workflowId: args.workflowId };
     }
     const ctx: RunningContext = {
       runId: args.initialState.runId,
@@ -4532,6 +4541,10 @@ export class WorkflowEngine {
       const registration = this.deps.adapters.get(agentId);
       const canUseManagedSession = Boolean(this.deps.sessions && this.deps.sessionRuntime?.canRun(workspaceId));
       if (!registration && !canUseManagedSession) {
+        // Auto-authored specialists are intentionally soft pins: let the normal
+        // role/capability resolver choose a connected runtime when their own
+        // adapter has not been materialized yet.
+        if (this.#isSoftPinnedSpecialist(agentId)) continue;
         throw new AgentisError(
           'WORKFLOW_GRAPH_INVALID',
           `${node.title || node.id}: assigned specialist "${row.name}" has no executable runtime. Connect an available runtime or configure a workspace model before running.`,

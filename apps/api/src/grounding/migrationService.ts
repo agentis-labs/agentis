@@ -194,14 +194,36 @@ export class GroundingMigrationService {
         id: `step-${index + 1}`,
         type: 'agent_task',
         title: claim.predicate.replace(/_/g, ' '),
-        config: { instruction: typeof claim.objectJson === 'string' ? claim.objectJson : JSON.stringify(claim.objectJson), sourceClaimId: claim.id },
+        position: { x: (index + 1) * 240, y: 0 },
+        config: {
+          kind: 'agent_task',
+          prompt: typeof claim.objectJson === 'string' ? claim.objectJson : JSON.stringify(claim.objectJson),
+          inputKeys: [],
+          outputKeys: [],
+          capabilityTags: [],
+          sourceClaimId: claim.id,
+        },
       }));
+    const trigger = {
+      id: 'trigger',
+      type: 'trigger',
+      title: 'Migration trigger',
+      position: { x: 0, y: 0 },
+      config: { kind: 'trigger', triggerType: 'manual' },
+    };
+    const graphNodes = [trigger, ...steps];
     const draft = {
       title: candidate.title.replace(/^Repeated ad-hoc run: /, ''),
       target: candidate.recommendedTarget,
       graph: {
-        nodes: steps,
-        edges: steps.slice(1).map((step, index) => ({ from: steps[index]!.id, to: step.id })),
+        version: 1,
+        viewport: { x: 0, y: 0, zoom: 1 },
+        nodes: graphNodes,
+        edges: graphNodes.slice(1).map((step, index) => ({
+          id: `edge-${index + 1}`,
+          source: graphNodes[index]!.id,
+          target: step.id,
+        })),
       },
       controls: {
         humanCheckpoint: candidate.operationalRisk >= 0.5 || claims.some((c) => c.protectedDomain),

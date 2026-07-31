@@ -75,6 +75,12 @@ export function classifyWorkflowFailure(
     return policyFor('expected_business', explicitCode, 'The workflow reached an expected business outcome.');
   }
   if (
+    /\bBLOCKED_[A-Z0-9_]+\b/i.test(message)
+    && !/\bBLOCKED_(?:LIFECYCLE|POLICY|APPROVAL)_[A-Z0-9_]+\b/i.test(message)
+  ) {
+    return policyFor('data_contract', explicitCode, 'A workflow guard rejected the expression result and should be designed as a corrective path.');
+  }
+  if (
     POLICY_CODE.test(message)
     || /\b(awaiting approval|approval (?:required|denied|pending)|policy (?:blocked|denied)|human (?:input|review|required)|manual checkpoint)\b/i.test(message)
   ) {

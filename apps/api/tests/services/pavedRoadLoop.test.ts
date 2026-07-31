@@ -150,8 +150,9 @@ describe('one door (P0)', () => {
       toolCtx(),
     );
     expect(res.ok).toBe(true);
-    const out = res.output as { patched: boolean; compass?: { stage: string } };
-    expect(out.patched).toBe(true);
+    const out = res.output as { patched: boolean; candidate?: boolean; compass?: { stage: string } };
+    expect(out.patched).toBe(false);
+    expect(out.candidate).toBe(true);
     expect(out.compass?.stage).toBe('authored');
     const row = ctx.db.select().from(schema.workflows).all().find((w) => w.id === wfId)!;
     expect(readBuildLoop(row.settings).validatedAt).toBeTruthy();

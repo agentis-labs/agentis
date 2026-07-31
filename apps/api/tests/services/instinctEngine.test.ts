@@ -12,6 +12,7 @@ import { REALTIME_EVENTS, type WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { InstinctEngine } from '../../src/services/instinctEngine.js';
 import { MemoryStore } from '../../src/services/memory/memoryStore.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -21,6 +22,7 @@ let workflowId: string;
 beforeEach(async () => {
   ctx = await createTestContext();
   engine = new InstinctEngine(ctx.db, ctx.bus, new MemoryStore(ctx.db, ctx.logger), ctx.logger, 3);
+  engine.bindWorkflowRevisionService(new WorkflowRevisionService(ctx.db));
   workflowId = randomUUID();
   ctx.db.insert(schema.workflows).values({
     id: workflowId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
@@ -96,7 +98,7 @@ describe('InstinctEngine', () => {
     const res = await engine.applyInstinct({ workspaceId: ctx.workspace.id, workflowId, nodeId: 'summarizer', rootCause: 'context_too_long' });
     expect(res.applied).toBe(true);
 
-    const graph = (ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get()!.graph) as {
+    const graph = new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflowId)!.graph as {
       nodes: Array<{ id: string; type: string }>; edges: Array<{ source: string; target: string }>;
     };
     // A truncation transform was inserted and the inbound edge rewired through it.
@@ -117,7 +119,7 @@ describe('InstinctEngine', () => {
 
     const res = await engine.applyInstinct({ workspaceId: ctx.workspace.id, workflowId, nodeId: 'gh', rootCause: 'rate_limit' });
     expect(res.applied).toBe(true);
-    const node = (ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get()!.graph as {
+    const node = (new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflowId)!.graph as {
       nodes: Array<{ id: string; config: { maxRetries?: number; retryOn?: number[] } }>;
     }).nodes.find((n) => n.id === 'gh')!;
     expect(node.config.maxRetries).toBeGreaterThanOrEqual(3);

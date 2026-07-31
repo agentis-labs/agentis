@@ -17,6 +17,7 @@ import { ChatToolExecutor } from '../../src/services/chat/chatToolExecutor.js';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
 import { registerBuildTools } from '../../src/services/agentisToolHandlers/build.js';
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 class ScriptedChatAdapter implements AgentAdapter {
@@ -140,7 +141,7 @@ describe('chat golden path', () => {
     const workflows = ctx.db.select().from(schema.workflows).all();
     expect(workflows).toHaveLength(1);
     expect(workflows[0]!.title).toContain('Hello World');
-    const graph = workflows[0]!.graph as WorkflowGraph;
+    const graph = new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, workflows[0]!.id)!.graph as WorkflowGraph;
     expect(graph.nodes.map((n) => n.id)).toEqual(['trigger', 'produce_output', 'return_output']);
     expect(graph.nodes[1]).toEqual(expect.objectContaining({
       type: 'transform',

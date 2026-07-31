@@ -10,6 +10,7 @@ import { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
 import { ActiveWorkflowRegistry, type ActiveTrigger } from '../../src/engine/ActiveWorkflowRegistry.js';
 import type { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import type { AdapterManager } from '../../src/adapters/AdapterManager.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -30,6 +31,7 @@ beforeEach(async () => {
     engine: engine as unknown as WorkflowEngine,
     adapters: adapters as unknown as AdapterManager,
     bus: ctx.bus,
+    revisions: new WorkflowRevisionService(ctx.db),
   });
 });
 afterEach(() => ctx.close());
@@ -104,7 +106,7 @@ describe('TriggerRuntime — fire()', () => {
     expect(trigRow?.lastFiredAt).toBeTruthy();
   });
 
-  it('normalizes the graph before dispatch and heals the stored row (parity with API run path)', async () => {
+  it('stages normalization as a candidate and blocks unattended dispatch until promotion', async () => {
     // A graph synthesized with an operationId the connector does not support.
     // The manual `/run` path heals the stored row via loadWorkflow; the trigger
     // path must converge it too, so the canvas/exports don't keep showing a stale
@@ -128,15 +130,15 @@ describe('TriggerRuntime — fire()', () => {
       triggerType: 'cron',
       config: {},
     };
-    await runtime.fire({ trigger: t, payload: {} });
-    // Dispatched graph was normalized.
-    const dispatched = engine.startRun.mock.calls[0]?.[0] as { graph: WorkflowGraph } | undefined;
-    const sentOp = (dispatched?.graph.nodes.find((n) => n.id === 'send')?.config as { operationId?: string } | undefined)?.operationId;
-    expect(sentOp).toBe('send_message');
-    // Stored row healed too — the next fire is a no-op normalization.
+    await expect(runtime.fire({ trigger: t, payload: {} })).rejects.toMatchObject({ code: 'WORKFLOW_GRAPH_INVALID' });
+    expect(engine.startRun).not.toHaveBeenCalled();
+    const candidate = new WorkflowRevisionService(ctx.db).candidate(ctx.workspace.id, wfId);
+    const candidateOp = (candidate?.graph.nodes.find((n) => n.id === 'send')?.config as { operationId?: string } | undefined)?.operationId;
+    expect(candidateOp).toBe('send_message');
+    // Production bytes remain unchanged until the candidate is verified and promoted.
     const persisted = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, wfId)).get();
     const storedOp = ((persisted?.graph as WorkflowGraph).nodes.find((n) => n.id === 'send')?.config as { operationId?: string } | undefined)?.operationId;
-    expect(storedOp).toBe('send_message');
+    expect(storedOp).toBe('send_email');
   });
 
   it('throws RESOURCE_NOT_FOUND when workflow is missing', async () => {
