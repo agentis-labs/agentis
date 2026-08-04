@@ -83,7 +83,7 @@ export function AgentisNode({ data, selected }: { data: AgentisNodeData; selecte
     ? `${data.integrationId}${data.operationId ? ` · ${data.operationId}` : ''}`
     : null;
   const subtitle =
-    data.kind === 'extension_task' && data.operationName
+    (data.kind === 'extension_task' || data.kind === 'component_task') && data.operationName
       ? data.operationName
       : mcpIdentity ?? integrationIdentity ?? meta.label;
 
@@ -217,7 +217,7 @@ export function AgentisNode({ data, selected }: { data: AgentisNodeData; selecte
           <div
             className={clsx(
               'mt-px truncate text-[10.5px]',
-              data.kind === 'extension_task' && data.operationName
+              (data.kind === 'extension_task' || data.kind === 'component_task') && data.operationName
                 ? 'font-mono text-text-secondary'
                 : 'text-text-muted',
             )}

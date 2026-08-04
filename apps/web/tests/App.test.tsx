@@ -109,11 +109,13 @@ describe('<App /> launch auth', () => {
 
   it('shows login when local launch auth is unavailable', async () => {
     window.history.pushState({}, '', '/');
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ error: { code: 'RESOURCE_NOT_FOUND' } }), {
-        status: 404,
-        headers: { 'content-type': 'application/json' },
-      }),
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === '/healthz'
+        ? new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+        : new Response(JSON.stringify({ error: { code: 'RESOURCE_NOT_FOUND' } }), {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+          }),
     );
     vi.stubGlobal('fetch', fetchMock);
 
@@ -141,6 +143,9 @@ describe('<App /> launch auth', () => {
           status: 401,
           headers: { 'content-type': 'application/json' },
         });
+      }
+      if (String(input) === '/healthz') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       return new Response(JSON.stringify({}), { status: 200 });
     });

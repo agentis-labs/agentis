@@ -4,7 +4,27 @@
  * Extensions are deterministic, sandboxed capability units. They are not agent
  * abilities or prompt instructions; they are executable runtime extensions.
  */
-export type ExtensionRuntime = 'builtin' | 'node_worker' | 'docker_sandbox';
+export type ExtensionRuntime = 'builtin' | 'node_worker' | 'docker_sandbox' | 'component_oci';
+
+export type ComponentLanguage = 'python' | 'node';
+
+export interface ComponentManifestV2 {
+  manifestVersion: 2;
+  id: string;
+  version: string;
+  runtime: { language: ComponentLanguage; version: string };
+  entrypoint: string;
+  operations: ExtensionOperation[];
+  /** Relative lockfile path inside the immutable bundle. */
+  dependencyLock: string;
+  /** SHA-256 of the canonical bundle inventory and file bytes. */
+  bundleHash: string;
+  permissions: ExtensionPermission[];
+  allowedDomains?: string[];
+  resources: { cpu: number; memoryMb: number; timeoutSec: number; tmpMb?: number };
+  healthcheck?: string;
+  sbom?: Record<string, unknown>;
+}
 
 export type ExtensionPermission =
   | 'network'
@@ -76,6 +96,8 @@ export interface ExtensionManifest {
   source?: string;
   /** docker_sandbox only: absolute path to the unpacked extension bundle. */
   bundleDir?: string;
+  /** component_oci only: language-neutral, locked multi-file bundle contract. */
+  component?: ComponentManifestV2;
   /** Operation names that are valid Listener sources (mirror of operation.isListenerSource). */
   listenerOperations?: string[];
 }

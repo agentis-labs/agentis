@@ -51,12 +51,12 @@ export const extensionContentsSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
   version: z.string().min(1),
-  runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox']),
+  runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox', 'component_oci']),
   manifest: z.object({
     name: z.string().min(1),
     slug: z.string().min(1),
     version: z.string().min(1),
-    runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox']),
+    runtime: z.enum(['builtin', 'node_worker', 'docker_sandbox', 'component_oci']),
     entrypoint: z.string().min(1).optional(),
     operations: z.array(z.object({
       name: z.string().min(1),
@@ -69,6 +69,7 @@ export const extensionContentsSchema = z.object({
     allowedDomains: z.array(z.string()).optional(),
     source: z.string().optional(),
     bundleDir: z.string().optional(),
+    component: z.unknown().optional(),
   }),
 });
 export type ExtensionContents = z.infer<typeof extensionContentsSchema>;

@@ -71,6 +71,7 @@ export const NODE_CONFIG_META: Record<string, NodeConfigMeta> = {
   agent_task: { label: 'Agent task', reason: 'Routes a prompt to an agent that matches the requested capabilities.' },
   agent_session: { label: 'Agent session', reason: 'Runs a persistent agent session that can think, use tools, and resume work.' },
   extension_task: { label: 'Extension', reason: 'Runs a typed deterministic extension operation.' },
+  component_task: { label: 'Component', reason: 'Runs a portable, version-pinned Python or Node component in a hardened OCI container.' },
   agent_swarm: { label: 'Agent swarm', reason: 'Fans items out across agents and collects the results.' },
   dynamic_swarm: { label: 'Dynamic swarm', reason: 'Lets a planner decompose a goal into bounded parallel tasks.' },
   planner: { label: 'Planner', reason: 'Turns a goal into a bounded sequence of executable agent steps.' },
@@ -164,6 +165,10 @@ export function evaluateNodeReadiness(config: unknown, context: NodeConfigContex
     case 'extension_task':
       if (!stringOf(c.extensionId) && !stringOf(c.extensionSlug)) return missing('Choose an extension.');
       return stringOf(c.operationName) ? ready() : missing('Choose an extension operation.');
+    case 'component_task':
+      if (!stringOf(c.componentId) && !stringOf(c.componentSlug)) return missing('Choose a component.');
+      if (!stringOf(c.version)) return missing('Pin a component version.');
+      return stringOf(c.operationName) ? ready() : missing('Choose a component operation.');
     case 'transform':
       return stringOf(c.expression) ? ready() : missing('Enter a transform expression.');
     case 'filter':

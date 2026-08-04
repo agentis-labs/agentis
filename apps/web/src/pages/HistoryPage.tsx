@@ -85,15 +85,17 @@ export function HistoryPage() {
     } catch {
       // Fallback: synthesize from /v1/runs
       try {
-        const runs = await api<{ runs: Array<{ id: string; status: string; workflowId?: string; workflowName?: string; finishedAt?: string; startedAt?: string; failedNode?: string; failedNodeId?: string }> }>(
+        const runs = await api<{ runs: Array<{ id: string; status: string; executionStatus?: string; outcomeStatus?: string; workflowId?: string; workflowName?: string; finishedAt?: string; startedAt?: string; failedNode?: string; failedNodeId?: string }> }>(
           '/v1/runs?limit=100',
         );
         setEvents((runs.runs ?? []).map((r) => ({
           id: `run-${r.id}`,
-          type: r.status === 'failed' ? REALTIME_EVENTS.RUN_FAILED : REALTIME_EVENTS.RUN_COMPLETED,
-          title: r.status === 'failed' ? `${r.workflowName ?? 'Workflow'} failed` : `${r.workflowName ?? 'Workflow'} completed`,
+          type: r.outcomeStatus === 'accomplished' ? REALTIME_EVENTS.RUN_COMPLETED : REALTIME_EVENTS.RUN_FAILED,
+          title: r.outcomeStatus === 'accomplished'
+            ? `${r.workflowName ?? 'Workflow'} accomplished`
+            : `${r.workflowName ?? 'Workflow'} ${r.outcomeStatus ?? r.status}`,
           timestamp: r.finishedAt ?? r.startedAt ?? new Date().toISOString(),
-          status: r.status,
+          status: r.outcomeStatus === 'accomplished' ? 'completed' : r.executionStatus === 'completed' ? 'failed' : r.status,
           runId: r.id,
           workflowId: r.workflowId,
           workflowName: r.workflowName,
@@ -119,6 +121,7 @@ export function HistoryPage() {
 
   useRealtime([
     REALTIME_EVENTS.RUN_COMPLETED,
+    REALTIME_EVENTS.RUN_SETTLED,
     REALTIME_EVENTS.RUN_FAILED,
     REALTIME_EVENTS.AGENT_TASK_COMPLETED,
   ], () => { void refresh(); });

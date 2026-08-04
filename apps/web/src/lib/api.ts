@@ -137,11 +137,15 @@ export function apiErrorMessage(error: unknown): string {
       base && detail && !base.includes(detail) ? `${base} — ${detail}` : (base ?? detail);
     // Keep server-provided diagnostic details, but use a locale-specific summary
     // for error codes whose semantics are part of Agentis's public UI contract.
-    const message = localized
-      ? detail && !localized.includes(detail)
-        ? `${localized} — ${detail}`
-        : localized
-      : fallback;
+    // Stable public errors (auth, validation, permissions) keep their localized
+    // contract. INTERNAL_ERROR is intentionally different: its server message
+    // is the only concrete diagnostic the operator has, so do not replace it
+    // with a generic translation.
+    const message = code === 'INTERNAL_ERROR' && fallback
+      ? fallback
+      : localized
+        ? detail && !localized.includes(detail) ? `${localized} — ${detail}` : localized
+        : fallback;
     if (message && code) return `${message} (${code})`;
     if (message) return message;
     if (code) return code;

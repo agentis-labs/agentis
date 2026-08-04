@@ -19,7 +19,7 @@ fabricating results, and judges runs against declared outcomes. Source: `apps/ap
 State stores: `RunStateStore.ts`, `ReadyQueue.ts`, `WaitingInputBuffer.ts`,
 `ActiveWorkflowRegistry.ts`. Crash recovery re-hydrates interrupted runs on boot.
 
-## Node kinds (47)
+## Node kinds (48)
 
 `WorkflowNodeType` (`packages/core/src/types/workflow.ts`):
 
@@ -29,7 +29,7 @@ State stores: `RunStateStore.ts`, `ReadyQueue.ts`, `WaitingInputBuffer.ts`,
   `data_query`, `data_mutate`, `aggregate_window`, `http_request`, `graphql`,
   `workflow_store`, `workspace_store`, `scratchpad`.
 - **Intelligence** — `agent_task`, `agent_session`, `agent_swarm`, `dynamic_swarm`, `planner`,
-  `evaluator`, `guardrails`, `extension_task`.
+  `evaluator`, `guardrails`, `extension_task`, `component_task`.
 - **Knowledge** — `knowledge` (semantic search), `knowledge_ingest`.
 - **Utility** — `datetime`, `crypto_util`, `xml_parse`, `markdown`, `spreadsheet` (csv/xlsx),
   `html_extract`, `json_schema_validate`.
@@ -107,6 +107,18 @@ not prove that the requested result exists. A scoped workflow emits `run.accompl
 after its persisted definition-of-done passes. Success-gated App dependencies, event rules,
 conversation continuations, and operator status surfaces all use the same outcome interpreter
 (`services/workflow/runOutcome.ts`).
+
+Every terminal run persists a **RunSettlement** that keeps execution truth separate from outcome
+truth: `executionStatus` records lifecycle state, while `outcomeStatus` is `unverified`,
+`accomplished`, `partial`, `failed`, or `blocked`. The settlement pins the workflow revision and
+semantic hash and carries evidence references, deficiencies, and `settledAt`. Published MCP
+workflow calls report success only when both dimensions are `completed` and `accomplished`.
+
+World-changing operations also persist **mutation receipts**. A receipt records attempted,
+succeeded, failed, and skipped counts plus per-item terminal status and whether authoritative
+verification was performed and passed. Batch success therefore describes the final observed
+state, not merely an accepted request. If later production evidence contradicts a trusted result,
+the workflow and revision are demoted to `regressed` rather than leaving stale proof in force.
 
 Executable cross-workflow rules are persisted in `workflow_event_subscriptions` and authored
 with `agentis.workflow.rule`. App-level `dependsOn` remains the simple dependency primitive;

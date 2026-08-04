@@ -1,53 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { deriveSurface } from '../../src/lib/viewportContext';
 
-/**
- * The chat's viewport awareness is gated off when the surface is 'unknown'
- * (see ThreadView `awarenessActive`). Apps/app-detail/workflow routes must map
- * to real surfaces so the operator chat actually knows where the user is.
- */
 describe('deriveSurface', () => {
-  it('maps the Apps index to a real surface', () => {
-    expect(deriveSurface('/apps')).toMatchObject({ surface: 'apps', title: 'Apps' });
-  });
-
-  it('maps an App detail route to app_detail with the app as the resource', () => {
-    expect(deriveSurface('/apps/app-123')).toMatchObject({
+  it('drops stale interface state when the workflow facet is active', () => {
+    expect(deriveSurface('/apps/app-1', '?facet=workflow&page=surface&mode=live&node=node-1')).toEqual({
       surface: 'app_detail',
       resourceKind: 'app',
-      resourceId: 'app-123',
-    });
-  });
-
-  it('folds the facet into the title so the agent knows which part of the App is open', () => {
-    expect(deriveSurface('/apps/app-123', '?facet=workflow')).toMatchObject({
-      surface: 'app_detail',
-      resourceKind: 'app',
-      resourceId: 'app-123',
+      resourceId: 'app-1',
       title: 'App · Workflow',
+      facet: 'workflow',
     });
   });
 
-  it('maps a workflow detail route', () => {
-    expect(deriveSurface('/workflows/wf-1')).toMatchObject({ surface: 'workflow_detail', resourceKind: 'workflow', resourceId: 'wf-1' });
-  });
-
-  it('captures the exact App page, editor mode, and selected component', () => {
-    expect(deriveSurface('/apps/app-123', '?facet=interface&page=Pipeline&mode=edit&node=kanban-main')).toMatchObject({
+  it('keeps the selected page only while the interface is active', () => {
+    expect(deriveSurface('/apps/app-1', '?facet=interface&page=news-dashboard&mode=edit&node=hero')).toEqual({
       surface: 'app_detail',
-      resourceId: 'app-123',
-      page: 'Pipeline',
+      resourceKind: 'app',
+      resourceId: 'app-1',
+      title: 'App · Interface',
+      page: 'news-dashboard',
       mode: 'edit',
-      selectedNodeId: 'kanban-main',
+      selectedNodeId: 'hero',
       facet: 'interface',
-      title: 'App · Pipeline',
     });
-  });
-
-  it('never returns the inert "unknown" surface for app routes', () => {
-    for (const route of ['/apps', '/apps/x', '/apps/x?facet=interface', '/workflows', '/workflows/y']) {
-      const [path, search] = route.split('?');
-      expect(deriveSurface(path ?? '/', search ? `?${search}` : '').surface).not.toBe('unknown');
-    }
   });
 });

@@ -57,16 +57,19 @@ export function NotificationPanel() {
   const [acknowledgedIds, setAcknowledgedIds] = useState<Set<string>>(new Set());
   const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
 
-  useRealtime([REALTIME_EVENTS.RUN_COMPLETED], (env) => {
+  useRealtime([REALTIME_EVENTS.RUN_SETTLED], (env) => {
     const payload = env.payload as Record<string, unknown>;
     const runId = payload.runId as string | undefined;
     const workflowId = payload.workflowId as string | undefined;
-    const title = (payload.workflowName as string) || (payload.title as string) || 'Workflow succeeded';
+    const title = (payload.workflowName as string) || (payload.title as string) || 'Workflow run';
+    const outcome = typeof payload.outcomeStatus === 'string' ? payload.outcomeStatus : 'unverified';
+    const accomplished = outcome === 'accomplished';
+    const partial = outcome === 'partial';
     
     toast.push({
-      title: 'Run completed successfully',
-      body: title,
-      tone: 'success',
+      title: accomplished ? 'Outcome accomplished' : partial ? 'Outcome only partially verified' : `Outcome ${outcome}`,
+      body: accomplished ? title : `${title} finished, but delivery was not verified as accomplished.`,
+      tone: accomplished ? 'success' : partial ? 'warn' : 'danger',
       action: runId ? {
         label: 'View details',
         onClick: () => openRunModal({ runId, workflowId, source: 'toast' }),

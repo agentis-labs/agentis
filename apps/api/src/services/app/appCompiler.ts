@@ -69,6 +69,12 @@ export interface AppCompileReport {
   executionBlockerCount: number;
   /** Target evidence/hardening still required, but never a reason to block a manual proof run. */
   evidencePendingCount: number;
+  readinessFacets: {
+    structural: { ready: boolean; blockers: number };
+    executable: { ready: boolean; blockers: number };
+    verified: { ready: boolean; pending: number };
+    deliverable: { ready: boolean; blockers: number };
+  };
   counts: Record<AppCompileStatus, number>;
   checks: AppCompileCheck[];
   workflowProofs: Array<{
@@ -308,8 +314,16 @@ export function compileAppReadiness(
   const readyForExecution = structuralReady && executionBlockerCount === 0;
   const executableReady = readyForExecution;
   const ready = structuralReady && counts.block === 0;
+  const structuralBlockers = checks.filter((check) => check.status === 'block' && structuralLayers.has(check.layer)).length;
+  const deliverableBlockers = checks.filter((check) => check.status === 'block' && (check.layer === 'surface' || check.layer === 'channel')).length;
+  const readinessFacets = {
+    structural: { ready: structuralReady, blockers: structuralBlockers },
+    executable: { ready: readyForExecution, blockers: executionBlockerCount },
+    verified: { ready: evidencePendingCount === 0, pending: evidencePendingCount },
+    deliverable: { ready: ready && deliverableBlockers === 0, blockers: deliverableBlockers },
+  };
   return {
-    appId, target, generatedAt: now.toISOString(), structuralReady, executableReady, ready, readyForExecution, executionBlockerCount, evidencePendingCount, counts, checks, workflowProofs, next, repairPlan,
+    appId, target, generatedAt: now.toISOString(), structuralReady, executableReady, ready, readyForExecution, executionBlockerCount, evidencePendingCount, readinessFacets, counts, checks, workflowProofs, next, repairPlan,
     summary: ready
       ? `COMPILED: App is ready for ${target} execution (${counts.pass} checks passed${counts.warn ? `, ${counts.warn} warning(s)` : ''}).`
       : readyForExecution

@@ -3092,6 +3092,45 @@ CREATE INDEX idx_app_interface_proofs_revision
   ON app_interface_proofs(revision_id, status);
 `,
   },
+  {
+    version: 124,
+    name: 'verified_delivery_settlements_and_runtime_envelopes',
+    sql: `
+ALTER TABLE workflow_runs ADD COLUMN execution_status TEXT NOT NULL DEFAULT 'queued';
+ALTER TABLE workflow_runs ADD COLUMN outcome_status TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE workflow_runs ADD COLUMN settlement_json TEXT NOT NULL DEFAULT '{}';
+
+UPDATE workflow_runs SET execution_status = CASE
+  WHEN status IN ('CREATED','PLANNING') THEN 'queued'
+  WHEN status = 'RUNNING' THEN 'running'
+  WHEN status IN ('PAUSED','WAITING') THEN 'waiting'
+  WHEN status IN ('COMPLETED','COMPLETED_WITH_CONTRACT_VIOLATION','COMPLETED_WITH_ERRORS') THEN 'completed'
+  WHEN status = 'FAILED' THEN 'failed'
+  WHEN status = 'CANCELLED' THEN 'cancelled'
+  ELSE 'queued' END;
+
+UPDATE workflow_runs SET outcome_status = CASE
+  WHEN json_extract(run_state, '$.verdict.outcome') = 'accomplished' AND status = 'COMPLETED' THEN 'accomplished'
+  WHEN json_extract(run_state, '$.verdict.outcome') = 'partial' THEN 'partial'
+  WHEN json_extract(run_state, '$.verdict.outcome') IN ('hollow','failed_checks') THEN 'failed'
+  WHEN status = 'FAILED' THEN 'failed'
+  WHEN status = 'CANCELLED' THEN 'blocked'
+  ELSE 'unverified' END;
+
+CREATE TABLE agent_execution_envelopes (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  agent_id        TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  run_id          TEXT,
+  conversation_id TEXT,
+  envelope_json   TEXT NOT NULL,
+  observed_at     TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_agent_execution_envelopes_agent
+  ON agent_execution_envelopes(workspace_id, agent_id, observed_at);
+`,
+  },
 ];
 
 

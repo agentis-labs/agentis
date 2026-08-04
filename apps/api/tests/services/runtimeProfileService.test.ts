@@ -69,6 +69,33 @@ describe('RuntimeProfileService', () => {
     expect(() => service.writeResource(agent, soul!.id, '# Stale overwrite', soul!.checksum))
       .toThrow('changed outside Agentis');
   });
+
+  it('persists a non-secret execution envelope for each concrete turn', async () => {
+    seedHermesProfile();
+    const agent = seedAgent();
+    ctx.db.update(schema.agents).set({
+      config: {
+        env: { HERMES_HOME: home },
+        runtimeProfile: {
+          version: 2,
+          mode: 'native',
+          permissionProfile: 'workspace_write',
+          inheritUserConfig: true,
+          inheritProjectInstructions: true,
+          inheritPlugins: true,
+          inheritSkills: true,
+          browser: 'disabled',
+          sessionPolicy: 'persistent',
+        },
+      },
+    }).run();
+    const service = new RuntimeProfileService(ctx.db, new AdapterManager(ctx.logger), ctx.logger);
+    const descriptor = await service.captureExecution(ctx.workspace.id, agent.id, { conversationId: 'conv-1' });
+    expect(descriptor.executionEnvelope).toMatchObject({ agentId: agent.id, permissionProfile: 'workspace_write', browserEnabled: false });
+    expect(ctx.db.select().from(schema.agentExecutionEnvelopes).all()).toEqual([
+      expect.objectContaining({ agentId: agent.id, conversationId: 'conv-1', envelope: expect.objectContaining({ envelopeVersion: 1 }) }),
+    ]);
+  });
 });
 
 function seedHermesProfile(): void {

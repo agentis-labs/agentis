@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateRunOutcome } from '../../src/services/workflow/runOutcome.js';
+import { buildRunSettlement, evaluateRunOutcome } from '../../src/services/workflow/runOutcome.js';
 
 describe('evaluateRunOutcome', () => {
   it('allows legacy clean completion while keeping it explicitly unverified', () => {
@@ -29,5 +29,29 @@ describe('evaluateRunOutcome', () => {
       status: 'COMPLETED_WITH_CONTRACT_VIOLATION',
       runState: { verdict: { outcome: 'accomplished' } },
     })).toMatchObject({ canAdvanceOnSuccess: false, accomplished: false, reason: 'contract_violation' });
+  });
+
+  it('settles execution and business outcome independently with evidence', () => {
+    const settlement = buildRunSettlement({
+      status: 'COMPLETED',
+      revisionId: 'rev-1',
+      semanticHash: 'hash-1',
+      settledAt: '2026-01-01T00:00:00.000Z',
+      runState: {
+        verdict: {
+          outcome: 'failed_checks',
+          checks: [{ checkId: 'delivered', evidence: 'Provider receipt was absent.' }],
+          deficiencies: [{ checkId: 'delivered', detail: 'Delivery was not proven.', producingNodeIds: ['send'] }],
+        },
+      },
+    });
+    expect(settlement).toMatchObject({
+      executionStatus: 'completed',
+      outcomeStatus: 'failed',
+      revisionId: 'rev-1',
+      semanticHash: 'hash-1',
+      evidence: [{ kind: 'check', id: 'delivered', summary: 'Provider receipt was absent.' }],
+      deficiencies: [{ code: 'delivered', detail: 'Delivery was not proven.', producingNodeIds: ['send'] }],
+    });
   });
 });

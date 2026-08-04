@@ -3,6 +3,7 @@ import {
   ControlButton,
   Controls,
   MiniMap,
+  PanOnScrollMode,
   ReactFlow,
   SelectionMode,
   useViewport,
@@ -132,6 +133,10 @@ export function CanvasEngine({
       selectionMode={selectionMode ?? SelectionMode.Partial}
       deleteKeyCode={deleteKeyCode ?? ['Delete', 'Backspace']}
       multiSelectionKeyCode={multiSelectionKeyCode ?? ['Meta', 'Control']}
+      // Trackpads emit two-finger wheel deltas in both axes. Free panning keeps
+      // canvas navigation natural without requiring a middle mouse button.
+      panOnScrollMode={flowProps.panOnScrollMode ?? PanOnScrollMode.Free}
+      panOnScrollSpeed={flowProps.panOnScrollSpeed ?? 1}
       proOptions={{ hideAttribution: true, ...(proOptions ?? {}) }}
       className={['agentis-flow-canvas bg-canvas', className].filter(Boolean).join(' ')}
     >

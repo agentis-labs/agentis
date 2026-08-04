@@ -74,6 +74,17 @@ function str(value: unknown, name: string): string {
   return value;
 }
 
+function successfulMutationReceipt(ids: string[], detail: string) {
+  return {
+    attempted: Math.max(1, ids.length),
+    succeeded: Math.max(1, ids.length),
+    failed: 0,
+    skipped: 0,
+    items: ids.map((id) => ({ id, status: 'succeeded' as const })),
+    verification: { performed: true, passed: true, detail },
+  };
+}
+
 function removeInterfaceNode(node: import('@agentis/core').ViewNode, nodeId: string): { node: import('@agentis/core').ViewNode; removed: boolean } {
   if (node.type === 'Split') {
     if (node.left.nodeId === nodeId) return { node: node.right, removed: true };
@@ -816,8 +827,9 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       handler: (args, ctx) => {
         const collection = str(args.collection, 'collection');
         const rec = data.insert(ctx.workspaceId, resolveAppId(args, ctx), collection, obj(args.record, 'record'), ctx.agentId);
+        data.getRecord(ctx.workspaceId, resolveAppId(args, ctx), collection, rec.id);
         emitCreation(deps, ctx, { creationKind: 'record', title: collection, collection, count: 1 });
-        return rec;
+        return { ...rec, mutationReceipt: successfulMutationReceipt([rec.id], `Inserted and re-read ${rec.id} from ${collection}.`) };
       },
     },
     {
@@ -829,7 +841,13 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         mutating: true,
         autoExecute: true,
       },
-      handler: (args, ctx) => data.update(ctx.workspaceId, resolveAppId(args, ctx), str(args.collection, 'collection'), str(args.id, 'id'), obj(args.patch, 'patch')),
+      handler: (args, ctx) => {
+        const appId = resolveAppId(args, ctx);
+        const collection = str(args.collection, 'collection');
+        const rec = data.update(ctx.workspaceId, appId, collection, str(args.id, 'id'), obj(args.patch, 'patch'));
+        data.getRecord(ctx.workspaceId, appId, collection, rec.id);
+        return { ...rec, mutationReceipt: successfulMutationReceipt([rec.id], `Updated and re-read ${rec.id} from ${collection}.`) };
+      },
     },
     {
       definition: {
@@ -843,8 +861,9 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
       handler: (args, ctx) => {
         const collection = str(args.collection, 'collection');
         const rec = data.upsert(ctx.workspaceId, resolveAppId(args, ctx), collection, obj(args.match, 'match'), obj(args.record, 'record'), ctx.agentId);
+        data.getRecord(ctx.workspaceId, resolveAppId(args, ctx), collection, rec.id);
         emitCreation(deps, ctx, { creationKind: 'record', title: collection, collection, count: 1 });
-        return rec;
+        return { ...rec, mutationReceipt: successfulMutationReceipt([rec.id], `Upserted and re-read ${rec.id} from ${collection}.`) };
       },
     },
     {
@@ -918,7 +937,37 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
           counts[result.op] = (counts[result.op] ?? 0) + 1;
           return counts;
         }, {});
-        return { ok: true, appId, applied: results.length, byOperation, results, summary: `Applied ${results.length} datastore mutation(s) in one tool call.` };
+        // Verify the final authoritative state, not every intermediate operation:
+        // a valid transaction may update and then delete the same record. The
+        // last operation for each collection/id is the state the receipt proves.
+        const finalStates = new Map<string, (typeof results)[number]>();
+        for (const result of results) {
+          if (result.id) finalStates.set(`${result.collection}\u0000${result.id}`, result);
+        }
+        for (const result of finalStates.values()) {
+          if (!result.id) continue;
+          if (result.op === 'delete') {
+            let absent = false;
+            try { data.getRecord(ctx.workspaceId, appId, result.collection, result.id); } catch { absent = true; }
+            if (!absent) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `Batch delete could not be verified for ${result.collection}/${result.id}`);
+          } else {
+            data.getRecord(ctx.workspaceId, appId, result.collection, result.id);
+          }
+        }
+        const receiptIds = results.map((result, index) => result.id ?? `operation-${index}`);
+        return {
+          ok: true,
+          appId,
+          applied: results.length,
+          byOperation,
+          results,
+          mutationReceipt: {
+            ...successfulMutationReceipt(receiptIds, `Transaction committed ${results.length} datastore mutation(s); authoritative reads verified ${finalStates.size} final record state(s).`),
+            attempted: results.length,
+            succeeded: results.length,
+          },
+          summary: `Applied and verified ${results.length} datastore mutation(s) in one transaction.`,
+        };
       },
     },
     {
@@ -931,8 +980,14 @@ export function registerAppDataTools(registry: AgentisToolRegistry, deps: ToolHa
         autoExecute: true,
       },
       handler: (args, ctx) => {
-        data.delete(ctx.workspaceId, resolveAppId(args, ctx), str(args.collection, 'collection'), str(args.id, 'id'));
-        return { deleted: true };
+        const appId = resolveAppId(args, ctx);
+        const collection = str(args.collection, 'collection');
+        const id = str(args.id, 'id');
+        data.delete(ctx.workspaceId, appId, collection, id);
+        let absent = false;
+        try { data.getRecord(ctx.workspaceId, appId, collection, id); } catch { absent = true; }
+        if (!absent) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `Delete could not be verified for ${id}`);
+        return { deleted: true, id, mutationReceipt: successfulMutationReceipt([id], `Authoritative read confirmed ${id} is absent from ${collection}.`) };
       },
     },
     {

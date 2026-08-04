@@ -93,7 +93,14 @@ export function groupClosure(closure: AppClosure): Record<ClosureKind, ClosureIt
   return out;
 }
 
-export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appId: string): AppClosure {
+export type AppRevisionTarget = 'active' | 'candidate';
+
+export function computeAppClosure(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  appId: string,
+  revisionTarget: AppRevisionTarget = 'active',
+): AppClosure {
   const items: ClosureItem[] = [];
   const warnings: string[] = [];
   const add = (item: ClosureItem) => {
@@ -102,12 +109,19 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
 
   // ── 1. Workflows: App-owned, then everything they reach, transitively. ──────
   const owned = db
-    .select({ id: schema.workflows.id, title: schema.workflows.title, graph: schema.workflows.graph })
+    .select({
+      id: schema.workflows.id,
+      title: schema.workflows.title,
+      graph: schema.workflows.graph,
+      activeRevisionId: schema.workflows.activeRevisionId,
+      candidateRevisionId: schema.workflows.candidateRevisionId,
+    })
     .from(schema.workflows)
     .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId)))
     .all();
 
-  const graphsById = new Map(owned.map((w) => [w.id, w]));
+  const selectedOwned = owned.map((w) => ({ ...w, graph: selectedGraph(db, w, revisionTarget) }));
+  const graphsById = new Map(selectedOwned.map((w) => [w.id, w]));
   for (const w of owned) {
     add({ kind: 'workflow', id: w.id, label: w.title, required: true, ownedByApp: true, reason: 'Belongs to this App', transportable: true });
   }
@@ -120,7 +134,7 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
   const scriptWorkflowIds = scriptRefs(script).filter((r) => r.kind === 'workflow').map((r) => r.value);
   const scriptAgentIds = scriptRefs(script).filter((r) => r.kind === 'agent').map((r) => r.value);
 
-  const queue = [...owned.flatMap((w) => referencedIds(w.graph, 'workflow')), ...scriptWorkflowIds];
+  const queue = [...selectedOwned.flatMap((w) => referencedIds(w.graph, 'workflow')), ...scriptWorkflowIds];
   const seenWorkflows = new Set(owned.map((w) => w.id));
   // Depth guard: a workflow chain could otherwise drag in an unbounded graph.
   for (let guard = 0; queue.length > 0 && guard < 500; guard += 1) {
@@ -128,7 +142,13 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
     if (seenWorkflows.has(refId)) continue;
     seenWorkflows.add(refId);
     const child = db
-      .select({ id: schema.workflows.id, title: schema.workflows.title, graph: schema.workflows.graph })
+      .select({
+        id: schema.workflows.id,
+        title: schema.workflows.title,
+        graph: schema.workflows.graph,
+        activeRevisionId: schema.workflows.activeRevisionId,
+        candidateRevisionId: schema.workflows.candidateRevisionId,
+      })
       .from(schema.workflows)
       .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.id, refId)))
       .get();
@@ -136,9 +156,10 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
       warnings.push(`A sub-workflow (${refId}) no longer exists — that step will not run after import.`);
       continue;
     }
-    graphsById.set(child.id, child);
+    const selectedChild = { ...child, graph: selectedGraph(db, child, revisionTarget) };
+    graphsById.set(child.id, selectedChild);
     add({ kind: 'workflow', id: child.id, label: child.title, required: true, ownedByApp: false, reason: 'Called as a sub-workflow', transportable: true });
-    queue.push(...referencedIds(child.graph, 'workflow'));
+    queue.push(...referencedIds(selectedChild.graph, 'workflow'));
   }
 
   const allGraphs = [...graphsById.values()];
@@ -253,4 +274,19 @@ export function computeAppClosure(db: AgentisSqliteDb, workspaceId: string, appI
     extensionIds: items.filter((i) => i.kind === 'extension' && i.transportable).map((i) => i.id),
     warnings,
   };
+}
+
+function selectedGraph(
+  db: AgentisSqliteDb,
+  workflow: { graph: unknown; activeRevisionId: string | null; candidateRevisionId: string | null },
+  target: AppRevisionTarget,
+): unknown {
+  const revisionId = target === 'candidate'
+    ? workflow.candidateRevisionId ?? workflow.activeRevisionId
+    : workflow.activeRevisionId;
+  if (!revisionId) return workflow.graph;
+  return db.select({ graph: schema.workflowGraphRevisions.graphJson })
+    .from(schema.workflowGraphRevisions)
+    .where(eq(schema.workflowGraphRevisions.id, revisionId))
+    .get()?.graph ?? workflow.graph;
 }

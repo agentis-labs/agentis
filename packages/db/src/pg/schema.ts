@@ -362,6 +362,9 @@ export const workflowRuns = pgTable('workflow_runs', {
     .references(() => workflows.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id),
   status: text('status').notNull().default('CREATED'),
+  executionStatus: text('execution_status').notNull().default('queued'),
+  outcomeStatus: text('outcome_status').notNull().default('unverified'),
+  settlement: jsonb('settlement_json').notNull().default(sql`'{}'::jsonb`),
   runState: jsonb('run_state').notNull(),
   graphSnapshot: jsonb('graph_snapshot'),
   workflowRevisionId: uuid('workflow_revision_id').references(() => workflowGraphRevisions.id, { onDelete: 'set null' }),
@@ -372,6 +375,18 @@ export const workflowRuns = pgTable('workflow_runs', {
   startedAt: timestamp('started_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   ...baseTimestamps(),
+});
+
+export const agentExecutionEnvelopes = pgTable('agent_execution_envelopes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  // Agent table is part of the wider deferred PG parity set; SQLite enforces FK.
+  agentId: uuid('agent_id').notNull(),
+  runId: uuid('run_id'),
+  conversationId: uuid('conversation_id'),
+  envelope: jsonb('envelope_json').notNull(),
+  observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const ledgerEvents = pgTable('ledger_events', {

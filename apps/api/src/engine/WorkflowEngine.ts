@@ -35,6 +35,7 @@ import {
   type WorkflowNodeContractDeviation,
   type ReadyQueueItem,
   type ExtensionTaskNodeConfig,
+  type ComponentTaskNodeConfig,
   type AgentTaskNodeConfig,
   type KnowledgeNodeConfig,
   type KnowledgeIngestNodeConfig,
@@ -136,6 +137,7 @@ import { type IntentManifest } from '../services/intentContract.js';
 import { graphContentHash, stampBuildLoop, readBuildLoop, type BuildLoopOutcomeHealth } from '../services/workflow/workflowCompass.js';
 import { readWorkflowSpec, type WorkflowSpec } from '../services/workflow/workflowSpec.js';
 import { evaluateRunVerdict, terminalOutputPaths, unwrapReturnEnvelope, type RunVerdict, type VerdictProbeDeps } from '../services/workflow/workflowVerdict.js';
+import { buildRunSettlement } from '../services/workflow/runOutcome.js';
 import { decideRecoveryPolicy, recoveryFailureFingerprint, recoveryTierForPlan, repairPlanFingerprint } from '../services/workflow/workflowRecoveryPolicy.js';
 import { composeOperatingManual, getWorkspaceManual } from '../services/agent/agentOperatingManual.js';
 import { loadAgentIdentitySnapshot, renderAgentIdentityBlock } from '../services/agent/agentIdentity.js';
@@ -384,6 +386,7 @@ export interface AppDataPort {
   update(workspaceId: string, appId: string, collection: string, id: string, patch: Record<string, unknown>): { id: string };
   upsert(workspaceId: string, appId: string, collection: string, match: Record<string, unknown>, record: Record<string, unknown>): { id: string };
   delete(workspaceId: string, appId: string, collection: string, id: string): void;
+  getRecord(workspaceId: string, appId: string, collection: string, id: string): { id: string; data?: Record<string, unknown> };
 }
 
 export interface SpecialistRouterPort {
@@ -583,7 +586,7 @@ export class WorkflowEngine {
       const now = new Date().toISOString();
       this.deps.db
         .update(schema.workflowRuns)
-        .set({ status: 'FAILED', completedAt: now, updatedAt: now })
+        .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', completedAt: now, updatedAt: now })
         .where(eq(schema.workflowRuns.id, args.initialState.runId))
         .run();
       const payload = {
@@ -810,7 +813,7 @@ export class WorkflowEngine {
         state.status = 'FAILED';
         const now = new Date().toISOString();
         this.deps.db.update(schema.workflowRuns).set({
-          status: 'FAILED', runState: state as unknown as object, completedAt: now, updatedAt: now,
+          status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', runState: state as unknown as object, completedAt: now, updatedAt: now,
         }).where(eq(schema.workflowRuns.id, run.id)).run();
         const payload = { runId: run.id, status: 'FAILED', workflowId: run.workflowId, workspaceId: run.workspaceId };
         this.deps.bus.publish(REALTIME_ROOMS.run(run.id), REALTIME_EVENTS.RUN_FAILED, payload);
@@ -905,7 +908,7 @@ export class WorkflowEngine {
         // Truly unrecoverable (no graph or no persisted state) — fail loud.
         this.deps.db
           .update(schema.workflowRuns)
-          .set({ status: 'FAILED', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
           .where(eq(schema.workflowRuns.id, run.id))
           .run();
         failed += 1;
@@ -1030,7 +1033,7 @@ export class WorkflowEngine {
         this.deps.logger.warn('engine.run_resume_failed', { runId: run.id, err: (err as Error).message });
         this.deps.db
           .update(schema.workflowRuns)
-          .set({ status: 'FAILED', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
           .where(eq(schema.workflowRuns.id, run.id))
           .run();
         failed += 1;
@@ -1090,7 +1093,7 @@ export class WorkflowEngine {
       }
       this.deps.db
         .update(schema.workflowRuns)
-        .set({ status: 'CANCELLED', ...(state ? { runState: state as unknown as object } : {}), completedAt: now, updatedAt: now })
+        .set({ status: 'CANCELLED', executionStatus: 'cancelled', outcomeStatus: 'blocked', ...(state ? { runState: state as unknown as object } : {}), completedAt: now, updatedAt: now })
         .where(eq(schema.workflowRuns.id, run.id))
         .run();
       const payload = { runId: run.id, status: 'CANCELLED', workflowId: run.workflowId, workspaceId: run.workspaceId, reason: 'workflow no longer exists' };
@@ -1438,6 +1441,9 @@ export class WorkflowEngine {
         }
         case 'extension_task':
           output = await this.#executeExtensionTask(ctx, node, resolvedConfig as ExtensionTaskNodeConfig, args.inputs);
+          break;
+        case 'component_task':
+          output = await this.#executeExtensionTask(ctx, node, componentAsExtension(resolvedConfig as ComponentTaskNodeConfig), args.inputs);
           break;
         case 'knowledge':
           output = await this.#executeKnowledgeNode(ctx, resolvedConfig as KnowledgeNodeConfig, args.inputs);
@@ -2677,6 +2683,11 @@ export class WorkflowEngine {
       }
       case 'extension_task': {
         const result = await this.#executeExtensionTask(ctx, node, resolvedConfig as ExtensionTaskNodeConfig, item.inputData);
+        await this.#completeNode(ctx, node.id, result);
+        return;
+      }
+      case 'component_task': {
+        const result = await this.#executeExtensionTask(ctx, node, componentAsExtension(resolvedConfig as ComponentTaskNodeConfig), item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -7938,6 +7949,8 @@ export class WorkflowEngine {
       .update(schema.workflowRuns)
       .set({
         status: 'CANCELLED',
+        executionStatus: 'cancelled',
+        outcomeStatus: 'blocked',
         runState: (state ?? run.runState) as unknown as object,
         completedAt: now,
         updatedAt: now,
@@ -7957,7 +7970,7 @@ export class WorkflowEngine {
       state.status = 'FAILED';
       const now = new Date().toISOString();
       await this.deps.db.update(schema.workflowRuns).set({
-        status: 'FAILED', runState: state as unknown as object, completedAt: now, updatedAt: now,
+        status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', runState: state as unknown as object, completedAt: now, updatedAt: now,
       }).where(eq(schema.workflowRuns.id, runId));
       const payload = { runId, status: 'FAILED', workflowId: run.workflowId, workspaceId: run.workspaceId };
       this.deps.bus.publish(REALTIME_ROOMS.run(runId), REALTIME_EVENTS.RUN_FAILED, payload);
@@ -7977,7 +7990,7 @@ export class WorkflowEngine {
     }
     const now = new Date().toISOString();
     await this.deps.db.update(schema.workflowRuns).set({
-      status: 'PAUSED', runState: (state ?? run.runState) as unknown as object, updatedAt: now,
+      status: 'PAUSED', executionStatus: 'waiting', outcomeStatus: 'unverified', runState: (state ?? run.runState) as unknown as object, updatedAt: now,
     }).where(eq(schema.workflowRuns.id, runId));
     const payload = { runId, status: 'PAUSED', workflowId: run.workflowId, workspaceId: run.workspaceId };
     this.deps.bus.publish(REALTIME_ROOMS.run(runId), REALTIME_EVENTS.RUN_PAUSED, payload);
@@ -8209,15 +8222,27 @@ export class WorkflowEngine {
     // This IS the durable status write; a pending coalesced flush would only
     // race it with a staler snapshot, so drop it first.
     this.#cancelPendingPersist(ctx.runId);
+    const persistedState = toPersistedRunState(ctx.state);
+    const settledAt = finishing ? new Date().toISOString() : null;
+    const settlement = buildRunSettlement({
+      status,
+      runState: persistedState,
+      revisionId: ctx.workflowRevisionId ?? null,
+      semanticHash: graphContentHash(ctx.graph),
+      settledAt,
+    });
     await this.deps.db
       .update(schema.workflowRuns)
       .set({
         status,
-        runState: toPersistedRunState(ctx.state),
+        runState: persistedState,
+        executionStatus: settlement.executionStatus,
+        outcomeStatus: settlement.outcomeStatus,
+        settlement,
         ...(status === 'RUNNING' && !ctx.startedAt
           ? { startedAt: new Date().toISOString() }
           : {}),
-        ...(finishing ? { completedAt: new Date().toISOString() } : {}),
+        ...(finishing ? { completedAt: settledAt! } : {}),
         updatedAt: new Date().toISOString(),
       })
       .where(eq(schema.workflowRuns.id, ctx.runId));
@@ -8292,7 +8317,13 @@ export class WorkflowEngine {
       if (status !== 'CANCELLED') {
         try {
           const wfRow = this.deps.db
-            .select({ graph: schema.workflows.graph, settings: schema.workflows.settings })
+            .select({
+              graph: schema.workflows.graph,
+              settings: schema.workflows.settings,
+              contentHash: schema.workflows.contentHash,
+              activeRevisionId: schema.workflows.activeRevisionId,
+              trustState: schema.workflows.trustState,
+            })
             .from(schema.workflows)
             .where(eq(schema.workflows.id, ctx.workflowId))
             .get();
@@ -8358,13 +8389,28 @@ export class WorkflowEngine {
                   actorId: 'verdict-engine',
                   outputSummary: `hardened stamp cleared: production run ${ctx.runId} verdict ${runVerdict.outcome}`,
                 });
-                this.deps.onWorkflowDemoted?.({
-                  workspaceId: ctx.workspaceId,
-                  workflowId: ctx.workflowId,
-                  runId: ctx.runId,
-                  verdict: runVerdict,
-                });
               }
+              // Trust is operational, not a permanent badge. A deficient
+              // production run against the exact active bytes makes that active
+              // revision regressed until it is freshly verified and promoted.
+              if (wfRow.activeRevisionId
+                && wfRow.contentHash === stamp.graphHash
+                && (wfRow.trustState === 'proven' || wfRow.trustState === 'break_glass')) {
+                this.deps.db.update(schema.workflows).set({
+                  trustState: 'regressed',
+                  updatedAt: stamp.at,
+                }).where(eq(schema.workflows.id, ctx.workflowId)).run();
+                this.deps.db.update(schema.workflowGraphRevisions).set({
+                  trustState: 'regressed',
+                  updatedAt: stamp.at,
+                }).where(eq(schema.workflowGraphRevisions.id, wfRow.activeRevisionId)).run();
+              }
+              this.deps.onWorkflowDemoted?.({
+                workspaceId: ctx.workspaceId,
+                workflowId: ctx.workflowId,
+                runId: ctx.runId,
+                verdict: runVerdict,
+              });
               // Sentinel on outcomes: a deficient production run files an Issue
               // exactly like a failed one — silence is not an option.
               if (this.deps.instincts) {
@@ -8441,6 +8487,9 @@ export class WorkflowEngine {
     const runStatusPayload = {
       runId: ctx.runId,
       status,
+      executionStatus: settlement.executionStatus,
+      outcomeStatus: settlement.outcomeStatus,
+      settlement,
       workflowId: ctx.workflowId,
       workspaceId: ctx.workspaceId,
       // WHY the run parked, on the wire — so a surface can say "out of credits"
@@ -8465,6 +8514,11 @@ export class WorkflowEngine {
     this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), eventName, runStatusPayload);
     this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), eventName, runStatusPayload);
     this.#appendActivityTail(ctx.runId, eventName, runStatusPayload);
+    if (finishing) {
+      this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.RUN_SETTLED, runStatusPayload);
+      this.deps.bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.RUN_SETTLED, runStatusPayload);
+      this.#appendActivityTail(ctx.runId, REALTIME_EVENTS.RUN_SETTLED, runStatusPayload);
+    }
     // Business progression gets its own strong event. `run.completed` remains
     // an execution-lifecycle signal for compatibility; rules that mean "the
     // objective was achieved" subscribe to this verdict-backed event instead.
@@ -8618,7 +8672,7 @@ export class WorkflowEngine {
   #sufficiencyTripwireApplies(node: WorkflowNode): boolean {
     const cfg = node.config as { kind?: string; allowEmptyOutput?: boolean };
     if (cfg.allowEmptyOutput === true) return false;
-    return ['agent_task', 'agent_session', 'agent_swarm', 'integration', 'mcp', 'extension_task', 'code', 'http_request', 'browser', 'subflow', 'transform'].includes(cfg.kind ?? '');
+    return ['agent_task', 'agent_session', 'agent_swarm', 'integration', 'mcp', 'extension_task', 'component_task', 'code', 'http_request', 'browser', 'subflow', 'transform'].includes(cfg.kind ?? '');
   }
 
   /** First floor violation in this node's output, or null. */
@@ -10516,6 +10570,19 @@ function implicitConditionEdgeResult(output: Record<string, unknown> | unknown):
     }
   }
   return true;
+}
+
+function componentAsExtension(config: ComponentTaskNodeConfig): ExtensionTaskNodeConfig {
+  return {
+    kind: 'extension_task',
+    extensionId: config.componentId,
+    extensionSlug: config.componentSlug,
+    operationName: config.operationName,
+    version: config.version,
+    inputMapping: config.inputMapping,
+    outputMapping: config.outputMapping,
+    timeoutMs: config.timeoutMs,
+  };
 }
 
 

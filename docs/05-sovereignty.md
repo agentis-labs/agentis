@@ -35,6 +35,11 @@ workspace (`workspace_model_config`) or via `AGENTIS_ORCHESTRATOR_*` env vars.
   `local / dev / staging / prod / fleet / custom`, each with its own encrypted credential
   vault.
 
+- **App bundle v2** (`.agentisapp`, `/v1/apps/:id/export`) — exports the `active` revision by
+  default or an explicitly requested `candidate`, embeds content-addressed components, strips
+  host-local executable configuration, and rejects incompatible or unsafe imports before
+  activation.
+
 ## Deployment
 
 - **Docker** — a single container (`Dockerfile`, `docker-compose.yml`) bundles better-sqlite3,

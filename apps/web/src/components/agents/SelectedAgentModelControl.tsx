@@ -98,6 +98,12 @@ export function SelectedAgentModelControl({
     const runtimeConfig = configToRuntimeConfig(agentAdapterType, storedConfig);
     const nextRuntimeConfig = withRuntimeModel(runtimeConfig, agentAdapterType, nextModel);
     const nextKnownConfig = runtimeConfigToAdapterConfig(agentAdapterType, nextRuntimeConfig);
+    // A model-only edit must not silently opt a legacy agent into a synthesized
+    // execution profile. The Runtime editor is the explicit migration point;
+    // here we preserve an existing profile but otherwise leave it absent.
+    if (!Object.prototype.hasOwnProperty.call(storedConfig, 'runtimeProfile')) {
+      delete nextKnownConfig.runtimeProfile;
+    }
     const nextConfig = { ...storedConfig, ...nextKnownConfig };
     if (!Object.prototype.hasOwnProperty.call(nextKnownConfig, 'model')) delete nextConfig.model;
 

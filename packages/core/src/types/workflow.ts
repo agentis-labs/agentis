@@ -36,6 +36,7 @@ export type WorkflowNodeType =
   | 'agent_task'
   | 'agent_session'
   | 'extension_task'
+  | 'component_task'
   | 'agent_swarm'
   | 'dynamic_swarm'
   | 'planner'
@@ -221,6 +222,7 @@ export type WorkflowNodeConfig = (
   | AgentTaskNodeConfig
   | AgentSessionNodeConfig
   | ExtensionTaskNodeConfig
+  | ComponentTaskNodeConfig
   | KnowledgeNodeConfig
   | KnowledgeIngestNodeConfig
   | RouterNodeConfig
@@ -1295,6 +1297,68 @@ export type WorkflowRunStatus =
   | 'FAILED'
   | 'CANCELLED';
 
+/** Mechanical process lifecycle, intentionally independent of worldly success. */
+export type RunExecutionStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** Business outcome. Only `accomplished` is a successful delivery. */
+export type RunOutcomeStatus =
+  | 'unverified'
+  | 'accomplished'
+  | 'partial'
+  | 'failed'
+  | 'blocked';
+
+export interface RunEvidenceRef {
+  kind: 'check' | 'artifact' | 'record' | 'http' | 'browser' | 'operator';
+  id?: string;
+  summary: string;
+}
+
+/** Executes a portable Component v2 bundle through the hardened OCI runtime. */
+export interface ComponentTaskNodeConfig {
+  kind: 'component_task';
+  componentId?: string;
+  componentSlug?: string;
+  operationName: string;
+  /** Pin in production for reproducible execution. */
+  version?: string;
+  inputMapping: Record<string, string>;
+  outputMapping: Record<string, string>;
+  timeoutMs?: number;
+}
+
+export interface RunSettlement {
+  executionStatus: RunExecutionStatus;
+  outcomeStatus: RunOutcomeStatus;
+  revisionId: string | null;
+  semanticHash: string | null;
+  evidence: RunEvidenceRef[];
+  deficiencies: Array<{ code: string; detail: string; producingNodeIds?: string[] }>;
+  settledAt: string | null;
+}
+
+export interface MutationReceiptItem {
+  id?: string;
+  status: 'succeeded' | 'failed' | 'skipped';
+  detail?: string;
+}
+
+export interface MutationReceipt {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  idempotencyKey?: string;
+  items: MutationReceiptItem[];
+  verification: { performed: boolean; passed: boolean; detail?: string };
+}
+
 export type WorkflowNodeStatus =
   | 'PENDING'
   | 'WAITING'
@@ -1338,6 +1402,7 @@ export type WorkflowTrustState =
   | 'unverified'
   | 'proven_equivalent'
   | 'break_glass'
+  | 'regressed'
   | 'rejected';
 
 export interface WorkflowRevisionSummary {

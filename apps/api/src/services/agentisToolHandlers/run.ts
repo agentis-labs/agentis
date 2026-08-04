@@ -1108,6 +1108,9 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     workflowTitle: workflow?.title ?? run.ephemeralTitle ?? null,
     isEphemeral: run.isEphemeral,
     status: run.status,
+    executionStatus: run.executionStatus,
+    outcomeStatus: run.outcomeStatus,
+    settlement: run.settlement,
     // The honest headline. `accomplished:false` on a COMPLETED run is the whole
     // point of SWIFT — do NOT report success to the operator on that basis.
     ...(verdict ? { accomplished, outcome: verdict.outcome } : {}),

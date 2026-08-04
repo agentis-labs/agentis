@@ -177,9 +177,9 @@ describe('/v1/mcp/rpc', () => {
     // PAVED-ROAD P2 — doctrine at the door: external harnesses receive the
     // build loop + data-flow contract in the initialize result.
     expect(body.result.instructions).toBeTruthy();
-    expect(body.result.instructions).toContain('AGENTIS BUILD LOOP');
-    expect(body.result.instructions).toContain('agentis.workflow.dry_run');
-    expect(body.result.instructions).toContain('agentis.workflow.loop_status');
+    expect(body.result.instructions).toContain('agentis.tools.search');
+    expect(body.result.instructions).toContain('agentis.tools.describe');
+    expect(body.result.instructions).toContain('accomplished settlement');
   });
 
   it('exposes read-only workspace state as MCP resources (not an empty stub)', async () => {
@@ -230,15 +230,39 @@ describe('/v1/mcp/rpc', () => {
     expect(body.error?.code).toBe(-32602);
   });
 
-  it('lists published workflows and mcp-exposed registry tools, hiding non-exposed ones', async () => {
+  it('advertises only the progressive-disclosure gateway while legacy operations remain callable', async () => {
     seedPublishedWorkflow('greeter');
     const res = await rpc(app(), 'tools/list');
     const tools = (await res.json() as { result: { tools: Array<{ name: string }> } }).result.tools;
     const names = tools.map((t) => t.name);
-    expect(names).toContain('agentis__greeter');
-    expect(names).toContain('agentis.echo');
-    expect(names).toContain('agentis.build_workflow');
+    expect(names.length).toBeLessThanOrEqual(8);
+    expect(names).toContain('agentis.tools.search');
+    expect(names).toContain('agentis.tools.describe');
+    expect(names).toContain('agentis.tools.call');
+    expect(names).not.toContain('agentis__greeter');
+    expect(names).not.toContain('agentis.echo');
     expect(names).not.toContain('agentis.secret');
+  });
+
+  it('searches, describes, and calls legacy operations through the gateway', async () => {
+    const searched = await rpc(app(), 'tools/call', {
+      name: 'agentis.tools.search', arguments: { query: 'echo' },
+    });
+    const searchPayload = JSON.parse(((await searched.json()) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text) as { matches: Array<{ name: string }> };
+    expect(searchPayload.matches.map((match) => match.name)).toContain('agentis.echo');
+
+    const described = await rpc(app(), 'tools/call', {
+      name: 'agentis.tools.describe', arguments: { name: 'agentis.echo' },
+    });
+    const description = JSON.parse(((await described.json()) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text) as { name: string; inputSchema: unknown };
+    expect(description.name).toBe('agentis.echo');
+    expect(description.inputSchema).toBeTruthy();
+
+    const called = await rpc(app(), 'tools/call', {
+      name: 'agentis.tools.call', arguments: { name: 'agentis.echo', arguments: { via: 'gateway' } },
+    });
+    expect(JSON.parse(((await called.json()) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text))
+      .toEqual({ echoed: { via: 'gateway' } });
   });
 
   it('calls a registry tool via tools/call', async () => {

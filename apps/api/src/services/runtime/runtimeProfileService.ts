@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -21,6 +21,7 @@ import type {
   RuntimeResourceWriteResult,
   RuntimeValue,
   RuntimeValueSource,
+  RuntimeProfileV2,
 } from '@agentis/core';
 import { AgentisError } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -61,6 +62,7 @@ export class RuntimeProfileService {
       : null;
     const resources = this.listResources(agent);
     const config = record(agent.config);
+    const runtimeProfile = effectiveRuntimeProfile(config);
     const adapterType = agent.adapterType as AdapterType;
     const home = runtimeHome(adapterType, config);
     const configuredModel = firstString(agent.runtimeModel, config.model);
@@ -95,6 +97,19 @@ export class RuntimeProfileService {
       ? await adapter.describeRuntime().catch(() => null)
       : null;
 
+    const binary = firstString(config.binaryPath, config.command) ?? defaultBinary(adapterType);
+    const cwd = runtimeProfile.projectRoot
+      ?? firstString(config.cwd, config.workingDirectory, config.repositoryPath)
+      ?? home
+      ?? process.cwd();
+    const browserEnabled = runtimeProfile.browser === 'enabled'
+      || (runtimeProfile.browser === 'inherit' && config.browser === true);
+    const capabilityWarnings = [
+      ...(!health.isHealthy ? [health.error ?? 'Runtime health check failed.'] : []),
+      ...(runtimeProfile.mode === 'containerized' ? ['Containerized harness supervision is not configured for this adapter.'] : []),
+      ...(browserEnabled && capabilities.affordances?.browser !== true ? ['Browser was requested but is not advertised by the connected runtime.'] : []),
+    ];
+
     return {
       adapterType,
       displayName: runtimeDisplayName(adapterType),
@@ -128,7 +143,51 @@ export class RuntimeProfileService {
       resourceCount: resources.length,
       probedAt: observedAt,
       limitations: capabilities.limitations,
+      runtimeProfile,
+      executionEnvelope: {
+        envelopeVersion: 1,
+        observedAt,
+        agentId: agent.id,
+        adapterType,
+        runtimeProfile,
+        binary,
+        cliVersion: driverState?.version?.value ?? null,
+        cwd,
+        model: currentModel?.value ?? null,
+        reasoningEffort: firstString(config.modelReasoningEffort),
+        serviceTier: config.fastMode === true ? 'fast' : null,
+        browserEnabled,
+        permissionProfile: runtimeProfile.permissionProfile,
+        loadedSources: [
+          ...(runtimeProfile.inheritUserConfig ? ['user' as const] : []),
+          ...(runtimeProfile.inheritProjectInstructions ? ['project' as const] : []),
+          'agentis' as const,
+        ],
+        mcpServerCount: capabilities.affordances?.nativeMcp ? 1 : 0,
+        capabilityWarnings,
+      },
     };
+  }
+
+  /** Persist the immutable, non-secret launch facts used for a concrete turn. */
+  async captureExecution(
+    workspaceId: string,
+    agentId: string,
+    refs: { runId?: string | null; conversationId?: string | null } = {},
+  ): Promise<RuntimeDescriptor> {
+    const agent = this.loadAgent(workspaceId, agentId);
+    const descriptor = await this.describe(agent);
+    if (!descriptor.executionEnvelope) return descriptor;
+    this.db.insert(schema.agentExecutionEnvelopes).values({
+      id: randomUUID(),
+      workspaceId,
+      agentId,
+      runId: refs.runId ?? null,
+      conversationId: refs.conversationId ?? null,
+      envelope: descriptor.executionEnvelope,
+      observedAt: descriptor.executionEnvelope.observedAt,
+    }).run();
+    return descriptor;
   }
 
   listResources(agent: AgentRow, force = false): RuntimeResourceDescriptor[] {
@@ -261,6 +320,29 @@ export class RuntimeProfileService {
       if (key.startsWith(`${agentId}:`)) this.#resourceCache.delete(key);
     }
   }
+}
+
+function effectiveRuntimeProfile(config: Record<string, unknown>): RuntimeProfileV2 {
+  const raw = record(config.runtimeProfile);
+  const mode = raw.mode === 'hermetic' || raw.mode === 'containerized' ? raw.mode : 'native';
+  const permissionProfile = raw.permissionProfile === 'read_only'
+    || raw.permissionProfile === 'workspace_write'
+    || raw.permissionProfile === 'externally_sandboxed'
+    ? raw.permissionProfile
+    : 'trusted_local';
+  return {
+    version: 2,
+    mode,
+    ...(firstString(raw.projectRoot, config.cwd) ? { projectRoot: firstString(raw.projectRoot, config.cwd)! } : {}),
+    ...(firstString(raw.profileName, config.profile, config.profileName) ? { profileName: firstString(raw.profileName, config.profile, config.profileName)! } : {}),
+    permissionProfile,
+    inheritUserConfig: mode === 'native' && raw.inheritUserConfig !== false,
+    inheritProjectInstructions: mode === 'native' && raw.inheritProjectInstructions !== false,
+    inheritPlugins: mode === 'native' && raw.inheritPlugins !== false,
+    inheritSkills: mode === 'native' && raw.inheritSkills !== false,
+    browser: raw.browser === 'enabled' || raw.browser === 'disabled' ? raw.browser : 'inherit',
+    sessionPolicy: raw.sessionPolicy === 'ephemeral' ? 'ephemeral' : 'persistent',
+  };
 }
 
 function resourceCacheKey(agent: AgentRow, home: string | null, cwd: string | null): string {

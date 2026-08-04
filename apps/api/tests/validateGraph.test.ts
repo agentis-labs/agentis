@@ -284,6 +284,7 @@ describe('validateWorkflowGraph — WORKFLOW-UPDATE node kinds', () => {
   }
 
   it('accepts all new node kinds with valid config', () => {
+    expect(validateWorkflowGraph(single({ kind: 'component_task', componentSlug: 'python-example', version: '1.0.0', operationName: 'execute', inputMapping: {}, outputMapping: {} })).ok).toBe(true);
     expect(validateWorkflowGraph(single({ kind: 'datetime', operation: 'now' })).ok).toBe(true);
     expect(validateWorkflowGraph(single({ kind: 'crypto_util', operation: 'uuid' })).ok).toBe(true);
     expect(validateWorkflowGraph(single({ kind: 'xml_parse', operation: 'parse' })).ok).toBe(true);
@@ -299,6 +300,7 @@ describe('validateWorkflowGraph — WORKFLOW-UPDATE node kinds', () => {
   });
 
   it('rejects invalid new-kind config', () => {
+    expect(() => validateWorkflowGraph(single({ kind: 'component_task', operationName: 'execute', inputMapping: {}, outputMapping: {} }))).toThrow(/componentId or componentSlug/);
     expect(() => validateWorkflowGraph(single({ kind: 'stop_error' }))).toThrow(/missing errorMessage/);
     expect(() => validateWorkflowGraph(single({ kind: 'code', language: 'ruby', code: 'x', inputKeys: [] }))).toThrow(/language/);
     expect(() => validateWorkflowGraph(single({ kind: 'json_schema_validate', schema: 'not json', onViolation: 'flag' }))).toThrow(/not valid JSON/);

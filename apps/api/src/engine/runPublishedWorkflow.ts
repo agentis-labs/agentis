@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import type { WorkflowGraph, WorkflowRunState } from '@agentis/core';
+import type { RunExecutionStatus, RunOutcomeStatus, RunSettlement, WorkflowGraph, WorkflowRunState } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowEngine } from './WorkflowEngine.js';
@@ -37,6 +37,9 @@ export interface RunPublishedWorkflowResult {
   /** Declared output (return_output / isOutput nodes), or last completed node. */
   output: unknown;
   terminal: boolean;
+  executionStatus: RunExecutionStatus;
+  outcomeStatus: RunOutcomeStatus;
+  settlement: RunSettlement | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -83,12 +86,15 @@ export async function runPublishedWorkflow(args: RunPublishedWorkflowArgs): Prom
   const { runId } = await startPublishedWorkflow(args);
   const final = await awaitRun(args.db, runId, args.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const terminal = isTerminal(final.status);
-  const succeeded = final.status === 'COMPLETED' || final.status === 'COMPLETED_WITH_CONTRACT_VIOLATION';
+  const executionCompleted = final.executionStatus === 'completed';
   return {
     runId,
     status: final.status,
-    output: succeeded ? finalOutput(args.graph, final.runState as WorkflowRunState) : null,
+    output: executionCompleted ? finalOutput(args.graph, final.runState as WorkflowRunState) : null,
     terminal,
+    executionStatus: final.executionStatus as RunExecutionStatus,
+    outcomeStatus: final.outcomeStatus as RunOutcomeStatus,
+    settlement: final.settlement && typeof final.settlement === 'object' ? final.settlement as RunSettlement : null,
   };
 }
 

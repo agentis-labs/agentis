@@ -109,6 +109,18 @@ const extensionTaskConfigSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
 });
 
+const componentTaskConfigSchema = z.object({
+  ...outputConfigFields,
+  kind: z.literal('component_task'),
+  componentId: z.string().min(1).optional(),
+  componentSlug: z.string().min(1).optional(),
+  operationName: z.string().min(1),
+  version: z.string().min(1).optional(),
+  inputMapping: z.record(z.string(), z.string()).default({}),
+  outputMapping: z.record(z.string(), z.string()).default({}),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
 const knowledgeConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('knowledge'),
@@ -427,6 +439,7 @@ export const workflowNodeConfigSchema = z.union([
   agentTaskConfigSchema,
   agentSessionConfigSchema,
   extensionTaskConfigSchema,
+  componentTaskConfigSchema,
   knowledgeConfigSchema,
   knowledgeIngestConfigSchema,
   routerConfigSchema,

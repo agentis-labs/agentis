@@ -101,6 +101,7 @@ const NODE_KIND_ICON: Record<string, LucideIcon> = {
   agent_task: Bot,
   agent_session: BotMessageSquare,
   extension_task: Puzzle,
+  component_task: Package,
   agent_swarm: Users,
   dynamic_swarm: Network,
   planner: ListTree,

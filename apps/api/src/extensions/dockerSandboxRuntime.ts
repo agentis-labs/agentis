@@ -70,27 +70,49 @@ export async function runDockerSandboxExtension(args: {
   }
 
   const docker = loaded.docker;
-  const memoryBytes = CONSTANTS.EXTENSION_DOCKER_MEMORY_MB * 1024 * 1024;
-  const cpuQuota = Math.floor(CONSTANTS.EXTENSION_DOCKER_CPU_QUOTA * 100_000);
-  const tmpBytes = CONSTANTS.EXTENSION_DOCKER_TMP_MAX_MB * 1024 * 1024;
+  const component = args.manifest.component;
+  const memoryBytes = (component?.resources.memoryMb ?? CONSTANTS.EXTENSION_DOCKER_MEMORY_MB) * 1024 * 1024;
+  const cpuQuota = Math.floor((component?.resources.cpu ?? CONSTANTS.EXTENSION_DOCKER_CPU_QUOTA) * 100_000);
+  const tmpBytes = (component?.resources.tmpMb ?? CONSTANTS.EXTENSION_DOCKER_TMP_MAX_MB) * 1024 * 1024;
+  const isComponent = args.manifest.runtime === 'component_oci' && Boolean(component);
+  const image = component?.runtime.language === 'python'
+    ? process.env.AGENTIS_COMPONENT_PYTHON_IMAGE?.trim() || 'python:3.12-alpine'
+    : component?.runtime.language === 'node'
+      ? process.env.AGENTIS_COMPONENT_NODE_IMAGE?.trim() || 'node:20-alpine'
+      : 'node:20-alpine';
+  const entrypoint = component?.entrypoint ?? args.manifest.entrypoint ?? 'index.js';
+  const command = component?.runtime.language === 'python' ? ['python', `/extension/${entrypoint}`] : ['node', `/extension/${entrypoint}`];
+  const wantsNetwork = isComponent && (component?.permissions ?? []).includes('network');
+  const egressProxy = process.env.AGENTIS_COMPONENT_EGRESS_PROXY?.trim();
+  const componentNetwork = process.env.AGENTIS_COMPONENT_NETWORK?.trim();
+  if (wantsNetwork && (!egressProxy || !componentNetwork)) {
+    return {
+      ok: false,
+      errorCode: 'EXTENSION_RUNTIME_UNAVAILABLE',
+      message: 'Component requested network access but the isolated AGENTIS_COMPONENT_NETWORK and AGENTIS_COMPONENT_EGRESS_PROXY are not both configured; execution failed closed.',
+      durationMs: Date.now() - start,
+      operationName: args.operationName,
+    };
+  }
 
   let container: Awaited<ReturnType<DockerodeLike['createContainer']>> | undefined;
   try {
     container = await docker.createContainer({
-      Image: 'node:20-alpine',
-      Cmd: ['node', '/extension/index.js'],
+      Image: image,
+      Cmd: command,
       Env: [
         `AGENTIS_EXTENSION_INPUT=${JSON.stringify(args.input)}`,
         `AGENTIS_EXTENSION_SCRATCHPAD=${JSON.stringify(args.scratchpad)}`,
         `AGENTIS_EXTENSION_ALLOWED_DOMAINS=${args.allowedDomains.join(',')}`,
         `AGENTIS_EXTENSION_MANIFEST=${JSON.stringify(args.manifest)}`,
         `AGENTIS_EXTENSION_OPERATION=${args.operationName}`,
+        ...(egressProxy ? [`HTTPS_PROXY=${egressProxy}`, `HTTP_PROXY=${egressProxy}`, `NO_PROXY=`] : []),
       ],
       HostConfig: {
         Binds: [`${args.bundleDir}:/extension:ro`],
         ReadonlyRootfs: true,
         AutoRemove: false,
-        NetworkMode: 'none',
+        NetworkMode: wantsNetwork ? componentNetwork : 'none',
         Memory: memoryBytes,
         MemorySwap: memoryBytes,
         CpuPeriod: 100_000,

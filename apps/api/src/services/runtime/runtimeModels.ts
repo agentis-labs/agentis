@@ -404,17 +404,13 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
     ];
   }
   if (adapterType === 'antigravity') {
-    // Antigravity's `agy models` uses display-name strings; these are the known
-    // selectable models (Gemini + Claude + GPT-OSS) passed verbatim to `-m`.
+    // Antigravity's quality suffixes are execution presets, not distinct model
+    // families. Show one stable, runnable preset for each family so the picker
+    // does not repeat Gemini 3.6/3.5 several times during agent creation.
     return [
       antigravityOption('Gemini 3.6 Flash (High)', 'Gemini 3.6 Flash', true),
-      antigravityOption('Gemini 3.6 Flash (Medium)', 'Gemini 3.6 Flash'),
-      antigravityOption('Gemini 3.6 Flash (Low)', 'Gemini 3.6 Flash'),
       antigravityOption('Gemini 3.5 Flash (High)', 'Gemini 3.5 Flash'),
-      antigravityOption('Gemini 3.5 Flash (Medium)', 'Gemini 3.5 Flash'),
-      antigravityOption('Gemini 3.5 Flash (Low)', 'Gemini 3.5 Flash'),
       antigravityOption('Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro'),
-      antigravityOption('Gemini 3.1 Pro (Low)', 'Gemini 3.1 Pro'),
       antigravityOption('Claude Sonnet 4.6 (Thinking)', 'Claude Sonnet 4.6'),
       antigravityOption('Claude Opus 4.6 (Thinking)', 'Claude Opus 4.6'),
       antigravityOption('GPT-OSS 120B (Medium)', 'GPT-OSS 120B'),

@@ -108,6 +108,12 @@ export const manifestAgentSchema = z.object({
   config: z.record(z.unknown()).default({}),
   avatarGlyph: z.string().nullable().optional(),
   runtimeModel: z.string().nullable().optional(),
+  /** Portable capability request; local binary paths never travel. */
+  runtimeRequirement: z.object({
+    adapterFamily: z.string().min(1),
+    preferredModel: z.string().nullable().optional(),
+    requiredAffordances: z.array(z.string()).default([]),
+  }).optional(),
   /** Agent-private Brain memory (full fidelity only). */
   brain: portableBrainSchema.optional(),
   /**
@@ -151,8 +157,14 @@ export const manifestExtensionSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
   version: z.string().min(1),
-  runtime: z.enum(['node_worker', 'docker_sandbox']),
+  runtime: z.enum(['node_worker', 'docker_sandbox', 'component_oci']),
   manifest: z.record(z.unknown()).default({}),
+  /** Portable, hash-checked files for component_oci. Never contains host paths. */
+  bundleFiles: z.array(z.object({
+    path: z.string().min(1),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    dataBase64: z.string(),
+  })).default([]),
 });
 export type ManifestExtension = z.infer<typeof manifestExtensionSchema>;
 
@@ -192,7 +204,10 @@ export type AppDependency = z.infer<typeof appDependencySchema>;
  * the projection (rows ↔ manifest) is a straight map.
  */
 export const appManifestSchema = z.object({
-  manifestVersion: z.literal(1).default(1),
+  // Missing means the original v1 contract. New exporters set v2 explicitly;
+  // retaining the legacy default keeps authentic pre-version-field packages
+  // importable instead of silently reclassifying them as v2.
+  manifestVersion: z.union([z.literal(1), z.literal(2)]).default(1),
   agentisVersion: z.string().min(1).default('1.0.0'),
   /**
    * The App's id IN THE SOURCE workspace — the rebinding key for the App's own
@@ -230,7 +245,7 @@ export type AppManifest = z.infer<typeof appManifestSchema>;
 /** The serialized `.agentisapp` envelope: a manifest + integrity + provenance. */
 export const appManifestEnvelopeSchema = z.object({
   format: z.literal('.agentisapp'),
-  formatVersion: z.literal(1),
+  formatVersion: z.union([z.literal(1), z.literal(2)]),
   manifest: appManifestSchema,
   checksum: z.string(), // sha256 over canonical(manifest)
   exportedAt: z.string(),
@@ -240,7 +255,7 @@ export type AppManifestEnvelope = z.infer<typeof appManifestEnvelopeSchema>;
 /** Non-mutating install summary shown before a `.agentisapp` enters a workspace. */
 export const appInstallPreviewSchema = z.object({
   format: z.literal('.agentisapp'),
-  formatVersion: z.literal(1),
+  formatVersion: z.union([z.literal(1), z.literal(2)]),
   checksum: z.string(),
   exportedAt: z.string(),
   identity: appIdentitySchema,

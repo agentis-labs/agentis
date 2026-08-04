@@ -90,6 +90,10 @@ const REF_TABLE: Record<string, RefField[]> = {
     { path: 'extensionId', kind: 'extension', required: true },
     { path: 'extensionSlug', kind: 'extension', byName: true },
   ],
+  component_task: [
+    { path: 'componentId', kind: 'extension', required: true },
+    { path: 'componentSlug', kind: 'extension', byName: true },
+  ],
   knowledge: [{ path: 'knowledgeBaseId', kind: 'knowledgeBase', required: true }],
   knowledge_ingest: [{ path: 'knowledgeBaseId', kind: 'knowledgeBase' }],
 

@@ -56,6 +56,7 @@ import { CapabilityRegistry } from './services/capability/capabilityRegistry.js'
 import { registerAllTools } from './services/agentisToolHandlers/index.js';
 import { ChatToolExecutor } from './services/chat/chatToolExecutor.js';
 import { ChatSessionExecutor } from './services/chat/chatSessionExecutor.js';
+import { RuntimeProfileService } from './services/runtime/runtimeProfileService.js';
 import { OrchestratorEventBridge } from './services/orchestrator/orchestratorEventBridge.js';
 import { SelectiveWakeSupervisor } from './services/orchestrator/selectiveWakeSupervisor.js';
 import { ViewportStore } from './services/viewportStore.js';
@@ -1395,6 +1396,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     enabled: Boolean(orchestratorRuntime),
     models: orchestratorModelRouter.describe(),
   });
+  const runtimeProfiles = new RuntimeProfileService(sqlite, adapters, logger);
   ChatSessionExecutor.configure({
     db: sqlite,
     logger,
@@ -1413,6 +1415,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     browserSessions: browserSessionManager,
     capabilityIndex,
     commandModel,
+    runtimeProfiles,
     audit: auditTrail,
     budget: budgetService,
   });

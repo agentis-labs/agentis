@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
+import { useRef } from 'react';
 import {
   Activity,
   Box,
@@ -10,6 +11,7 @@ import {
   FolderTree,
   KeyRound,
   MemoryStick,
+  Plus,
   PlugZap,
   RefreshCw,
   Save,
@@ -37,6 +39,17 @@ interface EffectiveContextLayer {
   resource: RuntimeResourceDescriptor;
 }
 
+const AGENT_INSTRUCTIONS_TEMPLATE = `# Agent Instructions
+
+## Purpose
+
+Describe the role this agent should play and the outcomes it owns.
+
+## Working rules
+
+- State the constraints, preferences, and handoff expectations that should guide every task.
+`;
+
 export function RuntimeNativePanel({
   agentId,
   mode = 'overview',
@@ -59,6 +72,9 @@ export function RuntimeNativePanel({
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   const [filter, setFilter] = useState('');
+  const instructionCreationSequenceRef = useRef(0);
+  const pendingInstructionCreationRef = useRef(0);
+  const [instructionCreationRequest, setInstructionCreationRequest] = useState(0);
 
   async function load() {
     setLoading(true);
@@ -103,13 +119,20 @@ export function RuntimeNativePanel({
       return;
     }
     let cancelled = false;
+    const creationRequest = instructionCreationRequest;
     setReading(true);
     void api<RuntimeResourceContent>(
       `/v1/agents/${agentId}/runtime/resources/${encodeURIComponent(selectedId)}`,
     ).then((result) => {
       if (cancelled) return;
       setSelected(result);
-      setDraft(result.content);
+      const isAgentInstructions = selectedId === 'agentis:overlay';
+      const shouldSeedInstructions = isAgentInstructions
+        && creationRequest > 0
+        && creationRequest === pendingInstructionCreationRef.current
+        && !result.content.trim();
+      setDraft(shouldSeedInstructions ? AGENT_INSTRUCTIONS_TEMPLATE : result.content);
+      if (shouldSeedInstructions) pendingInstructionCreationRef.current = 0;
     }).catch((error) => {
       if (!cancelled) toast.error('Could not read runtime resource', apiErrorMessage(error));
     }).finally(() => {
@@ -118,7 +141,7 @@ export function RuntimeNativePanel({
     return () => {
       cancelled = true;
     };
-  }, [agentId, selectedId, toast]);
+  }, [agentId, instructionCreationRequest, selectedId, toast]);
 
   const filteredResources = useMemo(() => {
     const query = filter.trim().toLowerCase();
@@ -190,6 +213,14 @@ export function RuntimeNativePanel({
     }
   }
 
+  function createInstructions() {
+    const nextRequest = instructionCreationSequenceRef.current + 1;
+    instructionCreationSequenceRef.current = nextRequest;
+    pendingInstructionCreationRef.current = nextRequest;
+    setSelectedId('agentis:overlay');
+    setInstructionCreationRequest(nextRequest);
+  }
+
   if (loading) return <Skeleton height={mode === 'resources' ? 560 : 360} />;
 
   return (
@@ -229,6 +260,10 @@ export function RuntimeNativePanel({
         </div>
       )}
 
+      {mode === 'overview' && runtime?.executionEnvelope && (
+        <ExecutionEnvelopeCard runtime={runtime} />
+      )}
+
       {/* Resource/files browser lives only in the Instructions tab — the Runtime
           tab no longer duplicates it (it was the slow, repeated section). */}
       {mode === 'resources' && (
@@ -244,7 +279,17 @@ export function RuntimeNativePanel({
                   {resources.length} discovered resources
                 </div>
               </div>
-              <ShieldCheck size={16} className="text-accent" />
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  iconLeft={<Plus size={12} />}
+                  onClick={createInstructions}
+                >
+                  New instructions
+                </Button>
+                <ShieldCheck size={16} className="text-accent" />
+              </div>
             </div>
             <input
               value={filter}
@@ -299,6 +344,43 @@ export function RuntimeNativePanel({
         <div className="grid gap-4 xl:grid-cols-2">
           <ContextStack layers={layers} />
           <SessionList sessions={sessions} onClose={(sessionKey) => void closeSession(sessionKey)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecutionEnvelopeCard({ runtime }: { runtime: RuntimeDescriptor }) {
+  const envelope = runtime.executionEnvelope!;
+  return (
+    <div className="rounded-card border border-line bg-surface p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">Effective execution envelope</div>
+          <div className="mt-1 text-[12px] text-text-secondary">Immutable launch facts recorded for every turn; secrets are never included.</div>
+        </div>
+        <span className="rounded-full border border-accent/25 bg-accent/10 px-2 py-1 text-[10px] font-semibold uppercase text-accent">{envelope.runtimeProfile.mode}</span>
+      </div>
+      <dl className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          ['Working directory', envelope.cwd],
+          ['Permission', envelope.permissionProfile.replace(/_/g, ' ')],
+          ['Browser', envelope.browserEnabled ? 'enabled' : 'disabled'],
+          ['Context sources', envelope.loadedSources.join(' · ') || 'none'],
+          ['CLI version', envelope.cliVersion ?? 'not reported'],
+          ['Model / effort', [envelope.model, envelope.reasoningEffort].filter(Boolean).join(' · ') || 'runtime default'],
+          ['Service tier', envelope.serviceTier ?? 'default'],
+          ['Agentis MCP', `${envelope.mcpServerCount} mounted server${envelope.mcpServerCount === 1 ? '' : 's'}`],
+        ].map(([label, value]) => (
+          <div key={label} className="min-w-0 rounded-lg bg-surface-2 px-3 py-2">
+            <dt className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{label}</dt>
+            <dd className="mt-1 truncate font-mono text-[11px] text-text-primary" title={value}>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {envelope.capabilityWarnings.length > 0 && (
+        <div className="mt-3 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+          {envelope.capabilityWarnings.join(' ')}
         </div>
       )}
     </div>
@@ -493,6 +575,7 @@ function ResourceEditor({
         </div>
       ) : (
         <textarea
+          aria-label={`Edit ${resource.name}`}
           value={content}
           onChange={(event) => onChange(event.target.value)}
           readOnly={!editable}

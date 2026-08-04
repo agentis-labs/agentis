@@ -168,7 +168,11 @@ function loadObservationAgentNames(
 }
 
 function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEvent {
-  const status = mapRunStatus(run.status);
+  const status = run.outcomeStatus === 'accomplished'
+    ? 'completed'
+    : run.executionStatus === 'completed' && run.outcomeStatus !== 'accomplished'
+      ? 'failed'
+      : mapRunStatus(run.status);
   const workflowName = workflow?.title ?? run.ephemeralTitle ?? 'Workflow';
   const state = run.runState as WorkflowRunState;
   const failedNodeId = firstFailedNodeId(state) ?? undefined;
@@ -191,6 +195,10 @@ function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEv
     failedNode,
     context: {
       workflowId: run.workflowId,
+      revisionId: run.workflowRevisionId,
+      executionStatus: run.executionStatus,
+      outcomeStatus: run.outcomeStatus,
+      settlement: run.settlement,
       isEphemeral: run.isEphemeral,
       replanCount: run.replanCount,
     },

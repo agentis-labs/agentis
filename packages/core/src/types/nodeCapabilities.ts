@@ -163,6 +163,17 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
     codeExecutionSandbox: 'process',
     summary: 'Runs an extension operation (executes extension code).',
   },
+  component_task: {
+    nodeKind: 'component_task',
+    networkAccess: 'declared',
+    declaredHosts: [],
+    filesystemAccess: 'none',
+    credentialTypes: ['component'],
+    externalDataSent: 'declared',
+    codeExecution: true,
+    codeExecutionSandbox: 'container',
+    summary: 'Runs a versioned portable component in a read-only, resource-capped OCI container.',
+  },
   browser: {
     nodeKind: 'browser',
     networkAccess: 'unrestricted',

@@ -15,6 +15,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { and, eq, inArray } from 'drizzle-orm';
 import {
   AgentisError,
@@ -40,10 +42,12 @@ import { AppDatastore } from './appDatastore.js';
 import { AppSurfaceStore } from './appSurfaceStore.js';
 import type { BrainReader, BrainWriter } from './brainPort.js';
 import { rewriteNodeRefs, rewriteScriptRefs, type RefIdMap } from './appRefs.js';
-import { computeAppClosure, CONVERSATION_SCRIPT_COLLECTION, CONVERSATION_SCRIPT_KEY, type AppClosure } from './appClosure.js';
+import { computeAppClosure, CONVERSATION_SCRIPT_COLLECTION, CONVERSATION_SCRIPT_KEY, type AppClosure, type AppRevisionTarget } from './appClosure.js';
 
 /** Options controlling how much learned intelligence an App export carries. */
 export interface AppExportOptions {
+  /** Immutable graph line to export. Defaults to the production-active line. */
+  revisionTarget?: AppRevisionTarget;
   /** `full` carries brains + collection rows; `shareable` (default) carries neither. */
   fidelity?: BundleFidelity;
   /** Brain reader (api-supplied). Absent ⇒ no brains travel regardless of fidelity. */
@@ -143,6 +147,17 @@ function executablePayloadPermissions(manifest: AppManifest): string[] {
       if (!config) continue;
       if (config.kind === 'code') out.add(`executes-code:${config.language ?? 'javascript'}`);
       else if (config.kind === 'browser') out.add('controls-browser');
+      else if (config.kind === 'component_task') out.add('executes-component');
+    }
+  }
+  for (const extension of manifest.extensions) {
+    if (extension.runtime === 'node_worker') out.add('executes-code:javascript');
+    if (extension.runtime === 'docker_sandbox') out.add('executes-container');
+    if (extension.runtime === 'component_oci') {
+      const component = objectRecord(objectRecord(extension.manifest).component);
+      const runtime = objectRecord(component.runtime);
+      out.add(`executes-component:${typeof runtime.language === 'string' ? runtime.language : 'unknown'}`);
+      for (const permission of stringArray(component.permissions)) out.add(`component-permission:${permission}`);
     }
   }
   return [...out];
@@ -195,7 +210,8 @@ export class AppPackager {
     // it owns. An `agent_task` agent seated elsewhere, a bare sub-workflow, a
     // workspace-scoped knowledge base: all previously dropped, producing a package
     // that installed cleanly and failed at run time.
-    const closure = computeAppClosure(this.db, workspaceId, appId);
+    const revisionTarget = opts.revisionTarget ?? 'active';
+    const closure = computeAppClosure(this.db, workspaceId, appId, revisionTarget);
     if (opts.warnings) opts.warnings.push(...closure.warnings);
     const excluded = new Set(opts.exclude ?? []);
     const keep = (kind: string, id: string) => !excluded.has(`${kind}:${id}`);
@@ -203,6 +219,7 @@ export class AppPackager {
     const workflows = this.#exportWorkflows(
       workspaceId,
       closure.workflowIds.filter((id) => keep('workflow', id)),
+      revisionTarget,
       opts.warnings,
     );
     const agents = this.#exportAgents(
@@ -228,7 +245,7 @@ export class AppPackager {
       }));
 
     return appManifestSchema.parse({
-      manifestVersion: 1,
+      manifestVersion: 2,
       // Rebinding keys for the App's own data_query/data_mutate self-references.
       exportAppId: appId,
       identity: appIdentitySchema.parse({
@@ -295,14 +312,22 @@ export class AppPackager {
       .where(and(eq(schema.extensions.workspaceId, workspaceId), inArray(schema.extensions.id, extensionIds)))
       .all()
       .filter((row) => row.runtime !== 'builtin')
-      .map((row) => ({
-        exportId: row.id,
-        name: row.name,
-        slug: row.slug,
-        version: row.version,
-        runtime: row.runtime as 'node_worker' | 'docker_sandbox',
-        manifest: objectRecord(row.manifest),
-      }));
+      .map((row) => {
+        const manifest = objectRecord(row.manifest);
+        const bundleDir = typeof manifest.bundleDir === 'string' ? manifest.bundleDir : null;
+        const bundleFiles = row.runtime === 'component_oci' && bundleDir ? readPortableBundle(bundleDir) : [];
+        const portableManifest = { ...manifest };
+        delete portableManifest.bundleDir;
+        return {
+          exportId: row.id,
+          name: row.name,
+          slug: row.slug,
+          version: row.version,
+          runtime: row.runtime as 'node_worker' | 'docker_sandbox' | 'component_oci',
+          manifest: portableManifest,
+          bundleFiles,
+        };
+      });
   }
 
   /**
@@ -315,20 +340,30 @@ export class AppPackager {
    * referenced a workflow that did not exist in the target workspace. Each entry
    * carries `exportId` (its source id) so install can rebind the references.
    */
-  #exportWorkflows(workspaceId: string, workflowIds: string[], warnings?: string[]): AppManifest['workflows'] {
-    void warnings; // missing children are reported by the closure pass
+  #exportWorkflows(workspaceId: string, workflowIds: string[], revisionTarget: AppRevisionTarget, warnings?: string[]): AppManifest['workflows'] {
     if (workflowIds.length === 0) return [];
     const rows = this.db
-      .select({ id: schema.workflows.id, title: schema.workflows.title, description: schema.workflows.description, graph: schema.workflows.graph })
+      .select({
+        id: schema.workflows.id,
+        title: schema.workflows.title,
+        description: schema.workflows.description,
+        graph: schema.workflows.graph,
+        activeRevisionId: schema.workflows.activeRevisionId,
+        candidateRevisionId: schema.workflows.candidateRevisionId,
+      })
       .from(schema.workflows)
       .where(and(eq(schema.workflows.workspaceId, workspaceId), inArray(schema.workflows.id, workflowIds)))
       .all();
-    return rows.map((w) => ({
-      title: w.title,
-      description: w.description ?? null,
-      graph: w.graph,
-      exportId: w.id,
-    }));
+    return rows.map((w) => {
+      const revisionId = revisionTarget === 'candidate' ? w.candidateRevisionId ?? w.activeRevisionId : w.activeRevisionId;
+      const revision = revisionId
+        ? this.db.select({ graph: schema.workflowGraphRevisions.graphJson })
+          .from(schema.workflowGraphRevisions).where(eq(schema.workflowGraphRevisions.id, revisionId)).get()
+        : null;
+      if (revisionTarget === 'candidate' && !w.candidateRevisionId) warnings?.push(`Workflow "${w.title}" has no candidate; its active revision was exported.`);
+      if (!revision) warnings?.push(`Workflow "${w.title}" has no ${revisionTarget} revision row; its compatibility graph mirror was exported.`);
+      return { title: w.title, description: w.description ?? null, graph: revision?.graph ?? w.graph, exportId: w.id };
+    });
   }
 
   /**
@@ -365,9 +400,14 @@ export class AppPackager {
           capabilityTags: stringArray(a.capabilityTags),
           owner: a.id === ownerAgentId,
           ...(memberRole ? { memberRole } : {}),
-          config: objectRecord(a.config),
+          config: portableAgentConfig(a.config),
           avatarGlyph: a.avatarGlyph ?? null,
           runtimeModel: a.runtimeModel ?? null,
+          runtimeRequirement: {
+            adapterFamily: a.adapterType,
+            preferredModel: a.runtimeModel ?? null,
+            requiredAffordances: stringArray(a.capabilityTags),
+          },
           ...(brain ? { brain: { atoms: brain.exportScope(workspaceId, a.id) } } : {}),
         };
         return agent;
@@ -695,14 +735,23 @@ export class AppPackager {
     const idMap = new Map<string, string>();
     for (const ext of extensions) {
       const existing = db
-        .select({ id: schema.extensions.id })
+        .select({ id: schema.extensions.id, version: schema.extensions.version, runtime: schema.extensions.runtime })
         .from(schema.extensions)
         .where(and(eq(schema.extensions.workspaceId, workspaceId), eq(schema.extensions.slug, ext.slug)))
         .get();
       let id = existing?.id;
+      if (existing && (existing.version !== ext.version || existing.runtime !== ext.runtime)) {
+        throw new AgentisError(
+          'RESOURCE_CONFLICT',
+          `Extension ${ext.slug}@${existing.version} (${existing.runtime}) conflicts with packaged ${ext.version} (${ext.runtime}).`,
+        );
+      }
       if (!id) {
         id = randomUUID();
         const now = new Date().toISOString();
+        const installedManifest = ext.runtime === 'component_oci'
+          ? { ...ext.manifest, bundleDir: materializePortableBundle(ext) }
+          : ext.manifest;
         db.insert(schema.extensions).values({
           id,
           workspaceId,
@@ -711,7 +760,7 @@ export class AppPackager {
           slug: ext.slug,
           version: ext.version,
           runtime: ext.runtime,
-          manifest: ext.manifest as never,
+          manifest: installedManifest as never,
           createdAt: now,
           updatedAt: now,
         }).run();
@@ -759,7 +808,8 @@ export class AppPackager {
 
   serialize(manifest: AppManifest): AppManifestEnvelope {
     const parsed = appManifestSchema.parse(manifest);
-    return { format: '.agentisapp', formatVersion: 1, manifest: parsed, checksum: checksum(parsed), exportedAt: new Date().toISOString() };
+    const formatVersion = parsed.manifestVersion === 2 ? 2 : 1;
+    return { format: '.agentisapp', formatVersion, manifest: parsed, checksum: checksum(parsed), exportedAt: new Date().toISOString() };
   }
 
   deserialize(envelope: RawAppEnvelope): AppManifest {
@@ -830,6 +880,108 @@ function stringArray(value: unknown): string[] {
 
 function objectRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function portableAgentConfig(value: unknown): Record<string, unknown> {
+  const config = { ...objectRecord(value) };
+  for (const localKey of ['binaryPath', 'command', 'cwd', 'repositoryPath', 'workingDirectory', 'env']) delete config[localKey];
+  const runtimeProfile = objectRecord(config.runtimeProfile);
+  if (Object.keys(runtimeProfile).length > 0) {
+    const portableProfile = { ...runtimeProfile };
+    delete portableProfile.projectRoot;
+    config.runtimeProfile = portableProfile;
+  }
+  return config;
+}
+
+function readPortableBundle(bundleDir: string) {
+  const root = path.resolve(bundleDir);
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    throw new AgentisError('VALIDATION_FAILED', `component bundle is missing at export: ${bundleDir}`);
+  }
+  const files: Array<{ path: string; sha256: string; dataBase64: string }> = [];
+  let total = 0;
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = path.join(directory, entry.name);
+      const stats = lstatSync(absolute);
+      if (stats.isSymbolicLink()) {
+        throw new AgentisError('VALIDATION_FAILED', `component bundle cannot contain symlink ${path.relative(root, absolute)}`);
+      }
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.isFile()) {
+        const data = readFileSync(absolute);
+        total += data.length;
+        if (total > 100 * 1024 * 1024 || files.length >= 5_000) throw new AgentisError('VALIDATION_FAILED', 'component bundle exceeds portable package limits');
+        files.push({
+          path: path.relative(root, absolute).split(path.sep).join('/'),
+          sha256: createHash('sha256').update(data).digest('hex'),
+          dataBase64: data.toString('base64'),
+        });
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function materializePortableBundle(ext: AppManifest['extensions'][number]): string {
+  if (ext.bundleFiles.length === 0) throw new AgentisError('VALIDATION_FAILED', `component ${ext.slug} has no portable bundle files`);
+  const component = objectRecord(objectRecord(ext.manifest).component);
+  validatePortableComponent(component, ext.slug, new Set(ext.bundleFiles.map((file) => file.path)));
+  const expectedHash = typeof component.bundleHash === 'string' ? component.bundleHash : '';
+  const aggregate = createHash('sha256');
+  let total = 0;
+  const decoded = ext.bundleFiles.slice().sort((a, b) => a.path.localeCompare(b.path)).map((file) => {
+    if (path.isAbsolute(file.path) || file.path.split(/[\\/]+/).includes('..')) throw new AgentisError('VALIDATION_FAILED', `unsafe component bundle path ${file.path}`);
+    const data = Buffer.from(file.dataBase64, 'base64');
+    total += data.length;
+    if (total > 100 * 1024 * 1024) throw new AgentisError('VALIDATION_FAILED', 'component bundle exceeds 100MB');
+    const digest = createHash('sha256').update(data).digest('hex');
+    if (digest !== file.sha256) throw new AgentisError('VALIDATION_FAILED', `component file checksum mismatch: ${file.path}`);
+    aggregate.update(file.path).update('\0').update(data).update('\0');
+    return { ...file, data };
+  });
+  const actualHash = aggregate.digest('hex');
+  if (expectedHash && actualHash !== expectedHash) throw new AgentisError('VALIDATION_FAILED', `component bundle checksum mismatch for ${ext.slug}`);
+  const root = path.resolve(process.env.AGENTIS_DATA_DIR?.trim() || '.agentis', 'components');
+  mkdirSync(root, { recursive: true });
+  const target = path.join(root, actualHash);
+  if (existsSync(target)) return target;
+  const temporary = `${target}.tmp-${process.pid}`;
+  rmSync(temporary, { recursive: true, force: true });
+  mkdirSync(temporary, { recursive: true });
+  try {
+    for (const file of decoded) {
+      const destination = path.resolve(temporary, file.path);
+      if (!destination.startsWith(`${path.resolve(temporary)}${path.sep}`)) throw new AgentisError('VALIDATION_FAILED', `unsafe component destination ${file.path}`);
+      mkdirSync(path.dirname(destination), { recursive: true });
+      writeFileSync(destination, file.data);
+    }
+    renameSync(temporary, target);
+  } catch (error) {
+    rmSync(temporary, { recursive: true, force: true });
+    throw error;
+  }
+  return target;
+}
+
+function validatePortableComponent(component: Record<string, unknown>, slug: string, files: Set<string>): void {
+  if (component.manifestVersion !== 2) throw new AgentisError('VALIDATION_FAILED', `component ${slug} requires manifestVersion 2`);
+  const runtime = objectRecord(component.runtime);
+  const validRuntime = (runtime.language === 'python' && runtime.version === '3.12')
+    || (runtime.language === 'node' && runtime.version === '20');
+  if (!validRuntime) throw new AgentisError('VALIDATION_FAILED', `component ${slug} must use Python 3.12 or Node 20`);
+  const entrypoint = typeof component.entrypoint === 'string' ? component.entrypoint : '';
+  const dependencyLock = typeof component.dependencyLock === 'string' ? component.dependencyLock : '';
+  for (const [field, value] of [['entrypoint', entrypoint], ['dependencyLock', dependencyLock]] as const) {
+    if (!value || path.isAbsolute(value) || value.split(/[\\/]+/).includes('..') || !files.has(value)) {
+      throw new AgentisError('VALIDATION_FAILED', `component ${slug} has an invalid or missing ${field}`);
+    }
+  }
+  if (!Array.isArray(component.operations) || component.operations.length === 0) {
+    throw new AgentisError('VALIDATION_FAILED', `component ${slug} declares no operations`);
+  }
 }
 
 

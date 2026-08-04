@@ -22,7 +22,7 @@ import { repairCliHarnessConfig } from '../harness/harnessConfigRepair.js';
 import { RuntimeSessionStore } from '../runtime/runtimeSessionStore.js';
 import { harnessAgentHomeDir } from '../harness/harnessAgentHome.js';
 import type { SkillMaterializer } from '../skillMaterializer.js';
-import type { RuntimeCapabilityDeclaration, RuntimeCapabilityId } from '@agentis/core';
+import type { RuntimeCapabilityDeclaration, RuntimeCapabilityId, RuntimeProfileV2 } from '@agentis/core';
 
 /** The orchestrator's identity color — distinct from the random palette used for managers/specialists. */
 export const ORCHESTRATOR_DEFAULT_COLOR = '#3b82f6';
@@ -209,6 +209,7 @@ export async function registerAdapter(
   options: RegisterAdapterOptions = {},
 ) {
   config = options.skipConfigRepair ? config : (await repairCliHarnessConfig(adapterType, config)).config;
+  const runtimeProfile = runtimeProfileOf(config);
   await deps.adapters.unregister(agentId);
   if (adapterType === 'openclaw') {
     // Resolve an explicit gatewayUrl first, else fall back to the provisioned
@@ -284,7 +285,7 @@ export async function registerAdapter(
       workspaceId,
       sessionStore: new RuntimeSessionStore(deps.db),
       binaryPath: cliCommandFromConfig(config) ?? undefined,
-      cwd: managedAgentCwd(agentId, config),
+      cwd: managedAgentCwd(agentId, config, runtimeProfile),
       model: stringOf(config.model) ?? undefined,
       maxTurns: nativeTurnCap(),
       modelReasoningEffort: reasoningEffortOf(config.modelReasoningEffort),
@@ -294,6 +295,7 @@ export async function registerAdapter(
       env: recordStringOf(config.env),
       timeoutSec: numberOf(config.timeoutSec),
       browser: booleanOf(config.browser),
+      runtimeProfile,
       ...(() => { const m = mcpServersFor(deps, workspaceId, agentId); return m ? { mcpServers: m } : {}; })(),
       logger: deps.logger,
     });
@@ -374,8 +376,8 @@ export async function registerAdapter(
   // so Claude Code loads them natively. Resolves the cwd (managed home when no
   // explicit project cwd is set); best-effort, never blocks registration.
   const resolvedCwd = deps.skillMaterializer
-    ? deps.skillMaterializer.materializeForAgent(workspaceId, agentId, stringOf(config.cwd) ?? null).cwd
-    : managedAgentCwd(agentId, config);
+    ? deps.skillMaterializer.materializeForAgent(workspaceId, agentId, runtimeProfile.projectRoot ?? stringOf(config.cwd) ?? null).cwd
+    : managedAgentCwd(agentId, config, runtimeProfile);
   const adapter = new ClaudeCodeAdapter({
     agentId,
     workspaceId,
@@ -386,6 +388,7 @@ export async function registerAdapter(
     maxTurns: nativeTurnCap(),
     allowedTools: stringArrayOf(config.allowedTools),
     dangerouslySkipPermissions: booleanOf(config.dangerouslySkipPermissions),
+    runtimeProfile,
     extraArgs: stringArrayOf(config.extraArgs),
     env: recordStringOf(config.env),
     timeoutSec: numberOf(config.timeoutSec),
@@ -402,8 +405,8 @@ export async function registerAdapter(
  * NEVER `process.cwd()` (the repo), which is how agents used to scatter
  * generated media into the source tree.
  */
-function managedAgentCwd(agentId: string, config: Record<string, unknown>): string {
-  const cwd = stringOf(config.cwd) || harnessAgentHomeDir(agentId);
+function managedAgentCwd(agentId: string, config: Record<string, unknown>, profile = runtimeProfileOf(config)): string {
+  const cwd = profile.projectRoot || stringOf(config.cwd) || harnessAgentHomeDir(agentId);
   try { mkdirSync(cwd, { recursive: true }); } catch { /* best-effort */ }
   return cwd;
 }
@@ -619,9 +622,34 @@ function httpMethodOf(value: unknown): 'POST' | 'GET' | 'PUT' | 'PATCH' | undefi
   return method === 'POST' || method === 'GET' || method === 'PUT' || method === 'PATCH' ? method : undefined;
 }
 
-function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined {
+function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | undefined {
   const effort = stringOf(value);
-  return effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' ? effort : undefined;
+  return effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' || effort === 'max' || effort === 'ultra' ? effort : undefined;
+}
+
+/** Additive migration: old agents retain their prior authority but now expose it. */
+function runtimeProfileOf(config: Record<string, unknown>): RuntimeProfileV2 {
+  const raw = recordObjectOf(config.runtimeProfile) ?? {};
+  const mode = raw.mode === 'hermetic' || raw.mode === 'containerized' ? raw.mode : 'native';
+  const permissionProfile = raw.permissionProfile === 'read_only'
+    || raw.permissionProfile === 'workspace_write'
+    || raw.permissionProfile === 'externally_sandboxed'
+    ? raw.permissionProfile
+    : 'trusted_local';
+  const browser = raw.browser === 'enabled' || raw.browser === 'disabled' ? raw.browser : 'inherit';
+  return {
+    version: 2,
+    mode,
+    ...(stringOf(raw.projectRoot) || stringOf(config.cwd) ? { projectRoot: stringOf(raw.projectRoot) ?? stringOf(config.cwd)! } : {}),
+    ...(stringOf(raw.profileName) || stringOf(config.profile) ? { profileName: stringOf(raw.profileName) ?? stringOf(config.profile)! } : {}),
+    permissionProfile,
+    inheritUserConfig: mode === 'native' && raw.inheritUserConfig !== false,
+    inheritProjectInstructions: mode === 'native' && raw.inheritProjectInstructions !== false,
+    inheritPlugins: mode === 'native' && raw.inheritPlugins !== false,
+    inheritSkills: mode === 'native' && raw.inheritSkills !== false,
+    browser,
+    sessionPolicy: raw.sessionPolicy === 'ephemeral' ? 'ephemeral' : 'persistent',
+  };
 }
 
 function hermesChatTransportOf(value: unknown, version: unknown): 'cli' | 'acp' | 'auto' | undefined {

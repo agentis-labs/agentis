@@ -15,7 +15,6 @@ import {
 import { PlaybookLibrary, type PlaybookEntry } from './PlaybookLibrary';
 import { ManagerGlyph, OrchestratorGlyph, WorkerGlyph } from './AgentRoleGlyphs';
 import { DomainEditorSheet, type DomainOption } from './DomainEditorSheet';
-import { specialistsApi, type SpecialistSummary } from '../../lib/specialists';
 type AgentRole = 'orchestrator' | 'manager' | 'worker';
 type ChannelKind = 'telegram' | 'discord' | 'slack' | 'whatsapp';
 type GlyphComponent = (props: { size?: number }) => JSX.Element;
@@ -112,17 +111,10 @@ const ROLE_OPTIONS: Array<{
   {
     value: 'worker',
     title: 'Specialist',
-    subtitle: 'An expert role. Pick a specialty (or define one) — it executes tasks in workflows or for a manager.',
+    subtitle: 'An expert operator that executes tasks in workflows or for a manager.',
     icon: WorkerGlyph,
   },
 ];
-
-/** Stable role slug from a free-form specialty name (mirrors the API's slugifyRole). */
-function slugifySpecialty(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
-}
-
-const CUSTOM_SPECIALTY = '__custom__';
 
 function initials(name: string): string {
   if (!name) return '?';
@@ -211,9 +203,6 @@ export function AgentCreateWizard({
   const [spaces, setSpaces] = useState<DomainOption[]>([]);
   const [domainEditorOpen, setDomainEditorOpen] = useState(false);
   const [role, setRole] = useState<AgentRole>(initialRole ?? 'manager');
-  const [specialties, setSpecialties] = useState<SpecialistSummary[]>([]);
-  const [specialty, setSpecialty] = useState<string>('');
-  const [customRole, setCustomRole] = useState('');
   const [reportsTo, setReportsTo] = useState('');
   const [agents, setAgents] = useState<ExistingAgent[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
@@ -271,8 +260,6 @@ export function AgentCreateWizard({
     setDescription('');
     setSpaceId(nextRole === 'orchestrator' ? '' : initialSpaceId ?? '');
     setRole(nextRole);
-    setSpecialty('');
-    setCustomRole('');
     setReportsTo(nextRole === 'orchestrator' ? '' : initialReportsTo ?? '');
     setDetections(EMPTY_DETECTIONS);
     setDetecting(true);
@@ -291,8 +278,6 @@ export function AgentCreateWizard({
     setAgentsLoaded(false);
     setShowHierarchy(false);
     seededRoleRef.current = null;
-
-    void specialistsApi.list().then((res) => setSpecialties(res.specialists)).catch(() => setSpecialties([]));
 
     void Promise.allSettled([
       api<{ agents: ExistingAgent[] }>('/v1/agents'),
@@ -423,29 +408,7 @@ export function AgentCreateWizard({
     seededRoleRef.current = role;
   }
 
-  function pickSpecialty(value: string) {
-    setSpecialty(value);
-    if (value === CUSTOM_SPECIALTY || value === '') return;
-    const chosen = specialties.find((s) => s.role === value);
-    if (!chosen) return;
-    if (!name.trim()) setName(chosen.name);
-    if (chosen.capabilityTags.length > 0) setCapabilityTags(chosen.capabilityTags);
-  }
-
-  // The role string the agent is actually created with. For specialists this is
-  // the functional slug (e.g. frontend_architect), never the literal "worker".
-  const functionalRole = role !== 'worker'
-    ? role
-    : specialty === CUSTOM_SPECIALTY
-      ? slugifySpecialty(customRole)
-      : specialty || 'specialist';
-
-  // A custom slug not already in the registry → author a library def on create so
-  // the engine resolves it richly and it joins the specialist registry.
-  const isNewCustomSpecialty = role === 'worker'
-    && functionalRole.length > 0
-    && !specialties.some((s) => s.role === functionalRole)
-    && functionalRole !== 'specialist';
+  const functionalRole = role === 'worker' ? 'specialist' : role;
 
   async function handleCreate() {
     if (!name.trim()) return;
@@ -521,23 +484,6 @@ export function AgentCreateWizard({
         toast.error('Some inbox channels were not saved', channelErrors.join(' | '));
       }
 
-      // Register a brand-new custom specialty in the specialist library so the
-      // engine resolves its persona richly and it appears in the registry. This
-      // upserts the agent just created (same workspace+role) — no duplicate row.
-      if (isNewCustomSpecialty) {
-        try {
-          await specialistsApi.create({
-            role: functionalRole,
-            name: name.trim(),
-            description: description.trim() || undefined,
-            instructions: playbook.trim() || undefined,
-            capabilityTags,
-          });
-        } catch {
-          
-        }
-      }
-
       onCreated({ ...created.agent, role: functionalRole });
     } catch (error) {
       toast.error('Could not commission agent', apiErrorMessage(error));
@@ -573,8 +519,7 @@ export function AgentCreateWizard({
   }
 
   const canCreate = name.trim().length >= 2
-    && !(role === 'orchestrator' && Boolean(orchestrator))
-    && !(role === 'worker' && specialty === CUSTOM_SPECIALTY && slugifySpecialty(customRole).length === 0);
+    && !(role === 'orchestrator' && Boolean(orchestrator));
 
   return (
     <div
@@ -743,56 +688,6 @@ export function AgentCreateWizard({
                   <p className="text-[11px] text-text-muted">{ROLE_OPTIONS.find((o) => o.value === role)?.subtitle}</p>
                 )}
 
-                {role === 'worker' && (
-                  <div className="space-y-2 rounded-lg border border-line bg-surface-2 p-3">
-                    <span className="text-xs font-medium text-text-secondary">Specialty</span>
-                    <div className="relative">
-                      <select
-                        value={specialty}
-                        onChange={(event) => pickSpecialty(event.target.value)}
-                        className={clsx(inputCls, 'appearance-none pr-8')}
-                      >
-                        <option value="">Generic specialist</option>
-                        {specialties.length > 0 && (
-                          <optgroup label="Existing specialists">
-                            {specialties.map((s) => (
-                              <option key={s.role} value={s.role}>
-                                {s.name} · {s.source}
-                              </option>
-                            ))}
-                          </optgroup>
-                        )}
-                        <option value={CUSTOM_SPECIALTY}>+ Define a custom specialty…</option>
-                      </select>
-                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
-                        <svg className="h-4 w-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
-                      </div>
-                    </div>
-
-                    {specialty === CUSTOM_SPECIALTY ? (
-                      <label className="block space-y-1">
-                        <input
-                          value={customRole}
-                          onChange={(event) => setCustomRole(event.target.value)}
-                          placeholder="e.g. Frontend Architect"
-                          className={inputCls}
-                        />
-                        {customRole.trim() && (
-                          <span className="block font-mono text-[11px] text-text-muted">role: {slugifySpecialty(customRole) || '—'}</span>
-                        )}
-                      </label>
-                    ) : (
-                      <p className="text-[11px] text-text-muted">
-                        {specialty
-                          ? specialties.find((s) => s.role === specialty)?.description || `Specialist role: ${specialty}`
-                          : 'A general-purpose specialist. Pick an existing expert or define a custom specialty for a focused role.'}
-                      </p>
-                    )}
-                    <p className="text-[11px] text-text-muted">
-                      After commissioning, open the specialist to feed its mind (memory &amp; knowledge) and attach abilities.
-                    </p>
-                  </div>
-                )}
               </section>
               )}
 
@@ -1131,7 +1026,6 @@ function InboxChannelCard({
 const inputCls = 'mt-1 h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent';
 const secondaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn border border-line px-3 text-xs font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary';
 const primaryBtnCls = 'inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40';
-
 
 
 

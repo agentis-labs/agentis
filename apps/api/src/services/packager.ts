@@ -258,7 +258,7 @@ export class PackagerService {
         name: extension.name,
         slug: extension.slug,
         version: extension.version,
-        runtime: extension.runtime as 'builtin' | 'node_worker' | 'docker_sandbox',
+        runtime: extension.runtime as 'builtin' | 'node_worker' | 'docker_sandbox' | 'component_oci',
         manifest: objectRecord(extension.manifest) as unknown as ExtensionManifest,
       },
     };

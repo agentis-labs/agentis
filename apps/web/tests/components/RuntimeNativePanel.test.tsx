@@ -77,8 +77,12 @@ describe('<RuntimeNativePanel />', () => {
       if (url === '/v1/agents/a1/runtime/effective-context') {
         return jsonResponse({ layers: [{ precedence: 1, resource: overlay }, { precedence: 2, resource: soul }] });
       }
-      if (url === '/v1/agents/a1/runtime/resources/agentis%3Aoverlay') {
-        return jsonResponse({ resource: overlay, content: '# Agentis overlay' });
+      if (url === '/v1/agents/a1/runtime/resources/agentis%3Aoverlay' && method === 'GET') {
+        return jsonResponse({ resource: overlay, content: '' });
+      }
+      if (url === '/v1/agents/a1/runtime/resources/agentis%3Aoverlay' && method === 'PUT') {
+        const content = JSON.parse(String(init?.body)).content;
+        return jsonResponse({ resource: { ...overlay, effective: true }, content });
       }
       if (url === '/v1/agents/a1/runtime/resources/file%3Asoul' && method === 'GET') {
         return jsonResponse({ resource: soul, content: '# Native soul' });
@@ -106,6 +110,16 @@ describe('<RuntimeNativePanel />', () => {
     await waitFor(() => expect(screen.getByText('4 discovered resources')).toBeInTheDocument());
     expect(screen.getAllByText('SOUL.md').length).toBeGreaterThan(0);
     expect(screen.getByText('skills/research/SKILL.md')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'New instructions' }));
+    const instructionsEditor = await screen.findByRole('textbox', { name: 'Edit agentis.md' });
+    expect(instructionsEditor).toHaveValue('# Agent Instructions\n\n## Purpose\n\nDescribe the role this agent should play and the outcomes it owns.\n\n## Working rules\n\n- State the constraints, preferences, and handoff expectations that should guide every task.\n');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      const saveCall = calls.find((call) => call.url.endsWith('/agentis%3Aoverlay') && call.method === 'PUT');
+      expect(saveCall).toBeDefined();
+      expect(JSON.parse(saveCall!.body!).content).toContain('# Agent Instructions');
+    });
 
     await userEvent.click(screen.getByRole('button', { name: /^SOUL\.md/i }));
     const editor = await screen.findByDisplayValue('# Native soul');

@@ -10,6 +10,54 @@ import type { ChatDelta, ChatMessage, ToolDefinition } from './chat.js';
 
 export type AdapterType = 'openclaw' | 'claude_code' | 'http' | 'codex' | 'cursor' | 'hermes_agent' | 'antigravity' | 'local_llm';
 
+/** How much of the provider-native harness environment Agentis preserves. */
+export type RuntimeProfileMode = 'native' | 'hermetic' | 'containerized';
+
+/** Explicit execution authority. Adapters must never silently widen this. */
+export type RuntimePermissionProfile =
+  | 'read_only'
+  | 'workspace_write'
+  | 'trusted_local'
+  | 'externally_sandboxed';
+
+/**
+ * Portable runtime policy stored inside the existing agent config JSON. Keeping
+ * this additive lets old agents run while every launch gets an auditable policy.
+ */
+export interface RuntimeProfileV2 {
+  version: 2;
+  mode: RuntimeProfileMode;
+  projectRoot?: string;
+  profileName?: string;
+  permissionProfile: RuntimePermissionProfile;
+  inheritUserConfig: boolean;
+  inheritProjectInstructions: boolean;
+  inheritPlugins: boolean;
+  inheritSkills: boolean;
+  browser: 'inherit' | 'enabled' | 'disabled';
+  sessionPolicy: 'persistent' | 'ephemeral';
+}
+
+/** Exact, non-secret facts about one harness launch. */
+export interface AgentExecutionEnvelope {
+  envelopeVersion: 1;
+  observedAt: string;
+  agentId: string;
+  adapterType: AdapterType;
+  runtimeProfile: RuntimeProfileV2;
+  binary: string;
+  cliVersion?: string | null;
+  cwd: string;
+  model: string | null;
+  reasoningEffort?: string | null;
+  serviceTier?: string | null;
+  browserEnabled: boolean;
+  permissionProfile: RuntimePermissionProfile;
+  loadedSources: Array<'user' | 'project' | 'agentis'>;
+  mcpServerCount: number;
+  capabilityWarnings: string[];
+}
+
 export interface RuntimeContext {
   provider: string;
   models: {
@@ -183,6 +231,9 @@ export interface RuntimeDescriptor {
   resourceCount: number;
   probedAt: string;
   limitations?: string[];
+  /** Effective v2 policy plus the latest discoverable launch facts. */
+  runtimeProfile?: RuntimeProfileV2;
+  executionEnvelope?: AgentExecutionEnvelope;
 }
 
 export interface AgentAdapter {
@@ -374,6 +425,7 @@ export interface ClaudeCodeAdapterConfig {
   env?: Record<string, string>;
   timeoutSec?: number;
   dangerouslySkipPermissions?: boolean;
+  runtimeProfile?: RuntimeProfileV2;
 }
 
 export interface CodexAdapterConfig {
@@ -382,7 +434,7 @@ export interface CodexAdapterConfig {
   cwd?: string;
   model?: string;
   maxTurns?: number;
-  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   fastMode?: boolean;
   dangerouslyBypassApprovalsAndSandbox?: boolean;
   /**
@@ -394,6 +446,7 @@ export interface CodexAdapterConfig {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
+  runtimeProfile?: RuntimeProfileV2;
 }
 
 export interface CursorAdapterConfig {

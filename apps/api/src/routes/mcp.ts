@@ -33,7 +33,6 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { WorkflowEngine } from '../engine/WorkflowEngine.js';
 import type { AgentisToolRegistry } from '../services/agentisToolRegistry.js';
-import { AGENTIS_MCP_SERVER_INSTRUCTIONS } from '../services/orchestrator/orchestratorPrompt.js';
 import { listMcpResources, readMcpResource } from '../services/mcp/mcpResources.js';
 import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWorkflow.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -49,6 +48,12 @@ const MCP_CAPABILITIES = {
   tools: { listChanged: false },
   resources: { listChanged: false },
 };
+const AGENTIS_GATEWAY_INSTRUCTIONS = [
+  'Agentis exposes a progressive-disclosure gateway, not its full internal control plane.',
+  'Start with agentis.orient. Use agentis.tools.search, then agentis.tools.describe, then agentis.tools.call.',
+  'Use agentis.code.execute for bounded multi-operation orchestration and agentis.task.status for run progress.',
+  'A tool result is not delivery proof: verify the requested world-state and require an accomplished settlement.',
+].join(' ');
 
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || 'workflow';
@@ -118,7 +123,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
       workspaceId: ws.workspaceId, ambientId: ws.ambientId, userId: ws.user.id,
       workflowId: wf.id, graph: wf.graph as WorkflowGraph, inputs: body.inputs ?? {},
     });
-    return c.json({ runId: result.runId, status: result.status, output: result.output });
+    return c.json({ runId: result.runId, status: result.status, executionStatus: result.executionStatus, outcomeStatus: result.outcomeStatus, settlement: result.settlement, output: result.output });
   });
 
   // ── Discovery card ───────────────────────────────────────────────────────
@@ -131,7 +136,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
       capabilities: MCP_CAPABILITIES,
       toolCount: tools.length,
       endpoint: '/v1/mcp/rpc',
-      instructions: AGENTIS_MCP_SERVER_INSTRUCTIONS,
+      instructions: AGENTIS_GATEWAY_INSTRUCTIONS,
     });
   });
 
@@ -162,7 +167,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
             // surface `instructions` to the model as system context, so an
             // external harness gets the build loop + data-flow contract instead
             // of a flat pile of ~70 undocumented tool names.
-            instructions: AGENTIS_MCP_SERVER_INSTRUCTIONS,
+            instructions: AGENTIS_GATEWAY_INSTRUCTIONS,
           }));
         case 'notifications/initialized':
           // Notification — no response body expected, but return 202-style ack.
@@ -201,14 +206,28 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
             params.arguments ?? {},
           );
           if (conversationId && turnLease && deps.turnLeases) {
-            const mutating = params.name.startsWith(WORKFLOW_TOOL_PREFIX)
-              || Boolean(deps.toolRegistry?.get(params.name)?.mutating);
+            const gatewayTarget = params.name === 'agentis.tools.call' && typeof params.arguments?.name === 'string'
+              ? params.arguments.name
+              : params.name;
+            const gatewayArguments = params.name === 'agentis.tools.call'
+              && params.arguments?.arguments
+              && typeof params.arguments.arguments === 'object'
+              && !Array.isArray(params.arguments.arguments)
+              ? params.arguments.arguments as Record<string, unknown>
+              : params.arguments ?? {};
+            // The compact gateway must remain transparent to the capability
+            // ledger. Record the invoked operation (and its mutation posture),
+            // otherwise a write hidden behind tools.call would not advance the
+            // conversation's state frontier and later reads could be deduped
+            // against stale observations.
+            const mutating = gatewayTarget.startsWith(WORKFLOW_TOOL_PREFIX)
+              || Boolean(deps.toolRegistry?.get(gatewayTarget)?.mutating);
             const observation = deps.turnLeases.recordToolResult({
               workspaceId: ws.workspaceId,
               conversationId,
               token: turnLease,
-              name: params.name,
-              toolArgs: params.arguments ?? {},
+              name: gatewayTarget,
+              toolArgs: gatewayArguments,
               result: experiencePayload(result),
               ok: result.isError !== true,
               mutating,
@@ -259,6 +278,48 @@ interface McpTool {
 }
 
 function collectMcpTools(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
+  return gatewayMcpTools(deps, workspaceId);
+}
+
+/**
+ * Keep the model-facing surface intentionally tiny. Legacy direct names remain
+ * callable for compatibility, but are discovered through search/describe rather
+ * than forcing every model turn to ingest more than one hundred schemas.
+ */
+function gatewayMcpTools(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
+  const exposed = allMcpOperations(deps, workspaceId);
+  const direct = (name: string): McpTool | null => exposed.find((tool) => tool.name === name) ?? null;
+  return [
+    direct('agentis.orient'),
+    {
+      name: 'agentis.tools.search',
+      description: 'Search Agentis operations by goal, family, or name. Returns compact matches; call describe before invoking an unfamiliar operation.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false },
+      kind: 'registry', ref: 'gateway:search',
+    },
+    {
+      name: 'agentis.tools.describe',
+      description: 'Load the exact schema and mutation policy for one Agentis operation.',
+      inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false },
+      kind: 'registry', ref: 'gateway:describe',
+    },
+    {
+      name: 'agentis.tools.call',
+      description: 'Invoke one operation discovered through search/describe. Server-side validation and conversation permissions still apply.',
+      inputSchema: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object' } }, required: ['name'], additionalProperties: false },
+      kind: 'registry', ref: 'gateway:call',
+    },
+    direct('agentis.code.execute'),
+    {
+      name: 'agentis.task.status',
+      description: 'Read the durable status and settlement of a workflow run.',
+      inputSchema: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'], additionalProperties: false },
+      kind: 'registry', ref: 'gateway:status',
+    },
+  ].filter((tool): tool is McpTool => Boolean(tool));
+}
+
+function allMcpOperations(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
   const tools: McpTool[] = listWorkflowTools(deps.db, workspaceId).map((t) => ({
     name: t.name,
     description: t.description,
@@ -323,6 +384,40 @@ async function callMcpTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
+  if (name === 'agentis.tools.search') {
+    const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+    if (!query) return textResult(JSON.stringify({ error: 'query is required', path: 'query', expected: 'non-empty string' }), true);
+    const limit = Math.max(1, Math.min(20, Number(args.limit) || 10));
+    const terms = query.split(/\s+/).filter(Boolean);
+    const matches = allMcpOperations(deps, ws.workspaceId)
+      .map((tool) => {
+        const haystack = `${tool.name} ${tool.description}`.toLowerCase();
+        const score = terms.reduce((total, term) => total + (tool.name.toLowerCase().includes(term) ? 4 : haystack.includes(term) ? 1 : 0), 0);
+        return { tool, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name))
+      .slice(0, limit)
+      .map(({ tool }) => ({ name: tool.name, description: tool.description, kind: tool.kind }));
+    return textResult(JSON.stringify({ query, matches, next: matches.length ? 'Describe one exact operation before calling it.' : 'Try a broader goal or domain term.' }));
+  }
+  if (name === 'agentis.tools.describe') {
+    const target = typeof args.name === 'string' ? args.name.trim() : '';
+    const tool = allMcpOperations(deps, ws.workspaceId).find((candidate) => candidate.name === target);
+    if (!tool) return textResult(JSON.stringify({ error: `Unknown operation '${target}'`, remediation: 'Use agentis.tools.search first.' }), true);
+    return textResult(JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, mutating: tool.kind === 'workflow' || Boolean(deps.toolRegistry?.get(tool.ref)?.mutating) }));
+  }
+  if (name === 'agentis.tools.call') {
+    const target = typeof args.name === 'string' ? args.name.trim() : '';
+    if (!target || target.startsWith('agentis.tools.')) return textResult(JSON.stringify({ error: 'name must identify a non-gateway operation' }), true);
+    const callArgs = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+      ? args.arguments as Record<string, unknown>
+      : {};
+    return callMcpTool(deps, ws, target, callArgs);
+  }
+  if (name === 'agentis.task.status') {
+    return callMcpTool(deps, ws, 'agentis.run.status', args);
+  }
   // Workflow tool?
   if (name.startsWith(WORKFLOW_TOOL_PREFIX)) {
     const slug = name.slice(WORKFLOW_TOOL_PREFIX.length);
@@ -334,8 +429,17 @@ async function callMcpTool(
       workflowId: wf.id, graph: wf.graph as WorkflowGraph, inputs: args,
       conversationId: ws.conversationId ?? null,
     });
-    const ok = result.status === 'COMPLETED' || result.status === 'COMPLETED_WITH_CONTRACT_VIOLATION';
-    return textResult(JSON.stringify({ runId: result.runId, status: result.status, output: result.output }), !ok);
+    const ok = result.executionStatus === 'completed' && result.outcomeStatus === 'accomplished';
+    return textResult(JSON.stringify({
+      runId: result.runId,
+      status: result.status,
+      executionStatus: result.executionStatus,
+      outcomeStatus: result.outcomeStatus,
+      settlement: result.settlement,
+      output: result.output,
+      ok,
+      ...(!ok ? { remediation: 'Execution stopping is not delivery proof. Add or satisfy a definition of done, then rerun/regrade the exact revision.' } : {}),
+    }), !ok);
   }
 
   // Registry tool?

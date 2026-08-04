@@ -110,6 +110,12 @@ export function explainNode(kind: string, config: Record<string, unknown>, opts:
         ? `Runs the ${humanize(ext)}${op ? ` · ${humanize(op)}` : ''} extension operation.`
         : op ? `Runs the ${humanize(op)} extension operation.` : 'Runs an extension operation.';
     }
+    case 'component_task': {
+      const component = str(config.componentSlug) || str(config.componentId) || 'component';
+      const op = str(config.operationName) || 'execute';
+      const version = str(config.version);
+      return `Runs ${humanize(component)}${version ? ` v${version}` : ''} · ${humanize(op)} in an isolated container.`;
+    }
     case 'subflow':
       return 'Runs a reusable sub-workflow as a single step.';
     case 'browser':

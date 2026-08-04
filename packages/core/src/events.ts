@@ -68,6 +68,8 @@ export const REALTIME_EVENTS = {
   RUN_PAUSED: 'run.paused',
   RUN_CANCELLED: 'run.cancelled',
   RUN_COMPLETED: 'run.completed',
+  /** Canonical dual-axis terminal signal. Consumers should prefer this. */
+  RUN_SETTLED: 'run.settled',
   /** Definition-of-done checks passed against the world (stronger than completion). */
   RUN_ACCOMPLISHED: 'run.accomplished',
   RUN_FAILED: 'run.failed',

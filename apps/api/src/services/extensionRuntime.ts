@@ -6,7 +6,7 @@
 
 import { and, eq } from 'drizzle-orm';
 import { CONSTANTS, AgentisError } from '@agentis/core';
-import type { ExtensionExecutionOutcome, ExtensionManifest, ExtensionOperation, ExtensionPermission } from '@agentis/core';
+import type { ComponentManifestV2, ExtensionExecutionOutcome, ExtensionManifest, ExtensionOperation, ExtensionPermission } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
@@ -16,6 +16,7 @@ import { runDockerSandboxExtension } from '../extensions/dockerSandboxRuntime.js
 import type { ExtensionKvStore } from '../extensions/kv.js';
 import type { CredentialVault } from './credentialVault.js';
 import type { ResolvedExtensionCredential } from '../extensions/credentialAttach.js';
+import { validateComponentManifest } from '../extensions/componentBundle.js';
 
 /** Minimal cursor surface the ExtensionSource passes to a listener-source op. */
 export interface ListenerSourceCursor {
@@ -227,7 +228,9 @@ export class ExtensionRuntime {
       manifest.runtime === 'builtin' && (!manifest.timeoutMs || manifest.timeoutMs <= 0)
         ? BUILTIN_LONG_RUNNING_TIMEOUTS[manifest.entrypoint ?? operationName]
         : undefined;
-    const timeoutMs = clampTimeout(manifest.timeoutMs || builtinBudget);
+    const timeoutMs = clampTimeout(manifest.component?.resources.timeoutSec
+      ? manifest.component.resources.timeoutSec * 1000
+      : manifest.timeoutMs || builtinBudget);
     let outcome: ExtensionExecutionOutcome;
 
     // Run-scoped cancellation: settle immediately with an honest ABORTED
@@ -253,7 +256,7 @@ export class ExtensionRuntime {
     // Bound concurrent sandbox executions (node_worker/docker) to prevent
     // resource exhaustion from a runaway/injected extension loop. Builtins are
     // trusted and excluded so a long deploy never starves the sandbox pool.
-    const needsSandboxSlot = manifest.runtime === 'node_worker' || manifest.runtime === 'docker_sandbox';
+    const needsSandboxSlot = manifest.runtime === 'node_worker' || manifest.runtime === 'docker_sandbox' || manifest.runtime === 'component_oci';
     const releaseSandboxSlot = needsSandboxSlot ? await acquireSandboxSlot() : null;
     try {
       if (args.signal?.aborted) throw new Error('__ABORTED__');
@@ -294,6 +297,7 @@ export class ExtensionRuntime {
           break;
         }
         case 'docker_sandbox':
+        case 'component_oci':
           if (!this.options.dockerEnabled) {
               outcome = {
                 ok: false,
@@ -308,7 +312,7 @@ export class ExtensionRuntime {
               outcome = {
                 ok: false,
                 errorCode: 'VALIDATION_FAILED',
-                message: 'docker_sandbox extension manifest is missing `bundleDir`',
+                message: `${manifest.runtime} extension manifest is missing bundleDir`,
                 durationMs: Date.now() - startedAt,
                 operationName,
               };
@@ -429,6 +433,7 @@ export function normalizeExtensionManifest(
     allowedDomains: Array.isArray(source.allowedDomains) ? source.allowedDomains.filter((v): v is string => typeof v === 'string') : undefined,
     source: typeof source.source === 'string' ? source.source : undefined,
     bundleDir: typeof source.bundleDir === 'string' ? source.bundleDir : undefined,
+    component: source.component && typeof source.component === 'object' ? source.component as ComponentManifestV2 : undefined,
     listenerOperations: Array.isArray(source.listenerOperations)
       ? source.listenerOperations.filter((v): v is string => typeof v === 'string')
       : operations.filter((o) => o.isListenerSource).map((o) => o.name),
@@ -445,6 +450,13 @@ export function validateExtensionManifest(manifest: ExtensionManifest, opts: { i
   }
   if (!manifest.operations.length) {
     throw new AgentisError('EXTENSION_MANIFEST_INVALID', `Extension ${manifest.slug} must declare at least one operation`);
+  }
+  if (manifest.runtime === 'component_oci') {
+    if (!manifest.component) throw new AgentisError('EXTENSION_MANIFEST_INVALID', 'component_oci requires component manifest v2');
+    validateComponentManifest(manifest.component);
+    if (manifest.component.operations.map((operation) => operation.name).join('|') !== manifest.operations.map((operation) => operation.name).join('|')) {
+      throw new AgentisError('EXTENSION_MANIFEST_INVALID', 'component and extension operation catalogs must match');
+    }
   }
   for (const operation of manifest.operations) {
     if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(operation.name)) {
@@ -496,8 +508,8 @@ export function validateExtensionManifest(manifest: ExtensionManifest, opts: { i
   if (permissions.includes('credentials') && (!manifest.credentialKeys || manifest.credentialKeys.length === 0)) {
     throw new AgentisError('EXTENSION_MANIFEST_INVALID', `Extension ${manifest.slug} declares credentials but has no credentialKeys`);
   }
-  if (permissions.includes('spawn') && manifest.runtime !== 'docker_sandbox') {
-    throw new AgentisError('EXTENSION_PERMISSION_INVALID', 'spawn permission is only valid for docker_sandbox extensions');
+  if (permissions.includes('spawn') && manifest.runtime !== 'docker_sandbox' && manifest.runtime !== 'component_oci') {
+    throw new AgentisError('EXTENSION_PERMISSION_INVALID', 'spawn permission is only valid for OCI-backed extensions');
   }
   if (opts.install && permissions.includes('network.unrestricted')) {
     const enabled = String(process.env.AGENTIS_EXTENSION_ALLOW_UNRESTRICTED_NETWORK ?? '').toLowerCase() === 'true';

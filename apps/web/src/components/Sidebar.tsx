@@ -35,11 +35,11 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { to: '/home', labelKey: 'navigation.home', icon: HomeIcon },
-  { to: '/apps', labelKey: 'navigation.apps', icon: AppsIcon },
-  { to: '/agents', labelKey: 'navigation.agents', icon: Bot, badge: 'liveAgents' },
-  { to: '/brain', labelKey: 'navigation.brain', icon: BrainIcon },
-  { to: '/assets', labelKey: 'navigation.assets', icon: AssetsIcon },
+  { to: '/home', labelKey: 'navigation.home', title: 'Home', icon: HomeIcon },
+  { to: '/apps', labelKey: 'navigation.apps', title: 'Apps', icon: AppsIcon },
+  { to: '/agents', labelKey: 'navigation.agents', title: 'Agents', icon: Bot, badge: 'liveAgents' },
+  { to: '/brain', labelKey: 'navigation.brain', title: 'Brain', icon: BrainIcon },
+  { to: '/assets', labelKey: 'navigation.assets', title: 'Assets', icon: AssetsIcon },
 ];
 
 const STORAGE_KEY = 'agentis.sidebar.collapsed';
@@ -105,7 +105,7 @@ function SidebarLink({
     <li>
       <NavLink
         to={item.to}
-        title={t(item.labelKey)}
+        title={item.title ?? t(item.labelKey)}
         className={({ isActive }) =>
           clsx(
             'group relative flex items-center gap-2.5 rounded-nav px-2.5 py-2 text-[13px] transition-colors',

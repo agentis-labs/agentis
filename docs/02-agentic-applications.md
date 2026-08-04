@@ -74,6 +74,23 @@ token-gated, read-only, CSP-safe, and embeddable (`PublicAppSurfacePage`).
 - **Proactive followups** (`services/proactiveFollowups.ts`) — a sweep over due
   `nextTouchAt` clocks dispatches turns so apps reach out first (subject to outbound policy).
 
+## Readiness and portable App revisions
+
+The App compiler reports four separate readiness facets: **Structure**, **Execute**, **Verify**,
+and **Deliver**. Structural and executable blockers determine whether an operator can start a proof
+run; verification and delivery evidence determine whether the result is ready to trust or release.
+Runtime, channel, surface, and test checks feed those facets, so a polished interface cannot hide
+an unavailable binary, component runtime, permission mismatch, or unverified business outcome.
+
+Portable `.agentisapp` bundles use manifest version 2. Exports include the App's transitive
+workflows, surfaces, data contracts, and content-addressed Component v2 files. The export target is
+revision-explicit: `active` is the safe default and `candidate` must be requested deliberately;
+preview and export resolve the same target. Local executable paths, commands, working directories,
+environment values, repository paths, and runtime project roots are removed from the bundle.
+Import verifies manifest/runtime compatibility, file hashes, dependency locks, and component
+entrypoints before activating anything. A missing manifest version remains readable as legacy v1;
+unsafe or conflicting bundles fail closed.
+
 ## App Goals & the Evolution Loop
 
 An App can hold a durable **Goal** (the reserved north-star tier — distinct from a run-scoped
@@ -106,7 +123,7 @@ the owner agent (via `strategy.propose`), keeping the LLM out of the promote/ret
 ## API surface
 
 - HTTP: `/v1/apps`, `/v1/artifacts`, `/v1/rooms`, `/v1/interactions`,
-  `/v1/workspace-context`, `/v1/apps/:id/goal`.
+  `/v1/workspace-context`, `/v1/apps/:id/goal`, `/v1/apps/:id/export`.
 - Tools: `agentis.app.{create,list,archive,delete,adopt_workflow,scaffold,plan,goal}`,
   `agentis.strategy.{propose,list}`, `agentis.evolution.review`, plus the `data.*` and `ui.*`
   families above.

@@ -22,6 +22,7 @@ import type {
   NormalizedTask,
   RuntimeContext,
   RuntimeDescriptor,
+  RuntimeProfileV2,
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
@@ -56,7 +57,7 @@ export interface CodexAdapterOptions {
   cwd?: string;
   model?: string;
   maxTurns?: number;
-  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  modelReasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
   fastMode?: boolean;
   dangerouslyBypassApprovalsAndSandbox?: boolean;
   extraArgs?: string[];
@@ -72,6 +73,8 @@ export interface CodexAdapterOptions {
    * for agents that declare the `browser` affordance. (UNIVERSAL-HARNESS §4/§6.)
    */
   browser?: boolean;
+  /** Effective, already-migrated launch policy. Native mode preserves Codex. */
+  runtimeProfile?: RuntimeProfileV2;
   /**
    * Agentis MCP servers to mount so the harness calls Agentis tools natively and
    * runs its own loop in ONE invocation (no marker-protocol re-spawn). When set,
@@ -535,7 +538,11 @@ function buildCodexArgs(
   const fastMode = options.fastMode ?? opts.fastMode ?? false;
   const reasoningEffort = options.reasoningEffort ?? opts.modelReasoningEffort ?? (fastMode ? 'minimal' : undefined);
   const fastModeArgs = fastMode ? ['-c', 'service_tier="fast"', '-c', 'features.fast_mode=true'] : [];
-  // Headless isolation (default ON). Agentis drives Codex as a server subprocess,
+  // Runtime profile v2 defaults locally attached agents to native parity. The
+  // legacy environment switch remains a compatibility override, but it no longer
+  // silently strips a healthy user's skills/plugins/project configuration.
+  // Headless isolation is still available through the explicit hermetic profile.
+  // Agentis drives Codex as a server subprocess,
   // but `~/.codex/config.toml` is authored for INTERACTIVE desktop use: it mounts
   // plugins (github/browser), a `node_repl` MCP server (120s startup timeout), and
   // the `openai-bundled` "apps" marketplace. Loaded on every `codex exec` spawn,
@@ -554,8 +561,13 @@ function buildCodexArgs(
   // the `browser@openai-bundled` plugin + `node_repl` browser backend are present
   // — that is the whole point of the opt-in, and the only place the native browser
   // lives.
-  const browser = opts.browser === true;
-  const loadUserConfig = browser || String(
+  const profile = opts.runtimeProfile;
+  const browser = profile?.browser === 'enabled'
+    || (profile?.browser === 'inherit' && opts.browser === true)
+    || (!profile && opts.browser === true);
+  const loadUserConfig = profile
+    ? profile.mode === 'native' && profile.inheritUserConfig
+    : browser || String(
     opts.env?.AGENTIS_CODEX_LOAD_USER_CONFIG ?? process.env.AGENTIS_CODEX_LOAD_USER_CONFIG ?? '',
   ).toLowerCase() === 'true';
   const mcpArgs = options.mountMcp === false
@@ -578,6 +590,7 @@ function buildCodexArgs(
   return [
     'exec',
     '--json',
+    ...(loadUserConfig && profile?.profileName ? [`--profile=${profile.profileName}`] : []),
     // See the headless-isolation note above.
     ...(loadUserConfig ? [] : ['--ignore-user-config']),
     ...(model ? [`--model=${model}`] : []),
@@ -595,11 +608,19 @@ function buildCodexArgs(
     // chat. This mirrors ClaudeCodeAdapter's hardcoded `--dangerously-skip-permissions`.
     // Don't refuse / prompt when the workspace cwd isn't a git repo.
     '--skip-git-repo-check',
-    '--dangerously-bypass-approvals-and-sandbox',
+    ...codexPermissionArgs(profile?.permissionProfile ?? 'trusted_local'),
     // Mount Agentis tools over MCP so the harness runs its own loop natively.
     ...mcpArgs,
     ...(opts.extraArgs ?? []),
   ];
+}
+
+function codexPermissionArgs(profile: RuntimeProfileV2['permissionProfile']): string[] {
+  if (profile === 'read_only') return ['--sandbox=read-only', '--ask-for-approval=never'];
+  if (profile === 'workspace_write') return ['--sandbox=workspace-write', '--ask-for-approval=never'];
+  // trusted_local preserves legacy behavior. externally_sandboxed is safe to
+  // bypass because the enclosing runner, not Codex, owns the sandbox boundary.
+  return ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
 function disableConfiguredMcpArgs(opts: CodexAdapterOptions): string[] {

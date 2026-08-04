@@ -45,7 +45,7 @@ export function CanvasSelectionToolbar({
         // toolbar is captured by the pane first (selection box / pane click) and
         // clears the selection before our handlers run. With them, RF leaves the
         // event to the toolbar so the buttons actually fire.
-        className="nopan nodrag absolute flex items-center gap-1 rounded-lg border border-line bg-surface/95 p-1 shadow-dropdown backdrop-blur"
+        className="nopan nodrag nowheel pointer-events-auto absolute flex items-center gap-1 rounded-lg border border-line bg-surface/95 p-1 shadow-dropdown backdrop-blur"
         style={{ transform: `translate(${x}px, ${minY - 12}px) translate(-50%, -100%)`, zIndex: 20 }}
         onPointerDownCapture={stopCanvasEvent}
         onPointerUpCapture={stopCanvasEvent}
@@ -53,6 +53,7 @@ export function CanvasSelectionToolbar({
         onMouseUpCapture={stopCanvasEvent}
         onTouchStartCapture={stopCanvasEvent}
         onTouchEndCapture={stopCanvasEvent}
+        onWheel={stopCanvasEvent}
         onClick={stopCanvasEvent}
       >
         <button type="button" disabled={!canCreatePhase} onClick={(event) => runAction(event, onCreatePhase)} className={buttonClass} title="Create a phase from unassigned nodes">

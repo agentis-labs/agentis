@@ -645,6 +645,35 @@ describe('CodexAdapter', () => {
     expect((spawnMock.mock.calls[2]![1] as string[]).slice(0, 2)).toEqual(['exec', '--json']);
   });
 
+  it('native profile preserves user config/profile while enforcing the named permission envelope', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new CodexAdapter({
+      agentId: 'agent-1', logger, binaryPath: 'codex-test', cwd: 'C:/repo',
+      runtimeProfile: {
+        version: 2,
+        mode: 'native',
+        profileName: 'work',
+        projectRoot: 'C:/repo',
+        permissionProfile: 'read_only',
+        inheritUserConfig: true,
+        inheritProjectInstructions: true,
+        inheritPlugins: true,
+        inheritSkills: true,
+        browser: 'inherit',
+        sessionPolicy: 'persistent',
+      },
+    });
+    await adapter.dispatchTask(task);
+    const invocation = spawnMock.mock.calls[0]![1] as string[];
+    expect(invocation).toContain('--profile=work');
+    expect(invocation).not.toContain('--ignore-user-config');
+    expect(invocation).toContain('--sandbox=read-only');
+    expect(invocation).toContain('--ask-for-approval=never');
+    expect(invocation).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+    child.emit('exit', 0);
+  });
+
   it('does not resend prior Agentis history into a resumed Codex thread', async () => {
     const first = fakeChildProcess();
     const second = fakeChildProcess();

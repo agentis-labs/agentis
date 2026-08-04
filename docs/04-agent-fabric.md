@@ -15,8 +15,8 @@ protected by a per-runtime `CircuitBreaker`. Every task is a `NormalizedTask`.
 
 | Adapter | Runtime | Notes |
 |---------|---------|-------|
-| `ClaudeCodeAdapter` | Claude Code CLI | marker tools; native MCP when a server is mounted |
-| `CodexAdapter` | OpenAI Codex CLI | optional native browser/computer-use |
+| `ClaudeCodeAdapter` | Claude Code CLI | native or hermetic profile; native MCP when a server is mounted |
+| `CodexAdapter` | OpenAI Codex CLI | native profile preserves user/project config, skills, plugins, browser, and named permissions |
 | `CursorAdapter` | Cursor | semantic code index |
 | `AntigravityAdapter` | Google Antigravity (agy) | native MCP; reads transcript for output |
 | `HermesAgentAdapter` | Hermes Agent (ACP) | dual-transport ACP client |
@@ -25,6 +25,32 @@ protected by a per-runtime `CircuitBreaker`. Every task is a `NormalizedTask`.
 | `HttpAdapter` | Custom HTTP callback | any endpoint, HMAC auth |
 
 All six CLI/streaming harnesses share a common chat runtime (`adapters/cliChatRuntime.ts`).
+
+## Runtime Profile v2 and the execution envelope
+
+An adapter name is not enough to explain what a turn could actually do. Each commissioned
+agent therefore carries a `RuntimeProfileV2` (`packages/core/src/types/adapter.ts`) with an
+explicit execution mode (`native | hermetic | containerized`), project root, optional native
+profile name, named permission profile (`read_only | workspace_write | trusted_local |
+externally_sandboxed`), inheritance switches for user config/project instructions/plugins/skills,
+browser posture, and persistent-or-ephemeral session policy.
+
+`native` is the parity path: Agentis preserves the selected CLI harness's useful environment
+instead of silently stripping the configuration that makes the same model capable in its desktop
+app. `hermetic` is the repeatable isolated path. Permission profiles are enforced by adapter
+arguments and MCP execution mode; they are not prompt-only suggestions and are never silently
+widened.
+
+Before every concrete chat turn, `RuntimeProfileService.captureExecution()` writes a non-secret
+`AgentExecutionEnvelope` to `agent_execution_envelopes`. The envelope records the adapter,
+effective profile, binary and CLI version, cwd, model/reasoning/tier, browser state, loaded source
+classes (`user | project | agentis`), MCP server count, and capability warnings. The Runtime panel
+shows this same record, so a weak answer can be diagnosed against the launch that produced it
+rather than against an assumed configuration.
+
+Session identity is conversation-scoped. Codex resume ids and equivalent native state are reused
+only for the same Agentis conversation; unrelated conversations never share one global native
+thread.
 
 ## Affordances — what a runtime can do
 
@@ -93,6 +119,13 @@ for third-party adapters that have not adopted native declarations yet.
 `services/modelRoutingPolicy.ts` classifies a task and selects the **minimum-sufficient** tier
 (fast / balanced / flagship). Per-agent hard pins and per-turn overrides take precedence.
 `agentis.routing.preview` explains which runtime + model a task would select.
+
+The paired black-box gate in `scripts/runtime-parity-eval.ts` runs one fixture corpus through the
+native CLI and the Agentis conversation surface, scores both outputs, and fails when Agentis
+regresses by more than the configured tolerance. Configure the two surfaces with
+`AGENTIS_PARITY_NATIVE_JSON` and `AGENTIS_PARITY_{URL,API_KEY,WORKSPACE_ID,AGENT_ID}`, then run
+`pnpm eval:runtime-parity`. An unpaired run is rejected unless `--allow-unpaired` is supplied
+explicitly for harness smoke testing.
 
 ## Sessions, specialists, chat
 

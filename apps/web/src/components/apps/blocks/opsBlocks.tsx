@@ -405,19 +405,26 @@ export function OrchestrationPanelView({ appId, title, controls = true }: { appI
               Run Pipeline
             </button>
           ) : null}
-          {compiler || doctor ? (
+          {compiler ? (
+            <div className="flex items-center gap-1" title={compiler.summary}>
+              {([
+                ['Structure', compiler.readinessFacets.structural.ready],
+                ['Execute', compiler.readinessFacets.executable.ready],
+                ['Verify', compiler.readinessFacets.verified.ready],
+                ['Deliver', compiler.readinessFacets.deliverable.ready],
+              ] as const).map(([label, ready]) => (
+                <span key={label} className={clsx('inline-flex h-7 items-center gap-1 rounded-full border px-2 text-[10px] font-semibold', ready ? 'border-success/25 bg-success/10 text-success' : 'border-warn/30 bg-warn/10 text-warn')}>
+                  {ready ? <ShieldCheck size={11} /> : <AlertTriangle size={11} />}{label}
+                </span>
+              ))}
+            </div>
+          ) : doctor ? (
             <span
               className={clsx('inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold', doctorTone)}
-              title={compiler ? compiler.summary : doctor!.readyForUnattended ? 'All required orchestration layers are executable' : `${doctor!.summary.critical + doctor!.summary.error} blocking findings`}
+              title={doctor.readyForUnattended ? 'All required orchestration layers are executable' : `${doctor.summary.critical + doctor.summary.error} blocking findings`}
             >
-              {compiler?.ready ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}
-              {compiler
-                ? compiler.ready
-                  ? 'Production ready'
-                  : compiler.readyForExecution
-                    ? `${compiler.evidencePendingCount} proof pending`
-                    : `${compiler.executionBlockerCount} blockers`
-                : doctor!.readyForUnattended ? 'Doctor ready' : `${doctor!.summary.critical + doctor!.summary.error} blockers`}
+              {doctor.readyForUnattended ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}
+              {doctor.readyForUnattended ? 'Doctor ready' : `${doctor.summary.critical + doctor.summary.error} blockers`}
             </span>
           ) : null}
         </div>

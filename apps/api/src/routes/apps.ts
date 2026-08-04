@@ -241,7 +241,7 @@ const createAppRequestSchema = createAppSchema.extend({
 // checksum of authentic older exports (see AppPackager.deserialize).
 const rawAppEnvelopeSchema = z.object({
   format: z.literal('.agentisapp'),
-  formatVersion: z.literal(1).optional(),
+  formatVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   manifest: z.record(z.unknown()),
   checksum: z.string().min(1),
   exportedAt: z.string().optional(),
@@ -870,10 +870,12 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
     // data. `?fidelity=shareable` opts down to structure-only for public sharing.
     // `?exclude=agent:<id>,knowledgeBase:<id>` drops individual closure items.
     const fidelity = bundleFidelitySchema.catch('full').parse(c.req.query('fidelity'));
+    const revisionTarget = c.req.query('revisionTarget') === 'candidate' ? 'candidate' : 'active';
     const exclude = (c.req.query('exclude') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     return c.json({
       data: packager.export(ws.workspaceId, c.req.param('id'), {
         fidelity,
+        revisionTarget,
         ...(exclude.length > 0 ? { exclude } : {}),
         ...(brainPort ? { brain: brainPort } : {}),
       }),
@@ -883,7 +885,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
   /** What an App export contains, before exporting — powers the selection tree. */
   app.get('/:id/export/preview', (c) => {
     const ws = getWorkspace(c);
-    return c.json({ data: computeAppClosure(deps.db, ws.workspaceId, c.req.param('id')) });
+    const revisionTarget = c.req.query('revisionTarget') === 'candidate' ? 'candidate' : 'active';
+    return c.json({ data: { ...computeAppClosure(deps.db, ws.workspaceId, c.req.param('id'), revisionTarget), revisionTarget } });
   });
 
   app.post('/import/preview', async (c) => {
@@ -911,7 +914,10 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       ))
       .all();
     for (const workflow of importedWorkflows) {
-      workflowRevisions.stageImportedLegacyAsCandidate(ws.workspaceId, workflow.id);
+      // The operator explicitly acknowledged this package before installation.
+      // Materialize its imported graph as the active revision so a manual run
+      // executes the graph they just reviewed, rather than an empty baseline.
+      workflowRevisions.ensureWorkflow(ws.workspaceId, workflow.id);
     }
     return c.json({
       data: imported,

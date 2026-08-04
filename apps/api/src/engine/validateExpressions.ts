@@ -416,7 +416,7 @@ function inferNodeOutputKeys(node: WorkflowNode, cfg: Record<string, unknown>, i
     const ok = Array.isArray(cfg.outputKeys) ? (cfg.outputKeys as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0) : [];
     return ok.length > 0 ? new Set(ok) : null;
   }
-  if (kind === 'extension_task' || kind === 'subflow') {
+  if (kind === 'extension_task' || kind === 'component_task' || kind === 'subflow') {
     const om = cfg.outputMapping && typeof cfg.outputMapping === 'object' ? Object.keys(cfg.outputMapping as object) : [];
     return om.length > 0 ? new Set(om) : null;
   }

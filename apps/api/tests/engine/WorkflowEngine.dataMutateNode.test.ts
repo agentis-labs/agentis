@@ -86,7 +86,15 @@ describe('WorkflowEngine — data_mutate node', () => {
     const seeded = ds.insert(ctx.workspace.id, appId, 'leads', { name: 'Gone' });
     expect(ds.query(ctx.workspace.id, appId, 'leads', {}).rows).toHaveLength(1);
     const out = await runMutate({ operation: 'delete', recordId: seeded.id });
-    expect(out).toEqual({ deleted: seeded.id });
+    expect(out).toEqual(expect.objectContaining({
+      deleted: seeded.id,
+      mutationReceipt: expect.objectContaining({
+        attempted: 1,
+        succeeded: 1,
+        failed: 0,
+        verification: expect.objectContaining({ performed: true, passed: true }),
+      }),
+    }));
     expect(ds.query(ctx.workspace.id, appId, 'leads', {}).rows).toHaveLength(0);
   });
 

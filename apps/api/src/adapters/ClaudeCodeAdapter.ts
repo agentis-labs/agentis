@@ -23,6 +23,7 @@ import type {
   NormalizedTask,
   RuntimeContext,
   RuntimeDescriptor,
+  RuntimeProfileV2,
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
@@ -58,6 +59,8 @@ export interface ClaudeCodeAdapterOptions {
   env?: Record<string, string>;
   timeoutSec?: number;
   dangerouslySkipPermissions?: boolean;
+  /** Effective v2 launch policy; native mode preserves user/project settings. */
+  runtimeProfile?: RuntimeProfileV2;
   /**
    * Agentis MCP servers to mount (`--mcp-config`) so the harness calls Agentis
    * tools natively in its own loop. When set, `toolForwarding` becomes
@@ -247,10 +250,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       '--verbose',
       '--include-partial-messages',
       ...(dispatchTurnCap ? [`--max-turns=${dispatchTurnCap}`] : []),
-      '--dangerously-skip-permissions',
+      ...claudePermissionArgs(this.opts.runtimeProfile?.permissionProfile ?? 'trusted_local'),
+      ...claudeProfileArgs(this.opts.runtimeProfile),
       ...(task.preferredModel || this.opts.model ? [`--model=${task.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
-      '--strict-mcp-config',
+      ...(this.opts.runtimeProfile?.mode === 'hermetic' ? ['--strict-mcp-config'] : []),
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? []),
       ...(this.opts.extraArgs ?? []),
@@ -436,11 +440,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       '--verbose',
       '--include-partial-messages',
       ...(turnCap ? [`--max-turns=${turnCap}`] : []),
-      '--dangerously-skip-permissions',
+      ...claudePermissionArgs(this.opts.runtimeProfile?.permissionProfile ?? 'trusted_local'),
+      ...claudeProfileArgs(this.opts.runtimeProfile),
       ...(options?.preferredModel || this.opts.model ? [`--model=${options?.preferredModel || this.opts.model}`] : []),
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
       ...(storedSession ? ['--resume', storedSession] : []),
-      '--strict-mcp-config',
+      ...(this.opts.runtimeProfile?.mode === 'hermetic' ? ['--strict-mcp-config'] : []),
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       // `executionMode` tags the descriptor so Plan mode is registry-enforced, not
       // just prompt-level, for Claude's own tool loop.
@@ -540,6 +545,23 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       timestamp: new Date().toISOString(),
     });
   }
+}
+
+function claudeProfileArgs(profile?: RuntimeProfileV2): string[] {
+  if (!profile) return [];
+  if (profile.mode === 'hermetic') return ['--safe-mode'];
+  const sources = [
+    profile.inheritUserConfig ? 'user' : null,
+    profile.inheritProjectInstructions ? 'project' : null,
+    profile.inheritProjectInstructions ? 'local' : null,
+  ].filter((value): value is string => Boolean(value));
+  return sources.length > 0 ? [`--setting-sources=${sources.join(',')}`] : [];
+}
+
+function claudePermissionArgs(profile: RuntimeProfileV2['permissionProfile']): string[] {
+  if (profile === 'read_only') return ['--permission-mode=dontAsk', '--tools=Read,Glob,Grep'];
+  if (profile === 'workspace_write') return ['--permission-mode=acceptEdits'];
+  return ['--dangerously-skip-permissions'];
 }
 
 async function probeClaudeAuthStatus(args: {

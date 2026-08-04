@@ -454,19 +454,44 @@ export class NodeExecutorController {
     }
     const { workspaceId } = ctx;
     const appId = this.#resolveDataAppId(ctx, config.appId);
+    const receipt = (id: string, verification: { passed: boolean; detail: string }) => ({
+      attempted: 1,
+      succeeded: verification.passed ? 1 : 0,
+      failed: verification.passed ? 0 : 1,
+      skipped: 0,
+      idempotencyKey: `${ctx.runId}:${config.collection}:${config.operation}:${id}`,
+      items: [{ id, status: verification.passed ? 'succeeded' as const : 'failed' as const, detail: verification.detail }],
+      verification: { performed: true, ...verification },
+    });
+    const verifyPresent = (id: string) => {
+      const stored = this.host.deps.appData!.getRecord(workspaceId, appId, config.collection, id);
+      if (!stored?.id) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `data_mutate could not verify persisted record ${id}`);
+      return receipt(id, { passed: true, detail: `Authoritative datastore read confirmed record ${id}.` });
+    };
     switch (config.operation) {
-      case 'insert':
-        return { [config.outputKey ?? 'record']: this.host.deps.appData.insert(workspaceId, appId, config.collection, config.record ?? {}) };
+      case 'insert': {
+        const record = this.host.deps.appData.insert(workspaceId, appId, config.collection, config.record ?? {});
+        return { [config.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
+      }
       case 'update': {
         if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate update requires recordId');
-        return { [config.outputKey ?? 'record']: this.host.deps.appData.update(workspaceId, appId, config.collection, config.recordId, config.record ?? {}) };
+        const record = this.host.deps.appData.update(workspaceId, appId, config.collection, config.recordId, config.record ?? {});
+        return { [config.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
       }
-      case 'upsert':
-        return { [config.outputKey ?? 'record']: this.host.deps.appData.upsert(workspaceId, appId, config.collection, config.match ?? {}, config.record ?? {}) };
+      case 'upsert': {
+        const record = this.host.deps.appData.upsert(workspaceId, appId, config.collection, config.match ?? {}, config.record ?? {});
+        return { [config.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
+      }
       case 'delete': {
         if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate delete requires recordId');
         this.host.deps.appData.delete(workspaceId, appId, config.collection, config.recordId);
-        return { [config.outputKey ?? 'deleted']: config.recordId };
+        let absent = false;
+        try { this.host.deps.appData.getRecord(workspaceId, appId, config.collection, config.recordId); } catch { absent = true; }
+        if (!absent) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `data_mutate delete could not verify removal of ${config.recordId}`);
+        return {
+          [config.outputKey ?? 'deleted']: config.recordId,
+          mutationReceipt: receipt(config.recordId, { passed: true, detail: `Authoritative datastore read confirmed record ${config.recordId} is absent.` }),
+        };
       }
       default:
         throw new AgentisError('VALIDATION_FAILED', `data_mutate: unknown operation ${String(config.operation)}`);

@@ -262,6 +262,14 @@ export function AppEditorPage() {
     setSearchParams((params) => {
       const next = new URLSearchParams(params);
       next.set('facet', value);
+      // `page`, `mode`, and `node` belong to the embedded interface runtime.
+      // Keeping them while another facet is visible makes chat context describe
+      // a stale surface instead of the workflow/data/brain currently on screen.
+      if (value !== 'interface') {
+        next.delete('page');
+        next.delete('mode');
+        next.delete('node');
+      }
       return next;
     }, { replace: true });
   }, [setSearchParams]);

@@ -555,6 +555,14 @@ describe('/v1/apps package install', () => {
   it('previews without mutating, then installs a fresh app', async () => {
     const sourceId = seedApp();
     const before = appCount();
+    const sourceWorkflow = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.appId, sourceId)).get()!;
+    ctx.db.update(schema.workflows).set({
+      graph: {
+        version: 1,
+        nodes: [{ id: 'draft', type: 'transform', title: 'Draft', position: { x: 0, y: 0 }, config: { kind: 'transform', expression: '({})' } }],
+        edges: [],
+      },
+    }).where(eq(schema.workflows.id, sourceWorkflow.id)).run();
 
     const exported = await app().request(`/v1/apps/${sourceId}/export`, { headers: ctx.authHeaders });
     expect(exported.status).toBe(200);
@@ -588,7 +596,14 @@ describe('/v1/apps package install', () => {
     expect(installedBody.data.appId).not.toBe(sourceId);
     expect(appCount()).toBe(before + 1);
     expect(new AppSurfaceStore({ db: ctx.db }).list(ctx.workspace.id, installedBody.data.appId).map((s) => s.name)).toEqual(['home']);
-    expect(ctx.db.select().from(schema.workflows).where(eq(schema.workflows.appId, installedBody.data.appId)).all()).toHaveLength(1);
+    const [importedWorkflow] = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.appId, installedBody.data.appId)).all();
+    expect(importedWorkflow).toBeDefined();
+    expect(importedWorkflow?.graph.nodes).toHaveLength(1);
+    expect(importedWorkflow?.activeRevisionId).toBeTruthy();
+    const activeRevision = ctx.db.select().from(schema.workflowGraphRevisions)
+      .where(eq(schema.workflowGraphRevisions.id, importedWorkflow!.activeRevisionId!))
+      .get();
+    expect((activeRevision?.graphJson as { nodes: unknown[] }).nodes).toHaveLength(1);
   });
 
   it('requires permission acknowledgement before installing', async () => {

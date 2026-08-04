@@ -7,6 +7,8 @@
  * statuses.
  */
 
+import type { RunExecutionStatus, RunOutcomeStatus, RunSettlement } from '@agentis/core';
+
 export type RunVerdictOutcome = 'accomplished' | 'partial' | 'hollow' | 'failed_checks';
 
 export interface EffectiveRunOutcome {
@@ -72,3 +74,57 @@ export function evaluateRunOutcome(args: {
   };
 }
 
+export function executionStatusFor(status: string): RunExecutionStatus {
+  if (status === 'RUNNING') return 'running';
+  if (status === 'PAUSED' || status === 'WAITING') return 'waiting';
+  if (status === 'FAILED') return 'failed';
+  if (status === 'CANCELLED') return 'cancelled';
+  if (status === 'COMPLETED' || status === 'COMPLETED_WITH_ERRORS' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION') return 'completed';
+  return 'queued';
+}
+
+export function outcomeStatusFor(status: string, verdict: RunVerdictOutcome | null): RunOutcomeStatus {
+  if (status === 'CANCELLED') return 'blocked';
+  if (status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION') return 'failed';
+  if (status !== 'COMPLETED') return 'unverified';
+  if (verdict === 'accomplished') return 'accomplished';
+  if (verdict === 'partial') return 'partial';
+  if (verdict === 'hollow' || verdict === 'failed_checks') return 'failed';
+  return 'unverified';
+}
+
+export function buildRunSettlement(args: {
+  status: string;
+  runState?: unknown;
+  revisionId?: string | null;
+  semanticHash?: string | null;
+  settledAt?: string | null;
+}): RunSettlement {
+  const verdict = readRunVerdictOutcome(args.runState);
+  const rawVerdict = args.runState && typeof args.runState === 'object'
+    ? (args.runState as { verdict?: { checks?: unknown[]; deficiencies?: unknown[] } }).verdict
+    : undefined;
+  const checks = Array.isArray(rawVerdict?.checks) ? rawVerdict.checks : [];
+  const deficiencies = Array.isArray(rawVerdict?.deficiencies) ? rawVerdict.deficiencies : [];
+  return {
+    executionStatus: executionStatusFor(args.status),
+    outcomeStatus: outcomeStatusFor(args.status, verdict),
+    revisionId: args.revisionId ?? null,
+    semanticHash: args.semanticHash ?? null,
+    evidence: checks.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const check = entry as { checkId?: unknown; evidence?: unknown };
+      return [{ kind: 'check' as const, ...(typeof check.checkId === 'string' ? { id: check.checkId } : {}), summary: typeof check.evidence === 'string' ? check.evidence : 'Acceptance check evaluated.' }];
+    }),
+    deficiencies: deficiencies.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const deficiency = entry as { checkId?: unknown; detail?: unknown; producingNodeIds?: unknown };
+      return [{
+        code: typeof deficiency.checkId === 'string' ? deficiency.checkId : 'OUTCOME_DEFICIENT',
+        detail: typeof deficiency.detail === 'string' ? deficiency.detail : 'The requested outcome was not proven.',
+        ...(Array.isArray(deficiency.producingNodeIds) ? { producingNodeIds: deficiency.producingNodeIds.filter((id): id is string => typeof id === 'string') } : {}),
+      }];
+    }),
+    settledAt: args.settledAt ?? (TERMINAL.has(args.status) ? new Date().toISOString() : null),
+  };
+}

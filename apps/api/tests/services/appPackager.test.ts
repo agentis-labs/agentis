@@ -133,4 +133,22 @@ describe('AppPackager — IR projection', () => {
     expect(reexported.manifest.source).toEqual(manifest.source);
     expect(reexported.checksum).not.toBe('');
   });
+
+  it('exports the immutable active graph by default and candidate only when explicit', () => {
+    const workflow = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.appId, appId)).get()!;
+    const activeId = randomUUID();
+    const candidateId = randomUUID();
+    const activeGraph = { version: 1 as const, nodes: [], edges: [], viewport: { x: 1, y: 0, zoom: 1 } };
+    const candidateGraph = { version: 1 as const, nodes: [], edges: [], viewport: { x: 2, y: 0, zoom: 1 } };
+    for (const [id, graph, status] of [[activeId, activeGraph, 'active'], [candidateId, candidateGraph, 'candidate']] as const) {
+      ctx.db.insert(schema.workflowGraphRevisions).values({
+        id, workspaceId: ctx.workspace.id, workflowId: workflow.id,
+        graphJson: graph, semanticHash: `${id}-semantic`, presentationHash: `${id}-presentation`,
+        source: 'test', reason: 'test', status, trustState: status === 'active' ? 'proven' : 'unverified',
+      }).run();
+    }
+    ctx.db.update(schema.workflows).set({ activeRevisionId: activeId, candidateRevisionId: candidateId, graph: candidateGraph }).where(eq(schema.workflows.id, workflow.id)).run();
+    expect(packager.export(ctx.workspace.id, appId).manifest.workflows[0]!.graph).toEqual(activeGraph);
+    expect(packager.export(ctx.workspace.id, appId, { revisionTarget: 'candidate' }).manifest.workflows[0]!.graph).toEqual(candidateGraph);
+  });
 });

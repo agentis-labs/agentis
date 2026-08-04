@@ -1597,20 +1597,22 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
     }
   }
 
-  async function runWorkflow(inputs: Record<string, unknown>) {
+  async function runWorkflow(inputs: Record<string, unknown>, target: 'active' | 'candidate') {
     if (!wf) return;
     setRunning(true);
     try {
       const res = await api<{ runId: string }>(`/v1/workflows/${wf.id}/run`, {
         method: 'POST',
-        body: JSON.stringify({ inputs }),
+        body: JSON.stringify(target === 'candidate'
+          ? { inputs, mode: 'debug', revisionId: wf.candidateRevision?.id }
+          : { inputs, mode: 'active', revisionId: wf.activeRevision?.id }),
       });
       setActiveRunId(res.runId);
       setActiveRunFallbackStatus('pending');
       setRunDialogOpen(false);
       setRunControlOpen(false);
       setTab('canvas');
-      toast.success('Run started');
+      toast.success(target === 'candidate' ? 'Candidate verification run started' : 'Active production run started');
     } catch (e) {
       toast.error('Failed to start run', apiErrorMessage(e));
     } finally {
@@ -2501,7 +2503,9 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
         open={runDialogOpen}
         onClose={() => setRunDialogOpen(false)}
         variables={wf.variables ?? []}
-        onRun={(inputs) => void runWorkflow(inputs)}
+        activeRevision={wf.activeRevision}
+        candidateRevision={wf.candidateRevision}
+        onRun={(inputs, target) => void runWorkflow(inputs, target)}
         running={running}
       />
 
@@ -3798,16 +3802,21 @@ function RunInputDialog({
   open,
   onClose,
   variables,
+  activeRevision,
+  candidateRevision,
   onRun,
   running,
 }: {
   open: boolean;
   onClose: () => void;
   variables: Array<{ name: string; type: string; default?: unknown; label?: string }>;
-  onRun: (inputs: Record<string, unknown>) => void;
+  activeRevision: WorkflowRevisionSummary | undefined;
+  candidateRevision: WorkflowRevisionSummary | null | undefined;
+  onRun: (inputs: Record<string, unknown>, target: 'active' | 'candidate') => void;
   running: boolean;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
+  const [target, setTarget] = useState<'active' | 'candidate'>('active');
   useEffect(() => {
     if (open) {
       const init: Record<string, string> = {};
@@ -3815,6 +3824,7 @@ function RunInputDialog({
         init[v.name] = v.default != null ? String(v.default) : '';
       });
       setValues(init);
+      setTarget('active');
     }
   }, [open, variables]);
 
@@ -3828,7 +3838,7 @@ function RunInputDialog({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          onRun(values);
+          onRun(values, target);
         }}
         className="animate-scale-in w-full max-w-md rounded-modal border border-line bg-surface shadow-modal"
       >
@@ -3844,6 +3854,17 @@ function RunInputDialog({
           </button>
         </header>
         <div className="space-y-4 px-5 py-5">
+          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Revision to run">
+            <button type="button" role="radio" aria-checked={target === 'active'} onClick={() => setTarget('active')} className={clsx('rounded-lg border p-3 text-left', target === 'active' ? 'border-accent bg-accent/10' : 'border-line bg-surface-2')}>
+              <div className="text-[12px] font-semibold text-text-primary">Active · production</div>
+              <div className="mt-1 font-mono text-[10px] text-text-muted">{activeRevision ? activeRevision.id.slice(0, 8) : 'Compatibility active'}</div>
+            </button>
+            <button type="button" role="radio" aria-checked={target === 'candidate'} disabled={!candidateRevision} onClick={() => candidateRevision && setTarget('candidate')} className={clsx('rounded-lg border p-3 text-left disabled:cursor-not-allowed disabled:opacity-45', target === 'candidate' ? 'border-warn bg-warn/10' : 'border-line bg-surface-2')}>
+              <div className="text-[12px] font-semibold text-text-primary">Candidate · debug</div>
+              <div className="mt-1 font-mono text-[10px] text-text-muted">{candidateRevision ? candidateRevision.id.slice(0, 8) : 'No candidate'}</div>
+            </button>
+          </div>
+          <p className="text-[11px] text-text-muted">Production always runs the active revision. Candidate runs gather proof and never silently replace it.</p>
           {variables.length === 0 ? null : (
             <>
               <p className="text-[13px] text-text-secondary">

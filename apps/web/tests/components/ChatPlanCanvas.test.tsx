@@ -11,6 +11,7 @@ vi.mock('@xyflow/react', () => ({
   Handle: () => null,
   Position: { Left: 'left', Right: 'right' },
   SelectionMode: { Partial: 'partial' },
+  PanOnScrollMode: { Free: 'free' },
   useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
 }));
 

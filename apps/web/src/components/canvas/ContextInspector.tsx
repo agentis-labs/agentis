@@ -514,6 +514,8 @@ function NodeForm({ kind, data, update, agents, skills, workflows, knowledgeBase
       return <SkillForm data={data} update={update} skills={skills} onSkillsChange={onSkillsChange} />;
     case 'extension_task':
       return <ExtensionTaskForm data={data} update={update} skills={skills} onSkillsChange={onSkillsChange} />;
+    case 'component_task':
+      return <ComponentTaskForm data={data} update={update} />;
     case 'approval':
     case 'checkpoint':
       return <ApprovalForm data={data} update={update} />;
@@ -1062,6 +1064,28 @@ function ExtensionTaskForm({ data, update, skills, onSkillsChange }: { data: Rec
           mapping={(data.outputMapping as Record<string, string>) || {}}
           onChange={(outputMapping) => update({ outputMapping })}
         />
+      </Field>
+    </>
+  );
+}
+
+function ComponentTaskForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
+  return (
+    <>
+      <Field label="Component ID or slug" hint="The installed Component v2 bundle. Installation verifies its content hash and manifest.">
+        <input className={inputCls + ' font-mono'} value={asStr(data.componentSlug) || asStr(data.componentId)} onChange={(event) => update({ componentSlug: event.target.value, componentId: undefined })} placeholder="my-python-component" />
+      </Field>
+      <Field label="Pinned version" hint="Required by the editor so production runs remain reproducible.">
+        <input className={inputCls + ' font-mono'} value={asStr(data.version)} onChange={(event) => update({ version: event.target.value })} placeholder="1.0.0" />
+      </Field>
+      <Field label="Operation">
+        <input className={inputCls + ' font-mono'} value={asStr(data.operationName) || 'execute'} onChange={(event) => update({ operationName: event.target.value })} placeholder="execute" />
+      </Field>
+      <Field label="Input mapping" hint="Empty passes the whole upstream input to the component.">
+        <RawMappingEditor mapping={(data.inputMapping as Record<string, string>) || {}} onChange={(inputMapping) => update({ inputMapping })} />
+      </Field>
+      <Field label="Output mapping" hint="Copy component outputs onto the run scratchpad.">
+        <RawMappingEditor mapping={(data.outputMapping as Record<string, string>) || {}} onChange={(outputMapping) => update({ outputMapping })} />
       </Field>
     </>
   );
@@ -3228,6 +3252,5 @@ function RawGenericForm({ data, update }: { data: Record<string, unknown>; updat
     </>
   );
 }
-
 
 

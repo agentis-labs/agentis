@@ -61,6 +61,7 @@ describe('CanvasSelectionToolbar', () => {
     );
 
     const toolbar = screen.getByTestId('canvas-selection-toolbar');
+    expect(toolbar).toHaveClass('pointer-events-auto');
     fireEvent.pointerDown(toolbar);
     fireEvent.click(toolbar);
 

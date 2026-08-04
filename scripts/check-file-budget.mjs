@@ -57,6 +57,15 @@ const ALLOWLIST = new Set([
   'apps/web/src/components/agents/AgentCreateWizard.tsx',
   'apps/web/src/components/runs/RunModalProvider.tsx',
   'apps/web/src/components/settings/SettingsModal.tsx',
+  // Pre-existing >1k files omitted from the original 2026-07-07 snapshot
+  // (HEAD line counts before the runtime-parity work: 1453, 1210, 1055, 1035,
+  // and 1016 respectively). Keep them visible as tracked decomposition debt;
+  // this is not an exemption for newly-created oversized modules.
+  'apps/api/src/services/agentisToolHandlers/appData.ts',
+  'apps/api/src/services/agentisToolHandlers/run.ts',
+  'apps/api/src/adapters/CodexAdapter.ts',
+  'apps/api/src/engine/executors/nodeExecutors.ts',
+  'apps/web/src/components/apps/blocks/opsBlocks.tsx',
 ]);
 
 function collect(dir, out = []) {

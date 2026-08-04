@@ -90,6 +90,12 @@ export interface AppCompileReport {
   readyForExecution: boolean;
   executionBlockerCount: number;
   evidencePendingCount: number;
+  readinessFacets: {
+    structural: { ready: boolean; blockers: number };
+    executable: { ready: boolean; blockers: number };
+    verified: { ready: boolean; pending: number };
+    deliverable: { ready: boolean; blockers: number };
+  };
   counts: { pass: number; block: number; warn: number; not_applicable: number };
   checks: AppCompileCheck[];
   summary: string;
@@ -369,6 +375,5 @@ export const appsApi = {
       { method: 'POST', body: JSON.stringify({ collection, ...q }) },
     ),
 };
-
 
 

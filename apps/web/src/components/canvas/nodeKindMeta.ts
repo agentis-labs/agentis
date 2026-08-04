@@ -87,6 +87,7 @@ export const NODE_KIND_META: Record<string, NodeKindMeta> = {
   agent_task: { label: 'Agent task', glyph: '◎', category: 'intelligence' },
   agent_session: { label: 'Agent session', glyph: '?', category: 'intelligence' },
   extension_task: { label: 'Extension', glyph: '⬡', category: 'intelligence' },
+  component_task: { label: 'Component', glyph: '⬢', category: 'intelligence' },
   agent_swarm: { label: 'Swarm', glyph: '?', category: 'intelligence' },
   dynamic_swarm: { label: 'Dynamic swarm', glyph: '✸', category: 'intelligence' },
   planner: { label: 'Planner', glyph: '⊹', category: 'intelligence' },

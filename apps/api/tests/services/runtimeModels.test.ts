@@ -34,4 +34,17 @@ describe('runtimeModels', () => {
     ]);
     expect(catalog.models.map((model) => model.id)).not.toContain('gpt-5.2');
   });
+
+  it('lists each Antigravity model family once', async () => {
+    const catalog = await listRuntimeModels('antigravity');
+
+    expect(catalog.models.map((model) => model.label)).toEqual([
+      'Gemini 3.6 Flash',
+      'Gemini 3.5 Flash',
+      'Gemini 3.1 Pro',
+      'Claude Sonnet 4.6',
+      'Claude Opus 4.6',
+      'GPT-OSS 120B',
+    ]);
+  });
 });

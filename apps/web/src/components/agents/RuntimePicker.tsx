@@ -17,6 +17,12 @@ export interface AdapterModelOption {
 }
 
 export interface RuntimeConfig {
+  runtimeMode: string;
+  runtimePermissionProfile: string;
+  runtimeProfileName: string;
+  runtimeInheritUserConfig: string;
+  runtimeInheritProjectInstructions: string;
+  runtimeSessionPolicy: string;
   openclawGatewayId: string;
   openclawGatewayUrl: string;
   openclawModel: string;
@@ -82,6 +88,12 @@ export interface RuntimeConfig {
 }
 
 export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
+  runtimeMode: 'native',
+  runtimePermissionProfile: 'trusted_local',
+  runtimeProfileName: '',
+  runtimeInheritUserConfig: 'true',
+  runtimeInheritProjectInstructions: 'true',
+  runtimeSessionPolicy: 'persistent',
   openclawGatewayId: '',
   openclawGatewayUrl: '',
   openclawModel: '',
@@ -675,7 +687,7 @@ function AdapterConfigFields({
   }
   if (adapterType === 'claude_code') {
     return (
-      <div className="grid gap-3 md:grid-cols-5">
+      <><RuntimeProfileFields config={config} setConfig={setConfig} /><div className="grid gap-3 md:grid-cols-5">
         <Field label="Binary path"><input value={config.claudeBinaryPath} onChange={(event) => setConfig('claudeBinaryPath', event.target.value)} placeholder="claude" className={inputCls} /></Field>
         <Field label="Working directory"><input value={config.claudeCwd} onChange={(event) => setConfig('claudeCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
         <Field label="Max turns"><input value={config.claudeMaxTurns} onChange={(event) => setConfig('claudeMaxTurns', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
@@ -684,16 +696,16 @@ function AdapterConfigFields({
         <Field label="Extra args"><input value={config.claudeExtraArgs} onChange={(event) => setConfig('claudeExtraArgs', event.target.value)} placeholder="--flag value" className={inputCls} /></Field>
         <Field label="Env"><textarea value={config.claudeEnv} onChange={(event) => setConfig('claudeEnv', event.target.value)} placeholder="{}" className={textareaCls} /></Field>
         <Field label="Timeout"><input value={config.claudeTimeoutSec} onChange={(event) => setConfig('claudeTimeoutSec', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
-      </div>
+      </div></>
     );
   }
   if (adapterType === 'codex') {
     return (
-      <div className="grid gap-3 md:grid-cols-4">
+      <><RuntimeProfileFields config={config} setConfig={setConfig} /><div className="grid gap-3 md:grid-cols-4">
         <Field label="Binary path"><input value={config.codexBinaryPath} onChange={(event) => setConfig('codexBinaryPath', event.target.value)} placeholder="codex" className={inputCls} /></Field>
         <Field label="Working directory"><input value={config.codexCwd} onChange={(event) => setConfig('codexCwd', event.target.value)} placeholder="Repository path" className={inputCls} /></Field>
         <Field label="Max turns"><input value={config.codexMaxTurns} onChange={(event) => setConfig('codexMaxTurns', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
-        <Field label="Reasoning effort"><select value={config.codexReasoningEffort} onChange={(event) => setConfig('codexReasoningEffort', event.target.value)} className={inputCls}><option value="">Default</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Xhigh</option></select></Field>
+        <Field label="Reasoning effort"><select value={config.codexReasoningEffort} onChange={(event) => setConfig('codexReasoningEffort', event.target.value)} className={inputCls}><option value="">Default</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Xhigh</option><option value="max">Max</option><option value="ultra">Ultra</option></select></Field>
         <Field label="Fast mode"><select value={config.codexFastMode} onChange={(event) => setConfig('codexFastMode', event.target.value)} className={inputCls}><option value="false">Off</option><option value="true">On</option></select></Field>
         <Field label="Native browser" hint="Loads the runtime's browser/computer-use config. Heavier cold start; real web browsing.">
           <select value={config.codexBrowser} onChange={(event) => setConfig('codexBrowser', event.target.value)} className={inputCls}><option value="false">Off</option><option value="true">On</option></select>
@@ -701,7 +713,7 @@ function AdapterConfigFields({
         <Field label="Extra args"><input value={config.codexExtraArgs} onChange={(event) => setConfig('codexExtraArgs', event.target.value)} placeholder="--flag value" className={inputCls} /></Field>
         <Field label="Env"><textarea value={config.codexEnv} onChange={(event) => setConfig('codexEnv', event.target.value)} placeholder="{}" className={textareaCls} /></Field>
         <Field label="Timeout"><input value={config.codexTimeoutSec} onChange={(event) => setConfig('codexTimeoutSec', event.target.value)} inputMode="numeric" className={inputCls} /></Field>
-      </div>
+      </div></>
     );
   }
   if (adapterType === 'cursor') {
@@ -747,6 +759,19 @@ function AdapterConfigFields({
   );
 }
 
+function RuntimeProfileFields({ config, setConfig }: { config: RuntimeConfig; setConfig: (key: keyof RuntimeConfig, value: string) => void }) {
+  return (
+    <div className="mb-3 grid gap-3 rounded-lg border border-accent/20 bg-accent/5 p-3 md:grid-cols-3">
+      <Field label="Execution profile" hint="Native preserves your CLI profile; hermetic deliberately isolates it."><select value={config.runtimeMode} onChange={(event) => setConfig('runtimeMode', event.target.value)} className={inputCls}><option value="native">Native parity</option><option value="hermetic">Hermetic</option><option value="containerized">Externally containerized</option></select></Field>
+      <Field label="Permission envelope"><select value={config.runtimePermissionProfile} onChange={(event) => setConfig('runtimePermissionProfile', event.target.value)} className={inputCls}><option value="trusted_local">Trusted local</option><option value="workspace_write">Workspace write</option><option value="read_only">Read only</option><option value="externally_sandboxed">Externally sandboxed</option></select></Field>
+      <Field label="Native profile name"><input value={config.runtimeProfileName} onChange={(event) => setConfig('runtimeProfileName', event.target.value)} placeholder="default" className={inputCls} /></Field>
+      <Field label="User config"><select value={config.runtimeInheritUserConfig} onChange={(event) => setConfig('runtimeInheritUserConfig', event.target.value)} className={inputCls}><option value="true">Inherit</option><option value="false">Do not inherit</option></select></Field>
+      <Field label="Project instructions"><select value={config.runtimeInheritProjectInstructions} onChange={(event) => setConfig('runtimeInheritProjectInstructions', event.target.value)} className={inputCls}><option value="true">Inherit</option><option value="false">Do not inherit</option></select></Field>
+      <Field label="Session policy"><select value={config.runtimeSessionPolicy} onChange={(event) => setConfig('runtimeSessionPolicy', event.target.value)} className={inputCls}><option value="persistent">Persistent</option><option value="ephemeral">Ephemeral</option></select></Field>
+    </div>
+  );
+}
+
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return <label className="block"><span className="mb-1 block text-xs font-medium uppercase tracking-wider text-text-muted">{label}</span>{children}{hint ? <span className="mt-1 block text-[11px] leading-snug text-text-muted/80">{hint}</span> : null}</label>;
 }
@@ -758,7 +783,16 @@ function hermesTransportHint(value: string): string {
 }
 
 export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<string, unknown>): RuntimeConfig {
-  const base = { ...DEFAULT_RUNTIME_CONFIG };
+  const profile = objectOf(stored.runtimeProfile);
+  const base = {
+    ...DEFAULT_RUNTIME_CONFIG,
+    runtimeMode: stringOf(profile.mode, DEFAULT_RUNTIME_CONFIG.runtimeMode),
+    runtimePermissionProfile: stringOf(profile.permissionProfile, DEFAULT_RUNTIME_CONFIG.runtimePermissionProfile),
+    runtimeProfileName: stringOf(profile.profileName),
+    runtimeInheritUserConfig: boolText(profile.inheritUserConfig, DEFAULT_RUNTIME_CONFIG.runtimeInheritUserConfig),
+    runtimeInheritProjectInstructions: boolText(profile.inheritProjectInstructions, DEFAULT_RUNTIME_CONFIG.runtimeInheritProjectInstructions),
+    runtimeSessionPolicy: stringOf(profile.sessionPolicy, DEFAULT_RUNTIME_CONFIG.runtimeSessionPolicy),
+  };
   if (adapterType === 'openclaw') return { ...base, openclawGatewayId: stringOf(stored.gatewayId), openclawGatewayUrl: stringOf(stored.gatewayUrl), openclawModel: stringOf(stored.model), openclawDeviceTokenCredentialId: stringOf(stored.deviceTokenCredentialId), openclawAgentName: stringOf(stored.agentName), openclawSessionKeyStrategy: stringOf(stored.sessionKeyStrategy, DEFAULT_RUNTIME_CONFIG.openclawSessionKeyStrategy), openclawSessionKey: stringOf(stored.sessionKey), openclawTimeoutSec: stringOf(stored.timeoutSec, DEFAULT_RUNTIME_CONFIG.openclawTimeoutSec), openclawPayloadTemplate: jsonText(stored.payloadTemplate) };
   if (adapterType === 'hermes_agent') return { ...base, hermesBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), hermesCwd: stringOf(stored.cwd), hermesModel: stringOf(stored.model), hermesChatTransport: stringOf(stored.chatTransport, DEFAULT_RUNTIME_CONFIG.hermesChatTransport), hermesMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.hermesMaxTurns), hermesExtraArgs: arrayText(stored.extraArgs), hermesEnv: jsonText(stored.env), hermesTimeoutSec: stringOf(stored.timeoutSec), hermesGraceSec: stringOf(stored.graceSec) };
   if (adapterType === 'claude_code') return { ...base, claudeBinaryPath: stringOf(stored.command) || stringOf(stored.binaryPath), claudeCwd: stringOf(stored.cwd), claudeModel: stringOf(stored.model), claudeMaxTurns: stringOf(stored.maxTurns, DEFAULT_RUNTIME_CONFIG.claudeMaxTurns), claudeAllowedTools: arrayText(stored.allowedTools), claudeSkipPermissions: boolText(stored.dangerouslySkipPermissions, DEFAULT_RUNTIME_CONFIG.claudeSkipPermissions), claudeExtraArgs: arrayText(stored.extraArgs), claudeEnv: jsonText(stored.env), claudeTimeoutSec: stringOf(stored.timeoutSec) };
@@ -771,8 +805,8 @@ export function configToRuntimeConfig(adapterType: AdapterType, stored: Record<s
 export function runtimeConfigToAdapterConfig(adapterType: AdapterType, config: RuntimeConfig): Record<string, unknown> {
   if (adapterType === 'openclaw') return compact({ gatewayId: config.openclawGatewayId, gatewayUrl: normalizeGatewayUrl(config.openclawGatewayUrl), model: config.openclawModel, agentName: config.openclawAgentName, deviceTokenCredentialId: config.openclawDeviceTokenCredentialId, sessionKeyStrategy: config.openclawSessionKeyStrategy, sessionKey: config.openclawSessionKey, timeoutSec: positiveNumber(config.openclawTimeoutSec), payloadTemplate: jsonObject(config.openclawPayloadTemplate) });
   if (adapterType === 'hermes_agent') return compact({ binaryPath: config.hermesBinaryPath, command: config.hermesBinaryPath, cwd: config.hermesCwd, model: config.hermesModel, chatTransport: config.hermesChatTransport, chatTransportVersion: 2, maxTurns: positiveNumber(config.hermesMaxTurns), extraArgs: splitArgs(config.hermesExtraArgs), env: jsonStringRecord(config.hermesEnv), timeoutSec: positiveNumber(config.hermesTimeoutSec), graceSec: positiveNumber(config.hermesGraceSec) });
-  if (adapterType === 'claude_code') return compact({ binaryPath: config.claudeBinaryPath, command: config.claudeBinaryPath, cwd: config.claudeCwd, model: config.claudeModel, maxTurns: positiveNumber(config.claudeMaxTurns), allowedTools: splitCsv(config.claudeAllowedTools), dangerouslySkipPermissions: boolValue(config.claudeSkipPermissions), extraArgs: splitArgs(config.claudeExtraArgs), env: jsonStringRecord(config.claudeEnv), timeoutSec: positiveNumber(config.claudeTimeoutSec) });
-  if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), browser: boolValue(config.codexBrowser), dangerouslyBypassApprovalsAndSandbox: true, extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
+  if (adapterType === 'claude_code') return compact({ binaryPath: config.claudeBinaryPath, command: config.claudeBinaryPath, cwd: config.claudeCwd, model: config.claudeModel, maxTurns: positiveNumber(config.claudeMaxTurns), allowedTools: splitCsv(config.claudeAllowedTools), runtimeProfile: runtimeProfileConfig(config, config.claudeCwd, false), dangerouslySkipPermissions: boolValue(config.claudeSkipPermissions), extraArgs: splitArgs(config.claudeExtraArgs), env: jsonStringRecord(config.claudeEnv), timeoutSec: positiveNumber(config.claudeTimeoutSec) });
+  if (adapterType === 'codex') return compact({ binaryPath: config.codexBinaryPath, command: config.codexBinaryPath, cwd: config.codexCwd, model: config.codexModel, maxTurns: positiveNumber(config.codexMaxTurns), modelReasoningEffort: config.codexReasoningEffort, fastMode: boolValue(config.codexFastMode), browser: boolValue(config.codexBrowser), runtimeProfile: runtimeProfileConfig(config, config.codexCwd, boolValue(config.codexBrowser) ?? false), dangerouslyBypassApprovalsAndSandbox: config.runtimePermissionProfile === 'trusted_local', extraArgs: splitArgs(config.codexExtraArgs), env: jsonStringRecord(config.codexEnv), timeoutSec: positiveNumber(config.codexTimeoutSec) });
   if (adapterType === 'cursor') return compact({ binaryPath: config.cursorBinaryPath, command: config.cursorBinaryPath, cwd: config.cursorCwd, model: config.cursorModel, extraArgs: splitArgs(config.cursorExtraArgs), env: jsonStringRecord(config.cursorEnv), timeoutSec: positiveNumber(config.cursorTimeoutSec) });
   if (adapterType === 'antigravity') return compact({ binaryPath: config.antigravityBinaryPath, command: config.antigravityBinaryPath, cwd: config.antigravityCwd, model: config.antigravityModel, yolo: boolValue(config.antigravityYolo), extraArgs: splitArgs(config.antigravityExtraArgs), env: jsonStringRecord(config.antigravityEnv), timeoutSec: positiveNumber(config.antigravityTimeoutSec) });
   return compact({ baseUrl: config.httpBaseUrl, authCredentialId: config.httpAuthCredentialId, sharedSecretCredentialId: config.httpSharedSecretCredentialId, dispatchPath: config.httpDispatchPath, cancelPath: config.httpCancelPath, healthPath: config.httpHealthPath, method: config.httpMethod, headers: jsonStringRecord(config.httpHeaders), payloadTemplate: jsonObject(config.httpPayloadTemplate), dispatchTimeoutMs: positiveNumber(config.httpDispatchTimeoutMs), model: config.httpModel });
@@ -803,8 +837,28 @@ export function isV1AdapterType(value: string): value is AdapterType {
   return ADAPTERS.some((adapter) => adapter.id === value);
 }
 
+function runtimeProfileConfig(config: RuntimeConfig, projectRoot: string, browserEnabled: boolean): Record<string, unknown> {
+  return compact({
+    version: 2,
+    mode: config.runtimeMode,
+    projectRoot,
+    profileName: config.runtimeProfileName,
+    permissionProfile: config.runtimePermissionProfile,
+    inheritUserConfig: boolValue(config.runtimeInheritUserConfig),
+    inheritProjectInstructions: boolValue(config.runtimeInheritProjectInstructions),
+    inheritPlugins: boolValue(config.runtimeInheritUserConfig),
+    inheritSkills: boolValue(config.runtimeInheritUserConfig),
+    browser: browserEnabled ? 'enabled' : 'inherit',
+    sessionPolicy: config.runtimeSessionPolicy,
+  });
+}
+
 function compact(obj: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== '' && value !== undefined && value !== null && (!Array.isArray(value) || value.length > 0)));
+}
+
+function objectOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function parseUrl(value: string): URL | null {

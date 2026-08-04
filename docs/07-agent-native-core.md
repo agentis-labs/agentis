@@ -25,8 +25,14 @@ Families (representative, not exhaustive):
 - **Experiments, tasks, subjects** — `experiment.{define,assign,record,results}`, `task.{accept,set_steps,advance_step,record_decision,flag_deviation,bind_run}`, `subject.{enroll,post,get,list}`.
 - **Inspect & govern** — `orient`, `space.summary`, `audit_trail`, `approval.{list,resolve}`, `command.{review,note}`, `gateways.status`.
 
-Most tools are `mcpExposed`, so external CLI/IDE harnesses (Claude Code, Codex, Cursor) call
-the same surface. Plan-mode blocks mutating tools at the registry.
+External CLI/IDE harnesses (Claude Code, Codex, Cursor) see a compact MCP gateway rather than a
+flat dump of the registry. At most six progressive-disclosure operations are advertised:
+`agentis.orient`, `agentis.tools.search`, `agentis.tools.describe`, `agentis.tools.call`,
+`agentis.code.execute`, and `agentis.task.status`. Legacy tool names remain directly callable for
+compatibility. Ask/Plan/Auto policy is still enforced by the registry, including mutations made
+inside code-mode; inner calls retain attribution and advance the lease-state frontier. Gateway
+output is bounded to 12,000 characters by default, with explicit `full` or `graph` detail for
+larger responses.
 
 ## Code-mode
 
@@ -56,6 +62,16 @@ Agent-authored operations in a sandbox (`apps/api/src/extensions/`, `services/ex
   returns real output + `durationMs`, catching contract violations before wiring it into a
   workflow. Tables: `extensions`, `agent_packages`, `extension_executions`. Routes:
   `/v1/extensions`, `/v1/packages`, `/v1/capabilities`, `/v1/tools`.
+
+**Component v2** is the hardened, portable extension path for multi-file Python 3.12 and Node 20
+packages. Its manifest pins the entrypoint, operations, dependency lock, bundle hash, permissions,
+allowed domains, CPU/memory/timeout/tmp limits, and optional SBOM and healthcheck. Installation is
+content-addressed under `AGENTIS_DATA_DIR/components/<hash>` and rejects traversal, symlinks,
+checksum mismatches, missing locks, and missing entrypoints. `component_task` executes the pinned
+component revision. Network is `none` by default; a component requesting network fails closed
+unless both `AGENTIS_COMPONENT_NETWORK` and `AGENTIS_COMPONENT_EGRESS_PROXY` are configured.
+Runtime inspection and installation are exposed through `GET /v1/extensions/runtime-health` and
+`POST /v1/extensions/install-component`.
 
 ## Media, vision, assets
 

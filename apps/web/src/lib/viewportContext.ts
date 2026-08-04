@@ -95,22 +95,27 @@ export function deriveSurface(pathname: string, search = ''): Pick<ViewportConte
   if (root === 'apps' && id) {
     const params = new URLSearchParams(search);
     const facet = params.get('facet');
-    const page = params.get('page') ?? undefined;
+    // AppRuntime owns `page` while an interface preview is open. Once the user
+    // switches to Workflow/Data/Brain it is stale editor state, not the thing
+    // on screen, so it must not leak into the agent's viewport context.
+    const interfaceActive = facet === 'interface' || (!facet && params.has('page'));
+    const page = interfaceActive ? params.get('page') ?? undefined : undefined;
     const rawMode = params.get('mode');
-    const mode = rawMode && ['live', 'edit', 'history', 'code'].includes(rawMode)
+    const mode = interfaceActive && rawMode && ['live', 'edit', 'history', 'code'].includes(rawMode)
       ? rawMode as 'live' | 'edit' | 'history' | 'code'
       : undefined;
-    const selectedNodeId = params.get('node') ?? undefined;
-    const facetLabel = facet ? facet.charAt(0).toUpperCase() + facet.slice(1) : null;
+    const selectedNodeId = interfaceActive ? params.get('node') ?? undefined : undefined;
+    const activeFacet = facet ?? (interfaceActive ? 'interface' : null);
+    const facetLabel = activeFacet ? activeFacet.charAt(0).toUpperCase() + activeFacet.slice(1) : null;
     return {
       surface: 'app_detail',
       resourceKind: 'app',
       resourceId: id,
-      title: page ? `App · ${page}` : facetLabel ? `App · ${facetLabel}` : 'App',
+      title: facetLabel ? `App · ${facetLabel}` : 'App',
       ...(page ? { page } : {}),
       ...(mode ? { mode } : {}),
       ...(selectedNodeId ? { selectedNodeId } : {}),
-      ...(facet ? { facet } : {}),
+      ...(activeFacet ? { facet: activeFacet } : {}),
     };
   }
   if (root === 'apps') return { surface: 'apps', title: 'Apps' };

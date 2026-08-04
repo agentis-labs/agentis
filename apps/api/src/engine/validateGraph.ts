@@ -30,6 +30,7 @@ export const SUPPORTED_NODE_KINDS = new Set([
   'agent_task',
   'agent_session',
   'extension_task',
+  'component_task',
   'knowledge',
   'knowledge_ingest',
   'router',
@@ -275,6 +276,17 @@ export function validateWorkflowGraph(
         }
         if (!node.config.operationName) {
           fail(`Node ${node.id} (extension_task) missing operationName`);
+        }
+        break;
+      case 'component_task':
+        if (!node.config.componentId && !node.config.componentSlug) {
+          fail(`Node ${node.id} (component_task) missing componentId or componentSlug`);
+        }
+        if (!node.config.operationName) {
+          fail(`Node ${node.id} (component_task) missing operationName`);
+        }
+        if (!node.config.version) {
+          warnings.push(`Node ${node.id} (component_task) is not version-pinned; production runs may not be reproducible`);
         }
         break;
       case 'integration':

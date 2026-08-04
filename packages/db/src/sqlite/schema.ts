@@ -418,6 +418,20 @@ export const workflows = sqliteTable('workflows', {
   ...baseTimestamps(),
 });
 
+/** Non-secret, immutable launch facts for runtime parity and postmortems. */
+export const agentExecutionEnvelopes = sqliteTable('agent_execution_envelopes', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+  runId: text('run_id'),
+  conversationId: text('conversation_id'),
+  envelope: text('envelope_json', { mode: 'json' }).notNull(),
+  observedAt: text('observed_at').notNull(),
+  createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+}, (table) => ({
+  agentRecency: index('idx_agent_execution_envelopes_agent').on(table.workspaceId, table.agentId, table.observedAt),
+}));
+
 /**
  * Immutable workflow source revisions. `workflows.graph` remains a
  * compatibility mirror of the active row; this table is the source of truth.
@@ -692,6 +706,11 @@ export const workflowRuns = sqliteTable('workflow_runs', {
     .references(() => users.id),
   /** CREATED | PLANNING | RUNNING | WAITING | COMPLETED | FAILED | CANCELLED */
   status: text('status').notNull().default('CREATED'),
+  /** Mechanical lifecycle projected from legacy status. */
+  executionStatus: text('execution_status').notNull().default('queued'),
+  /** World/business result; successful only when accomplished. */
+  outcomeStatus: text('outcome_status').notNull().default('unverified'),
+  settlement: text('settlement_json', { mode: 'json' }).notNull().default(sql`'{}'`),
   runState: text('run_state', { mode: 'json' }).notNull(),
   replanCount: integer('replan_count').notNull().default(0),
   isReplay: integer('is_replay', { mode: 'boolean' }).notNull().default(false),

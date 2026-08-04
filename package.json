@@ -34,6 +34,7 @@
     "agentis:up": "pnpm --filter @agentis-labs/cli start up",
     "doctor": "tsx scripts/agentis-doctor.ts",
     "workflow:audit": "tsx scripts/workflow-reliability-audit.ts --write",
+    "eval:runtime-parity": "tsx scripts/runtime-parity-eval.ts",
     "lint": "node scripts/check-boundaries.mjs && node scripts/check-security-invariants.mjs && node scripts/check-file-budget.mjs && pnpm -r lint",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "lint:security": "node scripts/check-security-invariants.mjs",

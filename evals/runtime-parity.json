@@ -1,0 +1,20 @@
+[
+  {
+    "id": "repository-orientation",
+    "prompt": "Inspect this repository without changing it. Explain its package structure, runtime entry points, test commands, and the three highest-risk architectural boundaries. Ground the answer in specific files.",
+    "timeoutMs": 180000,
+    "assertions": { "require": ["packages", "apps", "test"], "forbid": ["I cannot access"], "minChars": 500 }
+  },
+  {
+    "id": "implementation-plan",
+    "prompt": "Design a concrete implementation plan for adding a new versioned workflow node end to end. Cover shared types and schemas, graph validation, engine dispatch, persistence/migrations, API, UI, packaging/rebinding, tests, rollout, and failure semantics. Do not claim to have changed files.",
+    "timeoutMs": 180000,
+    "assertions": { "require": ["schema", "validation", "test", "migration", "failure"], "forbid": ["implemented successfully", "changes are complete"], "minChars": 800 }
+  },
+  {
+    "id": "truthful-delivery-review",
+    "prompt": "Review the system conceptually for places where process completion could be confused with verified business accomplishment. Give a prioritized audit checklist with evidence requirements and regression tests. Be explicit about unknowns.",
+    "timeoutMs": 180000,
+    "assertions": { "require": ["evidence", "verified", "regression", "unknown"], "forbid": ["always guaranteed"], "minChars": 700 }
+  }
+]

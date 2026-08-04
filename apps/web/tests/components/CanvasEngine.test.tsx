@@ -25,6 +25,7 @@ vi.mock('@xyflow/react', () => ({
   Background: () => null,
   useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
   SelectionMode: { Partial: 'partial', Full: 'full' },
+  PanOnScrollMode: { Free: 'free' },
 }));
 
 import { CanvasEngine } from '../../src/components/canvas/CanvasEngine';

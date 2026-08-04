@@ -33,6 +33,7 @@ import type { WorkspaceHarnessRuntimeResolver } from '../workspace/workspaceHarn
 import type { CapabilityIndex } from '../capability/capabilityIndex.js';
 import type { CommandModelService } from '../command/commandModel.js';
 import type { ConversationTurnLeaseRegistry } from '../conversation/conversationTurnLease.js';
+import type { RuntimeProfileService } from '../runtime/runtimeProfileService.js';
 
 export interface ChatSessionExecutorDeps {
   db?: AgentisSqliteDb;
@@ -82,6 +83,8 @@ export interface ChatSessionExecutorDeps {
   commandModel?: CommandModelService;
   /** Shared experience recorder for caller-loop/marker/HTTP tools. */
   turnLeases?: ConversationTurnLeaseRegistry;
+  /** Records the exact non-secret runtime launch envelope before every turn. */
+  runtimeProfiles?: RuntimeProfileService;
   /** Shared audit sink so interactive/model-repair turns are metered too. */
   audit?: { record(entry: {
     workspaceId: string; runId: string; agentId?: string | null; action: string;
@@ -457,6 +460,16 @@ export class ChatSessionExecutor {
     const agentAdapter = adapter;
     this.#chatRoutingDecision(effectiveUserMessage, ctx.workspaceId, lightweightConversation, tools);
     adapter = this.#resolveChatAdapter(adapter, ctx.workspaceId, effectiveUserMessage);
+    if (ctx.agentId && this.#deps.runtimeProfiles) {
+      await this.#deps.runtimeProfiles.captureExecution(ctx.workspaceId, ctx.agentId, {
+        runId: ctx.runId,
+        conversationId: ctx.conversationId,
+      }).catch((error) => this.#deps.logger?.warn?.('chat.runtime_envelope.failed', {
+        workspaceId: ctx.workspaceId,
+        agentId: ctx.agentId,
+        error: (error as Error).message,
+      }));
+    }
     // Developer observability (not a user prompt — the harness is the intended
     // default brain). A marker-protocol CLI harness (Codex / Claude Code) re-spawns
     // per tool round, so multi-step tasks pay a per-round cold-start. Note it once
