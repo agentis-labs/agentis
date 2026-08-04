@@ -32,11 +32,7 @@ import { BudgetService } from '../services/budget.js';
 import { CommandIndex } from '../services/command/commandIndex.js';
 import { ConversationStore } from '../services/conversation/conversationStore.js';
 import { CredentialVault } from '../services/credentialVault.js';
-import {
-  isLocalEmbeddingModelReady,
-  LocalEmbeddingProvider,
-  warmLocalEmbeddingModel,
-} from '../services/embedding/embeddingProvider.js';
+import { LocalEmbeddingProvider } from '../services/embedding/embeddingProvider.js';
 import { EmbeddingProviderRegistry } from '../services/embedding/embeddingProviderRegistry.js';
 import { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { ExtensionLibraryService } from '../services/extensionLibrary.js';
@@ -223,51 +219,6 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   // hard-wired hashing instance). This is the keystone of the semantic-recall fix.
   const embeddingRegistry = new EmbeddingProviderRegistry(sqlite, logger);
   const embeddingResolver = embeddingRegistry.resolver();
-  // The local model's ~450 MB weights are NOT bundled — they download once on
-  // first use. Warm them in the background at boot so that cost (or a failure on
-  // an offline/firewalled host) surfaces here, in the logs, while the operator is
-  // still setting up — rather than stalling their first chat turn. Fire-and-forget
-  // by design: a warm failure must never block startup, and the real embed path
-  // still reports the actionable error if the model is genuinely unavailable.
-  // Say what is happening BEFORE the wait: the first run downloads ~450 MB and
-  // can take minutes, and silence for that long reads as a hung process.
-  const embeddingPrewarmed = isLocalEmbeddingModelReady();
-  if (embeddingPrewarmed) {
-    logger.info('embedding.model_ready', { source: 'in_process' });
-  } else {
-    logger.info('embedding.model_warming', {
-      model: 'Xenova/multilingual-e5-small',
-      cacheDir: `${env.AGENTIS_DATA_DIR}/models`,
-      note: 'first run downloads the model (~450 MB); the Brain cannot store or recall memories until it finishes',
-    });
-    // DEFERRED + RETRIED for programmatic API consumers. The CLI now begins its
-    // preparation only after the server is listening; both paths share the same
-    // memoised pipeline, so they join one download instead of racing cache writes.
-    const warmDelaysMs = [8_000, 75_000, 150_000];
-    void (async () => {
-      for (const [attempt, delay] of warmDelaysMs.entries()) {
-        await new Promise((r) => setTimeout(r, delay).unref());
-        const startedAt = Date.now();
-        try {
-          await warmLocalEmbeddingModel();
-          logger.info('embedding.model_ready', { ms: Date.now() - startedAt, attempt: attempt + 1 });
-          return;
-        } catch (err) {
-          const last = attempt === warmDelaysMs.length - 1;
-          // Only the FINAL failure carries the full remedy; earlier ones stay terse
-          // so a slow-but-recovering first run doesn't spam the console.
-          if (last) {
-            logger.warn('embedding.model_warm_failed', {
-              attempts: warmDelaysMs.length,
-              detail: err instanceof Error ? err.message : String(err),
-            });
-          } else {
-            logger.info('embedding.model_warm_retrying', { attempt: attempt + 1, nextInMs: warmDelaysMs[attempt + 1] });
-          }
-        }
-      }
-    })();
-  }
   const agentMemoryService = new AgentMemoryService(sqlite, new EpisodicMemoryStore(sqlite, logger, embeddingResolver));
   // PersonalBrain is USER-scoped (cross-workspace); there is no per-user provider
   // config, so it uses a default local (semantic) embedder until an account-level

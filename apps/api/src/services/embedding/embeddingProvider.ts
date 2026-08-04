@@ -6,7 +6,7 @@
  * Providers:
  *   - `LocalEmbeddingProvider` — self-hosted, free, multilingual ONNX
  *     (`multilingual-e5-small`, 384-dim). The zero-config DEFAULT.
- *     NOT bundled: the ~450 MB weights are downloaded once on first use and
+ *     NOT bundled: the default ~129 MB q8 artifacts download once on first use and
  *     cached under `<data-dir>/models`. Inference is local (no data egress), but
  *     the FIRST run needs network unless the cache is pre-populated — see
  *     `AGENTIS_EMBEDDING_MODEL_PATH` / `AGENTIS_EMBEDDING_OFFLINE`.
@@ -20,6 +20,15 @@
 
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  embeddingRuntimeManager,
+  embeddingRuntimeState,
+} from './embeddingRuntimeManager.js';
+export {
+  DEFAULT_Q8_EMBEDDING_MANIFEST,
+  embeddingRuntimeState,
+  type EmbeddingRuntimeSnapshot,
+} from './embeddingRuntimeManager.js';
 
 // ────────────────────────────────────────────────────────────
 // Interface
@@ -188,10 +197,6 @@ export class OpenAIEmbeddingProvider implements ValidatableEmbeddingProvider {
  * symmetric simplification — asymmetric query/passage prefixes can be threaded
  * later when call sites distinguish the two).
  */
-/** One loaded pipeline per model id, shared across all provider instances. */
-const localPipelines = new Map<string, Promise<unknown>>();
-const loadedLocalModels = new Set<string>();
-
 /**
  * Raised whenever the local model cannot be loaded. Callers that sweep many rows
  * (re-embed backfills) MUST detect this and stop the whole cycle rather than
@@ -238,7 +243,7 @@ export function embedSyncOrDefer(provider: EmbeddingProvider, text: string): num
  * Circuit breaker for model loading.
  *
  * Not memoising failures (so a transient blip can recover) is right, but on its
- * own it is a trap: a genuinely missing model then re-attempts a ~450 MB load on
+ * own it is a trap: a genuinely missing model then re-attempts a large download on
  * EVERY call, and every background sweep re-prints the full multi-line remedy.
  * Observed in the wild as an endless console flood that made the product look
  * hung. So: remember the failure, fail fast and QUIETLY for a cooldown, then let
@@ -250,14 +255,6 @@ export function embedSyncOrDefer(provider: EmbeddingProvider, text: string): num
  * complaining in between). Back off hard so a genuinely dead model costs one line
  * every half hour, while a transient blip still recovers within a minute.
  */
-const MODEL_FAILURE_COOLDOWN_STEPS_MS = [60_000, 300_000, 1_800_000];
-let lastModelFailure: { at: number; streak: number } | null = null;
-
-function cooldownMsFor(streak: number): number {
-  const index = Math.min(Math.max(streak, 1) - 1, MODEL_FAILURE_COOLDOWN_STEPS_MS.length - 1);
-  return MODEL_FAILURE_COOLDOWN_STEPS_MS[index]!;
-}
-
 /**
  * True while the model is in a failure cooldown. Background sweeps should check
  * this and skip their cycle SILENTLY — attempting (and logging) per cycle is what
@@ -267,8 +264,10 @@ export function isEmbeddingModelCoolingDown(provider?: EmbeddingProvider): boole
   // A local-model outage must never pause a workspace configured to use an API
   // provider. Callers with a resolved provider pass it so the guard stays local.
   if (provider && !provider.modelId.startsWith('local:')) return false;
-  const failure = lastModelFailure;
-  return !!failure && Date.now() - failure.at < cooldownMsFor(failure.streak);
+  const runtime = embeddingRuntimeState(embeddingCacheDir());
+  return runtime.status === 'degraded'
+    && Boolean(runtime.retryAt)
+    && Date.parse(runtime.retryAt!) > Date.now();
 }
 
 /** Default model — kept here so the warmer and the provider can never diverge. */
@@ -284,6 +283,7 @@ let progressSink: (message: string) => void = (message) => process.stdout.write(
 
 export function setEmbeddingProgressSink(sink: (message: string) => void): void {
   progressSink = sink;
+  embeddingRuntimeManager.setProgressSink(sink);
 }
 
 const progressLastStep = new Map<string, number>();
@@ -301,7 +301,7 @@ function reportModelDownloadProgress(event: unknown): void {
 
 /** True only after transformers has fully loaded the requested model. */
 export function isLocalEmbeddingModelReady(model = DEFAULT_LOCAL_EMBEDDING_MODEL): boolean {
-  return loadedLocalModels.has(model);
+  return embeddingRuntimeManager.isReady(model);
 }
 
 /**
@@ -309,11 +309,11 @@ export function isLocalEmbeddingModelReady(model = DEFAULT_LOCAL_EMBEDDING_MODEL
  *
  * transformers.js otherwise picks its own default, which on a global `npm i -g`
  * can land inside `node_modules` — a directory the user may not be able to write
- * to, and which is wiped on every upgrade (re-downloading ~450 MB). Anchor it to
+ * to, and which is wiped on every upgrade. Anchor it to
  * the Agentis data dir so the cache is writable, survives upgrades, and can be
  * pre-populated for air-gapped installs.
  */
-function embeddingCacheDir(): string | undefined {
+export function embeddingCacheDir(): string | undefined {
   const explicit = process.env.AGENTIS_EMBEDDING_CACHE_DIR?.trim();
   // MUST be absolute. `resolveDefaultDataDir()` returns a bare relative
   // `.agentis` whenever the process is not inside an Agentis workspace — i.e.
@@ -347,7 +347,7 @@ function offlineOnly(): boolean {
  * 'fp32' — existing vectors carry a modelId with NO dtype suffix, and making
  * fp32 explicit would change the modelId and re-embed the whole brain.
  */
-function configuredDtype(): string | undefined {
+export function configuredDtype(): string | undefined {
   const env = process.env.AGENTIS_EMBEDDING_DTYPE?.trim();
   if (env) return env;
   const marker = readDtypeMarker();
@@ -424,7 +424,7 @@ function configureTransformersEnv(mod: Record<string, unknown>): void {
 /**
  * Turn a model-load failure into something an operator can act on.
  *
- * The weights are NOT bundled — they are fetched once (~450 MB) on first use. On
+ * The weights are NOT bundled — the default q8 generation is fetched once (~129 MB). On
  * a fresh, offline, or firewalled install that first fetch fails deep inside a
  * chat turn, and the raw transformers error ("Could not locate file…") gives no
  * hint that the fix is network access or a pre-populated cache. There is
@@ -457,12 +457,13 @@ function describeCauseChain(err: unknown): string {
 function describeModelLoadFailure(model: string, err: unknown): EmbeddingModelUnavailableError {
   const cacheDir = embeddingCacheDir() ?? '(transformers default)';
   const detail = describeCauseChain(err);
+  const downloadSize = configuredDtype() === 'q8' ? 'about 129 MB' : 'about 449 MB';
   return new EmbeddingModelUnavailableError(
     `Could not load the local embedding model "${model}" — the Brain cannot store or recall memories until it loads.\n` +
       `  cache dir: ${cacheDir}\n` +
       `  cause: ${detail}\n` +
       'Fix one of:\n' +
-      '  • Allow network access on first run — the model (~450 MB) is downloaded once and cached.\n' +
+      `  • Allow network access on first run — the model (${downloadSize}) is downloaded once and cached.\n` +
       '  • Pre-download it, then set AGENTIS_EMBEDDING_MODEL_PATH=<dir> and AGENTIS_EMBEDDING_OFFLINE=true.\n' +
       '  • Or configure an API embedding provider instead of the local one.',
   );
@@ -524,12 +525,44 @@ function delay(ms: number): Promise<void> {
 /**
  * Load (and cache) the local model ahead of first use.
  *
- * Called in the background at boot so the ~450 MB first fetch happens while the
+ * Called in the background at boot so the verified first fetch happens while the
  * operator is still setting up, instead of stalling — or failing — inside their
  * first chat turn. Safe to call repeatedly: the pipeline promise is memoised.
  */
-export async function warmLocalEmbeddingModel(model = DEFAULT_LOCAL_EMBEDDING_MODEL): Promise<void> {
-  await new LocalEmbeddingProvider({ model }).embed('warmup');
+export async function warmLocalEmbeddingModel(
+  model = DEFAULT_LOCAL_EMBEDDING_MODEL,
+  options: { force?: boolean; repair?: boolean } = {},
+): Promise<{ backupDir: string | null }> {
+  const provider = new LocalEmbeddingProvider({ model });
+  if (options.repair) {
+    const result = await embeddingRuntimeManager.repair({
+      model,
+      dtype: configuredDtype() ?? 'fp32',
+      cacheDir: embeddingCacheDir(),
+      localModelPath: process.env.AGENTIS_EMBEDDING_MODEL_PATH?.trim(),
+      offline: offlineOnly(),
+      load: async (localFilesOnly) => {
+        const pipeline = await provider.loadPipeline(localFilesOnly);
+        await provider.probe(pipeline, 'runtime verification');
+        return pipeline;
+      },
+    });
+    return { backupDir: result.backupDir };
+  }
+  await embeddingRuntimeManager.run({
+    model,
+    dtype: configuredDtype() ?? 'fp32',
+    cacheDir: embeddingCacheDir(),
+    localModelPath: process.env.AGENTIS_EMBEDDING_MODEL_PATH?.trim(),
+    offline: offlineOnly(),
+    force: options.force,
+    load: async (localFilesOnly) => {
+      const pipeline = await provider.loadPipeline(localFilesOnly);
+      await provider.probe(pipeline, 'runtime verification');
+      return pipeline;
+    },
+  });
+  return { backupDir: null };
 }
 
 export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
@@ -548,31 +581,21 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
   }
 
   #pipeline(): Promise<unknown> {
-    const cached = localPipelines.get(this.#model);
-    if (cached) return cached;
-
-    // Inside the cooldown, fail fast with a ONE-LINE error. The full remedy was
-    // already logged when the breaker tripped; repeating it per row is the flood.
-    const failure = lastModelFailure;
-    if (failure && Date.now() - failure.at < cooldownMsFor(failure.streak)) {
-      const retryInSec = Math.ceil((cooldownMsFor(failure.streak) - (Date.now() - failure.at)) / 1000);
-      return Promise.reject(
-        new EmbeddingModelUnavailableError(
-          `Embedding model unavailable — retrying in ${retryInSec}s (see the earlier embedding model error for how to fix it).`,
-        ),
-      );
-    }
-
-    const pipe = this.#loadPipelineWithRetry().catch((err) => {
-      // Don't memoise the PIPELINE (a transient blip must be able to recover),
-      // but do trip the breaker so the retry storm is bounded.
-      localPipelines.delete(this.#model);
-      loadedLocalModels.delete(this.#model);
-      lastModelFailure = { at: Date.now(), streak: (lastModelFailure?.streak ?? 0) + 1 };
+    return embeddingRuntimeManager.run({
+      model: this.#model,
+      dtype: configuredDtype() ?? 'fp32',
+      cacheDir: embeddingCacheDir(),
+      localModelPath: process.env.AGENTIS_EMBEDDING_MODEL_PATH?.trim(),
+      offline: offlineOnly(),
+      load: async (localFilesOnly) => {
+        const pipeline = await this.loadPipeline(localFilesOnly);
+        await this.probe(pipeline, 'runtime verification');
+        return pipeline;
+      },
+    }).catch((err) => {
+      if (isEmbeddingModelUnavailable(err)) throw err;
       throw describeModelLoadFailure(this.#model, err);
     });
-    localPipelines.set(this.#model, pipe);
-    return pipe;
   }
 
   /**
@@ -585,7 +608,7 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
    * failure (model not found, or offline with no cache) is NOT retried — there is
    * nothing to wait for — so it trips the breaker immediately as before.
    */
-  async #loadPipelineWithRetry(): Promise<unknown> {
+  async loadPipeline(localFilesOnly = false): Promise<unknown> {
     const mod = await import('@huggingface/transformers');
     // Must happen before the first pipeline() call — cacheDir/localModelPath are
     // read at load time.
@@ -595,8 +618,13 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
     // 449 MB fp32) used to emit one "model_warming" line and then silence for
     // minutes; an operator cannot tell "downloading" from "hung". Throttled to
     // 25% steps per file inside the reporter.
-    const options: Record<string, unknown> = { progress_callback: reportModelDownloadProgress };
+    const options: Record<string, unknown> = {};
+    // Managed q8 downloads are reported by EmbeddingRuntimeManager. The
+    // Transformers callback also emits "progress" while reading local cache
+    // files, which would falsely label an offline load as another download.
+    if (!localFilesOnly) options.progress_callback = reportModelDownloadProgress;
     if (dtype) options.dtype = dtype;
+    if (localFilesOnly) options.local_files_only = true;
 
     // Offline installs have no network to wait for: a miss is permanent, so don't
     // retry — fail straight through to the breaker with the actionable message.
@@ -605,8 +633,6 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         const loaded = await mod.pipeline('feature-extraction', this.#model, options as never);
-        loadedLocalModels.add(this.#model);
-        lastModelFailure = null; // recovered — reset the breaker
         return loaded;
       } catch (err) {
         lastErr = err;
@@ -632,6 +658,15 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
     return Array.from(output.data as ArrayLike<number>, (value) => Number(value));
   }
 
+  async probe(pipeline: unknown, text: string): Promise<number[]> {
+    const extractor = pipeline as (
+      input: string,
+      options: { pooling: 'mean'; normalize: boolean },
+    ) => Promise<{ data: ArrayLike<number> }>;
+    const output = await extractor(`query: ${text}`.slice(0, 8000), { pooling: 'mean', normalize: true });
+    return Array.from(output.data as ArrayLike<number>, (value) => Number(value));
+  }
+
   async validate(): Promise<void> {
     const probe = await this.embed('connection test');
     if (probe.length === 0) throw new Error('local embedding probe returned no dimensions');
@@ -640,7 +675,7 @@ export class LocalEmbeddingProvider implements ValidatableEmbeddingProvider {
 
 /**
  * Factory — instantiate a provider from the workspace's configured type.
- * `local` (bundled semantic ONNX, multilingual-e5-small) is the default. There
+ * `local` (locally cached semantic ONNX, multilingual-e5-small) is the default. There
  * is intentionally NO non-semantic / lexical fallback: a misconfigured or
  * unreachable provider must fail loud, never silently degrade recall to keyword
  * matching.

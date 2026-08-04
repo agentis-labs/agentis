@@ -92,8 +92,9 @@ const HELP = `agentis — the operating system for agentic software
 Usage:
   agentis up                              Start Agentis (default if no command given).
   agentis setup                           Prepare the embedding model and Chromium runtime.
-  agentis warmup                          Pre-download the embedding model (~450 MB, once).
-                                          Needed for offline/air-gapped hosts; up prepares it in the background.
+  agentis warmup [--repair]               Download and verify the embedding model (~129 MB q8).
+                                          --repair preserves the old cache before rebuilding it.
+  agentis doctor [--json]                 Report embedding runtime/cache health.
   agentis backup [--out <dir>]            Snapshot the data dir into <dir>.
                                           Default <dir>: <data-dir>/backups/<timestamp>.
   agentis restore <dir> [--force]         Restore a backup directory into the data dir.
@@ -128,7 +129,7 @@ Environment:
   AGENTIS_EMBEDDING_CACHE_DIR    Where the embedding model is cached. Default: <data-dir>/models
   AGENTIS_EMBEDDING_MODEL_PATH   Directory of pre-downloaded model files (offline installs).
   AGENTIS_EMBEDDING_OFFLINE      true = never fetch the model remotely (use the local path only).
-  AGENTIS_EMBEDDING_DTYPE        q8 = ~4x smaller download + faster CPU inference. Default: fp32.
+  AGENTIS_EMBEDDING_DTYPE        q8 = smaller download + faster CPU inference. Default: q8 on fresh installs.
 
 Run \`agentis up\` and open http://127.0.0.1:3737 in your browser.
 `;
@@ -221,25 +222,18 @@ async function runUp(): Promise<void> {
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
 
-  // Runtime assets are optional during boot and large on a clean machine. Start
-  // them only after the server is listening and the dashboard has been opened.
-  // The API's local embedding pipeline is memoised in-process, so this joins any
-  // warm already started by bootstrap instead of racing a second cache writer.
-  void prepareRuntime({ showOfflineHint: false, background: true, includeChromium: false }).then((code) => {
-    if (code === 0) process.stdout.write('Background runtime setup complete.\n');
-  });
 }
 
 /**
  * Pre-download the local embedding model.
  *
- * The Brain's ~450 MB ONNX weights are NOT shipped in the package — they are
+ * The Brain's default ~129 MB q8 artifacts are NOT shipped in the package — they are
  * fetched once on first use. `agentis up` warms them in the background, but that
  * is no help for an air-gapped or firewalled host, or a CI image that must be
  * built ready-to-run. This makes the download an explicit, scriptable step:
  * run it where there IS network, then ship/copy the cache dir.
  */
-async function runWarmupCmd(options: { showOfflineHint?: boolean; background?: boolean } = {}): Promise<number> {
+async function runWarmupCmd(options: { showOfflineHint?: boolean; background?: boolean; repair?: boolean } = {}): Promise<number> {
   const dir = await dataDir();
   // The provider reads this to place its cache; set it so a warm run and a later
   // `agentis up` agree on the location.
@@ -247,13 +241,15 @@ async function runWarmupCmd(options: { showOfflineHint?: boolean; background?: b
   const cacheDir = process.env.AGENTIS_EMBEDDING_CACHE_DIR ?? join(dir, 'models');
   process.stdout.write(
     options.background
-      ? `Preparing the embedding model in the background (~450 MB on first run) → ${cacheDir}\n`
-      : `Downloading the embedding model (~450 MB, once) → ${cacheDir}\n`,
+      ? `Preparing the verified embedding model in the background (~129 MB q8) → ${cacheDir}\n`
+      : `${options.repair ? 'Repairing' : 'Downloading'} the verified embedding model (~129 MB q8) → ${cacheDir}\n`,
   );
   try {
-    const { warmLocalEmbeddingModel } = await import('@agentis/api/embeddingProvider');
+    const { ensureDtypeDefault, warmLocalEmbeddingModel } = await import('@agentis/api/embeddingProvider');
+    ensureDtypeDefault(false);
     const started = Date.now();
-    await warmLocalEmbeddingModel();
+    const result = await warmLocalEmbeddingModel(undefined, { repair: options.repair });
+    if (result.backupDir) process.stdout.write(`Previous cache preserved at ${result.backupDir}.\n`);
     process.stdout.write(`Embedding model ready in ${((Date.now() - started) / 1000).toFixed(1)}s.\n`);
     if (options.showOfflineHint !== false) {
       process.stdout.write('For an offline host, copy that directory over and set:\n');
@@ -264,6 +260,30 @@ async function runWarmupCmd(options: { showOfflineHint?: boolean; background?: b
     process.stderr.write(`agentis warmup failed: ${(err as Error).message}\n`);
     return 1;
   }
+}
+
+async function runDoctorCmd(argv: string[]): Promise<number> {
+  const { flags } = parseFlags(argv);
+  const dir = await dataDir();
+  process.env.AGENTIS_DATA_DIR ??= dir;
+  const { configuredDtype, embeddingCacheDir, embeddingRuntimeState } = await import('@agentis/api/embeddingProvider');
+  const cacheDir = embeddingCacheDir() ?? join(dir, 'models');
+  const runtime = embeddingRuntimeState(cacheDir);
+  const report = {
+    ok: runtime.status === 'ready' || (runtime.status === 'uninitialized' && runtime.readyAt != null),
+    embedding: { ...runtime, cacheDir, configuredDtype: configuredDtype() ?? 'fp32' },
+  };
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    process.stdout.write(`Embedding runtime: ${runtime.status}\n`);
+    process.stdout.write(`  model: ${runtime.model}@${runtime.revision ?? 'library-default'} (${runtime.dtype})\n`);
+    process.stdout.write(`  cache: ${cacheDir}\n`);
+    process.stdout.write(`  progress: ${runtime.progress}%\n`);
+    if (runtime.error) process.stdout.write(`  failure: ${runtime.errorCode ?? 'unknown'} - ${runtime.error}\n`);
+    if (runtime.retryAt) process.stdout.write(`  retry at: ${runtime.retryAt}\n`);
+  }
+  return report.ok ? 0 : 1;
 }
 
 type PlaywrightRuntime = {
@@ -696,7 +716,12 @@ async function main() {
     return;
   }
   if (cmd === 'warmup') {
-    process.exitCode = await runWarmupCmd();
+    const { flags } = parseFlags(process.argv.slice(3));
+    process.exitCode = await runWarmupCmd({ repair: Boolean(flags.repair) });
+    return;
+  }
+  if (cmd === 'doctor') {
+    process.exitCode = await runDoctorCmd(process.argv.slice(3));
     return;
   }
   if (cmd === 'backup') {

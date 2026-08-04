@@ -45,20 +45,16 @@ describe('Brain redesigned surface support routes', () => {
     expect(await episodeListing.json()).toEqual({ episodes: [] });
   });
 
-  it('reports embedding state and verifies the built-in provider', async () => {
+  it('reports the managed local runtime as pending before warmup', async () => {
     const status = await app().request('/v1/workspace/intelligence', { headers: ctx.authHeaders });
-    const statusBody = await status.json() as { embeddingProviderType: string; degraded: boolean };
+    const statusBody = await status.json() as {
+      embeddingProviderType: string;
+      degraded: boolean;
+      runtime: { status: string } | null;
+    };
     expect(statusBody.embeddingProviderType).toBe('local');
-    expect(statusBody.degraded).toBe(false);
-
-    const verify = await app().request('/v1/workspace/intelligence/embedding/verify', {
-      method: 'POST',
-      headers: ctx.authHeaders,
-      body: JSON.stringify({ embeddingProviderType: 'local', embeddingProviderConfig: {} }),
-    });
-    const verifyBody = await verify.json() as { ok: boolean; dimension: number };
-    expect(verifyBody.ok).toBe(true);
-    expect(verifyBody.dimension).toBeGreaterThan(0);
+    expect(statusBody.degraded).toBe(true);
+    expect(statusBody.runtime?.status).toBe('uninitialized');
   });
 
   it('stores model-driven Brain configuration without returning its API key', async () => {

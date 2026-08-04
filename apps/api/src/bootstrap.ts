@@ -183,7 +183,13 @@ import { GroundingDiscoveryService } from './grounding/discovery.js';
 import { GroundingExtractionService } from './grounding/extractionService.js';
 import { GroundingRuntime } from './grounding/groundingRuntime.js';
 // Brain — knowledge graph + memory subsystem.
-import { LocalEmbeddingProvider, ensureDtypeDefault, setEmbeddingProgressSink } from './services/embedding/embeddingProvider.js';
+import {
+  LocalEmbeddingProvider,
+  ensureDtypeDefault,
+  setEmbeddingProgressSink,
+  warmLocalEmbeddingModel,
+} from './services/embedding/embeddingProvider.js';
+import { embeddingRuntimeManager } from './services/embedding/embeddingRuntimeManager.js';
 import { EmbeddingProviderRegistry } from './services/embedding/embeddingProviderRegistry.js';
 import { KnowledgeStore } from './services/knowledge/knowledgeStore.js';
 import { MemoryStore } from './services/memory/memoryStore.js';
@@ -2039,7 +2045,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       const repairTimer = setTimeout(() => {
         try {
           const repaired = knowledgeBaseService.repairOrphanedLinks();
-          if (repaired > 0) logger.info('knowledge.orphan_links_repaired', { repaired });
+          if (repaired > 0) logger.info('knowledge.document_links_backfilled', { repaired });
         } catch (err) {
           logger.warn('knowledge.orphan_link_repair_failed', { message: (err as Error).message });
         }
@@ -2073,15 +2079,16 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       brainMaintenance.start(); // §0.2 — immediate-if-due + daily lifecycle, hygiene, compression, reflection, and reclamation
       harnessImportSync.start(); // P4: notify when imported agents accrue new memory
 
-      // Warm the bundled on-device embedding model in the BACKGROUND (after the
+      // Warm the verified on-device embedding model in the BACKGROUND (after the
       // server is already serving) so the first knowledge upload / brain write
-      // doesn't pay the cold start — model download (~450 MB, once) + load (tens
+      // doesn't pay the cold start — q8 artifact download (~129 MB, once) + load (tens
       // of seconds) — INSIDE the request, which previously stalled the whole API
       // (uploads appeared to hang for minutes). Fire-and-forget; never blocks boot.
-      void embeddingProvider.embed('warmup').then(
-        () => logger.info('brain.embedding.warmed', { model: embeddingProvider.modelId }),
-        (err) => logger.warn('brain.embedding.warm_failed', { message: (err as Error).message }),
-      );
+      logger.info('brain.embedding.warming', {
+        model: embeddingProvider.modelId,
+        cacheDir: path.join(env.AGENTIS_DATA_DIR, 'models'),
+        note: 'the default q8 generation is about 129 MB and is verified before use',
+      });
       // Resume any knowledge document left mid-index by a previous restart, so it
       // never stays stuck at `indexing` without embeddings (§perf background ingest).
       try { knowledgeBaseService.resumeStalledIndexing(); } catch (err) { logger.warn('knowledge.resume_indexing_failed', { message: (err as Error).message }); }
@@ -2091,38 +2098,52 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       // light sweep embeds those shortly after, so a just-formed memory is
       // retrievable on the next run (closes the fresh-write recall gap). Unref'd
       // so it never holds the process open.
-      const reembedSweep = setInterval(() => {
-        try {
-          const pending = sqlite
+      let reembedDrain: Promise<void> | null = null;
+      const drainDeferredEmbeddings = (): Promise<void> => {
+        if (reembedDrain) return reembedDrain;
+        if (embeddingRuntimeManager.snapshot().status !== 'ready') return Promise.resolve();
+        reembedDrain = (async () => {
+          const workspaceIds = new Set<string>();
+          for (const row of sqlite
             .selectDistinct({ workspaceId: schema.memoryEpisodes.workspaceId })
             .from(schema.memoryEpisodes)
             .where(eq(schema.memoryEpisodes.needsReembed, true))
-            .all();
-          for (const { workspaceId } of pending) {
-            void SharedIntelligence.reembedPending(workspaceId).catch((err) =>
-              logger.warn('brain.reembed_sweep_failed', { workspaceId, message: (err as Error).message }));
-          }
-        } catch (err) {
-          logger.warn('brain.reembed_sweep_error', { message: (err as Error).message });
-        }
-        // Session moments defer async embeddings the same way a fresh memory
-        // write does; sweep them too so a deferred session atom becomes
-        // semantically seekable instead of staying lexical-only forever
-        // (closes the session-moment recall gap).
-        try {
-          const pendingSessions = sqlite
+            .all()) workspaceIds.add(row.workspaceId);
+          for (const row of sqlite
             .selectDistinct({ workspaceId: schema.sessionMoments.workspaceId })
             .from(schema.sessionMoments)
             .where(eq(schema.sessionMoments.needsReembed, true))
-            .all();
-          for (const { workspaceId } of pendingSessions) {
-            void SessionMoments.reembedPending(workspaceId).catch((err) =>
-              logger.warn('session_moments.reembed_sweep_failed', { workspaceId, message: (err as Error).message }));
+            .all()) workspaceIds.add(row.workspaceId);
+
+          for (const workspaceId of workspaceIds) {
+            while (embeddingRuntimeManager.snapshot().status === 'ready') {
+              const brain = await SharedIntelligence.reembedPending(workspaceId, 200);
+              const sessions = await SessionMoments.reembedPending(workspaceId, 50);
+              if ((brain.reembedded === 0 && sessions === 0) || brain.failed > 0) break;
+            }
           }
-        } catch (err) {
-          logger.warn('session_moments.reembed_sweep_error', { message: (err as Error).message });
-        }
-      }, 15_000);
+        })().catch((err) => {
+          logger.warn('brain.reembed_drain_failed', { message: (err as Error).message });
+        }).finally(() => {
+          reembedDrain = null;
+        });
+        return reembedDrain;
+      };
+      embeddingRuntimeManager.subscribe((snapshot) => {
+        if (snapshot.status === 'ready') void drainDeferredEmbeddings();
+      });
+      void warmLocalEmbeddingModel().then(
+        () => {
+          logger.info('brain.embedding.warmed', { model: embeddingProvider.modelId });
+          return drainDeferredEmbeddings();
+        },
+        (err) => logger.warn('brain.embedding.warm_failed', {
+          phase: embeddingRuntimeManager.snapshot().status,
+          code: embeddingRuntimeManager.snapshot().errorCode,
+          message: (err as Error).message,
+        }),
+      );
+      const reembedSweep = setInterval(() => void drainDeferredEmbeddings(), 5 * 60_000);
       reembedSweep.unref();
 
       // Reclaim asset blobs no artifact row references (freed when an artifact is

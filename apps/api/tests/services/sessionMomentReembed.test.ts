@@ -49,4 +49,25 @@ describe('SessionMomentService.reembedPending', () => {
     svc.add({ workspaceId: ctx.workspace.id, sessionId: 's1', content: 'lexical only' });
     expect(await svc.reembedPending(ctx.workspace.id)).toBe(0);
   });
+
+  it('joins concurrent backlog drains so each pending row is embedded once', async () => {
+    let calls = 0;
+    const provider: EmbeddingProvider = {
+      dimension: 3,
+      modelId: 'test-exactly-once',
+      embed: async () => {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return [0.1, 0.2, 0.3];
+      },
+    };
+    const svc = new SessionMomentService(ctx.db, ctx.bus, ctx.logger, () => provider);
+    svc.add({ workspaceId: ctx.workspace.id, sessionId: 's1', content: 'one deferred row' });
+    calls = 0; // Ignore the write path's async/defer probe; measure drainage only.
+
+    const results = await Promise.all([svc.reembedPending(ctx.workspace.id), svc.reembedPending(ctx.workspace.id)]);
+
+    expect(results).toEqual([1, 1]);
+    expect(calls).toBe(1);
+  });
 });

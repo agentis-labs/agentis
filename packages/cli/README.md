@@ -17,7 +17,7 @@ apps powered by a workflow engine. No lock-in.
 
 **No token tax. No data extraction. No forgetting.**
 
-> **Status: 1.0.2 stable.** Agentis is now in public release, and the CLI,
+> **Status: 1.0.3 stable.** Agentis is now in public release, and the CLI,
 > dashboard, and core runtime are ready for production use across 1.x updates.
 
 This package launches the whole local runtime: API, WebSocket bridge, workflow engine,
@@ -95,6 +95,8 @@ Everything runtime lives under `AGENTIS_DATA_DIR` by default.
 
 ```text
 agentis up                         Start Agentis (default if no command is given).
+agentis warmup [--repair]          Download, verify, or recover the local q8 embedding runtime.
+agentis doctor [--json]            Inspect embedding runtime and cache health.
 agentis bootstrap ...              Commission an orchestrator, manager, or specialist.
 agentis create <dir>               Scaffold a code-authored Agentic App.
 agentis app <pack|validate|install|test|export> ...   Work with .agentisapp packages.

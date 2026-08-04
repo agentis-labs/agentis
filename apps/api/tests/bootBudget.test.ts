@@ -35,13 +35,20 @@ interface BootProfile {
   phases: Array<{ phase: string; atMs: number; deltaMs: number }>;
 }
 
-async function pollHealthz(timeoutMs: number): Promise<{ ok: boolean; boot: BootProfile }> {
+interface HealthResponse {
+  ok: boolean;
+  status: 'ready' | 'degraded';
+  boot: BootProfile;
+  components: { embedding: { status: string; progress: number; errorCode: string | null } };
+}
+
+async function pollHealthz(timeoutMs: number): Promise<HealthResponse> {
   const deadline = Date.now() + timeoutMs;
   let lastError = 'no attempt';
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://127.0.0.1:${PORT}/healthz`);
-      if (res.ok) return await res.json() as { ok: boolean; boot: BootProfile };
+      if (res.ok) return await res.json() as HealthResponse;
       lastError = `status ${res.status}`;
     } catch (err) {
       lastError = (err as Error).message;
@@ -68,6 +75,9 @@ describe('boot budget', () => {
 
     const health = await pollHealthz(60_000);
     expect(health.ok).toBe(true);
+    expect(['ready', 'degraded']).toContain(health.status);
+    expect(health.components.embedding.status).toBeTruthy();
+    expect(health.components.embedding.progress).toBeGreaterThanOrEqual(0);
 
     const at = (phase: string) => health.boot.phases.find((p) => p.phase === phase);
     // The profile itself is part of the contract — if these disappear, the

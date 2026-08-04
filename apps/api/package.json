@@ -30,7 +30,7 @@
     "@agentis/runtime": "workspace:*",
     "@hono/node-server": "^1.13.1",
     "@hono/zod-openapi": "^0.16.0",
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "4.2.0",
     "@scalar/hono-api-reference": "^0.5.150",
     "baileys": "7.0.0-rc13",
     "bcryptjs": "^2.4.3",

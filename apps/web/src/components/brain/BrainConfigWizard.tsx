@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, Cpu, Image, Loader2, Mic, Radio, Sparkles, Zap } from 'lucide-react';
+import { AlertTriangle, Check, Cpu, HardDrive, Image, Loader2, Mic, Radio, RotateCcw, Sparkles, Wrench, Zap } from 'lucide-react';
 import { api, apiErrorMessage } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
@@ -21,6 +21,20 @@ interface IntelligenceConfig {
   };
   activeAtomCount: number;
   degraded: boolean;
+  runtime?: EmbeddingRuntime | null;
+}
+type RuntimeStatus = 'uninitialized' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'degraded';
+interface EmbeddingRuntime {
+  status: RuntimeStatus;
+  model: string;
+  revision: string | null;
+  dtype: string;
+  progress: number;
+  retryAt: string | null;
+  errorCode: string | null;
+  error: string | null;
+  artifacts: Array<{ file: string; expectedBytes: number; downloadedBytes: number; ready: boolean }>;
+  pending?: { memories: number; sessionMoments: number; total: number };
 }
 interface VerifyResult { ok: boolean; dimension?: number; latencyMs: number; error?: string }
 interface PendingMigration { activeAtomCount: number; estimateSeconds: number; message: string }
@@ -32,6 +46,8 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
   const [testingEmbedding, setTestingEmbedding] = useState(false);
   const [testingAi, setTestingAi] = useState(false);
   const [config, setConfig] = useState<IntelligenceConfig | null>(null);
+  const [runtime, setRuntime] = useState<EmbeddingRuntime | null>(null);
+  const [repairing, setRepairing] = useState<'retry' | 'repair' | null>(null);
   const [pendingMigration, setPendingMigration] = useState<PendingMigration | null>(null);
   const [provider, setProvider] = useState<ProviderType>('local');
   const [endpoint, setEndpoint] = useState('https://api.openai.com/v1');
@@ -53,6 +69,8 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
     try {
       const data = await api<IntelligenceConfig>('/v1/workspace/intelligence');
       setConfig(data);
+      setRuntime(data.runtime ?? null);
+      void refreshRuntime();
       setProvider(data.embeddingProviderType);
       setEndpoint(data.embeddingProviderConfig.endpoint ?? 'https://api.openai.com/v1');
       setModel(data.embeddingProviderConfig.model ?? 'text-embedding-3-small');
@@ -72,6 +90,38 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
   }
 
   useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  async function refreshRuntime() {
+    try {
+      setRuntime(await api<EmbeddingRuntime>('/v1/runtime/embedding'));
+    } catch {
+      // The settings request remains the primary error surface. Polling is quiet.
+    }
+  }
+
+  useEffect(() => {
+    if (provider !== 'local' || runtime?.status === 'ready' || runtime?.status === 'degraded') return;
+    const timer = window.setInterval(() => void refreshRuntime(), 1_500);
+    return () => window.clearInterval(timer);
+  }, [provider, runtime?.status]);
+
+  async function recoverRuntime(repair: boolean) {
+    setRepairing(repair ? 'repair' : 'retry');
+    try {
+      const result = await api<{ runtime: EmbeddingRuntime }>('/v1/runtime/embedding/retry', {
+        method: 'POST',
+        body: JSON.stringify({ repair }),
+      });
+      setRuntime(result.runtime);
+      toast.success(repair ? 'Embedding cache repaired' : 'Embedding runtime recovered');
+      await load();
+    } catch (error) {
+      toast.error(repair ? 'Cache repair failed' : 'Embedding retry failed', apiErrorMessage(error));
+      await refreshRuntime();
+    } finally {
+      setRepairing(null);
+    }
+  }
 
   const embeddingConfig = useMemo(() => provider === 'local' ? {} : {
     endpoint: endpoint.trim(),
@@ -177,6 +227,7 @@ export function BrainConfigWizard({ embedded = false, onFinished }: { embedded?:
             <TestRow loading={testingEmbedding} result={embeddingTest} onTest={() => void testEmbedding()} />
           </div>
         )}
+        {provider === 'local' && <EmbeddingRuntimeCard runtime={runtime} repairing={repairing} onRecover={recoverRuntime} />}
       </section>
 
       <section className="rounded-card border border-line bg-surface p-4">
@@ -219,7 +270,57 @@ function Header({ title, description, icon }: { title: string; description: stri
   return <div><h3 className="flex items-center gap-2 text-[14px] font-semibold text-text-primary">{icon}{title}</h3><p className="mt-1 text-[12px] text-text-muted">{description}</p></div>;
 }
 function Status({ degraded }: { degraded: boolean }) {
-  return <span className={`inline-flex items-center gap-1 rounded-pill px-2 py-1 text-[11px] font-medium ${degraded ? 'bg-amber-500/10 text-amber-200' : 'bg-emerald-500/10 text-emerald-300'}`}>{degraded ? <AlertTriangle size={12} /> : <Check size={12} />}{degraded ? 'Keyword' : 'Semantic'}</span>;
+  return <span className={`inline-flex items-center gap-1 rounded-pill px-2 py-1 text-[11px] font-medium ${degraded ? 'bg-amber-500/10 text-amber-200' : 'bg-emerald-500/10 text-emerald-300'}`}>{degraded ? <AlertTriangle size={12} /> : <Check size={12} />}{degraded ? 'Semantic pending' : 'Semantic ready'}</span>;
+}
+
+function EmbeddingRuntimeCard({
+  runtime,
+  repairing,
+  onRecover,
+}: {
+  runtime: EmbeddingRuntime | null;
+  repairing: 'retry' | 'repair' | null;
+  onRecover: (repair: boolean) => Promise<void>;
+}) {
+  const status = runtime?.status ?? 'uninitialized';
+  const busy = status === 'downloading' || status === 'verifying' || status === 'loading';
+  const pending = runtime?.pending?.total ?? 0;
+  const statusLabel: Record<RuntimeStatus, string> = {
+    uninitialized: 'Waiting to start',
+    downloading: 'Downloading verified generation',
+    verifying: 'Verifying artifacts',
+    loading: 'Running inference probe',
+    ready: 'Semantic runtime ready',
+    degraded: 'Semantic runtime degraded',
+  };
+  return (
+    <div className={`mt-3 overflow-hidden rounded-input border ${status === 'degraded' ? 'border-amber-400/30 bg-amber-500/[0.06]' : 'border-line bg-surface-2'}`}>
+      <div className="flex items-start justify-between gap-3 p-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-[12px] font-semibold text-text-primary">
+            {busy ? <Loader2 size={13} className="animate-spin text-accent" /> : <HardDrive size={13} className={status === 'ready' ? 'text-emerald-300' : 'text-amber-300'} />}
+            {statusLabel[status]}
+          </p>
+          <p className="mt-1 truncate font-mono text-[10px] text-text-muted">{runtime?.model ?? 'Xenova/multilingual-e5-small'} · {runtime?.dtype ?? 'q8'}</p>
+        </div>
+        <span className="shrink-0 font-mono text-[11px] text-text-muted">{runtime?.progress ?? 0}%</span>
+      </div>
+      <div className="h-1 bg-surface-3"><div className={`h-full transition-[width] duration-500 ${status === 'degraded' ? 'bg-amber-400' : 'bg-accent'}`} style={{ width: `${runtime?.progress ?? 0}%` }} /></div>
+      <div className="space-y-2 border-t border-line/70 px-3 py-2.5 text-[11px]">
+        <div className="flex items-center justify-between gap-3 text-text-muted">
+          <span>{pending > 0 ? `${pending} records waiting for semantic indexing` : status === 'ready' ? 'Deferred indexing is clear' : 'Writes remain durable while semantic indexing waits'}</span>
+          {runtime?.artifacts?.length ? <span className="shrink-0 font-mono">{runtime.artifacts.filter((item) => item.ready).length}/{runtime.artifacts.length} files</span> : null}
+        </div>
+        {runtime?.error && <p className="rounded-md border border-amber-400/20 bg-black/10 px-2.5 py-2 leading-4 text-amber-100"><span className="font-mono text-amber-300">{runtime.errorCode ?? 'EMBEDDING_RUNTIME_UNAVAILABLE'}</span><br />{runtime.error}</p>}
+        {status === 'degraded' && (
+          <div className="flex flex-wrap gap-2 pt-1">
+            <Button size="sm" variant="secondary" iconLeft={<RotateCcw size={12} />} loading={repairing === 'retry'} disabled={repairing != null} onClick={() => void onRecover(false)}>Retry</Button>
+            <Button size="sm" variant="ghost" iconLeft={<Wrench size={12} />} loading={repairing === 'repair'} disabled={repairing != null} onClick={() => void onRecover(true)}>Preserve & repair cache</Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 function Choice({ active, icon, title, onClick }: { active: boolean; icon: React.ReactNode; title: string; onClick: () => void }) {
   return <button type="button" onClick={onClick} className={`flex h-10 items-center justify-center gap-1.5 rounded-input border text-[12px] ${active ? 'border-accent bg-accent-soft text-text-primary' : 'border-line bg-surface-2 text-text-muted'}`}>{icon}{title}</button>;

@@ -24,6 +24,8 @@ export interface SessionMoment {
 const SESSION_ATOM_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class SessionMomentService {
+  readonly #reembedOperations = new Map<string, Promise<number>>();
+
   constructor(
     private readonly db: AgentisSqliteDb,
     private readonly bus: EventBus,
@@ -180,6 +182,16 @@ export class SessionMomentService {
    * Called by the boot re-embed sweep (mirrors `SharedIntelligence.reembedPending`).
    */
   async reembedPending(workspaceId: string, limit = 50): Promise<number> {
+    const existing = this.#reembedOperations.get(workspaceId);
+    if (existing) return existing;
+    const operation = this.#reembedPendingBatch(workspaceId, limit).finally(() => {
+      if (this.#reembedOperations.get(workspaceId) === operation) this.#reembedOperations.delete(workspaceId);
+    });
+    this.#reembedOperations.set(workspaceId, operation);
+    return operation;
+  }
+
+  async #reembedPendingBatch(workspaceId: string, limit: number): Promise<number> {
     const provider = this.resolveProvider?.(workspaceId);
     if (!provider) return 0;
     const rows = this.db.select().from(schema.sessionMoments)

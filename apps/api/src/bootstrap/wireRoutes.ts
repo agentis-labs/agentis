@@ -8,6 +8,7 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { bootProfileSnapshot } from '../services/bootProfile.js';
+import { embeddingRuntimeManager } from '../services/embedding/embeddingRuntimeManager.js';
 import { buildAutostartTarget } from '../services/system/autostartService.js';
 import { ClaimService } from '../grounding/claimService.js';
 import { GroundingContextComposer } from '../grounding/contextComposer.js';
@@ -48,6 +49,7 @@ import { buildCredentialRoutes } from '../routes/credentials.js';
 import { buildDashboardRoutes } from '../routes/dashboard.js';
 import { buildDomainRoutes } from '../routes/domains.js';
 import { buildEphemeralRoutes } from '../routes/ephemeral.js';
+import { buildEmbeddingRuntimeRoutes } from '../routes/embeddingRuntime.js';
 import { buildExtensionRegistryRoutes } from '../routes/extensionRegistry.js';
 import { buildExtensionRoutes } from '../routes/extensions.js';
 import { buildGatewayMutationRoutes } from '../routes/gatewayMutations.js';
@@ -327,16 +329,22 @@ export function wireRoutes(deps: WireRoutesDeps) {
   const app = new Hono();
   app.onError(errorHandler(logger));
   app.use('*', securityHeaders({ productionMode: env.NODE_ENV === 'production' }));
-  app.get('/healthz', (c) => c.json({
+  app.get('/healthz', (c) => {
+    const boot = bootProfileSnapshot();
+    const embedding = embeddingRuntimeManager.snapshot();
+    return c.json({
     ok: true,
+    status: boot.ready && embedding.status === 'ready' ? 'ready' : 'degraded',
     mode: db.mode,
     runtime: 'local-first',
     standardMode: 'unsupported-in-v1',
     // §PERF-BOOT — phase timings since process start + a ready flag, so "why is
     // boot slow?" and "is it warm yet?" are answerable with one curl. Additive:
     // the web app's reachability probe only reads `ok`.
-    boot: bootProfileSnapshot(),
-  }));
+    boot,
+    components: { embedding },
+    });
+  });
   app.route('/.well-known', buildJwksRoutes({ auth }));
   mountOpenApi(app);
 
@@ -417,6 +425,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   }));
   app.route('/v1/workspace-context', buildWorkspaceContextRoutes({ db: sqlite, auth, intelligence: workspaceIntelligence }));
   app.route('/v1/workspace/intelligence', buildWorkspaceIntelligenceRoutes({ db: sqlite, auth, intelligence: SharedIntelligence, backfill: embeddingBackfill, logger }));
+  app.route('/v1/runtime/embedding', buildEmbeddingRuntimeRoutes({ db: sqlite, auth }));
   app.route('/v1/memory', buildMemoryRoutes({ db: sqlite, auth, memory: memoryStore, episodes: episodicMemoryStore, brainAsk }));
   // Grounding — evidence ledger, source fabric, claims, grants, migration. The
   // claim service hears about evidence invalidation; the dispatch composer is

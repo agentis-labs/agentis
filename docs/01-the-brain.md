@@ -1,7 +1,7 @@
 # 01 · The Brain
 
 The Brain is Agentis's durable memory and intelligence subsystem. It runs locally with a
-bundled embedding model, gates what gets stored, classifies and reconciles memories, learns
+verified on-device embedding model, gates what gets stored, classifies and reconciles memories, learns
 from run outcomes, and answers queries with citations or explicit abstention. Grounding,
 knowledge bases, and skills are sub-systems inside it.
 
@@ -21,10 +21,19 @@ Related tables: `memory_promotion_events`, `promoted_patterns`, `brain_quality_e
 
 ## Embeddings
 
-`services/embedding/` provides a pluggable embedding provider. The default is an **offline,
-bundled ONNX `e5-small` model** (384-dim, multilingual, deterministic) — semantic recall
-with no external API. An OpenAI-compatible provider is opt-in. Every vector is stamped with
-its `modelId` + dimensions so mismatched vectors can never be silently compared.
+`services/embedding/` provides a pluggable embedding provider. The default is a **local ONNX
+`multilingual-e5-small` q8 model** (384-dim, multilingual, deterministic). Its pinned artifacts
+are downloaded once (about 129 MB), verified by size and SHA-256, inference-probed, and then
+reused offline; model weights are not bundled in the NPM tarball. An OpenAI-compatible provider
+is opt-in. Every vector is stamped with its `modelId` + dimensions so mismatched vectors can
+never be silently compared.
+
+`EmbeddingRuntimeManager` is the sole owner of download, verification, load, retry, and
+backfill readiness. State is persisted under the model cache and exposed through
+`GET /v1/runtime/embedding`, `POST /v1/runtime/embedding/retry`, `/healthz`, the Brain settings
+UI, and `agentis doctor --json`. `agentis warmup --repair` preserves the previous cache before
+building and promoting a verified generation. Memory writes remain durable while the runtime
+warms, but semantic indexing and recall are explicitly reported as pending until readiness.
 
 ## Formation pipeline
 
@@ -114,7 +123,7 @@ Routes: `/v1/skills`.
 ## API surface
 
 - HTTP: `/v1/brain` (graph, health, ask, rebuild-memory), `/v1/memory`, `/v1/knowledge-bases`,
-  `/v1/skills`, `/v1/grounding`, `/v1/personal-brain`.
+  `/v1/skills`, `/v1/grounding`, `/v1/personal-brain`, `/v1/runtime/embedding`.
 - Tools: `agentis.brain.search`, `agentis.memory.{write,read,delete}`,
   `agentis.knowledge.{write,search,archive}`, `agentis.skill.{load,promote_example}`.
 

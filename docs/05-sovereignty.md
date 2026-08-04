@@ -12,8 +12,9 @@ is local-first, model-neutral, self-hosted, and portable, and the supervision la
 - The **asset store** (`AGENTIS_ASSETS_DIR`, `services/assetStore.ts`) is content-addressed:
   every generated blob is stored once by SHA-256 and registered as an artifact. Point it at an
   external drive/NAS; it never needs to live on the system disk or in the repo.
-- The **Brain** runs on a bundled offline embedding model — recall works with no external API,
-  so institutional knowledge never leaves the host (see [The Brain](./01-the-brain.md)).
+- The **Brain** runs on a pinned local embedding model. Its q8 artifacts are downloaded and
+  cryptographically verified once, then work offline with no external API, so institutional
+  knowledge never leaves the host (see [The Brain](./01-the-brain.md)).
 
 ## Model & runtime neutrality
 
@@ -46,7 +47,8 @@ workspace (`workspace_model_config`) or via `AGENTIS_ORCHESTRATOR_*` env vars.
   all packages, and the built SPA in one Node process.
 - **Railway** — one-click template (`railway.toml`) with a stateful volume for SQLite.
 - **CLI** (`@agentis-labs/cli`) — `npm install -g @agentis-labs/cli` then `agentis up`;
-  also `bootstrap`, `backup`, `restore`, `create`, `app {pack,validate,install,test,export}`.
+  also `warmup [--repair]`, `doctor [--json]`, `bootstrap`, `backup`, `restore`, `create`,
+  `app {pack,validate,install,test,export}`.
 - **SDK** (`@agentis/sdk`) — programmatic validate/build/test in an isolated transaction.
 
 A hosted Postgres dialect exists (`packages/db/src/pg/`) but is a stub; SQLite single-writer is

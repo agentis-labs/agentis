@@ -56,6 +56,11 @@ const REQUIRED_ASSETS = [
   ['dist/web/index.html', 'the dashboard cannot be served'],
 ];
 
+const REQUIRED_EXACT_DEPENDENCIES = {
+  '@huggingface/transformers': '4.2.0',
+  'onnxruntime-node': '1.24.3',
+};
+
 function fail(lines) {
   console.error(`\n[check-bundle-deps] FAILED\n${lines.join('\n')}\n`);
   process.exit(1);
@@ -101,6 +106,12 @@ for (const spec of specifiers) {
 }
 
 const problems = [];
+for (const [name, expected] of Object.entries(REQUIRED_EXACT_DEPENDENCIES)) {
+  const actual = pkg.dependencies?.[name];
+  if (actual !== expected) {
+    problems.push(`  Runtime dependency ${name} must be pinned exactly to ${expected}; found ${actual ?? 'missing'}.`);
+  }
+}
 if (missing.size > 0) {
   problems.push('  Bundle requires packages that npm will NOT install:');
   for (const [name, specs] of [...missing].sort()) {

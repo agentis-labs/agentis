@@ -38,6 +38,10 @@ import {
 } from './embedding/embeddingProvider.js';
 import type { EmbeddingProviderRegistry } from './embedding/embeddingProviderRegistry.js';
 import {
+  embeddingRuntimeManager,
+  type EmbeddingRuntimeSnapshot,
+} from './embedding/embeddingRuntimeManager.js';
+import {
   extractCandidateStatements,
   extractOperatorCandidates,
   isRejectable,
@@ -325,6 +329,8 @@ const ARCHIVE_CONFIDENCE_FLOOR = 0.05;
 export class SharedIntelligenceService {
   /** Per-workspace embedding provider cache (resolved from workspace config). */
   readonly #embeddingProviders = new Map<string, EmbeddingProvider>();
+  /** Exactly one deferred-backfill worker per workspace. */
+  readonly #reembedOperations = new Map<string, Promise<{ reembedded: number; failed: number }>>();
 
   /**
    * Optional model behind the Formation Judge (the Mem0-style extract+classify
@@ -456,6 +462,7 @@ export class SharedIntelligenceService {
     degraded: boolean;
     retrievalPaused: boolean;
     migration: Record<string, unknown> | null;
+    runtime: EmbeddingRuntimeSnapshot | null;
   } {
     const row = this.db.select({
       type: schema.workspaces.embeddingProviderType,
@@ -467,13 +474,21 @@ export class SharedIntelligenceService {
     const migration = settings.embeddingMigration && typeof settings.embeddingMigration === 'object' && !Array.isArray(settings.embeddingMigration)
       ? settings.embeddingMigration as Record<string, unknown>
       : null;
+    const type = row?.type ?? 'local';
+    const provider = this.#resolveEmbeddingProvider(workspaceId);
+    // The managed runtime only governs LocalEmbeddingProvider. Tests and
+    // embedders injected by a store may intentionally use a different provider
+    // while the workspace's persisted type remains at its default `local`.
+    const runtime = type === 'local' && provider.modelId.startsWith('local:')
+      ? embeddingRuntimeManager.snapshot()
+      : null;
+    const runtimeUnavailable = runtime != null && runtime.status !== 'ready';
     return {
-      type: row?.type ?? 'local',
-      // No non-semantic provider exists anymore; "degraded" only ever meant the
-      // legacy hashing fallback, which is gone.
-      degraded: false,
-      retrievalPaused: migration?.status === 'running',
+      type,
+      degraded: runtimeUnavailable,
+      retrievalPaused: runtimeUnavailable || migration?.status === 'running',
       migration,
+      runtime,
     };
   }
 
@@ -1353,6 +1368,16 @@ export class SharedIntelligenceService {
    * clears the flag. Bounded per call so it never stalls maintenance.
    */
   async reembedPending(workspaceId: string, limit = 200): Promise<{ reembedded: number; failed: number }> {
+    const existing = this.#reembedOperations.get(workspaceId);
+    if (existing) return existing;
+    const operation = this.#reembedPendingBatch(workspaceId, limit).finally(() => {
+      if (this.#reembedOperations.get(workspaceId) === operation) this.#reembedOperations.delete(workspaceId);
+    });
+    this.#reembedOperations.set(workspaceId, operation);
+    return operation;
+  }
+
+  async #reembedPendingBatch(workspaceId: string, limit: number): Promise<{ reembedded: number; failed: number }> {
     const provider = this.#resolveEmbeddingProvider(workspaceId);
     const rows = this.db.select().from(schema.memoryEpisodes)
       .where(and(

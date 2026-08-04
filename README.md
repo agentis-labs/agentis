@@ -23,9 +23,9 @@ and a live product surface they can operate with you.
 [![Node](https://img.shields.io/badge/node-%3E%3D20.10-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-9.12-orange.svg)](https://pnpm.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org)
-![Status](https://img.shields.io/badge/status-1.0.0%20stable-brightgreen.svg)
+![Status](https://img.shields.io/badge/status-1.0.3%20stable-brightgreen.svg)
 
-> **Status: 1.0.2 stable.** Agentis is now in public release, and the CLI,
+> **Status: 1.0.3 stable.** Agentis is now in public release, and the CLI,
 > dashboard, and core runtime are ready for production use across 1.x updates.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fagentis-labs%2Fagentis)
@@ -117,8 +117,8 @@ Run `agentis help` for the complete flag list on every command.
 more), and local models all sit behind one Runtime Abstraction Layer. Route by capability,
 not vendor — and never rewrite your agents to switch one.
 
-**A permanent Brain, not a chat transcript.** Durable memory lives locally with a bundled
-offline embedding model, formation gates, grounded knowledge, living skills, and cited
+**A permanent Brain, not a chat transcript.** Durable memory lives locally with a pinned,
+verified embedding model that is reusable offline, formation gates, grounded knowledge, living skills, and cited
 answers — indexed through the Model Context Protocol so any harness you plug in reads and
 writes the same memory instead of starting cold.
 

@@ -70,6 +70,22 @@ export const openApiDocument = {
           expiresIn: { type: 'integer' },
         },
       },
+      EmbeddingRuntime: {
+        type: 'object',
+        required: ['status', 'model', 'dtype', 'progress', 'artifacts'],
+        properties: {
+          status: { type: 'string', enum: ['uninitialized', 'downloading', 'verifying', 'loading', 'ready', 'degraded'] },
+          model: { type: 'string' },
+          revision: { type: ['string', 'null'] },
+          dtype: { type: 'string' },
+          progress: { type: 'integer', minimum: 0, maximum: 100 },
+          errorCode: { type: ['string', 'null'] },
+          error: { type: ['string', 'null'] },
+          retryAt: { type: ['string', 'null'], format: 'date-time' },
+          artifacts: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          pending: { type: 'object', additionalProperties: true },
+        },
+      },
     },
   },
   security: [{ bearer: [] }],
@@ -81,17 +97,39 @@ export const openApiDocument = {
         summary: 'Liveness probe',
         responses: {
           '200': {
-            description: 'Service is up',
+            description: 'Process liveness. `ok` stays true while top-level readiness may be degraded.',
             content: {
               'application/json': {
                 schema: {
                   type: 'object',
-                  properties: { ok: { type: 'boolean' }, mode: { type: 'string' } },
+                  properties: {
+                    ok: { type: 'boolean' },
+                    status: { type: 'string', enum: ['ready', 'degraded'] },
+                    mode: { type: 'string' },
+                    components: { type: 'object', additionalProperties: true },
+                  },
                 },
               },
             },
           },
         },
+      },
+    },
+    '/v1/runtime/embedding': {
+      get: {
+        tags: ['runtime'],
+        summary: 'Inspect local embedding runtime, artifacts, failure, and deferred backlog',
+        responses: { '200': { description: 'Runtime state', content: { 'application/json': { schema: { $ref: '#/components/schemas/EmbeddingRuntime' } } } } },
+      },
+    },
+    '/v1/runtime/embedding/retry': {
+      post: {
+        tags: ['runtime'],
+        summary: 'Retry loading or preserve and repair the embedding cache',
+        requestBody: {
+          content: { 'application/json': { schema: { type: 'object', properties: { repair: { type: 'boolean', default: false } } } } },
+        },
+        responses: { '200': { description: 'Verified runtime ready' } },
       },
     },
     '/v1/auth/login': {

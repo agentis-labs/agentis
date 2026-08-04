@@ -2,6 +2,7 @@ import { and, desc, eq, gte, isNull } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { embeddingLatencyStats, type EmbeddingLatencyStats } from '../embedding/embeddingProvider.js';
+import { embeddingRuntimeManager, type EmbeddingRuntimeSnapshot } from '../embedding/embeddingRuntimeManager.js';
 import type { MemoryDropLog } from './memoryDropLog.js';
 
 export interface BrainHealthSnapshot {
@@ -37,6 +38,7 @@ export interface BrainHealthSnapshot {
     embeddingProviderType: string;
     degraded: boolean;
     migration: unknown;
+    runtime: EmbeddingRuntimeSnapshot | null;
     /**
      * §B5.10 — what a brain write actually costs. Process-wide (the embedding
      * pipeline is a single in-process singleton), not per-workspace. Until this
@@ -157,8 +159,12 @@ export class BrainHealthService {
       },
       intelligence: {
         embeddingProviderType: workspace?.embeddingProviderType ?? 'local',
-        degraded: false,
+        degraded: (workspace?.embeddingProviderType ?? 'local') === 'local'
+          && embeddingRuntimeManager.snapshot().status !== 'ready',
         migration: workspaceSettings.embeddingMigration ?? null,
+        runtime: (workspace?.embeddingProviderType ?? 'local') === 'local'
+          ? embeddingRuntimeManager.snapshot()
+          : null,
         embedLatency: embeddingLatencyStats(),
       },
       recentActivity: events.slice(0, 20).map((event) => ({

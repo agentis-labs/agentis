@@ -178,6 +178,7 @@ function readConfig(deps: { db: AgentisSqliteDb; intelligence: SharedIntelligenc
     activeAtomCount: countAtoms(deps.db, workspaceId),
     degraded: status.degraded,
     migration: status.migration,
+    runtime: status.runtime,
   };
 }
 
