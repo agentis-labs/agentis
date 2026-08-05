@@ -56,6 +56,31 @@ function provenSettings() {
 }
 
 describe('compileAppReadiness', () => {
+  it('focuses debug admission on the selected workflow and ignores unrelated App release blockers', () => {
+    const fixture = app();
+    insertWorkflow(fixture.id, provenSettings(), 'wf-target');
+    insertWorkflow(fixture.id, {}, 'wf-unrelated-broken');
+    ctx.db.insert(schema.appCollections).values([
+      { id: 'scripts-focus', appId: fixture.id, workspaceId: ctx.workspace.id, name: 'conversation_script', schemaJson: { fields: [{ key: 'key', type: 'string' }] } },
+      { id: 'contacts-focus', appId: fixture.id, workspaceId: ctx.workspace.id, name: 'runtime_contacts', schemaJson: { fields: [{ key: 'stage', type: 'string' }] } },
+    ]).run();
+    ctx.db.insert(schema.appRecords).values({
+      id: 'script-focus', collectionId: 'scripts-focus', appId: fixture.id, workspaceId: ctx.workspace.id,
+      dataJson: { key: 'script', script: { version: 1, contactCollection: 'runtime_contacts', initialStage: 'waiting', stages: [{ id: 'waiting' }] } },
+    }).run();
+
+    const appWide = compileAppReadiness(ctx.db, ctx.workspace.id, fixture.id, 'debug');
+    const focused = compileAppReadiness(ctx.db, ctx.workspace.id, fixture.id, 'debug', new Date(), {
+      workflowId: 'wf-target', revisionId: 'candidate-revision', graph,
+    });
+
+    expect(appWide.readyForExecution).toBe(false);
+    expect(focused.readyForExecution).toBe(true);
+    expect(focused.workflowProofs.map((proof) => proof.workflowId)).toEqual(['wf-target']);
+    expect(focused.checks.some((check) => check.id === 'spec:wf-unrelated-broken')).toBe(false);
+    expect(focused.checks.some((check) => check.id.startsWith('conversation-'))).toBe(false);
+  });
+
   it('blocks predictable work before a costly debug run and returns ordered calls', () => {
     const fixture = app();
     insertWorkflow(fixture.id);

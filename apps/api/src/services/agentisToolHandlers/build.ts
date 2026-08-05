@@ -755,6 +755,161 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
     },
     {
       definition: {
+        id: 'agentis.workflow.revision.inspect',
+        family: 'inspect',
+        description: 'Inspect the active and candidate revision heads, exact graph hashes, proof gates, and optionally immutable graph bytes.',
+        inputSchema: {
+          type: 'object',
+          properties: { workflowId: { type: 'string' }, revisionId: { type: 'string' }, includeGraph: { type: 'boolean' } },
+          required: ['workflowId'],
+        },
+        mutating: false,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
+        const active = deps.revisions.active(ctx.workspaceId, String(args.workflowId));
+        const candidate = deps.revisions.candidate(ctx.workspaceId, String(args.workflowId));
+        const requested = args.revisionId
+          ? deps.revisions.revision(ctx.workspaceId, String(args.workflowId), String(args.revisionId))
+          : candidate?.revision ?? active.revision;
+        if (!requested) throw new AgentisError('RESOURCE_NOT_FOUND', 'Workflow revision not found');
+        const present = (revision: typeof requested | null) => revision ? {
+          revisionId: revision.id,
+          semanticHash: revision.semanticHash,
+          status: revision.status,
+          trustState: revision.trustState,
+          proof: deps.revisions!.proofState(ctx.workspaceId, String(args.workflowId), revision.id),
+          ...(args.includeGraph === true ? { graph: revision.graphJson } : {}),
+        } : null;
+        return {
+          workflowId: String(args.workflowId),
+          active: present(active.revision),
+          candidate: present(candidate?.revision ?? null),
+          selected: present(requested),
+          editableTarget: candidate ? 'candidate' : 'active',
+        };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.revision.verify',
+        family: 'build',
+        description: 'Start a clean debug execution of the exact candidate revision. Deterministic gates must already be green; self-healing is disabled and proof is attached to the immutable revision hash.',
+        inputSchema: { type: 'object', properties: { workflowId: { type: 'string' }, inputs: { type: 'object' }, waitMode: { type: 'string', enum: ['background', 'inline', 'auto'] } }, required: ['workflowId'] },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
+        const candidate = deps.revisions.candidate(ctx.workspaceId, String(args.workflowId));
+        if (!candidate) throw new AgentisError('RESOURCE_NOT_FOUND', 'No candidate revision is available to verify.');
+        const proof = deps.revisions.proofState(ctx.workspaceId, String(args.workflowId), candidate.revision.id);
+        const preExecutionMissing = proof.missing.filter((gate) => !['clean_debug', 'outcome', 'operator_approval'].includes(gate));
+        if (preExecutionMissing.length > 0) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Candidate is not ready for a clean execution. Missing gates: ${preExecutionMissing.join(', ')}`);
+        }
+        const result = await registry.execute({
+          id: randomUUID(),
+          toolId: 'agentis.workflow.run',
+          arguments: {
+            workflowId: String(args.workflowId),
+            debugRun: true,
+            restartMode: 'fresh',
+            ...(args.inputs && typeof args.inputs === 'object' ? { inputs: args.inputs } : {}),
+            ...(typeof args.waitMode === 'string' ? { waitMode: args.waitMode } : {}),
+          },
+        }, ctx);
+        if (!result.ok) throw new AgentisError('WORKFLOW_GRAPH_INVALID', result.errorMessage ?? 'Candidate verification could not start', { details: result.details });
+        return { candidateRevisionId: candidate.revision.id, semanticHash: candidate.revision.semanticHash, run: result.output };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.revision.promote',
+        family: 'build',
+        description: 'Promote the exact proven candidate with compare-and-swap protection. Safe candidates promote immediately; risky/code/outward candidates create an administrator Approval Inbox request and return blocked_on_human.',
+        inputSchema: { type: 'object', properties: { workflowId: { type: 'string' }, revisionId: { type: 'string' } }, required: ['workflowId'] },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
+        const workflowId = String(args.workflowId);
+        const active = deps.revisions.active(ctx.workspaceId, workflowId);
+        const candidate = deps.revisions.candidate(ctx.workspaceId, workflowId);
+        if (!candidate) throw new AgentisError('RESOURCE_NOT_FOUND', 'No candidate revision is available to promote.');
+        if (args.revisionId && String(args.revisionId) !== candidate.revision.id) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'The requested candidate is no longer the editable head. Inspect revisions and rebase.');
+        }
+        const proof = deps.revisions.proofState(ctx.workspaceId, workflowId, candidate.revision.id);
+        const nonApprovalMissing = proof.missing.filter((gate) => gate !== 'operator_approval');
+        if (nonApprovalMissing.length > 0 || !proof.specMatchesCurrent) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', `Candidate is not proven. Missing gates: ${nonApprovalMissing.join(', ') || 'spec reconciliation'}`, { details: { proof } });
+        }
+        if (!proof.approvalRequired) {
+          return {
+            outcome: 'promoted',
+            promotion: deps.revisions.promote({
+              workspaceId: ctx.workspaceId,
+              workflowId,
+              revisionId: candidate.revision.id,
+              expectedActiveRevisionId: active.revision.id,
+              actor: { type: 'agent', id: ctx.agentId ?? null },
+            }),
+          };
+        }
+        const existing = deps.approvals.list(ctx.workspaceId, 'pending').find((approval) =>
+          approval.source === 'workflow_revision'
+          && approval.payload.revisionId === candidate.revision.id
+          && approval.payload.semanticHash === candidate.revision.semanticHash);
+        const approval = existing ?? await deps.approvals.create({
+          workspaceId: ctx.workspaceId,
+          ambientId: ctx.ambientId ?? null,
+          userId: ctx.userId,
+          runId: null,
+          taskId: null,
+          targetId: candidate.revision.id,
+          gatewayId: null,
+          source: 'workflow_revision',
+          title: `Approve workflow revision: ${active.workflow.title}`,
+          summary: `Promote candidate ${candidate.revision.id} (${candidate.revision.semanticHash.slice(0, 12)}) after all non-human proof gates passed. It can run code or send data outward.`,
+          confidence: null,
+          payload: {
+            workspaceId: ctx.workspaceId,
+            workflowId,
+            revisionId: candidate.revision.id,
+            semanticHash: candidate.revision.semanticHash,
+            expectedActiveRevisionId: active.revision.id,
+          },
+        });
+        return { outcome: 'blocked_on_human', approvalId: approval.id, candidateRevisionId: candidate.revision.id, semanticHash: candidate.revision.semanticHash };
+      },
+    },
+    {
+      definition: {
+        id: 'agentis.workflow.revision.abandon',
+        family: 'build',
+        description: 'Abandon the exact candidate revision without changing the active production graph.',
+        inputSchema: { type: 'object', properties: { workflowId: { type: 'string' }, revisionId: { type: 'string' }, reason: { type: 'string' } }, required: ['workflowId', 'revisionId'] },
+        mutating: true,
+        mcpExposed: true,
+      },
+      handler: async (args, ctx) => {
+        if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
+        deps.revisions.abandon({
+          workspaceId: ctx.workspaceId,
+          workflowId: String(args.workflowId),
+          revisionId: String(args.revisionId),
+          actor: { type: 'agent', id: ctx.agentId ?? null },
+          reason: typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : 'Abandoned through agent revision controls',
+        });
+        return { outcome: 'abandoned', revisionId: String(args.revisionId) };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.run.graph.evolve',
         family: 'run',
         description:
@@ -1692,6 +1847,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         return {
           ok: true,
           hardened: true,
+          outcome: promotion ? 'promoted' : proofState?.approvalRequired ? 'blocked_on_human' : 'hardened',
+          activated: Boolean(promotion),
           graphHash: hash,
           specHash,
           ...(candidateRevision ? { candidateRevisionId: candidateRevision.revision.id } : {}),
@@ -1705,6 +1862,13 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
                   : 'The candidate still lacks immutable proof gates.',
               }
             : {}),
+          ...(proofState?.approvalRequired && !promotion ? {
+            next: {
+              tool: 'agentis.workflow.revision.promote',
+              args: { workflowId: wf.id, revisionId: candidateRevision?.revision.id },
+              why: 'Create an administrator approval request for this exact proven outward/code candidate.',
+            },
+          } : {}),
           ...(exportRef ? { exportRef } : {}),
           compass: compassForWorkflow({ workflowId: wf.id, graph, settings: { ...settings, buildLoop } }),
           summary: promotion
@@ -4275,6 +4439,7 @@ export const SYNTHESIS_SYSTEM_PROMPT = [
   '    filter         — boolean gate (pass / skip) — never returns data',
   '    http_request   — fetch a URL / call a JSON API',
   '    integration    — a connector action (Slack / Gmail / GitHub / Sheets / …)',
+  '    component_task — a version-pinned deterministic Component v2 operation; prefer it over an agent when code can express the work exactly',
   '    knowledge      — Knowledge-Base (RAG) search over UPLOADED DOCS (not the Brain memory)',
   '    router         — branch by condition',
   '    merge          — join parallel branches',
@@ -4346,6 +4511,9 @@ export const SYNTHESIS_SYSTEM_PROMPT = [
   '                  Persistent KV SCOPE: `workflow_store` persists across runs of THIS workflow (the common case —',
   '                  dedup cursors, running logs). For state shared across ALL workflows use `workspace_store`',
   '                  (same operations shape); for throwaway state within ONE run use `scratchpad`.',
+  '  component_task: { kind: "component_task", componentId? | componentSlug?, operationName, version, inputMapping, outputMapping, stateBindings?, idempotencyKeyPath? }',
+  '                  stateBindings maps a state name to { key, mode:"read"|"read_write"|"set", writeFrom? }. State is loaded from workflow-scoped durable storage, passed as input.state, and committed atomically only after success.',
+  '                  idempotencyKeyPath identifies a stable input item so retries return the prior receipt without repeating the operation.',
   '  evaluator:      { kind: "evaluator", targetPath, criteria, passThreshold? }',
   '  guardrails:     { kind: "guardrails", rules: [], onViolation: "block"|"flag" }',
   '  loop:           { kind: "loop", itemsExpression, maxConcurrency, bodyWorkflowId, outputArrayKey, onIterationError }',

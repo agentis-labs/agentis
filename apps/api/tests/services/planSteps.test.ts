@@ -5,6 +5,8 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { REALTIME_EVENTS, projectPlanSteps, summarizeWorkSteps, type WorkStep } from '@agentis/core';
+import { schema } from '@agentis/db/sqlite';
+import { randomUUID } from 'node:crypto';
 import { PlanService } from '../../src/services/planService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -12,6 +14,30 @@ let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });
 
 describe('PlanService step projection', () => {
+  it('persists owning agent and resolves the latest plan for Home', () => {
+    const plans = new PlanService(ctx.db, ctx.bus);
+    const ownerAgentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: ownerAgentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Owner',
+      adapterType: 'codex',
+      capabilityTags: [],
+      status: 'online',
+      colorHex: '#8b5cf6',
+    }).run();
+    const plan = plans.createTask({
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      ownerAgentId,
+      objective: 'Make the workspace live',
+    });
+    expect(plan.ownerAgentId).toBe(ownerAgentId);
+    expect(plans.latestForAgent(ctx.workspace.id, ownerAgentId)?.id).toBe(plan.id);
+  });
+
   it('sets an ordered checklist and emits it on the task spine', () => {
     const plans = new PlanService(ctx.db, ctx.bus);
     const capture = ctx.captureBus();

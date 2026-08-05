@@ -208,6 +208,7 @@ export interface WorkspaceNotification {
   actionLabel?: string;
   actionEvent?: string;
   actionPayload?: Record<string, unknown>;
+  seen?: boolean;
 }
 
 export interface WorkspaceSnapshot {

@@ -225,6 +225,16 @@ export class PlanService {
     return (row?.content as ChatPlan | undefined) ?? null;
   }
 
+  latestForAgent(workspaceId: string, agentId: string): ChatPlan | null {
+    const row = this.db
+      .select({ id: schema.plans.id })
+      .from(schema.plans)
+      .where(and(eq(schema.plans.workspaceId, workspaceId), eq(schema.plans.ownerAgentId, agentId)))
+      .orderBy(desc(schema.plans.updatedAt))
+      .get();
+    return row ? this.byId(workspaceId, row.id) : null;
+  }
+
   create(workspaceId: string, userId: string, conversationId: string, objective: string): ChatPlan {
     const previous = reusablePlan(this.latest(workspaceId, conversationId));
     const plan = generatePlan({ conversationId, objective, previous });
@@ -267,6 +277,7 @@ export class PlanService {
     userId: string;
     objective: string;
     conversationId?: string | null;
+    ownerAgentId?: string | null;
     title?: string;
     acceptanceCriteria?: string[];
     assumptions?: string[];
@@ -275,6 +286,7 @@ export class PlanService {
     const generated = generatePlan({ conversationId: args.conversationId ?? null, objective: args.objective, previous });
     const plan: ChatPlan = {
       ...generated,
+      ownerAgentId: args.ownerAgentId ?? previous?.ownerAgentId ?? null,
       title: args.title ?? generated.title,
       acceptanceCriteria: args.acceptanceCriteria ?? generated.acceptanceCriteria,
       assumptions: args.assumptions ?? generated.assumptions,
@@ -283,6 +295,7 @@ export class PlanService {
       this.db.insert(schema.plans).values({
         id: plan.id,
         workspaceId: args.workspaceId,
+        ownerAgentId: plan.ownerAgentId ?? null,
         conversationId: plan.conversationId ?? null,
         runIds: [],
         sessionId: null,
@@ -329,9 +342,13 @@ export class PlanService {
         workspaceId,
         userId,
         conversationId: args.conversationId ?? null,
+        ownerAgentId: args.agentId ?? null,
         objective: args.objective ?? args.title ?? labels[0] ?? 'Task',
         ...(args.title ? { title: args.title } : {}),
       });
+    }
+    if (args.agentId && plan.ownerAgentId !== args.agentId) {
+      plan = { ...plan, ownerAgentId: args.agentId, updatedAt: new Date().toISOString() };
     }
     const next = withBuildSteps(plan, labels);
     const buildNodes = next.nodes.filter((item) => item.stage === 'build');
@@ -386,7 +403,12 @@ export class PlanService {
         nodes = nodes.map((item) => (item.id === next.id ? { ...item, status: 'running' as const } : item));
       }
     }
-    const updated: ChatPlan = { ...plan, nodes, updatedAt: new Date().toISOString() };
+    const updated: ChatPlan = {
+      ...plan,
+      ownerAgentId: args.agentId ?? plan.ownerAgentId ?? null,
+      nodes,
+      updatedAt: new Date().toISOString(),
+    };
     const revised = this.revise(workspaceId, userId, {
       ...updated,
       status: planStatusFromSteps(updated, nodes.filter((item) => item.stage === 'build')),
@@ -629,6 +651,7 @@ export class PlanService {
       eq(schema.planVersions.planId, plan.id),
       eq(schema.planVersions.version, plan.version),
     )).run();
+    this.syncMessage(attached);
     return attached;
   }
 
@@ -665,6 +688,7 @@ export class PlanService {
   private syncTopRow(workspaceId: string, plan: ChatPlan): void {
     this.db.update(schema.plans).set({
       conversationId: plan.conversationId ?? null,
+      ownerAgentId: plan.ownerAgentId ?? null,
       messageId: plan.messageId ?? null,
       runIds: plan.runIds ?? [],
       sessionId: plan.sessionId ?? null,
@@ -712,6 +736,8 @@ export class PlanService {
       stepCurrent: stepTrack.current,
       stepTotal: stepTrack.total,
       conversationId: plan.conversationId ?? undefined,
+      ownerAgentId: plan.ownerAgentId ?? undefined,
+      agentId: plan.ownerAgentId ?? undefined,
       runIds,
       runId: runIds[runIds.length - 1],
       sessionId: plan.sessionId ?? undefined,

@@ -17,6 +17,7 @@ export interface WorkspaceChromeSnapshot {
   fleet: WorkspaceFleetOverview | null;
   latestActivity: WorkspaceActivityRow | null;
   notifications: WorkspaceNotification[];
+  unreadNotificationCount: number;
   counts: {
     liveAgents: number;
     totalAgents: number;
@@ -31,6 +32,7 @@ interface WorkspaceChromeResponse {
   fleet?: WorkspaceFleetOverview | null;
   latestActivity?: WorkspaceActivityRow | null;
   notifications?: WorkspaceNotification[];
+  unreadNotificationCount?: number;
   counts?: {
     liveAgents?: number;
     totalAgents?: number;
@@ -45,6 +47,7 @@ const EMPTY_CHROME_SNAPSHOT: WorkspaceChromeSnapshot = {
   fleet: null,
   latestActivity: null,
   notifications: [],
+  unreadNotificationCount: 0,
   counts: { liveAgents: 0, totalAgents: 0, activeRuns: 0 },
   updatedAt: 0,
 };
@@ -99,6 +102,7 @@ function normalizeChromeResponse(response: WorkspaceChromeResponse, workspaceId:
     fleet: response.fleet ?? null,
     latestActivity: response.latestActivity ?? null,
     notifications: response.notifications ?? [],
+    unreadNotificationCount: Number(response.unreadNotificationCount ?? (response.notifications ?? []).filter((item) => !item.seen).length),
     counts: {
       liveAgents: Number.isFinite(liveAgents) ? liveAgents : 0,
       totalAgents: Number.isFinite(totalAgents) ? totalAgents : 0,

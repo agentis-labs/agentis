@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Brain, Check, Download, Loader2, MessageCircle, PauseCircle, PlayCircle, Send, X } from 'lucide-react';
 import clsx from 'clsx';
-import { REALTIME_EVENTS } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS } from '@agentis/core';
 import { api } from '../../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { useToast } from '../shared/Toast';
@@ -193,7 +193,8 @@ export function AgentQuickDetailPanel({
         return;
       }
       if (env.event === REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL) {
-        const tool = typeof payload.tool === 'string' ? payload.tool : typeof payload.name === 'string' ? payload.name : 'tool call';
+        const rawTool = typeof payload.tool === 'string' ? payload.tool : typeof payload.name === 'string' ? payload.name : 'tool call';
+        const tool = normalizeToolInvocation(rawTool, payload.args ?? payload.input).tool;
         setLiveLine(`calling ${tool}`);
         return;
       }
@@ -586,6 +587,5 @@ function Stat({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
 
 

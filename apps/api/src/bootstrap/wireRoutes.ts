@@ -588,7 +588,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     allowPrivateNetwork: mcpAllowPrivate,
   }));
   app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
-  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, engine, turnLeases: conversationTurnLeases, memoryCapture: chatMemoryCapture, audit: auditTrail }));
+  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, engine, plans: planService, turnLeases: conversationTurnLeases, memoryCapture: chatMemoryCapture, audit: auditTrail }));
   const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));

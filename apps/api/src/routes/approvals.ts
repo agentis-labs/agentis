@@ -54,6 +54,7 @@ export function buildApprovalRoutes(deps: {
       workspaceId: ws.workspaceId,
       approvalId: id,
       decision: body.decision,
+      resolvedByUserId: ws.user.id,
       reason: body.reason,
       ...(body.decision === 'revise' ? { feedback } : {}),
       ...(body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? { data: body.data } : {}),

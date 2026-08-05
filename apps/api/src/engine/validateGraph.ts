@@ -288,6 +288,12 @@ export function validateWorkflowGraph(
         if (!node.config.version) {
           warnings.push(`Node ${node.id} (component_task) is not version-pinned; production runs may not be reproducible`);
         }
+        if (node.config.stateBindings) {
+          const keys = Object.values(node.config.stateBindings).map((binding) => binding.key);
+          if (new Set(keys).size !== keys.length) {
+            fail(`Node ${node.id} (component_task) binds the same durable state key more than once`);
+          }
+        }
         break;
       case 'integration':
         if (!node.config.integrationId) {

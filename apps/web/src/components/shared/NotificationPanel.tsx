@@ -33,6 +33,7 @@ export interface AgentisNotification {
   actionLabel?: string;
   actionEvent?: string;
   actionPayload?: Record<string, unknown>;
+  seen?: boolean;
 }
 
 function relativeTime(iso: string): string {
@@ -54,8 +55,8 @@ export function NotificationPanel() {
   const { workspaceId, notifications: items, loading } = useWorkspaceChromeData();
   const ref = useRef<HTMLDivElement>(null);
   const toast = useToast();
-  const [acknowledgedIds, setAcknowledgedIds] = useState<Set<string>>(new Set());
-  const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
+  const [optimisticSeen, setOptimisticSeen] = useState<Set<string>>(new Set());
+  const [optimisticDismissed, setOptimisticDismissed] = useState<Set<string>>(new Set());
 
   useRealtime([REALTIME_EVENTS.RUN_SETTLED], (env) => {
     const payload = env.payload as Record<string, unknown>;
@@ -77,59 +78,56 @@ export function NotificationPanel() {
     });
   });
 
-  useEffect(() => {
-    const saved = readAcknowledgedNotificationIds(workspaceId);
-    if (loading) {
-      setAcknowledgedIds(saved);
-      return;
-    }
-    setAcknowledgedIds(saved);
-  }, [items, workspaceId, loading]);
+  useEffect(() => { setOptimisticSeen(new Set()); setOptimisticDismissed(new Set()); }, [workspaceId]);
 
+  // One-time import of the legacy browser-only receipts. Keys are removed only
+  // after the server accepted the equivalent durable state.
   useEffect(() => {
-    const saved = readSeenNotificationIds(workspaceId);
-    if (loading) {
-      setSeenIds(saved);
-      return;
-    }
-    setSeenIds(saved);
-  }, [items, workspaceId, loading]);
+    if (!workspaceId) return;
+    const acknowledged = [...readAcknowledgedNotificationIds(workspaceId)];
+    const seen = [...readSeenNotificationIds(workspaceId)];
+    if (seen.length > 0) void persistNotificationState('seen', seen).then(() => localStorage.removeItem(seenNotificationStorageKey(workspaceId)!)).catch(() => {});
+    if (acknowledged.length > 0) void persistNotificationState('dismiss', acknowledged).then(() => localStorage.removeItem(notificationStorageKey(workspaceId)!)).catch(() => {});
+  }, [workspaceId]);
 
   const panelItems = useMemo(
-    () => items.filter((item) => !acknowledgedIds.has(item.id)),
-    [acknowledgedIds, items],
+    () => items.filter((item) => !optimisticDismissed.has(item.id)),
+    [items, optimisticDismissed],
   );
 
   const unseenItems = useMemo(
-    () => panelItems.filter((item) => !seenIds.has(item.id)),
-    [panelItems, seenIds],
+    () => panelItems.filter((item) => !item.seen && !optimisticSeen.has(item.id)),
+    [optimisticSeen, panelItems],
   );
 
-  function acknowledgeNotifications(ids: string[]) {
+  function dismissNotifications(ids: string[]) {
     if (ids.length === 0) return;
-    setAcknowledgedIds((current) => {
+    setOptimisticDismissed((current) => {
       const next = new Set(current);
       for (const id of ids) next.add(id);
-      writeAcknowledgedNotificationIds(workspaceId, next);
       return next;
+    });
+    void persistNotificationState('dismiss', ids).then(() => refreshWorkspaceChromeSnapshot()).catch((error) => {
+      setOptimisticDismissed((current) => new Set([...current].filter((id) => !ids.includes(id))));
+      toast.error('Could not clear notification', apiErrorMessage(error));
     });
   }
 
   function markNotificationsSeen(ids: string[]) {
     if (ids.length === 0) return;
-    setSeenIds((current) => {
+    setOptimisticSeen((current) => {
       const next = new Set(current);
       for (const id of ids) next.add(id);
-      writeSeenNotificationIds(workspaceId, next);
       return next;
     });
+    void persistNotificationState('seen', ids).then(() => refreshWorkspaceChromeSnapshot()).catch(() => {});
   }
 
   useEffect(() => {
     if (!open) return;
-    const unseen = panelItems.filter((item) => !seenIds.has(item.id)).map((item) => item.id);
+    const unseen = panelItems.filter((item) => !item.seen && !optimisticSeen.has(item.id)).map((item) => item.id);
     if (unseen.length > 0) markNotificationsSeen(unseen);
-  }, [open, panelItems, seenIds]);
+  }, [open, optimisticSeen, panelItems]);
 
   // Click outside to close
   useEffect(() => {
@@ -150,7 +148,7 @@ export function NotificationPanel() {
     if (!n.runId) return;
     try {
       await api(`/v1/runs/${n.runId}/retry`, { method: 'POST' });
-      acknowledgeNotifications([n.id]);
+      dismissNotifications([n.id]);
       toast.success('Retry started');
       void refreshWorkspaceChromeSnapshot();
     } catch (e) {
@@ -190,14 +188,12 @@ export function NotificationPanel() {
             <button
               type="button"
               onClick={() => {
-                acknowledgeNotifications(panelItems.map((item) => item.id));
+                dismissNotifications(panelItems.map((item) => item.id));
                 setOpen(false);
-                const firstApproval = panelItems.find((item) => item.type === 'approval' && item.approvalId);
-                if (firstApproval?.approvalId) openApprovalModal({ approvalId: firstApproval.approvalId });
               }}
               className="text-[12px] text-text-muted hover:text-text-primary"
             >
-              View all
+              Clear all
             </button>
           </div>
 
@@ -231,6 +227,7 @@ export function NotificationPanel() {
                         <button
                           type="button"
                           onClick={() => {
+                            dismissNotifications([n.id]);
                             setOpen(false);
                             if (n.approvalId) openApprovalModal({ approvalId: n.approvalId });
                           }}
@@ -243,7 +240,7 @@ export function NotificationPanel() {
                         <button
                           type="button"
                           onClick={() => {
-                            acknowledgeNotifications([n.id]);
+                            dismissNotifications([n.id]);
                             setOpen(false);
                             openRunModal({
                               runId: n.runId,
@@ -262,7 +259,7 @@ export function NotificationPanel() {
                             <button
                               type="button"
                               onClick={() => {
-                                acknowledgeNotifications([n.id]);
+                                dismissNotifications([n.id]);
                                 setOpen(false);
                                 openRunModal({
                                   runId: n.runId,
@@ -289,7 +286,7 @@ export function NotificationPanel() {
                         <button
                           type="button"
                           onClick={() => {
-                            acknowledgeNotifications([n.id]);
+                            dismissNotifications([n.id]);
                             setOpen(false);
                             window.dispatchEvent(new CustomEvent(n.actionEvent!, { detail: n.actionPayload ?? {} }));
                           }}
@@ -335,16 +332,6 @@ function readAcknowledgedNotificationIds(workspaceId: string | null): Set<string
   }
 }
 
-function writeAcknowledgedNotificationIds(workspaceId: string | null, ids: Set<string>): void {
-  const key = notificationStorageKey(workspaceId);
-  if (!key) return;
-  try {
-    localStorage.setItem(key, JSON.stringify([...ids]));
-  } catch {
-    /* ignore */
-  }
-}
-
 function readSeenNotificationIds(workspaceId: string | null): Set<string> {
   const key = seenNotificationStorageKey(workspaceId);
   if (!key) return new Set();
@@ -360,14 +347,12 @@ function readSeenNotificationIds(workspaceId: string | null): Set<string> {
   }
 }
 
-function writeSeenNotificationIds(workspaceId: string | null, ids: Set<string>): void {
-  const key = seenNotificationStorageKey(workspaceId);
-  if (!key) return;
-  try {
-    localStorage.setItem(key, JSON.stringify([...ids]));
-  } catch {
-    /* ignore */
-  }
+async function persistNotificationState(state: 'seen' | 'dismiss', ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await api(`/v1/dashboard/notifications/${state}`, {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
 }
 
 

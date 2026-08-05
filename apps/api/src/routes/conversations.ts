@@ -52,6 +52,7 @@ import type { AgentRow, StreamedChatMetadata } from '../services/conversation/co
 import { collectAppDoctorSnapshot } from '../services/app/appDoctorSnapshot.js';
 import { validateAppConformance, type AppDoctorReport } from '../services/app/appDoctor.js';
 import type { ConversationTurnExperience, ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
+import type { PlanService } from '../services/planService.js';
 
 const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
@@ -103,6 +104,7 @@ type ConversationRouteDeps = {
   turnLeases?: ConversationTurnLeaseRegistry;
   /** Durable, runtime-neutral efficiency evidence for interactive turns. */
   audit?: Pick<AuditTrailService, 'record'>;
+  plans?: PlanService;
   memoryCapture?: {
     captureImmediateCorrection?(args: {
       workspaceId: string;
@@ -994,6 +996,18 @@ async function runConversationTurn(
       await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, { type: 'text', delta: finalText }, streamedMetadata);
     }
 
+    const turnPlan = deps.plans?.latest(ws.workspaceId, args.conversation.id) ?? null;
+    if (turnPlan && Date.parse(turnPlan.updatedAt) >= turnStartedAtMs) {
+      streamedMetadata.plan = turnPlan;
+      if (!finalText.trim() && !streamedMetadata.confirmation) {
+        finalText = `Plan saved: ${turnPlan.title}. It has ${turnPlan.nodes.filter((node) => node.stage === 'build').length} work steps and is ${turnPlan.status}.`;
+        await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
+          type: 'text',
+          delta: finalText,
+        }, streamedMetadata);
+      }
+    }
+
     if (!finalText.trim() && !streamedMetadata.confirmation) {
       if (finishReason === 'error') {
         finalText = relevantTurnError(streamedMetadata, adapterError);
@@ -1067,6 +1081,9 @@ async function runConversationTurn(
         deliveryStatus: failed ? 'failed' : 'delivered',
         metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata, args.clientTurnId),
       });
+      if (streamedMetadata.plan && deps.plans) {
+        streamedMetadata.plan = deps.plans.attachMessage(ws.workspaceId, streamedMetadata.plan, persisted.id);
+      }
       await stream.writeSSE({
         event: 'message',
         data: JSON.stringify({
@@ -1074,7 +1091,7 @@ async function runConversationTurn(
           role: 'agent',
           body: persisted.body,
           createdAt: persisted.createdAt,
-          metadata: persisted.metadata,
+          metadata: buildPersistedChatMetadata('chat_loop', streamedMetadata, args.clientTurnId),
           deliveryStatus: persisted.deliveryStatus,
         }),
       });
@@ -1437,6 +1454,18 @@ async function confirmConversationAction(
         if (delta.type === 'text') finalText += delta.delta;
       }
 
+      const turnPlan = deps.plans?.latest(ws.workspaceId, conversation.id) ?? null;
+      if (turnPlan && Date.parse(turnPlan.updatedAt) >= turnStartedAtMs) {
+        streamedMetadata.plan = turnPlan;
+        if (!finalText.trim() && !streamedMetadata.confirmation) {
+          finalText = `Plan saved: ${turnPlan.title}. It has ${turnPlan.nodes.filter((node) => node.stage === 'build').length} work steps and is ${turnPlan.status}.`;
+          await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, {
+            type: 'text',
+            delta: finalText,
+          }, streamedMetadata);
+        }
+      }
+
       if (!finalText.trim() && !streamedMetadata.confirmation) {
         if (finishReason === 'error') {
           finalText = relevantTurnError(streamedMetadata, adapterError);
@@ -1485,6 +1514,9 @@ async function confirmConversationAction(
           deliveryStatus: failed ? 'failed' : 'delivered',
           metadata: buildPersistedChatMetadata('chat_confirmation', streamedMetadata, clientTurnId),
         });
+        if (streamedMetadata.plan && deps.plans) {
+          streamedMetadata.plan = deps.plans.attachMessage(ws.workspaceId, streamedMetadata.plan, persisted.id);
+        }
         await stream.writeSSE({
           event: 'message',
           data: JSON.stringify({
@@ -1492,7 +1524,7 @@ async function confirmConversationAction(
             role: 'agent',
             body: persisted.body,
             createdAt: persisted.createdAt,
-            metadata: persisted.metadata,
+            metadata: buildPersistedChatMetadata('chat_confirmation', streamedMetadata, clientTurnId),
             deliveryStatus: persisted.deliveryStatus,
           }),
         });

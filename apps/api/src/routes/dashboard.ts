@@ -7,7 +7,8 @@
  * latency becomes a problem.
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { WorkflowGraph, WorkflowRunState, WorkflowSelfHealIncident } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -24,7 +25,9 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
 
   app.get('/fleet-overview', (c) => {
     const ws = getWorkspace(c);
-    return c.json(readFleetOverview(deps.db, ws.workspaceId, getUser(c)));
+    const overview = readFleetOverview(deps.db, ws.workspaceId, getUser(c));
+    if (deps.approvals) overview.approvals.pending = deps.approvals.countActionable(ws.workspaceId);
+    return c.json(overview);
   });
 
   app.get('/chrome', (c) => {
@@ -34,6 +37,8 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
     // re-count schema.channelConnections here, or every channel gets counted
     // twice.
     const fleetOverview = readFleetOverview(deps.db, ws.workspaceId, getUser(c), { includeRecentRuns: false });
+    const approvals = deps.approvals?.list(ws.workspaceId, 'pending') ?? readBasicApprovals(deps.db, ws.workspaceId);
+    fleetOverview.approvals.pending = approvals.length;
 
     const fleet = {
       runs: {
@@ -54,7 +59,6 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
         inArray(schema.workflowRuns.status, ACTIVE_RUN_STATUSES),
       ))
       .get());
-    const approvals = deps.approvals?.list(ws.workspaceId, 'pending') ?? readBasicApprovals(deps.db, ws.workspaceId);
     const latestActivity = deps.db
       .select({
         id: schema.activityEvents.id,
@@ -68,18 +72,43 @@ export function buildDashboardRoutes(deps: { db: AgentisSqliteDb; auth: AuthServ
       .get() ?? null;
     const failedRuns = readChromeRuns(deps.db, ws.workspaceId, FAILED_RUN_STATUSES, 5);
 
+    const derivedNotifications = deriveChromeNotifications(approvals, failedRuns, agents);
+    const receipts = deps.db.select().from(schema.notificationReceipts).where(and(
+      eq(schema.notificationReceipts.workspaceId, ws.workspaceId),
+      eq(schema.notificationReceipts.userId, ws.user.id),
+    )).all();
+    const receiptById = new Map(receipts.map((receipt) => [receipt.notificationId, receipt]));
+    const notifications = derivedNotifications
+      .filter((notification) => !receiptById.get(notification.id)?.dismissedAt)
+      .map((notification) => ({ ...notification, seen: Boolean(receiptById.get(notification.id)?.seenAt) }));
+
     return c.json({
       workspaceId: ws.workspaceId,
       fleet,
       approvals,
       latestActivity,
-      notifications: deriveChromeNotifications(approvals, failedRuns, agents),
+      notifications,
+      unreadNotificationCount: notifications.filter((notification) => !notification.seen).length,
       counts: {
         liveAgents,
         totalAgents: fleetOverview.agents.total,
         activeRuns,
       },
     });
+  });
+
+  app.post('/notifications/seen', async (c) => {
+    const ws = getWorkspace(c);
+    const ids = await notificationIds(c);
+    upsertNotificationReceipts(deps.db, ws.workspaceId, ws.user.id, ids, 'seen');
+    return c.json({ ok: true, ids });
+  });
+
+  app.post('/notifications/dismiss', async (c) => {
+    const ws = getWorkspace(c);
+    const ids = await notificationIds(c);
+    upsertNotificationReceipts(deps.db, ws.workspaceId, ws.user.id, ids, 'dismissed');
+    return c.json({ ok: true, ids });
   });
 
   return app;
@@ -366,7 +395,7 @@ function deriveChromeNotifications(
     if (incident) {
       const blocked = incident.status === 'EXHAUSTED' ? 'Self-healing exhausted' : 'Self-healing blocked';
       rest.push({
-        id: `self-heal-${run.id}-${incident.nodeId}`,
+        id: `self-heal-${run.id}-${incident.nodeId}-${incident.updatedAt ?? run.finishedAt ?? 'unknown'}`,
         type: 'failure',
         title: blocked,
         context: selfHealIncidentSummary(incident, run),
@@ -379,7 +408,7 @@ function deriveChromeNotifications(
       continue;
     }
     rest.push({
-      id: `failed-${run.id}`,
+      id: `failed-${run.id}-${run.finishedAt ?? 'unknown'}`,
       type: 'failure',
       title: 'Workflow failed',
       context: `${run.workflowName ?? 'Workflow'}${run.failedNode ? ` - failed at ${run.failedNode}` : ''}`,
@@ -407,4 +436,35 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function countRows(row: { count: number | string | bigint } | undefined): number {
   return Number(row?.count ?? 0);
+}
+
+async function notificationIds(c: Context): Promise<string[]> {
+  const body = await c.req.json().catch(() => ({})) as { ids?: unknown };
+  if (!Array.isArray(body.ids)) return [];
+  return [...new Set(body.ids.filter((id): id is string => typeof id === 'string' && id.length > 0).slice(0, 200))];
+}
+
+function upsertNotificationReceipts(
+  db: AgentisSqliteDb,
+  workspaceId: string,
+  userId: string,
+  ids: string[],
+  state: 'seen' | 'dismissed',
+): void {
+  const now = new Date().toISOString();
+  for (const notificationId of ids) {
+    db.insert(schema.notificationReceipts).values({
+      id: randomUUID(), workspaceId, userId, notificationId,
+      seenAt: now,
+      dismissedAt: state === 'dismissed' ? now : null,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [schema.notificationReceipts.workspaceId, schema.notificationReceipts.userId, schema.notificationReceipts.notificationId],
+      set: {
+        seenAt: now,
+        ...(state === 'dismissed' ? { dismissedAt: now } : {}),
+        updatedAt: now,
+      },
+    }).run();
+  }
 }

@@ -44,6 +44,7 @@ export function registerEnvironmentTools(registry: AgentisToolRegistry, deps: To
           workspaceId: ctx.workspaceId,
           approvalId: String(args.approvalId),
           decision: args.decision as 'approve' | 'reject',
+          resolvedByUserId: ctx.userId,
           reason: args.reason ? String(args.reason) : undefined,
           ...(args.data && typeof args.data === 'object' && !Array.isArray(args.data)
             ? { data: args.data as Record<string, unknown> }

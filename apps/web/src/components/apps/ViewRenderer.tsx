@@ -23,7 +23,7 @@ import {
   type AppClientResponse,
 } from '@agentis/app-client';
 import type { AccentName, ActionRef, AppAgentActivity, AppPresenceUpdate, AppPresenceViewer, AppWorkflowSummary, DataBind, RecordActionRef, SurfaceAction, Tone, ViewNode } from '@agentis/core';
-import { REALTIME_EVENTS } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS } from '@agentis/core';
 import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { tokens } from '../../lib/api';
 import { displayLabel } from '../../lib/prettyRef';
@@ -1704,7 +1704,11 @@ function mapActivity(env: RealtimeEnvelope): Omit<ActivityItem, 'id' | 'at'> | n
   const p = env.payload;
   switch (env.event) {
     case REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL:
-      return { icon: <Wrench size={13} />, tone: 'default', label: `Tool - ${field(p, 'tool') ?? field(p, 'name') ?? 'call'}` };
+      return {
+        icon: <Wrench size={13} />,
+        tone: 'default',
+        label: `Tool - ${normalizeToolInvocation(field(p, 'tool') ?? field(p, 'name') ?? 'call', isRecord(p) ? p.args ?? p.input : undefined).tool}`,
+      };
     case REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE: {
       const message = field(p, 'message') ?? field(p, 'token');
       return message ? { icon: <Bot size={13} />, tone: 'default', label: message } : null;

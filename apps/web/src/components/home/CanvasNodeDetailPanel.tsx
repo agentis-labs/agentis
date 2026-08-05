@@ -5,11 +5,7 @@ import { api } from '../../lib/api';
 import { useRealtime } from '../../lib/realtime';
 import { useRunActivity } from '../../lib/useRunActivity';
 import { openRunModal } from '../../lib/runModal';
-import {
-  REALTIME_ACTIVITY_EVENTS,
-  describeRealtimeActivity,
-  type RealtimeActivity,
-} from '../../lib/realtimeActivity';
+import { REALTIME_EVENTS, type ChatPlan } from '@agentis/core';
 import {
   isActiveObservation,
   type ObservationTone,
@@ -20,6 +16,7 @@ import { ApprovalPreviewCard, ApprovalReviewModal } from '../shared/ApprovalRevi
 import { NodeColorPicker } from './NodeColorPicker';
 import { ORCHESTRATOR_DEFAULT_ACCENT } from './homeCanvasTypes';
 import type { CanvasNode } from './homeCanvasTypes';
+import { DurablePlanCard } from '../shared/DurablePlanCard';
 
 export function CanvasNodeDetailPanel({
   node,
@@ -42,7 +39,7 @@ export function CanvasNodeDetailPanel({
   const hasRoute = Boolean(node.route);
   const canChat = Boolean(node.agent);
   const state = node.operationalState ?? (node.warn ? 'attention' : node.active ? 'active' : 'idle');
-  const nodeEvents = observabilityEvents.filter((event) => eventMatchesNode(event, node)).slice(0, 8);
+  const nodeEvents = observabilityEvents.filter((event) => eventMatchesNode(event, node)).slice(0, 40);
 
   return (
     <div data-canvas-control className="pointer-events-none absolute inset-y-0 right-0 z-50 flex w-full max-w-[380px] items-stretch p-3">
@@ -102,7 +99,8 @@ export function CanvasNodeDetailPanel({
             />
           )}
           <NodeRealtimeSummary node={node} state={state} events={nodeEvents} />
-          {(node.agent || node.workflow) && <NodeLiveFeed node={node} />}
+          {node.agent && <AgentLatestPlan agentId={node.agent.id} />}
+          {(node.agent || node.workflow) && <NodeLiveFeed events={nodeEvents} />}
           {node.agent && <AgentLiveState node={node} />}
           {node.workflow && <WorkflowRuntimeSection workflowId={node.workflow.id} onNavigate={onNavigate} />}
 
@@ -295,48 +293,51 @@ function nodeStateLabel(state: NodeDetailState): string {
  * happening right now instead of a static snapshot. Fed by the workspace activity
  * spine; renders nothing until there's something to show.
  */
-function NodeLiveFeed({ node }: { node: CanvasNode }) {
-  const agentId = node.agent?.id;
-  const workflowId = node.workflow?.id;
-  const [feed, setFeed] = useState<RealtimeActivity[]>([]);
-  const seqRef = useRef(0);
-
-  useRealtime([...REALTIME_ACTIVITY_EVENTS], (env) => {
-    const activity = describeRealtimeActivity(env);
-    if (!activity) return;
-    const match =
-      (agentId && activity.agentId === agentId) || (workflowId && activity.workflowId === workflowId);
-    if (!match) return;
-    seqRef.current += 1;
-    setFeed((current) => {
-      // Run-scoped reasoning now reaches this listener (the workspace spine joins
-      // active run rooms); collapse the copy that arrives from being in both the
-      // workspace and run rooms, and keep a fuller trace than the old cap of 6.
-      if (current.slice(0, 12).some((c) => c.id.replace(/:\d+$/, '') === activity.id)) return current;
-      return [{ ...activity, id: `${activity.id}:${seqRef.current}` }, ...current].slice(0, 40);
-    });
-  });
-
-  if (feed.length === 0) return null;
+function NodeLiveFeed({ events }: { events: ObservabilityEvent[] }) {
+  if (events.length === 0) return null;
+  const live = events.some(isActiveObservation);
 
   return (
-    <section className="mb-3 rounded-card border border-accent/25 bg-accent-soft/5 px-2.5 py-2.5">
+    <section className={clsx('mb-3 rounded-card border px-2.5 py-2.5', live ? 'border-accent/25 bg-accent-soft/5' : 'border-line bg-canvas/35')}>
       <div className="flex items-center gap-2">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-accent">Live activity</span>
+        <span className={clsx('h-1.5 w-1.5 rounded-full', live ? 'animate-pulse bg-accent' : 'bg-text-muted/60')} />
+        <span className={clsx('font-mono text-[10px] uppercase tracking-[0.14em]', live ? 'text-accent' : 'text-text-muted')}>{live ? 'Live activity' : 'Recent activity'}</span>
       </div>
       <div className="mt-2 space-y-1">
-        {feed.map((item) => (
+        {events.map((item) => (
           <div key={item.id} className="flex items-start gap-2">
-            <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-accent/70" />
+            <span className={clsx('mt-1 h-1 w-1 shrink-0 rounded-full', isActiveObservation(item) ? 'bg-accent' : 'bg-text-muted/60')} />
             <span className="min-w-0 flex-1 line-clamp-2 font-mono text-[10px] leading-snug text-text-secondary">
-              {item.agentName ? `${item.agentName}: ` : ''}{item.detail}
+              {item.summary || item.detail || item.title}
             </span>
+            <span className="shrink-0 font-mono text-[9px] text-text-muted">{relTime(item.createdAt)}</span>
           </div>
         ))}
       </div>
     </section>
   );
+}
+
+function AgentLatestPlan({ agentId }: { agentId: string }) {
+  const [plan, setPlan] = useState<ChatPlan | null>(null);
+  const load = useCallback(() => {
+    void api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?agentId=${encodeURIComponent(agentId)}`)
+      .then((result) => setPlan(result.task ?? null))
+      .catch(() => setPlan(null));
+  }, [agentId]);
+  useEffect(load, [load]);
+  useRealtime([
+    REALTIME_EVENTS.TASK_SPINE_ACCEPTED,
+    REALTIME_EVENTS.TASK_SPINE_UPDATED,
+    REALTIME_EVENTS.TASK_SPINE_COMPLETED,
+    REALTIME_EVENTS.TASK_SPINE_VERIFIED,
+    REALTIME_EVENTS.TASK_SPINE_BLOCKED,
+    REALTIME_EVENTS.TASK_SPINE_FAILED,
+  ], (event) => {
+    const payload = event.payload as { agentId?: string; ownerAgentId?: string };
+    if (payload.ownerAgentId === agentId || payload.agentId === agentId) load();
+  });
+  return plan ? <DurablePlanCard plan={plan} /> : null;
 }
 
 // ── Workflow runtime: latest run steps + history + live stream ──────────────

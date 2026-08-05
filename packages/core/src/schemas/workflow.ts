@@ -118,6 +118,12 @@ const componentTaskConfigSchema = z.object({
   version: z.string().min(1).optional(),
   inputMapping: z.record(z.string(), z.string()).default({}),
   outputMapping: z.record(z.string(), z.string()).default({}),
+  stateBindings: z.record(z.string(), z.object({
+    key: z.string().min(1),
+    mode: z.enum(['read', 'read_write', 'set']),
+    writeFrom: z.string().min(1).optional(),
+  })).optional(),
+  idempotencyKeyPath: z.string().min(1).optional(),
   timeoutMs: z.number().int().positive().optional(),
 });
 

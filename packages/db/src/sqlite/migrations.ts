@@ -3131,6 +3131,42 @@ CREATE INDEX idx_agent_execution_envelopes_agent
   ON agent_execution_envelopes(workspace_id, agent_id, observed_at);
 `,
   },
+  {
+    version: 125,
+    name: 'durable_plan_ownership_and_notification_receipts',
+    sql: `
+ALTER TABLE plans ADD COLUMN owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_plans_owner_agent ON plans(workspace_id, owner_agent_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS notification_receipts (
+  id               TEXT PRIMARY KEY,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  notification_id  TEXT NOT NULL,
+  seen_at           TEXT,
+  dismissed_at      TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(workspace_id, user_id, notification_id)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_receipts_user
+  ON notification_receipts(workspace_id, user_id, updated_at);
+`,
+  },
+  {
+    version: 126,
+    name: 'transactional_workflow_state_keys',
+    sql: `
+DELETE FROM workflow_kv_entries
+WHERE rowid NOT IN (
+  SELECT MAX(rowid)
+  FROM workflow_kv_entries
+  GROUP BY workspace_id, workflow_id, key
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_kv_key
+  ON workflow_kv_entries(workspace_id, workflow_id, key);
+`,
+  },
 ];
 
 

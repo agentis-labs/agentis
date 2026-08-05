@@ -96,6 +96,12 @@ export interface AppCompileReport {
   summary: string;
 }
 
+export interface AppCompileFocus {
+  workflowId: string;
+  revisionId: string;
+  graph: WorkflowGraph;
+}
+
 /** Compile the current persisted App into a readiness verdict without executing it. */
 export function compileAppReadiness(
   db: AgentisSqliteDb,
@@ -103,11 +109,20 @@ export function compileAppReadiness(
   appId: string,
   target: AppCompileTarget = 'debug',
   now = new Date(),
+  focus?: AppCompileFocus,
 ): AppCompileReport {
   const snapshot = collectAppDoctorSnapshot(db, workspaceId, appId);
   const doctor = validateAppConformance(snapshot, now);
-  const checks: AppCompileCheck[] = doctor.findings.map(doctorCheck);
+  // App Doctor findings remain visible during a focused proof run, but App-wide
+  // release defects cannot block execution of an unrelated immutable revision.
+  const checks: AppCompileCheck[] = doctor.findings.map((finding) => {
+    const check = doctorCheck(finding);
+    return focus && check.status === 'block'
+      ? { ...check, blocksExecution: false, clearWith: undefined }
+      : check;
+  });
   const workflowProofs: AppCompileReport['workflowProofs'] = [];
+  const focusedWorkflowIds = focus ? workflowExecutionClosure(snapshot, focus.workflowId) : null;
 
   if (snapshot.workflows.length === 0) {
     checks.push({
@@ -118,11 +133,12 @@ export function compileAppReadiness(
   }
 
   for (const workflow of snapshot.workflows) {
+    if (focusedWorkflowIds && !focusedWorkflowIds.has(workflow.id)) continue;
     const binding = appWorkflowBindingSchema.safeParse(record(workflow.settings)?.appBinding ?? {}).success
       ? appWorkflowBindingSchema.parse(record(workflow.settings)?.appBinding ?? {})
       : appWorkflowBindingSchema.parse({});
     const enabled = binding.enabled !== false;
-    const graph = workflow.graph as WorkflowGraph;
+    const graph = focus?.workflowId === workflow.id ? focus.graph : workflow.graph as WorkflowGraph;
     const capabilitySummary = summarizeGraphCapabilities(graph);
     const externalEffectsPossible = capabilitySummary.hasUnrestrictedNetwork
       || capabilitySummary.sendsDataExternally
@@ -269,17 +285,19 @@ export function compileAppReadiness(
     checks.push(...channelChecks(db, workspaceId, workflow.id, workflow.title, graph));
   }
 
-  checks.push(...conversationLivenessChecks(db, workspaceId, appId, snapshot));
-  checks.push(...channelIdentityChecks(db, workspaceId, appId, snapshot));
+  if (!focus) {
+    checks.push(...conversationLivenessChecks(db, workspaceId, appId, snapshot));
+    checks.push(...channelIdentityChecks(db, workspaceId, appId, snapshot));
+  }
 
-  if (snapshot.surfaces.length === 0) {
+  if (!focus && snapshot.surfaces.length === 0) {
     checks.push({
       id: 'surface:none', layer: 'surface', status: 'warn',
       summary: 'This App has no operator surface. That is valid for a declared headless automation, but interactive Apps need an operable interface.',
       clearWith: { tool: 'agentis.ui.render', args: { appId, surface: 'home' }, why: 'Author an operator interface, or intentionally keep the App headless.' },
     });
   }
-  for (const surface of snapshot.surfaces) {
+  for (const surface of focus ? [] : snapshot.surfaces) {
     const parsed = viewNodeSchema.safeParse(surface.view);
     if (!parsed.success) {
       checks.push({
@@ -308,7 +326,7 @@ export function compileAppReadiness(
     liveProof: next.filter((step) => step.tool === 'agentis.workflow.run'),
   };
   const structuralLayers = new Set<AppCompileLayer>(['topology', 'activation', 'outcome', 'surface']);
-  const structuralReady = !checks.some((check) => check.status === 'block' && structuralLayers.has(check.layer));
+  const structuralReady = !checks.some((check) => check.status === 'block' && check.blocksExecution !== false && structuralLayers.has(check.layer));
   const executionBlockerCount = checks.filter((check) => check.status === 'block' && check.blocksExecution !== false).length;
   const evidencePendingCount = checks.filter((check) => check.status === 'block' && check.blocksExecution === false).length;
   const readyForExecution = structuralReady && executionBlockerCount === 0;
@@ -515,6 +533,36 @@ function conversationLivenessChecks(
     }
   }
   return checks;
+}
+
+/** The workflows that can execute as part of one focused manual/debug run. */
+function workflowExecutionClosure(
+  snapshot: ReturnType<typeof collectAppDoctorSnapshot>,
+  rootWorkflowId: string,
+): Set<string> {
+  const byId = new Map(snapshot.workflows.map((workflow) => [workflow.id, workflow]));
+  const selected = new Set<string>();
+  const pending = [rootWorkflowId];
+  while (pending.length > 0) {
+    const workflowId = pending.pop()!;
+    if (selected.has(workflowId)) continue;
+    selected.add(workflowId);
+    const workflow = byId.get(workflowId);
+    if (!workflow) continue;
+    const binding = appWorkflowBindingSchema.safeParse(record(workflow.settings)?.appBinding ?? {});
+    if (binding.success) pending.push(...(binding.data.dependsOn ?? []));
+    const graph = workflow.graph as WorkflowGraph;
+    for (const node of graph.nodes) {
+      const config = node.config as unknown as Record<string, unknown>;
+      const child = typeof config.bodyWorkflowId === 'string'
+        ? config.bodyWorkflowId
+        : typeof config.workflowId === 'string' && config.kind === 'subflow'
+          ? config.workflowId
+          : null;
+      if (child) pending.push(child);
+    }
+  }
+  return selected;
 }
 
 function doctorCheck(finding: AppDoctorFinding): AppCompileCheck {

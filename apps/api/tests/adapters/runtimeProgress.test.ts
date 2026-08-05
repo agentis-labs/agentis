@@ -2,9 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   compactRuntimeProgressLabel,
   runtimeProgressActivity,
+  toolActivityLabel,
 } from '../../src/adapters/runtimeProgress.js';
 
 describe('runtime progress normalization', () => {
+  it('shows the underlying gateway operation without leaking credentials', () => {
+    const label = toolActivityLabel('Using', 'agentis.tools.call', {
+      name: 'agentis.workflow.patch_graph',
+      arguments: { workflowId: 'wf-1', apiKey: 'should-never-render' },
+    });
+    expect(label).toContain('agentis workflow patch graph');
+    expect(label).not.toContain('agentis tools call');
+    expect(label).not.toContain('should-never-render');
+  });
+
   it('keeps long progress text for responsive frontend truncation', () => {
     const label = compactRuntimeProgressLabel(
       'I will inspect the entire workspace configuration and compare every runtime adapter before applying the shared protocol fix',

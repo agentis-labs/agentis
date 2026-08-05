@@ -30,9 +30,11 @@ import { buildInitialRunState } from '../../engine/initialRunState.js';
 import { capabilityGapReason } from '../../engine/selfHeal/selfHealHelpers.js';
 import { preflightWorkflow } from './workflowPreflight.js';
 import { readWorkflowSpec, deriveSpecDraft, validateWorkflowSpec, type WorkflowSpec } from './workflowSpec.js';
-import { compassForWorkflow, graphContentHash, type Compass } from './workflowCompass.js';
+import { compassForWorkflow, graphContentHash, readBuildLoop, type Compass } from './workflowCompass.js';
 import type { RunVerdict } from './workflowVerdict.js';
 import type { ToolHandlerDeps } from '../agentisToolHandlers/deps.js';
+import { resolveWorkflowExecutionTarget } from './workflowExecutionTarget.js';
+import { WorkflowRevisionService } from './workflowRevisionService.js';
 
 export type DeliveryOutcome = 'accomplished' | 'blocked_on_human' | 'failed' | 'unverifiable';
 
@@ -90,6 +92,7 @@ const TERMINAL = new Set(['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION', 'COM
 const SETTLE_POLL_MS = 400;
 
 export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, args: DeliverArgs): Promise<DeliveryResult> {
+  const revisions = deps.revisions ?? new WorkflowRevisionService(deps.db);
   const timeline: DeliveryTimelineEntry[] = [];
   const mark = (stage: string, detail: string) => {
     timeline.push({ stage, detail, at: new Date().toISOString() });
@@ -149,8 +152,15 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
     iterations = i;
     if (Date.now() > deadline) return fail(timeline, workflowId, 'failed', `Delivery budget (${Math.round(maxWallMs / 1000)}s) exhausted after ${i - 1} attempt(s).`, { appId, runId: lastRunId, verdict: lastVerdict, iterations: i - 1 });
 
-    const row = loadRow()!;
-    const graph = row.graph as WorkflowGraph;
+    const target = resolveWorkflowExecutionTarget({
+      db: deps.db,
+      revisions,
+      workspaceId: ctx.workspaceId,
+      workflowId,
+      mode: 'candidate_or_active',
+    });
+    const row = target.workflow;
+    const graph = target.graph;
 
     // 2a. Dry-run — deterministic, free. Catch lost/empty payloads pre-spend.
     const graphHash = graphContentHash(graph);
@@ -167,10 +177,37 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
       if (i < maxIterations) { mark('repair', `Dry-run blocked (${blocking[0]!.message}); repairing`); await runRepair(deps, ctx, args, workflowId, args.goal ?? '', syntheticVerdict(blocking.map((b) => b.message)), i); continue; }
       return fail(timeline, workflowId, 'failed', `Dry-run still blocked after ${i} attempt(s): ${blocking.slice(0, 3).map((b) => b.message).join(' | ')}`, { appId, iterations: i });
     }
+    revisions.recordProof({
+      workspaceId: ctx.workspaceId,
+      workflowId,
+      revisionId: target.revisionId,
+      gate: 'dry_run',
+      status: 'passed',
+      evidence: { status: report.status, issues: [], scenario: report.scenario },
+    });
+    const loop = readBuildLoop(row.settings);
+    if (loop.suite?.graphHash === graphHash && loop.suite.ok) {
+      revisions.recordProof({
+        workspaceId: ctx.workspaceId,
+        workflowId,
+        revisionId: target.revisionId,
+        gate: 'regression',
+        status: 'passed',
+        evidence: { graphHash, suite: loop.suite },
+      });
+    }
 
     // 2b. Debug-run — real execution, self-heal OFF, verdict ON.
     mark('debug_run', `Attempt ${i}: running for real and verifying against the world`);
-    const settle = await startDebugRunAndSettle(deps, ctx, workflowId, graph, args.inputs ?? {}, deadline);
+    const settle = await startDebugRunAndSettle(
+      deps,
+      ctx,
+      workflowId,
+      target.revisionId,
+      graph,
+      args.inputs ?? {},
+      deadline,
+    );
     lastRunId = settle.runId;
     lastVerdict = settle.verdict;
 
@@ -253,6 +290,7 @@ async function startDebugRunAndSettle(
   deps: ToolHandlerDeps,
   ctx: DeliverCtx,
   workflowId: string,
+  workflowRevisionId: string,
   graph: WorkflowGraph,
   inputs: Record<string, unknown>,
   deadline: number,
@@ -268,6 +306,8 @@ async function startDebugRunAndSettle(
     userId: ctx.userId,
     status: 'CREATED',
     runState: initialState,
+    graphSnapshot: graph,
+    workflowRevisionId,
     triggerId: null,
   }).run();
 
@@ -283,6 +323,7 @@ async function startDebugRunAndSettle(
       initialState,
       debugRun: true,
       graph,
+      workflowRevisionId,
     });
   } catch (err) {
     return { kind: 'settled', runId, status: 'FAILED', failedError: (err as Error).message } as SettleResult & { blocker: DeliveryBlocker };

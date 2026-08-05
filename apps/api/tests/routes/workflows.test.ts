@@ -14,6 +14,7 @@ import { buildWorkflowRoutes } from '../../src/routes/workflows.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import type { WorkflowEngine } from '../../src/engine/WorkflowEngine.js';
 import type { TriggerRuntime } from '../../src/engine/TriggerRuntime.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
 
 let ctx: TestContext;
 let engine: { startRun: ReturnType<typeof vi.fn>; cancelRun: ReturnType<typeof vi.fn> };
@@ -765,5 +766,53 @@ describe('POST /v1/workflows/:id/run', () => {
     expect(engine.startRun).toHaveBeenCalledOnce();
     const body = (await res.json()) as { runId: string };
     expect(body.runId).toBeTruthy();
+  });
+
+  it('debug-runs the exact candidate bytes and never silently falls back to active', async () => {
+    const id = seedWorkflow();
+    const noCandidate = await app().request(`/v1/workflows/${id}/run`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ mode: 'debug' }),
+    });
+    expect(noCandidate.status).toBe(404);
+    expect(engine.startRun).not.toHaveBeenCalled();
+
+    const revisions = new WorkflowRevisionService(ctx.db);
+    const active = revisions.active(ctx.workspace.id, id).revision;
+    const candidateGraph: WorkflowGraph = {
+      version: 1,
+      nodes: [{
+        id: 'candidate-start',
+        type: 'trigger',
+        title: 'Candidate Manual',
+        position: { x: 0, y: 0 },
+        config: { kind: 'trigger', triggerType: 'manual' },
+      }],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const candidate = revisions.createCandidate({
+      workspaceId: ctx.workspace.id,
+      workflowId: id,
+      graph: candidateGraph,
+      baseRevisionId: active.id,
+      source: 'user_edit',
+      actor: { type: 'user', id: ctx.user.id },
+      reason: 'Candidate execution contract test',
+    }).revision;
+
+    const response = await app().request(`/v1/workflows/${id}/run`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ mode: 'debug', revisionId: candidate.id }),
+    });
+    expect(response.status).toBe(202);
+    expect(engine.startRun).toHaveBeenCalledOnce();
+    expect(engine.startRun.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      workflowRevisionId: candidate.id,
+      graph: candidateGraph,
+      debugRun: true,
+    }));
   });
 });

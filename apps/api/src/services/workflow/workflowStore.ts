@@ -11,6 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
+import { AgentisError } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 
@@ -28,6 +29,10 @@ export class WorkflowStoreService {
 
   /** Read a single key. Returns `undefined` when missing. */
   get(workspaceId: string, workflowId: string, key: string): unknown {
+    return this.getEntry(workspaceId, workflowId, key)?.value;
+  }
+
+  getEntry(workspaceId: string, workflowId: string, key: string): WorkflowStoreEntry | undefined {
     const row = this.db
       .select()
       .from(schema.workflowKvEntries)
@@ -39,7 +44,59 @@ export class WorkflowStoreService {
         ),
       )
       .get();
-    return row?.value;
+    return row ? {
+      workflowId: row.workflowId,
+      workspaceId: row.workspaceId,
+      key: row.key,
+      value: row.value,
+      version: row.version,
+      updatedAt: row.updatedAt,
+    } : undefined;
+  }
+
+  /** Atomically validate every expected version and commit all state writes. */
+  commit(
+    workspaceId: string,
+    workflowId: string,
+    writes: Array<{ key: string; expectedVersion: number; value: unknown; mode?: 'replace' | 'set' }>,
+  ): WorkflowStoreEntry[] {
+    if (writes.length === 0) return [];
+    const duplicate = writes.find((write, index) => writes.findIndex((candidate) => candidate.key === write.key) !== index);
+    if (duplicate) throw new AgentisError('VALIDATION_FAILED', `Duplicate workflow state binding for key ${duplicate.key}`);
+    return this.db.transaction((tx) => {
+      const current = writes.map((write) => ({
+        write,
+        row: tx.select().from(schema.workflowKvEntries).where(and(
+          eq(schema.workflowKvEntries.workspaceId, workspaceId),
+          eq(schema.workflowKvEntries.workflowId, workflowId),
+          eq(schema.workflowKvEntries.key, write.key),
+        )).get(),
+      }));
+      for (const item of current) {
+        if ((item.row?.version ?? 0) !== item.write.expectedVersion) {
+          throw new AgentisError(
+            'GRAPH_REVISION_CONFLICT',
+            `Workflow state '${item.write.key}' changed concurrently (expected v${item.write.expectedVersion}, actual v${item.row?.version ?? 0}).`,
+          );
+        }
+      }
+      const now = new Date().toISOString();
+      return current.map(({ write, row }) => {
+        const value = write.mode === 'set'
+          ? mergeSetValues(row?.value, write.value)
+          : write.value;
+        const version = (row?.version ?? 0) + 1;
+        if (row) {
+          tx.update(schema.workflowKvEntries).set({ value, version, updatedAt: now })
+            .where(and(eq(schema.workflowKvEntries.id, row.id), eq(schema.workflowKvEntries.version, write.expectedVersion))).run();
+        } else {
+          tx.insert(schema.workflowKvEntries).values({
+            id: randomUUID(), workspaceId, workflowId, key: write.key, value, version, createdAt: now, updatedAt: now,
+          }).run();
+        }
+        return { workflowId, workspaceId, key: write.key, value, version, updatedAt: now };
+      });
+    });
   }
 
   /** Atomic upsert. Bumps `version` for optimistic-concurrency clients. */
@@ -140,4 +197,24 @@ export class WorkflowStoreService {
     for (const row of rows) out[row.key] = row.value;
     return out;
   }
+}
+
+function mergeSetValues(current: unknown, next: unknown): unknown[] {
+  const values = [
+    ...(Array.isArray(current) ? current : current === undefined ? [] : [current]),
+    ...(Array.isArray(next) ? next : next === undefined ? [] : [next]),
+  ];
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = stableValueKey(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function stableValueKey(value: unknown): string {
+  if (!value || typeof value !== 'object') return `${typeof value}:${String(value)}`;
+  if (Array.isArray(value)) return `[${value.map(stableValueKey).join(',')}]`;
+  return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${key}:${stableValueKey(item)}`).join(',')}}`;
 }

@@ -48,6 +48,7 @@ import { useAgentisStore } from '../store/agentisStore';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api, apiErrorMessage, apiText } from '../lib/api';
 import { rtSubscribe, useRealtime, type RealtimeEnvelope } from '../lib/realtime';
+import { useResourceRevision } from '../lib/resourceRealtime';
 import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact } from '../components/ArtifactPanel/types';
 import { AppRuntime } from '../components/apps/AppRuntime';
@@ -106,6 +107,7 @@ const INTERFACE_REVEAL_EVENTS = [
 ];
 
 export function AppEditorPage() {
+  const resourceRevision = useResourceRevision(['apps', 'workflows', 'interfaces', 'appData']);
   const { t } = useTranslation();
   const { id = '' } = useParams();
   const navigate = useNavigate();
@@ -193,7 +195,7 @@ export function AppEditorPage() {
     }
   }, [id]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, resourceRevision]);
 
   // Keep the workspace room subscription alive so live build events reach us.
   useEffect(() => rtSubscribe('workspace', {}), []);

@@ -149,6 +149,40 @@ describe('/v1/dashboard/fleet-overview', () => {
 });
 
 describe('/v1/dashboard/chrome', () => {
+  it('persists seen and dismissed notification receipts across reloads', async () => {
+    const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
+    const created = await approvals.create({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      runId: null,
+      taskId: null,
+      gatewayId: null,
+      source: 'checkpoint',
+      title: 'Review durable state',
+      summary: 'Confirm the persisted output',
+      confidence: null,
+    });
+    const notificationId = `approval-${created.id}`;
+    const mounted = appWithApprovals(approvals);
+
+    let res = await mounted.request('/v1/dashboard/notifications/seen', {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ ids: [notificationId] }),
+    });
+    expect(res.status).toBe(200);
+    res = await mounted.request('/v1/dashboard/chrome', { headers: ctx.authHeaders });
+    let body = await res.json() as { notifications: Array<{ id: string; seen?: boolean }>; unreadNotificationCount: number };
+    expect(body.notifications.find((item) => item.id === notificationId)?.seen).toBe(true);
+
+    res = await mounted.request('/v1/dashboard/notifications/dismiss', {
+      method: 'POST', headers: ctx.authHeaders, body: JSON.stringify({ ids: [notificationId] }),
+    });
+    expect(res.status).toBe(200);
+    res = await mounted.request('/v1/dashboard/chrome', { headers: ctx.authHeaders });
+    body = await res.json() as typeof body;
+    expect(body.notifications.some((item) => item.id === notificationId)).toBe(false);
+  });
+
   it('returns compact always-on shell data without the full workspace snapshot payload', async () => {
     const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
     ctx.db.insert(schema.agents).values({

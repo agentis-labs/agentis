@@ -10,11 +10,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Maximize2, Minimize2, ExternalLink, Download, RefreshCw, Share2, PanelRightClose, PanelRightOpen, Plus, Minus } from 'lucide-react';
 import clsx from 'clsx';
-import { api, apiBlob } from '../../lib/api';
-import { useAssetUrl } from '../../lib/useAssetUrl';
+import { apiBlob } from '../../lib/api';
+import { artifactFilename, useArtifactContent } from '../../lib/useArtifactContent';
 import { useToast } from '../shared/Toast';
 import { useChatPanelStore } from '../chat/ChatPanelStore';
-import { safeResourceUrl } from '../workflows/OutputViewers';
+import { ChatMarkdown } from '../chat/ChatMarkdown';
 import type { Artifact, PanelState } from './types';
 
 interface Props {
@@ -209,13 +209,24 @@ export function ArtifactPanel({ artifact, state: initial = 'docked', onClose, on
   );
 }
 
-function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
-  switch (artifact.type) {
+export function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
+  const loaded = useArtifactContent(artifact);
+  if (loaded.loading) {
+    return <div className="flex h-full items-center justify-center p-6 text-sm text-text-muted">Loading preview…</div>;
+  }
+  if (loaded.error && !loaded.text && !loaded.url) {
+    return <DownloadFallback artifact={artifact} note={`Preview unavailable. ${loaded.error}`} />;
+  }
+  const kind = artifactPreviewKind(artifact, loaded.mime, loaded.filename);
+  const text = loaded.text ?? '';
+  switch (kind) {
+    case 'markdown':
+      return <div className="mx-auto max-w-4xl p-6 text-sm text-text"><ChatMarkdown text={text} /></div>;
     case 'html':
       return (
         <iframe
           title={artifact.title}
-          srcDoc={artifact.content}
+          srcDoc={text}
           sandbox=""
           className="h-full w-full border-0"
         />
@@ -224,58 +235,56 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
     case 'pdf':
     case 'audio':
     case 'video':
-      return <MediaRenderer artifact={artifact} kind={artifact.type} />;
+      return loaded.url
+        ? <MediaRenderer src={loaded.url} artifact={artifact} kind={kind} />
+        : <DownloadFallback artifact={artifact} note="Preview unavailable for this source." />;
     case 'code':
       return (
         <pre className="m-0 h-full overflow-auto bg-canvas p-4 font-mono text-[12px] leading-relaxed text-text">
-          <code>{artifact.content}</code>
+          <code>{text}</code>
         </pre>
       );
     case 'data':
-      return <DataView content={artifact.content} />;
-    case 'spreadsheet':
-      // Inline CSV/TSV text renders as a table; binary sheets (xlsx) download.
-      if (artifact.content.startsWith('data:')) {
-        return <DownloadFallback artifact={artifact} note="Spreadsheet file — download to open." />;
-      }
-      return <DataView content={artifact.content} />;
-    case 'archive':
-      return <DownloadFallback artifact={artifact} note="Archive — download to extract its contents." />;
-    case 'document':
+    case 'csv':
+    case 'tsv':
+      return <DataView content={text} delimiter={kind === 'csv' ? ',' : kind === 'tsv' ? '\t' : undefined} />;
+    case 'binary':
+      return <DownloadFallback artifact={artifact} note="This file type does not have an in-app preview." />;
+    case 'text':
     default:
       return (
         <div className="prose prose-invert max-w-none p-6 text-sm text-text">
           <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
-            {artifact.content}
+            {text}
           </pre>
         </div>
       );
   }
 }
 
-const DATA_URL_PREFIX: Record<'image' | 'pdf' | 'audio' | 'video', string[]> = {
-  image: ['data:image/'],
-  pdf: ['data:application/pdf'],
-  audio: ['data:audio/'],
-  video: ['data:video/'],
-};
+type PreviewKind = 'markdown' | 'html' | 'image' | 'pdf' | 'audio' | 'video' | 'code' | 'data' | 'csv' | 'tsv' | 'text' | 'binary';
+
+export function artifactPreviewKind(artifact: Artifact, mime: string, filename: string): PreviewKind {
+  const lower = filename.toLowerCase();
+  if (/\.(?:md|markdown|mdx)$/.test(lower) || /markdown/.test(mime)) return 'markdown';
+  if (/html/.test(mime) || /\.html?$/.test(lower) || artifact.type === 'html') return 'html';
+  if (mime.startsWith('image/') || artifact.type === 'image') return 'image';
+  if (mime === 'application/pdf' || artifact.type === 'pdf') return 'pdf';
+  if (mime.startsWith('audio/') || artifact.type === 'audio') return 'audio';
+  if (mime.startsWith('video/') || artifact.type === 'video') return 'video';
+  if (/csv/.test(mime) || /\.csv$/.test(lower)) return 'csv';
+  if (/tab-separated/.test(mime) || /\.tsv$/.test(lower)) return 'tsv';
+  if (/json/.test(mime) || /\.(?:json|jsonl)$/.test(lower) || artifact.type === 'data') return 'data';
+  if (artifact.type === 'code' || /\.(?:css|js|jsx|ts|tsx|xml|ya?ml|toml|sql|sh|py|rb|go|rs|java|c|cpp|h)$/.test(lower)) return 'code';
+  if (artifact.type === 'archive' || artifact.type === 'spreadsheet' || /\.(?:xlsx?|ods|zip|tar|gz|7z|rar)$/.test(lower)) return 'binary';
+  return 'text';
+}
 
 /**
  * Render binary media from either an inline `data:` URL (legacy) or a
  * content-addressed `asset://` reference (fetched as an authed object URL).
  */
-function MediaRenderer({ artifact, kind }: { artifact: Artifact; kind: 'image' | 'pdf' | 'audio' | 'video' }) {
-  const isData = (artifact.content ?? '').startsWith('data:');
-  // Fetch only for non-inline (asset://) content; inline data: is used directly.
-  const { url, loading, error } = useAssetUrl(isData ? null : artifact);
-  const src = isData ? safeResourceUrl(artifact.content, DATA_URL_PREFIX[kind]) : url;
-
-  if (!isData && loading) {
-    return <div className="flex h-full items-center justify-center p-6 text-sm text-text-muted">Loading…</div>;
-  }
-  if (!src || (!isData && error)) {
-    return <DownloadFallback artifact={artifact} note="Preview unavailable for this source." />;
-  }
+function MediaRenderer({ artifact, kind, src }: { artifact: Artifact; kind: 'image' | 'pdf' | 'audio' | 'video'; src: string }) {
   switch (kind) {
     case 'image':
       return <ZoomableImage src={src} alt={artifact.title} />;
@@ -428,7 +437,20 @@ function ZoomButton({ label, onClick, children }: { label: string; onClick: () =
   );
 }
 
-function DataView({ content }: { content: string }) {
+function DataView({ content, delimiter }: { content: string; delimiter?: ',' | '\t' }) {
+  if (delimiter) {
+    const rows = parseDelimited(content, delimiter);
+    if (rows.length === 0) return <pre className="m-0 h-full overflow-auto bg-canvas p-4 font-mono text-[12px] text-text">{content}</pre>;
+    const [headers, ...body] = rows;
+    return (
+      <div className="overflow-auto p-4">
+        <table className="w-full border-collapse text-[12px]">
+          <thead><tr className="border-b border-line">{headers!.map((header, index) => <th key={`${header}-${index}`} className="px-2 py-1.5 text-left font-medium text-text">{header}</th>)}</tr></thead>
+          <tbody>{body.map((row, rowIndex) => <tr key={rowIndex} className="border-b border-line/40">{headers!.map((_, columnIndex) => <td key={columnIndex} className="px-2 py-1.5 text-text-muted">{row[columnIndex] ?? ''}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -471,6 +493,30 @@ function DataView({ content }: { content: string }) {
       {JSON.stringify(parsed, null, 2)}
     </pre>
   );
+}
+
+function parseDelimited(content: string, delimiter: ',' | '\t'): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index]!;
+    if (char === '"') {
+      if (quoted && content[index + 1] === '"') { cell += '"'; index += 1; }
+      else quoted = !quoted;
+    } else if (char === delimiter && !quoted) {
+      row.push(cell); cell = '';
+    } else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && content[index + 1] === '\n') index += 1;
+      row.push(cell); cell = '';
+      if (row.some((value) => value.length > 0)) rows.push(row);
+      row = [];
+    } else cell += char;
+  }
+  row.push(cell);
+  if (row.some((value) => value.length > 0)) rows.push(row);
+  return rows;
 }
 
 function formatCell(v: unknown): string {
@@ -532,7 +578,9 @@ function artifactToFile(artifact: Artifact): File | null {
 }
 
 function downloadName(artifact: Artifact, mime?: string): string {
-  return `${(artifact.title || artifact.id).replace(/[\\/:*?"<>|]+/g, '_')}.${extFor(artifact, mime)}`;
+  const original = artifactFilename(artifact).replace(/[\\/:*?"<>|]+/g, '_');
+  const extension = extFor(artifact, mime);
+  return original.toLowerCase().endsWith(`.${extension.toLowerCase()}`) ? original : `${original}.${extension}`;
 }
 
 /** Download an artifact as a real file (data URLs are decoded to a Blob first). */

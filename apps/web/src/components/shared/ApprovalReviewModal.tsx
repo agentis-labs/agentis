@@ -234,6 +234,7 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
   const selfHeal = approval.source === 'self_heal';
   const sourceLabel = approval.source?.replace(/_/g, ' ') ?? 'approval';
   const title = approval.title ?? approval.workflowName ?? 'Approval needed';
+  const actionable = !approval.status || approval.status === 'pending';
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-overlay p-4 backdrop-blur-[3px]" role="dialog" aria-modal="true">
       <div
@@ -279,6 +280,12 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
 
         {/* Body — what exactly will happen */}
         <main className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
+          {!actionable && (
+            <section className="rounded-xl border border-warn/30 bg-warn-soft px-4 py-3">
+              <div className="text-[12px] font-semibold text-warn">This approval is no longer actionable</div>
+              <p className="mt-1 text-[12px] text-text-secondary">Its status is {approval.status}. The record remains available for history, but no decision can be submitted.</p>
+            </section>
+          )}
           {approval.summary ? (
             <section className="rounded-xl border border-line bg-surface p-4">
               <div className="s-label mb-1.5">The agent asks</div>
@@ -286,7 +293,7 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
             </section>
           ) : null}
 
-          {humanInputForm ? (
+          {humanInputForm && actionable ? (
             <Section icon={<ShieldCheck size={13} />} title="Your input">
               <HumanInputApprovalForm spec={humanInputForm} busy={busy} onResolve={(decision, data) => void resolve(decision, { data })} />
             </Section>
@@ -327,7 +334,7 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
         </main>
 
         {/* Footer — the decision bar */}
-        {!humanInputForm && (
+        {!humanInputForm && actionable && (
           <footer className="border-t border-line bg-surface px-6 py-4">
             {instructOpen ? (
               /* Third option — send a new instruction back to the waiting agent

@@ -1,4 +1,4 @@
-import { REALTIME_EVENTS, REALTIME_ROOMS, type AppAgentActivity, type ChatDelta } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS, REALTIME_ROOMS, type AppAgentActivity, type ChatDelta } from '@agentis/core';
 import type { EventBus } from '../../event-bus.js';
 
 type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
@@ -129,6 +129,7 @@ export function publishActivityProgress(bus: EventBus, ctx: AgentWorkContext, ac
 export function publishToolCallProgress(bus: EventBus, ctx: AgentWorkContext, delta: ChatToolCall): void {
   const at = new Date().toISOString();
   const correlationId = workCorrelationId(ctx);
+  const invocation = normalizeToolInvocation(delta.name, delta.args);
   bus.publish(REALTIME_ROOMS.workspace(ctx.workspaceId), REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL, {
     workspaceId: ctx.workspaceId,
     ambientId: ctx.ambientId ?? undefined,
@@ -140,15 +141,16 @@ export function publishToolCallProgress(bus: EventBus, ctx: AgentWorkContext, de
     workflowId: ctx.workflowId,
     runId: ctx.runId,
     nodeId: ctx.nodeId,
-    tool: delta.name,
-    args: delta.args,
+    tool: invocation.tool,
+    gatewayTool: invocation.gatewayTool,
+    args: invocation.input,
     at,
   }, correlationId);
   publishAgentWorkStep(bus, {
     ...ctx,
     phase: 'tool',
-    step: delta.name,
-    description: `Calling ${delta.name}`,
+    step: invocation.tool,
+    description: `Calling ${invocation.tool}`,
     at,
   });
 }

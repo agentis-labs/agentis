@@ -40,6 +40,7 @@ import type { WorkflowExperienceService } from '../services/workflow/workflowExp
 import { readWorkflowTests, type WorkflowTestCase } from '../services/workflow/workflowTestGenerator.js';
 import { readWorkflowSpec } from '../services/workflow/workflowSpec.js';
 import { evalCondition } from '../engine/SafeConditionParser.js';
+import { resolveWorkflowExecutionTarget } from '../services/workflow/workflowExecutionTarget.js';
 
 export function buildWorkflowRoutes(deps: {
   db: AgentisSqliteDb;
@@ -402,8 +403,8 @@ export function buildWorkflowRoutes(deps: {
     };
     const operator = deps.db.select({ isAdmin: schema.users.isAdmin })
       .from(schema.users).where(eq(schema.users.id, ws.user.id)).get();
-    if (body.overrideReason?.trim() && !operator?.isAdmin) {
-      throw new AgentisError('AUTH_FORBIDDEN', 'Break-glass activation requires an administrator.');
+    if ((body.overrideReason?.trim() || body.operatorApproval === true) && !operator?.isAdmin) {
+      throw new AgentisError('AUTH_FORBIDDEN', 'Workflow revision activation requires an administrator.');
     }
     const workflow = revisions.active(ws.workspaceId, workflowId).workflow;
     if (!workflow.activeRevisionId) throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'Workflow has no active base revision');
@@ -772,25 +773,16 @@ export function buildWorkflowRoutes(deps: {
     const ws = getWorkspace(c);
     const id = c.req.param('id');
     const body = schemas.runWorkflowSchema.parse(await c.req.json().catch(() => ({})));
-    const active = revisions.active(ws.workspaceId, id);
-    const selected = body.mode === 'debug'
-      ? body.revisionId
-        ? revisions.revision(ws.workspaceId, id, body.revisionId)
-        : revisions.candidate(ws.workspaceId, id)?.revision
-      : active.revision;
-    if (!selected) {
-      throw new AgentisError(
-        'WORKFLOW_GRAPH_INVALID',
-        body.mode === 'debug' ? 'No candidate revision is available to verify.' : 'No active workflow revision is available.',
-      );
-    }
-    if (body.mode === 'active' && body.revisionId && body.revisionId !== active.revision.id) {
-      throw new AgentisError(
-        'AUTH_FORBIDDEN',
-        'Production runs always execute the active revision. Use mode "debug" to test a candidate.',
-      );
-    }
-    const rawGraph = selected.graphJson as WorkflowGraph;
+    const target = resolveWorkflowExecutionTarget({
+      db: deps.db,
+      revisions,
+      workspaceId: ws.workspaceId,
+      workflowId: id,
+      mode: body.mode === 'debug' ? 'candidate' : 'active',
+      revisionId: body.revisionId,
+    });
+    const selected = target.revision;
+    const rawGraph = target.graph;
     const normalized = normalizeWorkflowGraph(deps.db, ws.workspaceId, rawGraph);
     if (normalized.repairs.length > 0) {
       const existingCandidate = revisions.candidate(ws.workspaceId, id);

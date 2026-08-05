@@ -31,6 +31,7 @@ import { rtSubscribe, useRealtime } from '../lib/realtime';
 import { appsApi, type AppUpdatePayload } from '../lib/appsApi';
 import { APP_TEMPLATES } from '../lib/appTemplates';
 import { api, apiCached, peekCached, apiErrorMessage } from '../lib/api';
+import { useResourceRevision } from '../lib/resourceRealtime';
 import { AppEngineModal, type AppEngineAgent, type AppEngineDomain } from '../components/apps/AppEngineModal';
 import { ExtensionsModal } from '../components/extensions/ExtensionsModal';
 import { DomainToolbar, nestedDomainOptions, type DomainToolbarSelection } from '../components/shared/DomainToolbar';
@@ -66,6 +67,7 @@ type AppIndexItem =
   | { kind: 'logic'; id: string; name: string; status: string; domainId: string | null };
 
 export function AppsPage() {
+  const resourceRevision = useResourceRevision(['apps', 'workflows', 'agents', 'spaces']);
   const navigate = useNavigate();
   const [apps, setApps] = useState<AppRecord[]>(() => peekCached<{ data: AppRecord[] }>('/v1/apps')?.data ?? []);
   const [workflows, setWorkflows] = useState<WorkflowRow[]>(() => peekCached<{ workflows: WorkflowRow[] }>('/v1/workflows')?.workflows ?? []);
@@ -129,7 +131,7 @@ export function AppsPage() {
     }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [resourceRevision]);
 
   // Live-refresh the apps + workflows grid when an AGENT (or anyone) creates,
   // deletes, or restructures an App/workflow — otherwise a deleted app lingers

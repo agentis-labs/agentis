@@ -22,6 +22,7 @@ import { REALTIME_EVENTS } from '@agentis/core';
 import { api, apiCached, peekCached } from '../lib/api';
 import { useAssetUrl } from '../lib/useAssetUrl';
 import { useRealtime } from '../lib/realtime';
+import { useResourceRevision } from '../lib/resourceRealtime';
 import { ArtifactPanel } from '../components/ArtifactPanel/ArtifactPanel';
 import type { Artifact, ArtifactOrigin, ArtifactType } from '../components/ArtifactPanel/types';
 
@@ -77,6 +78,7 @@ function normOrigin(a: Artifact): ArtifactOrigin {
 }
 
 export function ArtifactsPage() {
+  const artifactRevision = useResourceRevision('artifacts');
   const [searchParams, setSearchParams] = useSearchParams();
   const ARTIFACTS_PATH = '/v1/artifacts?limit=200';
   const [artifacts, setArtifacts] = useState<Artifact[]>(() => peekCached<{ artifacts: Artifact[] }>(ARTIFACTS_PATH)?.artifacts ?? []);
@@ -98,7 +100,9 @@ export function ArtifactsPage() {
 
   useEffect(() => {
     void refresh();
-  }, []);
+    // refresh is intentionally page-local; revision is the authoritative signal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifactRevision]);
 
   // Resolve producer ids → names so every asset can be labelled with the specific
   // agent/app that generated it (not just the origin type).

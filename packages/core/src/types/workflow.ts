@@ -1330,6 +1330,15 @@ export interface ComponentTaskNodeConfig {
   version?: string;
   inputMapping: Record<string, string>;
   outputMapping: Record<string, string>;
+  /** Durable workflow-scoped state loaded before execution and committed only after success. */
+  stateBindings?: Record<string, {
+    key: string;
+    mode: 'read' | 'read_write' | 'set';
+    /** Dot path in the component output used for write-back. Defaults to the binding name. */
+    writeFrom?: string;
+  }>;
+  /** Dot path in the component input used as the stable execution identity. */
+  idempotencyKeyPath?: string;
   timeoutMs?: number;
 }
 

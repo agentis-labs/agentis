@@ -37,7 +37,7 @@ export interface ApprovalCreateArgs {
   taskId: string | null;
   targetId?: string | null;
   gatewayId: string | null;
-  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit' | 'outbound';
+  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit' | 'outbound' | 'workflow_revision';
   title: string;
   summary: string;
   confidence: number | null;
@@ -75,9 +75,17 @@ export type OutboundApprovalHandler = (args: {
   payload: Record<string, unknown>;
 }) => Promise<void>;
 
+export type WorkflowRevisionApprovalHandler = (args: {
+  approvalId: string;
+  decision: 'approve' | 'reject';
+  payload: Record<string, unknown>;
+  resolvedByUserId: string | null;
+}) => Promise<void>;
+
 export class ApprovalInboxService {
   #onCheckpointResolved: CheckpointResumeHandler | null = null;
   #onOutboundResolved: OutboundApprovalHandler | null = null;
+  #onWorkflowRevisionResolved: WorkflowRevisionApprovalHandler | null = null;
 
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -91,6 +99,10 @@ export class ApprovalInboxService {
   /** Bind the deliver-on-approve hook for App outbound approvals (G7). */
   bindOutboundHandler(handler: OutboundApprovalHandler): void {
     this.#onOutboundResolved = handler;
+  }
+
+  bindWorkflowRevisionHandler(handler: WorkflowRevisionApprovalHandler): void {
+    this.#onWorkflowRevisionResolved = handler;
   }
 
   async create(args: ApprovalCreateArgs) {
@@ -126,6 +138,7 @@ export class ApprovalInboxService {
   }
 
   list(workspaceId: string, status: 'pending' | 'all' = 'pending'): PresentedApproval[] {
+    this.#expireTerminalRunApprovals(workspaceId);
     const rows = this.db
       .select()
       .from(schema.approvalRequests)
@@ -134,35 +147,48 @@ export class ApprovalInboxService {
     
     const filteredRows = status === 'all' ? rows : rows.filter((r) => r.status === 'pending');
     
-    if (filteredRows.length > 0) {
-      const runIds = [...new Set(filteredRows.map(r => r.runId).filter(Boolean))] as string[];
-      if (runIds.length > 0) {
-        const runs = this.db
-          .select({ id: schema.workflowRuns.id, status: schema.workflowRuns.status })
-          .from(schema.workflowRuns)
-          .where(inArray(schema.workflowRuns.id, runIds))
-          .all();
-        
-        const activeStatuses = new Set(['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']);
-        const knownRunIds = new Set(runs.map(r => r.id));
-        const activeRunIds = new Set(runs.filter(r => activeStatuses.has(r.status)).map(r => r.id));
-        
-        return filteredRows
-          .filter(r => !r.runId || !knownRunIds.has(r.runId) || activeRunIds.has(r.runId))
-          .map((row) => this.#present(row));
-      }
-    }
-    
     return filteredRows.map((row) => this.#present(row));
   }
 
   get(workspaceId: string, approvalId: string): PresentedApproval | null {
+    this.#expireTerminalRunApprovals(workspaceId);
     const row = this.db
       .select()
       .from(schema.approvalRequests)
       .where(and(eq(schema.approvalRequests.id, approvalId), eq(schema.approvalRequests.workspaceId, workspaceId)))
       .get();
     return row ? this.#present(row) : null;
+  }
+
+  countActionable(workspaceId: string): number {
+    return this.list(workspaceId, 'pending').length;
+  }
+
+  #expireTerminalRunApprovals(workspaceId: string): void {
+    const pending = this.db.select().from(schema.approvalRequests).where(and(
+      eq(schema.approvalRequests.workspaceId, workspaceId),
+      eq(schema.approvalRequests.status, 'pending'),
+    )).all();
+    const runIds = [...new Set(pending.map((row) => row.runId).filter((id): id is string => Boolean(id)))];
+    if (runIds.length === 0) return;
+    const runs = this.db.select({ id: schema.workflowRuns.id, status: schema.workflowRuns.status })
+      .from(schema.workflowRuns).where(inArray(schema.workflowRuns.id, runIds)).all();
+    const statusByRun = new Map(runs.map((run) => [run.id, run.status]));
+    const expiredAt = new Date().toISOString();
+    for (const approval of pending) {
+      const runStatus = approval.runId ? statusByRun.get(approval.runId) : undefined;
+      if (isActionableApproval(approval, runStatus)) continue;
+      this.db.update(schema.approvalRequests).set({
+        status: 'expired',
+        resolvedAt: expiredAt,
+        resolutionReason: `Run ended with status ${runStatus}.`,
+      }).where(eq(schema.approvalRequests.id, approval.id)).run();
+      this.bus.publish(REALTIME_ROOMS.workspace(workspaceId), REALTIME_EVENTS.APPROVAL_RESOLVED, {
+        id: approval.id,
+        status: 'expired',
+        resolvedAt: expiredAt,
+      });
+    }
   }
 
   async resolve(args: {
@@ -174,6 +200,7 @@ export class ApprovalInboxService {
     data?: Record<string, unknown>;
     /** Operator instruction for a `revise` decision (see CheckpointResumeHandler). */
     feedback?: string;
+    resolvedByUserId?: string | null;
   }) {
     const row = this.db
       .select()
@@ -188,6 +215,26 @@ export class ApprovalInboxService {
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', 'Approval not found');
     if (row.status !== 'pending') {
       throw new AgentisError('RESOURCE_CONFLICT', `Approval already ${row.status}`);
+    }
+    if (row.source === 'workflow_revision' && args.decision === 'approve') {
+      const operator = args.resolvedByUserId
+        ? this.db.select({ isAdmin: schema.users.isAdmin }).from(schema.users)
+            .where(eq(schema.users.id, args.resolvedByUserId)).get()
+        : null;
+      if (!operator?.isAdmin) {
+        throw new AgentisError('AUTH_FORBIDDEN', 'Workflow revision activation requires an administrator.');
+      }
+    }
+    const workflowRevisionHandled = row.source === 'workflow_revision'
+      && Boolean(this.#onWorkflowRevisionResolved)
+      && args.decision !== 'revise';
+    if (workflowRevisionHandled) {
+      await this.#onWorkflowRevisionResolved!({
+        approvalId: row.id,
+        decision: args.decision as 'approve' | 'reject',
+        payload: (row.payload ?? {}) as Record<string, unknown>,
+        resolvedByUserId: args.resolvedByUserId ?? null,
+      });
     }
     // `revise` is a non-destructive third decision: the operator sends a new
     // instruction back to the waiting agent instead of approving or cancelling
@@ -326,6 +373,18 @@ export class ApprovalInboxService {
       nodeType: node ? String((node as Record<string, unknown>).type ?? ((node as Record<string, unknown>).config as { kind?: unknown } | undefined)?.kind ?? '') || null : null,
     };
   }
+}
+
+const ACTIVE_APPROVAL_RUN_STATUSES = new Set(['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']);
+
+/** One predicate used by inboxes, badges, Home, and notification derivation. */
+export function isActionableApproval(
+  approval: Pick<ApprovalRow, 'status' | 'runId'>,
+  runStatus?: string,
+): boolean {
+  if (approval.status !== 'pending') return false;
+  if (!approval.runId || runStatus === undefined) return true;
+  return ACTIVE_APPROVAL_RUN_STATUSES.has(runStatus);
 }
 
 function isRunResumingApproval(source: string): boolean {

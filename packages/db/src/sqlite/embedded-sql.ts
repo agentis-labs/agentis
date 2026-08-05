@@ -491,6 +491,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conve
 CREATE TABLE IF NOT EXISTS plans (
   id                TEXT PRIMARY KEY,
   workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  owner_agent_id    TEXT REFERENCES agents(id) ON DELETE SET NULL,
   conversation_id   TEXT REFERENCES conversations(id) ON DELETE CASCADE,
   message_id        TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
   run_ids           TEXT NOT NULL DEFAULT '[]',
@@ -508,6 +509,7 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 CREATE INDEX IF NOT EXISTS plans_conversation ON plans(workspace_id, conversation_id, updated_at);
 CREATE INDEX IF NOT EXISTS plans_session ON plans(workspace_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_plans_owner_agent ON plans(workspace_id, owner_agent_id, updated_at);
 
 CREATE TABLE IF NOT EXISTS plan_versions (
   id            TEXT PRIMARY KEY,
@@ -519,6 +521,20 @@ CREATE TABLE IF NOT EXISTS plan_versions (
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(plan_id, version)
 );
+
+CREATE TABLE IF NOT EXISTS notification_receipts (
+  id               TEXT PRIMARY KEY,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  notification_id  TEXT NOT NULL,
+  seen_at           TEXT,
+  dismissed_at      TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(workspace_id, user_id, notification_id)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_receipts_user
+  ON notification_receipts(workspace_id, user_id, updated_at);
 
 CREATE TABLE IF NOT EXISTS rooms (
   id                TEXT PRIMARY KEY,

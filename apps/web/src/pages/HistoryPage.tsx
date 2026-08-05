@@ -13,6 +13,7 @@ import {
 import { REALTIME_EVENTS } from '@agentis/core';
 import { api, apiCached, peekCached, apiErrorMessage, workspace as wsStore } from '../lib/api';
 import { useRealtime, rtSubscribe } from '../lib/realtime';
+import { useResourceRevision } from '../lib/resourceRealtime';
 import { useToast } from '../components/shared/Toast';
 import { Tabs } from '../components/shared/Tabs';
 import { Button } from '../components/shared/Button';
@@ -66,6 +67,7 @@ function dateBucket(iso: string): string {
 }
 
 export function HistoryPage() {
+  const historyRevision = useResourceRevision(['history', 'runs']);
   const nav = useNavigate();
   const toast = useToast();
   const [searchParams] = useSearchParams();
@@ -112,7 +114,7 @@ export function HistoryPage() {
     void refresh();
     return () => unsubscribe?.();
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
-  }, [tab]);
+  }, [tab, historyRevision]);
 
   useEffect(() => {
     const runId = searchParams.get('runId');

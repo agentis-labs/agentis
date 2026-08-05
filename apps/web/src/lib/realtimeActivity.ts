@@ -1,5 +1,6 @@
 ﻿// §PERF-BOOT — subpath import; see lib/realtime.ts.
 import { REALTIME_EVENTS } from '@agentis/core/events';
+import { normalizeToolInvocation } from '@agentis/core';
 import type { RealtimeEnvelope } from './realtime';
 
 export type RealtimeActivityKind =
@@ -93,7 +94,9 @@ export function describeRealtimeActivity(
   const conversationId = stringField(payload, ['conversationId']);
   const clientTurnId = stringField(payload, ['clientTurnId']);
   const phase = stringField(payload, ['phase', 'status']);
-  const tool = stringField(payload, ['tool', 'toolName', 'name', 'command']);
+  const rawTool = stringField(payload, ['tool', 'toolName', 'name', 'command']);
+  const invocation = normalizeToolInvocation(rawTool, payload.args ?? payload.input);
+  const tool = invocation.tool === 'tool' && !rawTool ? undefined : invocation.tool;
   const approvalId = stringField(payload, ['approvalId', 'id']);
   const at = stringField(payload, ['at', 'timestamp']) ?? env.emittedAt;
   const baseId = [

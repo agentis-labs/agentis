@@ -20,7 +20,7 @@
  * (DEBT in DECISIONS.md).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, inArray, isNull, lte, or } from 'drizzle-orm';
 import {
   CONSTANTS,
@@ -1443,7 +1443,7 @@ export class WorkflowEngine {
           output = await this.#executeExtensionTask(ctx, node, resolvedConfig as ExtensionTaskNodeConfig, args.inputs);
           break;
         case 'component_task':
-          output = await this.#executeExtensionTask(ctx, node, componentAsExtension(resolvedConfig as ComponentTaskNodeConfig), args.inputs);
+          output = await this.#executeComponentTask(ctx, node, resolvedConfig as ComponentTaskNodeConfig, args.inputs);
           break;
         case 'knowledge':
           output = await this.#executeKnowledgeNode(ctx, resolvedConfig as KnowledgeNodeConfig, args.inputs);
@@ -2687,7 +2687,7 @@ export class WorkflowEngine {
         return;
       }
       case 'component_task': {
-        const result = await this.#executeExtensionTask(ctx, node, componentAsExtension(resolvedConfig as ComponentTaskNodeConfig), item.inputData);
+        const result = await this.#executeComponentTask(ctx, node, resolvedConfig as ComponentTaskNodeConfig, item.inputData);
         await this.#completeNode(ctx, node.id, result);
         return;
       }
@@ -2979,8 +2979,9 @@ export class WorkflowEngine {
     node: WorkflowNode,
     config: ExtensionTaskNodeConfig,
     inputData: Record<string, unknown>,
+    extraInput: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
-    const extensionInput = mapInputs(config.inputMapping, inputData, ctx.scratchpad?.snapshot ?? {});
+    const extensionInput = { ...mapInputs(config.inputMapping, inputData, ctx.scratchpad?.snapshot ?? {}), ...extraInput };
     // Extensions can run long (node worker / docker sandbox) — register the
     // in-flight execution and persist so observers see it (same staleness
     // class as agent_task); removed in the finally below.
@@ -3029,6 +3030,59 @@ export class WorkflowEngine {
     }
 
     return result.output;
+  }
+
+  async #executeComponentTask(
+    ctx: RunningContext,
+    node: WorkflowNode,
+    config: ComponentTaskNodeConfig,
+    inputData: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const bindings = Object.entries(config.stateBindings ?? {});
+    if (bindings.length > 0 && !this.deps.workflowStore) {
+      throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'component_task stateBindings require the workflow state service');
+    }
+    const loaded = bindings.map(([name, binding]) => ({
+      name,
+      binding,
+      entry: this.deps.workflowStore?.getEntry(ctx.workspaceId, ctx.workflowId, binding.key),
+    }));
+    const state = Object.fromEntries(loaded.map(({ name, entry }) => [name, entry?.value]));
+
+    let receiptKey: string | undefined;
+    if (config.idempotencyKeyPath && this.deps.workflowStore) {
+      const identity = readDotPath(inputData, config.idempotencyKeyPath);
+      if (identity !== undefined && identity !== null && String(identity).trim()) {
+        const digest = createHash('sha256').update(stableComponentIdentity(identity)).digest('hex');
+        receiptKey = `component.receipt.${node.id}.${digest}`;
+        const receipt = this.deps.workflowStore.get(ctx.workspaceId, ctx.workflowId, receiptKey);
+        if (receipt && typeof receipt === 'object' && !Array.isArray(receipt)) return receipt as Record<string, unknown>;
+      }
+    }
+
+    const output = await this.#executeExtensionTask(
+      ctx,
+      node,
+      componentAsExtension(config),
+      inputData,
+      bindings.length > 0 ? { state } : {},
+    );
+    if (this.deps.workflowStore) {
+      const writes = loaded.flatMap(({ name, binding, entry }) => {
+        if (binding.mode === 'read') return [];
+        const value = readDotPath(output, binding.writeFrom ?? name);
+        if (value === undefined) return [];
+        return [{
+          key: binding.key,
+          expectedVersion: entry?.version ?? 0,
+          value,
+          mode: binding.mode === 'set' ? 'set' as const : 'replace' as const,
+        }];
+      });
+      if (receiptKey) writes.push({ key: receiptKey, expectedVersion: 0, value: output, mode: 'replace' });
+      this.deps.workflowStore.commit(ctx.workspaceId, ctx.workflowId, writes);
+    }
+    return output;
   }
 
   async #executeKnowledgeNode(
@@ -10583,6 +10637,15 @@ function componentAsExtension(config: ComponentTaskNodeConfig): ExtensionTaskNod
     outputMapping: config.outputMapping,
     timeoutMs: config.timeoutMs,
   };
+}
+
+function stableComponentIdentity(value: unknown): string {
+  if (!value || typeof value !== 'object') return `${typeof value}:${String(value)}`;
+  if (Array.isArray(value)) return `[${value.map(stableComponentIdentity).join(',')}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => `${key}:${stableComponentIdentity(item)}`)
+    .join(',')}}`;
 }
 
 

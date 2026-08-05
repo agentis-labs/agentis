@@ -43,6 +43,7 @@ import {
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
+import { toolActivityLabel } from './runtimeProgress.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 15_000;
 const DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS = 30_000;
@@ -835,12 +836,13 @@ function codexItemActivity(
   const id = `codex-${String(item.id ?? randomUUID())}`;
   const inv = objectOf(item.invocation) ?? objectOf(item.tool_call);
   const name = firstString(inv?.tool, inv?.name, item.name, item.tool) ?? humanizeCodexItemType(itemType);
+  const input = inv?.arguments ?? inv?.input ?? item.arguments ?? item.input;
   const failed = item.status === 'failed' || Boolean(item.error);
   const verb = started ? 'Using' : 'Used';
   return {
     type: 'activity', id, phase: 'tool',
     status: started ? 'running' : failed ? 'error' : 'success',
-    label: `${verb} ${name}`,
+    label: toolActivityLabel(failed ? 'Failed' : verb, name, input),
     ...(started ? { startedAt: new Date().toISOString() } : { completedAt: new Date().toISOString() }),
   };
 }

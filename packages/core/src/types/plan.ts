@@ -128,6 +128,8 @@ export interface PlanPatch {
 
 export interface ChatPlan {
   id: string;
+  /** Agent that owns and is expected to continue this durable plan. */
+  ownerAgentId?: string | null;
   conversationId?: string | null;
   messageId?: string;
   runIds?: string[];

@@ -28,6 +28,7 @@ let ctx: TestContext;
 let engine: WorkflowEngine;
 let workflowStore: WorkflowStoreService;
 let approvals: ApprovalInboxService;
+let componentExecutions: number;
 
 const acmeConnector: ConnectorModule = {
   service: 'acme_crm',
@@ -49,7 +50,23 @@ beforeEach(async () => {
   const activity = new ActivityFeedService(ctx.db, ctx.bus);
   approvals = new ApprovalInboxService(ctx.db, ctx.bus);
   const adapters = new AdapterManager(ctx.logger);
-  const skills = {} as unknown as ExtensionRuntime;
+  componentExecutions = 0;
+  const extensions = {
+    execute: async (args: { input: Record<string, unknown>; operationName: string }) => {
+      componentExecutions += 1;
+      const state = (args.input.state ?? {}) as { seen?: unknown[]; cursor?: number };
+      return {
+        ok: true as const,
+        operationName: args.operationName,
+        output: {
+          seen: [...(state.seen ?? []), args.input.leadId],
+          cursor: (state.cursor ?? 0) + 1,
+          leadId: args.input.leadId,
+        },
+        durationMs: 1,
+      };
+    },
+  } as unknown as ExtensionRuntime;
   workflowStore = new WorkflowStoreService(ctx.db);
   engine = new WorkflowEngine({
     db: ctx.db,
@@ -59,7 +76,7 @@ beforeEach(async () => {
     scratchpad,
     activity,
     approvals,
-    skills,
+    extensions,
     adapters,
     workflowStore,
     connectors: new ConnectorRegistry([acmeConnector]),
@@ -650,6 +667,39 @@ describe('WorkflowEngine — interrupted run recovery', () => {
     expect(row.status).toBe('FAILED');
     expect(row.completedAt).toBeTruthy();
     expect((row.runState as { nodeStates: Record<string, { status: string }> }).nodeStates.Y?.status).toBe('SKIPPED');
+  });
+});
+
+describe('WorkflowEngine — deterministic component state', () => {
+  it('commits bound state across runs and reuses idempotent receipts', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'C', type: 'component_task', title: 'Persist lead search progress', position: { x: 220, y: 0 },
+          config: {
+            kind: 'component_task', componentSlug: 'lead-search', operationName: 'search', version: '2.0.0',
+            inputMapping: { leadId: 'leadId' }, outputMapping: {}, idempotencyKeyPath: 'leadId',
+            stateBindings: {
+              seen: { key: 'lead-search.seen', mode: 'set', writeFrom: 'seen' },
+              cursor: { key: 'lead-search.cursor', mode: 'read_write', writeFrom: 'cursor' },
+            },
+          },
+        },
+      ],
+      edges: [{ id: 'e', source: 'T', target: 'C' }],
+    };
+    const wfId = seedWorkflow(graph);
+
+    await startAndWait(wfId, graph, { leadId: 'lead-a' });
+    await startAndWait(wfId, graph, { leadId: 'lead-a' });
+    await startAndWait(wfId, graph, { leadId: 'lead-b' });
+
+    expect(componentExecutions).toBe(2);
+    expect(workflowStore.get(ctx.workspace.id, wfId, 'lead-search.seen')).toEqual(['lead-a', 'lead-b']);
+    expect(workflowStore.get(ctx.workspace.id, wfId, 'lead-search.cursor')).toBe(2);
   });
 });
 

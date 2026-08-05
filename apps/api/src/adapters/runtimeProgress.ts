@@ -1,4 +1,4 @@
-import type { ChatDelta } from '@agentis/core';
+import { normalizeToolInvocation, type ChatDelta } from '@agentis/core';
 
 type RuntimeActivity = Extract<ChatDelta, { type: 'activity' }>;
 
@@ -58,8 +58,9 @@ function reasoningLabel(text: string | undefined, runtimeName: string): string {
  * "Used build_workflow". Secrets are scrubbed; the input is clipped to one line.
  */
 export function toolActivityLabel(verb: 'Using' | 'Used' | 'Failed', name: unknown, input?: unknown): string {
-  const tool = prettyToolName(name);
-  const detail = compactToolInput(input);
+  const invocation = normalizeToolInvocation(name, input);
+  const tool = prettyToolName(invocation.tool);
+  const detail = compactToolInput(invocation.input);
   return detail ? `${verb} ${tool}: ${detail}` : `${verb} ${tool}`;
 }
 
@@ -82,7 +83,10 @@ function compactToolInput(input: unknown): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(obj)) {
     if (value == null || typeof value === 'object') continue;
-    parts.push(`${key}=${clipRuntimeLabel(scrubSecrets(String(value)), 40)}`);
+    const safeValue = /(?:key|token|secret|password|credential|authorization)/i.test(key)
+      ? '***'
+      : clipRuntimeLabel(scrubSecrets(String(value)), 40);
+    parts.push(`${key}=${safeValue}`);
     if (parts.length >= 3) break;
   }
   return parts.join(', ');

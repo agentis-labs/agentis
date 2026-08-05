@@ -33,6 +33,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import type { AppRecord, AppManifestEnvelope, WorkspaceBundleEnvelope } from '@agentis/core';
 import { api, apiCached, peekCached, apiErrorMessage } from '../lib/api';
+import { useResourceRevision } from '../lib/resourceRealtime';
 import { appsApi } from '../lib/appsApi';
 import { isWorkspaceBundle } from '../lib/workspaceBundle';
 import { WorkspaceBundleModal } from '../components/packages/WorkspaceBundleModal';
@@ -201,6 +202,7 @@ const PERMISSIONS: Array<{
 ];
 
 export function PackagesPage() {
+  const resourceRevision = useResourceRevision(['packages', 'apps']);
   const nav = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
@@ -244,7 +246,8 @@ export function PackagesPage() {
 
   useEffect(() => {
     void refresh();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resourceRevision]);
 
   const items = useMemo<LibraryItem[]>(() => {
     const appItems = apps.map((app): LibraryItem => ({

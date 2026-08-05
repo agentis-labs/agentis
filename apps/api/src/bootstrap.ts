@@ -195,6 +195,7 @@ import { KnowledgeStore } from './services/knowledge/knowledgeStore.js';
 import { MemoryStore } from './services/memory/memoryStore.js';
 import { recordWorkflowLesson, distillFailureLesson, isInstructiveFailure } from './services/workflow/workflowPlaybook.js';
 import { WorkflowRevisionService } from './services/workflow/workflowRevisionService.js';
+import { bindWorkflowRevisionApproval } from './services/workflow/workflowRevisionApproval.js';
 import { WorkflowExperienceService } from './services/workflow/workflowExperienceService.js';
 import { SkillService } from './services/skillService.js';
 import { SkillMaterializer } from './services/skillMaterializer.js';
@@ -1915,6 +1916,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   approvals.bindCheckpointHandler(async ({ runId, approvalId, decision, data, feedback }) => {
     await engine.resolveApproval({ runId, approvalId, decision, data, feedback });
   });
+  bindWorkflowRevisionApproval({ approvals, revisions: workflowRevisions });
 
   const {
     app,

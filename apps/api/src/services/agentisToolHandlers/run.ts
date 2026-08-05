@@ -20,6 +20,7 @@ import { compassForRun, detectProvenDivergence, graphContentHash, readBuildLoop,
 import { collectReplayFrontierNodeIds } from '../partialReplay.js';
 import { compileAppReadiness } from '../app/appCompiler.js';
 import { resolveStartAt } from '../workflow/deferredStart.js';
+import { resolveWorkflowExecutionTarget } from '../workflow/workflowExecutionTarget.js';
 import { queueWorkflowRun } from '../scheduler.js';
 import type { ToolHandlerDeps } from './deps.js';
 
@@ -95,20 +96,31 @@ export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandle
           throw new Error(`workflow ${args.workflowId} not found in workspace`);
         }
         const debugRun = args.debugRun === true;
-        const selectedRevision = deps.revisions
-          ? debugRun
-            ? deps.revisions.candidate(ctx.workspaceId, wf.id) ?? deps.revisions.active(ctx.workspaceId, wf.id)
-            : deps.revisions.active(ctx.workspaceId, wf.id)
+        const target = deps.revisions
+          ? resolveWorkflowExecutionTarget({
+              db: deps.db,
+              revisions: deps.revisions,
+              workspaceId: ctx.workspaceId,
+              workflowId: wf.id,
+              mode: debugRun ? 'candidate_or_active' : 'active',
+            })
           : null;
-        const graph = (selectedRevision?.graph ?? wf.graph) as WorkflowGraph;
-        const workflowRevisionId = selectedRevision?.revision.id ?? wf.activeRevisionId ?? null;
+        const graph = (target?.graph ?? wf.graph) as WorkflowGraph;
+        const workflowRevisionId = target?.revisionId ?? wf.activeRevisionId ?? null;
         const requestedWaitMode = typeof args.waitMode === 'string' ? args.waitMode : 'background';
         if (!['background', 'inline', 'auto'].includes(requestedWaitMode)) {
           throw new AgentisError('VALIDATION_FAILED', `unknown waitMode '${requestedWaitMode}'`);
         }
         const planId = args.planId ? String(args.planId) : args.taskId ? String(args.taskId) : null;
         if (wf.appId) {
-          const compile = compileAppReadiness(deps.db, ctx.workspaceId, wf.appId, debugRun ? 'debug' : 'production');
+          const compile = compileAppReadiness(
+            deps.db,
+            ctx.workspaceId,
+            wf.appId,
+            debugRun ? 'debug' : 'production',
+            new Date(),
+            target ? { workflowId: wf.id, revisionId: target.revisionId, graph: target.graph } : undefined,
+          );
           if (!compile.readyForExecution) {
             throw new AgentisError(
               'VALIDATION_FAILED',

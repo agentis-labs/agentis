@@ -71,14 +71,33 @@ export function registerInspectTools(registry: AgentisToolRegistry, deps: ToolHa
           .where(eq(schema.workflows.id, String(args.workflowId)))
           .get();
         if (!wf || wf.workspaceId !== ctx.workspaceId) return { found: false };
-        const graph = wf.graph as { version?: unknown; nodes?: Array<Record<string, unknown>>; edges?: unknown[]; inputContract?: unknown; outputContract?: unknown; phases?: unknown[] };
-        if (args.detail === 'graph') return { found: true, id: wf.id, title: wf.title, graph, createdAt: wf.createdAt };
+        const active = deps.revisions?.active(ctx.workspaceId, wf.id);
+        const candidate = deps.revisions?.candidate(ctx.workspaceId, wf.id);
+        const graph = (candidate?.graph ?? active?.graph ?? wf.graph) as { version?: unknown; nodes?: Array<Record<string, unknown>>; edges?: unknown[]; inputContract?: unknown; outputContract?: unknown; phases?: unknown[] };
+        const lineage = {
+          active: active ? { revisionId: active.revision.id, semanticHash: active.revision.semanticHash, trustState: active.revision.trustState } : null,
+          candidate: candidate ? { revisionId: candidate.revision.id, semanticHash: candidate.revision.semanticHash, trustState: candidate.revision.trustState } : null,
+          editableTarget: candidate ? 'candidate' : 'active',
+        };
+        if (args.detail === 'graph') return {
+          found: true,
+          id: wf.id,
+          title: wf.title,
+          graph,
+          lineage: {
+            ...lineage,
+            active: active ? { ...lineage.active, graph: active.graph } : null,
+            candidate: candidate ? { ...lineage.candidate, graph: candidate.graph } : null,
+          },
+          createdAt: wf.createdAt,
+        };
         const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
         return {
           found: true,
           id: wf.id,
           title: wf.title,
           createdAt: wf.createdAt,
+          lineage,
           graph: {
             version: graph.version,
             nodeCount: nodes.length,

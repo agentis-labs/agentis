@@ -39,6 +39,20 @@ export function buildTaskRoutes(deps: {
     return c.json({ tasks: rows });
   });
 
+  app.get('/spines/latest', (c) => {
+    if (!deps.plans) return c.json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Task spine service not available.' } }, 503);
+    const ws = getWorkspace(c);
+    const conversationId = c.req.query('conversationId')?.trim();
+    const agentId = c.req.query('agentId')?.trim();
+    if ((!conversationId && !agentId) || (conversationId && agentId)) {
+      return c.json({ error: { code: 'VALIDATION_FAILED', message: 'Provide exactly one of conversationId or agentId.' } }, 422);
+    }
+    const task = conversationId
+      ? deps.plans.latest(ws.workspaceId, conversationId)
+      : deps.plans.latestForAgent(ws.workspaceId, agentId!);
+    return c.json({ task });
+  });
+
   app.get('/spines/:id', (c) => {
     if (!deps.plans) return c.json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Task spine service not available.' } }, 503);
     const ws = getWorkspace(c);

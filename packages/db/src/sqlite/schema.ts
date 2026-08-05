@@ -652,7 +652,9 @@ export const workflowKvEntries = sqliteTable('workflow_kv_entries', {
   version: integer('version').notNull().default(1),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
   updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
-});
+}, (table) => ({
+  workflowKeyUnique: uniqueIndex('uq_workflow_kv_key').on(table.workspaceId, table.workflowId, table.key),
+}));
 
 /** Tier-3 state: workspace-scoped KV shared across all workflows (§4.1). */
 export const workspaceKv = sqliteTable('workspace_kv', {
@@ -1241,6 +1243,7 @@ export const plans = sqliteTable('plans', {
   workspaceId: text('workspace_id')
     .notNull()
     .references(() => workspaces.id, { onDelete: 'cascade' }),
+  ownerAgentId: text('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
   conversationId: text('conversation_id')
     .references(() => conversations.id, { onDelete: 'cascade' }),
   messageId: text('message_id').references(() => conversationMessages.id, { onDelete: 'set null' }),
@@ -1255,7 +1258,10 @@ export const plans = sqliteTable('plans', {
   deviations: text('deviations', { mode: 'json' }).notNull().default(sql`'[]'`),
   verification: text('verification', { mode: 'json' }),
   ...baseTimestamps(),
-});
+}, (table) => ({
+  byConversation: index('idx_plans_conversation').on(table.workspaceId, table.conversationId, table.updatedAt),
+  byOwner: index('idx_plans_owner_agent').on(table.workspaceId, table.ownerAgentId, table.updatedAt),
+}));
 
 export const planVersions = sqliteTable(
   'plan_versions',
@@ -3306,6 +3312,26 @@ export const appSurfaces = sqliteTable(
     appName: uniqueIndex('idx_app_surfaces_app_name').on(table.appId, table.name),
   }),
 );
+
+/** Per-operator notification state. Notification IDs identify stable occurrences. */
+export const notificationReceipts = sqliteTable('notification_receipts', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  notificationId: text('notification_id').notNull(),
+  seenAt: text('seen_at'),
+  dismissedAt: text('dismissed_at'),
+  ...baseTimestamps(),
+}, (table) => ({
+  occurrence: uniqueIndex('uq_notification_receipts_occurrence')
+    .on(table.workspaceId, table.userId, table.notificationId),
+  byUser: index('idx_notification_receipts_user')
+    .on(table.workspaceId, table.userId, table.updatedAt),
+}));
 
 export const appInterfaceRevisions = sqliteTable(
   'app_interface_revisions',

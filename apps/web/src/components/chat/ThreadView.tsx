@@ -2,7 +2,7 @@
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { REALTIME_EVENTS, type ChatDelta, type ChatPermissionMode, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS, type ChatDelta, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
 import { PermissionModePicker } from './PermissionModePicker';
 import { readPlanStepTrack } from '../../lib/workSteps';
 import { StepTrack } from '../shared/StepTrack';
@@ -23,6 +23,7 @@ import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessag
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
+import { DurablePlanCard } from '../shared/DurablePlanCard';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -92,6 +93,7 @@ interface MessageMeta {
   isEphemeral?: boolean;
   /** Composer file/photo uploads carried with this message — artifact ids. */
   artifactIds?: string[];
+  plan?: ChatPlan;
 }
 
 type ConfirmationStatus = 'pending' | 'approving' | 'approved' | 'cancelled' | 'failed';
@@ -275,7 +277,8 @@ function roomRealtimeActivity(event: string, payload: Record<string, unknown>): 
   if (!agentId) return null;
   const at = firstString(payload, ['at', 'timestamp']) ?? new Date().toISOString();
   if (event === REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL) {
-    const tool = firstString(payload, ['tool', 'toolName', 'name', 'command']) ?? 'tool';
+    const rawTool = firstString(payload, ['tool', 'toolName', 'name', 'command']) ?? 'tool';
+    const tool = normalizeToolInvocation(rawTool, payload.args ?? payload.input).tool;
     return {
       type: 'activity',
       id: `room-tool-${agentId}-${tool}-${at}`,
@@ -427,6 +430,7 @@ export function ThreadView({
   const [agentNoAdapter, setAgentNoAdapter] = useState(false);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
+  const [latestPlan, setLatestPlan] = useState<ChatPlan | null>(null);
   const [agentTyping, setAgentTyping] = useState(false);
   // Room loading state: which @mentioned agents we're still waiting on for
   // reply (posted after the mention) shows up. A safety timer caps the wait.
@@ -561,6 +565,16 @@ export function ThreadView({
     }
   }
 
+  useEffect(() => {
+    const targetConversationId = loadedConversationId ?? conversationId;
+    if (kind !== 'agent' || !targetConversationId) { setLatestPlan(null); return; }
+    let cancelled = false;
+    void api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?conversationId=${encodeURIComponent(targetConversationId)}`)
+      .then((result) => { if (!cancelled) setLatestPlan(result.task ?? null); })
+      .catch(() => { if (!cancelled) setLatestPlan(null); });
+    return () => { cancelled = true; };
+  }, [conversationId, kind, loadedConversationId]);
+
   async function loadOlder() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     suppressNextScroll();
@@ -644,6 +658,11 @@ export function ThreadView({
               applyToolResultDelta(streamId, delta, toolStartedAt);
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
+            } else if (delta.type === 'plan') {
+              setLatestPlan(delta.plan);
+              setMessages((current) => current.map((message) => message.id === streamId
+                ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
+                : message));
             } else if (delta.type === 'done') {
               setAgentTyping(false);
               setMessages((current) => current.map((message) => {
@@ -867,6 +886,17 @@ export function ThreadView({
     if (!payload.conversationId || !expected || payload.conversationId !== expected) return;
     const track = readPlanStepTrack(env.payload as Record<string, unknown>);
     if (track) setStepTrack(track);
+    void api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?conversationId=${encodeURIComponent(expected)}`)
+      .then(({ task }) => {
+        if (!task) return;
+        setLatestPlan(task);
+        setMessages((previous) => previous.map((message) => (
+          message.metadata?.plan?.id === task.id
+            ? { ...message, metadata: { ...message.metadata, plan: task } }
+            : message
+        )));
+      })
+      .catch(() => undefined);
   });
 
   useRealtime([
@@ -1327,6 +1357,11 @@ export function ThreadView({
               applyToolResultDelta(streamId, delta, toolStartedAt);
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
+            } else if (delta.type === 'plan') {
+              setLatestPlan(delta.plan);
+              setMessages((current) => current.map((message) => message.id === streamId
+                ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
+                : message));
             } else if (delta.type === 'done') {
               setAgentTyping(false);
               setActiveTask(null);
@@ -1575,6 +1610,11 @@ export function ThreadView({
               applyToolResultDelta(streamId, delta, toolStartedAt);
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
+            } else if (delta.type === 'plan') {
+              setLatestPlan(delta.plan);
+              setMessages((current) => current.map((message) => message.id === streamId
+                ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
+                : message));
             } else if (delta.type === 'done') {
               setAgentTyping(false);
               setActiveTask(null);
@@ -1719,6 +1759,9 @@ export function ThreadView({
           </div>
         ) : (
           <ul className="flex min-w-0 flex-col gap-2.5">
+            {latestPlan && !messages.some((message) => message.metadata?.plan?.id === latestPlan.id) && (
+              <li className="w-full"><DurablePlanCard plan={latestPlan} recovered /></li>
+            )}
             {hasMore && (
               <li className="flex justify-center">
                 <button
@@ -1977,6 +2020,7 @@ function MessageBubble({
               onCancel={() => onConfirmAction(msg.metadata!.confirmation!, false)}
             />
           )}
+          {msg.metadata?.plan && <DurablePlanCard plan={msg.metadata.plan} />}
           {parsedAgentPlan && <ChatPlanCanvas planText={parsedAgentPlan.planText} architecture={parsedAgentPlan.architecture} />}
           {msg.metadata?.card && <ProactiveCard data={msg.metadata.card} />}
           {msg.metadata?.runId && (

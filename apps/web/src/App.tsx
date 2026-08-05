@@ -49,6 +49,9 @@ const LazyNotificationPanel = lazy(() =>
 const LazyAvatarMenu = lazy(() =>
   import('./components/shared/AvatarMenu').then((m) => ({ default: m.AvatarMenu })),
 );
+const LazyWorkspaceRealtimeMount = lazy(() =>
+  import('./lib/resourceRealtime').then((m) => ({ default: m.WorkspaceRealtimeMount })),
+);
 
 function SettingsModalMount() {
   const settingsOpen = useAgentisStore((s) => s.settingsOpen);
@@ -358,6 +361,7 @@ export function App() {
 
   return (
     <ToastProvider>
+      <Suspense fallback={null}><LazyWorkspaceRealtimeMount /></Suspense>
       <ConfirmProvider>
         <RunModalProvider>
           <ApprovalModalProvider>

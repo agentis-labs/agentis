@@ -11,6 +11,9 @@ import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/dep
 import { ChannelBridge } from '../../src/services/conversation/channelBridge.js';
 import type { PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ApprovalInboxService } from '../../src/services/approvalInbox.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
+import { bindWorkflowRevisionApproval } from '../../src/services/workflow/workflowRevisionApproval.js';
 import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/channels/types.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
@@ -570,5 +573,82 @@ describe('agentis.build_workflow agent-authored drafts', () => {
     // Analyst carries the injected aarrr-framework skill.
     const analyst = output.graph.nodes.find((n) => (n.config as { agentRole?: string }).agentRole === 'analyst');
     expect((analyst!.config as { skills?: string[] }).skills).toContain('aarrr-framework');
+  });
+
+  it('promotes an exact outward candidate through an administrator approval', async () => {
+    const workflowId = randomUUID();
+    const activeGraph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'output', type: 'return_output', title: 'Result', position: { x: 240, y: 0 }, config: { kind: 'return_output', renderAs: 'json' } },
+      ],
+      edges: [{ id: 'active-edge', source: 'trigger', target: 'output' }],
+    };
+    const candidateGraph: WorkflowGraph = {
+      ...activeGraph,
+      nodes: [
+        activeGraph.nodes[0]!,
+        {
+          id: 'component', type: 'component_task', title: 'Deterministic prospect search', position: { x: 240, y: 0 },
+          config: { kind: 'component_task', componentSlug: 'prospect-search', operationName: 'search', version: '2.0.0', inputMapping: {}, outputMapping: {} },
+        },
+        { ...activeGraph.nodes[1]!, position: { x: 480, y: 0 } },
+      ],
+      edges: [
+        { id: 'candidate-1', source: 'trigger', target: 'component' },
+        { id: 'candidate-2', source: 'component', target: 'output' },
+      ],
+    };
+    ctx.db.insert(schema.workflows).values({
+      id: workflowId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      title: 'Protected prospecting',
+      graph: activeGraph,
+      settings: {},
+    }).run();
+
+    const revisions = new WorkflowRevisionService(ctx.db);
+    const active = revisions.ensureWorkflow(ctx.workspace.id, workflowId).active;
+    const candidate = revisions.createCandidate({
+      workspaceId: ctx.workspace.id,
+      workflowId,
+      graph: candidateGraph,
+      baseRevisionId: active.id,
+      source: 'agent_patch',
+      actor: { type: 'agent', id: null },
+      reason: 'Replace agent search with a deterministic component',
+    }).revision;
+    for (const gate of ['dry_run', 'regression', 'clean_debug', 'outcome'] as const) {
+      revisions.recordProof({ workspaceId: ctx.workspace.id, workflowId, revisionId: candidate.id, gate, status: 'passed' });
+    }
+
+    const approvals = new ApprovalInboxService(ctx.db, ctx.bus);
+    bindWorkflowRevisionApproval({ approvals, revisions });
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerBuildTools(registry, { ...deps(), revisions, approvals });
+    const requested = await registry.execute({
+      toolId: 'agentis.workflow.revision.promote',
+      arguments: { workflowId, revisionId: candidate.id },
+    }, toolContext());
+
+    expect(requested.ok).toBe(true);
+    const request = requested.output as { outcome: string; approvalId: string };
+    expect(request.outcome).toBe('blocked_on_human');
+    expect(revisions.active(ctx.workspace.id, workflowId).revision.id).toBe(active.id);
+
+    await approvals.resolve({
+      workspaceId: ctx.workspace.id,
+      approvalId: request.approvalId,
+      decision: 'approve',
+      resolvedByUserId: ctx.user.id,
+    });
+
+    expect(revisions.active(ctx.workspace.id, workflowId).revision.id).toBe(candidate.id);
+    expect(revisions.candidate(ctx.workspace.id, workflowId)).toBeNull();
+    expect(revisions.proofState(ctx.workspace.id, workflowId, candidate.id).passed).toContain('operator_approval');
   });
 });

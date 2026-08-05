@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { AgentisError, REALTIME_EVENTS } from '@agentis/core';
-import { openSqlite, type AgentisSqliteDb } from '@agentis/db/sqlite';
+import { openSqlite, schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import { ApprovalInboxService } from '../src/services/approvalInbox.js';
 import { createInProcessEventBus, type EventBus } from '../src/event-bus.js';
 
@@ -45,6 +45,21 @@ describe('ApprovalInboxService', () => {
   it('lists pending vs all', async () => {
     await svc.create(baseArgs);
     expect(svc.list('ws1', 'pending')).toHaveLength(1);
+    expect(svc.list('ws1', 'all')).toHaveLength(1);
+  });
+
+  it('expires a pending run-bound approval when its run is terminal', async () => {
+    db.insert(schema.workflowRuns).values({
+      id: 'terminal-run',
+      workspaceId: 'ws1',
+      userId: 'u1',
+      workflowId: 'wf1',
+      status: 'FAILED',
+      runState: {},
+    }).run();
+    const created = await svc.create({ ...baseArgs, runId: 'terminal-run' });
+    expect(svc.list('ws1', 'pending')).toHaveLength(0);
+    expect(svc.get('ws1', created.id)?.status).toBe('expired');
     expect(svc.list('ws1', 'all')).toHaveLength(1);
   });
 

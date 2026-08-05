@@ -42,6 +42,7 @@ export function registerTaskSpineTools(registry: AgentisToolRegistry, deps: Tool
           workspaceId: ctx.workspaceId,
           userId: ctx.userId,
           conversationId: ctx.conversationId ?? null,
+          ownerAgentId: ctx.agentId ?? null,
           objective: String(args.objective),
           ...(args.title ? { title: String(args.title) } : {}),
           ...(acceptanceCriteria ? { acceptanceCriteria } : {}),

@@ -16,6 +16,8 @@ import { deliverWorkflow, type DeliverCtx } from '../../src/services/workflow/wo
 import type { ToolHandlerDeps } from '../../src/services/agentisToolHandlers/deps.js';
 import type { RunVerdict } from '../../src/services/workflow/workflowVerdict.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
+import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
+import { graphContentHash } from '../../src/services/workflow/workflowCompass.js';
 
 let ctx: TestContext;
 
@@ -78,13 +80,62 @@ function scriptedEngine(outcomes: Scripted[]) {
   };
 }
 
-function deps(engine: unknown, approvals?: unknown): ToolHandlerDeps {
-  return { db: ctx.db, logger: ctx.logger, bus: ctx.bus, engine, ...(approvals ? { approvals } : {}) } as unknown as ToolHandlerDeps;
+function deps(engine: unknown, approvals?: unknown, revisions?: WorkflowRevisionService): ToolHandlerDeps {
+  return { db: ctx.db, logger: ctx.logger, bus: ctx.bus, engine, ...(approvals ? { approvals } : {}), ...(revisions ? { revisions } : {}) } as unknown as ToolHandlerDeps;
 }
 
 const dctx = (): DeliverCtx => ({ workspaceId: ctx.workspace.id, userId: ctx.user.id, ambientId: ctx.ambient.id });
 
 describe('deliverWorkflow', () => {
+  it('executes and attributes proof to the candidate revision, never the active mirror', async () => {
+    const wfId = seedWorkflow();
+    const revisions = new WorkflowRevisionService(ctx.db);
+    const active = revisions.ensureWorkflow(ctx.workspace.id, wfId).active;
+    const candidateGraph = pipelineGraph();
+    candidateGraph.nodes[1] = { ...candidateGraph.nodes[1]!, title: 'Deterministic candidate producer' };
+    const hash = graphContentHash(candidateGraph);
+    ctx.db.update(schema.workflows).set({ settings: {
+      spec: {
+        version: 1,
+        objective: 'Produce the store payload',
+        acceptance: [{ id: 'payload', claim: 'payload exists', verify: 'expr', expr: 'output.products.length > 0' }],
+        reworkBudget: 1,
+        createdAt: new Date().toISOString(),
+        reconciledHash: hash,
+      },
+    } }).where(eq(schema.workflows.id, wfId)).run();
+    const candidate = revisions.createCandidate({
+      workspaceId: ctx.workspace.id,
+      workflowId: wfId,
+      graph: candidateGraph,
+      baseRevisionId: active.id,
+      source: 'agent_build',
+      actor: { type: 'agent', id: 'builder' },
+      reason: 'replace Hermes with deterministic component',
+    }).revision;
+    let executedGraph: WorkflowGraph | undefined;
+    let executedRevisionId: string | undefined;
+    const { engine } = scriptedEngine([{ status: 'COMPLETED', verdict: 'accomplished' }]);
+    const base = engine as unknown as { startRun(args: Record<string, unknown>): Promise<unknown>; cancelRun(): Promise<void> };
+    const wrapped = {
+      ...base,
+      startRun: async (args: Record<string, unknown>) => {
+        executedGraph = args.graph as WorkflowGraph;
+        executedRevisionId = args.workflowRevisionId as string;
+        return base.startRun(args);
+      },
+    };
+
+    const result = await deliverWorkflow(deps(wrapped, undefined, revisions), dctx(), { workflowId: wfId });
+
+    expect(result.outcome).toBe('accomplished');
+    expect(executedRevisionId).toBe(candidate.id);
+    expect(executedGraph?.nodes[1]?.title).toBe('Deterministic candidate producer');
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, result.runId!)).get();
+    expect(run?.workflowRevisionId).toBe(candidate.id);
+    expect((run?.graphSnapshot as WorkflowGraph).nodes[1]?.title).toBe('Deterministic candidate producer');
+  });
+
   it('ACCOMPLISHED on the first verified run → delivered', async () => {
     const wfId = seedWorkflow();
     const { engine } = scriptedEngine([{ status: 'COMPLETED', verdict: 'accomplished' }]);
