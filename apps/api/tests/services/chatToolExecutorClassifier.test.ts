@@ -16,6 +16,7 @@ describe('ChatToolExecutor.isHighImpact', () => {
   it('flags the explicit high-impact tool ids', () => {
     for (const id of [
       'agentis.extension.create',
+      'agentis.component.install',
       'agentis.extension.test',
       'agentis.ability.create',
       'agentis.channel.send',

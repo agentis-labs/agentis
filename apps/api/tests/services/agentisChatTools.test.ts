@@ -1,5 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { WorkflowGraph } from '@agentis/core';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
@@ -18,12 +22,17 @@ import type { ChannelAdapter, ParsedInboundMessage } from '../../src/adapters/ch
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
+const componentRoots: string[] = [];
 
 beforeEach(async () => {
   ctx = await createTestContext();
 });
 
-afterEach(() => ctx.close());
+afterEach(() => {
+  ctx.close();
+  for (const root of componentRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  delete process.env.AGENTIS_DATA_DIR;
+});
 
 function deps(): ToolHandlerDeps {
   return {
@@ -269,7 +278,68 @@ describe('agent-facing capability authoring tools', () => {
       operations: ['listen'],
     }));
   });
+
+  it('upgrades a node_worker extension to a persisted Component v2 bundle in place', async () => {
+    const extensionId = seedSkill({
+      name: 'Prospect Search',
+      slug: 'prospect-search',
+      runtime: 'node_worker',
+      version: '1.0.0',
+      manifest: {
+        name: 'Prospect Search', slug: 'prospect-search', version: '1.0.0', runtime: 'node_worker',
+        source: 'async function search() { return {}; }', operations: [{ name: 'search', inputSchema: {}, outputSchema: {} }],
+        permissions: [], capabilityTags: ['prospecting'],
+      },
+    });
+    const root = mkdtempSync(join(tmpdir(), 'agentis-component-tool-'));
+    componentRoots.push(root);
+    process.env.AGENTIS_DATA_DIR = root;
+    const source = 'export async function search(input) { return { leads: input.leads ?? [] }; }\n';
+    const lock = '{}\n';
+    const files = [bundleFile('index.js', source), bundleFile('package-lock.json', lock)]
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const aggregate = createHash('sha256');
+    for (const file of files) aggregate.update(file.path).update('\0').update(Buffer.from(file.dataBase64, 'base64')).update('\0');
+    const bundleHash = aggregate.digest('hex');
+
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerCapabilityTools(registry, deps());
+    const result = await registry.execute({
+      toolId: 'agentis.component.install',
+      arguments: {
+        extensionId,
+        manifest: {
+          name: 'Prospect Search', slug: 'prospect-search', version: '2.0.0', runtime: 'component_oci',
+          permissions: [], capabilityTags: ['prospecting', 'deterministic'],
+          component: {
+            manifestVersion: 2, id: 'prospect-search', version: '2.0.0',
+            runtime: { language: 'node', version: '20' }, entrypoint: 'index.js', dependencyLock: 'package-lock.json',
+            bundleHash, permissions: [], operations: [{ name: 'search', inputSchema: {}, outputSchema: {} }],
+            resources: { cpu: 0.5, memoryMb: 128, timeoutSec: 30 },
+          },
+        },
+        bundleFiles: files,
+        permissionsAcknowledged: [],
+      },
+    }, toolContext());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toEqual(expect.objectContaining({ extensionId, runtime: 'component_oci', upgraded: true }));
+    const stored = ctx.db.select().from(schema.extensions).where(eq(schema.extensions.id, extensionId)).get();
+    expect(stored?.runtime).toBe('component_oci');
+    expect(stored?.packageId).toBeNull();
+    expect(stored?.manifest).toEqual(expect.objectContaining({
+      runtime: 'component_oci',
+      bundleDir: expect.stringContaining(bundleHash),
+      component: expect.objectContaining({ manifestVersion: 2, bundleHash }),
+    }));
+  });
 });
+
+function bundleFile(path: string, value: string) {
+  const data = Buffer.from(value);
+  return { path, sha256: createHash('sha256').update(data).digest('hex'), dataBase64: data.toString('base64') };
+}
 
 describe('agent-facing native channel tools', () => {
   it('binds a channel to an App and exposes the binding in channel inventory', async () => {

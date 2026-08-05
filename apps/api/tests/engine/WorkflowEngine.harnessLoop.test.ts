@@ -120,4 +120,85 @@ describe('WorkflowEngine — E1 harness chat tool loop', () => {
     expect(seenTools[0]).toContain('agentis.channel.send');
     expect(seenTools[0]).not.toContain('agentis.build_workflow');
   });
+
+  it('cancels the live harness turn and its adapter task when the run is cancelled', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Cancelable Coder', role: 'coder', adapterType: 'claude_code', capabilityTags: ['code'], config: {}, status: 'online',
+    }).run();
+
+    let signalAborted = false;
+    const cancelledTaskIds: string[] = [];
+    let notifyChatStarted!: () => void;
+    const chatStarted = new Promise<void>((resolve) => { notifyChatStarted = resolve; });
+    const adapter: AgentAdapter = {
+      adapterType: 'claude_code',
+      connect: async () => {},
+      disconnect: async () => {},
+      healthCheck: async () => ({ isHealthy: true, checkedAt: new Date().toISOString() }),
+      capabilities: () => ({
+        interactiveChat: true,
+        toolCalling: true,
+        toolForwarding: 'marker_protocol',
+        affordances: { fileSystem: true, terminal: true },
+      }),
+      dispatchTask: async () => { throw new Error('dispatch must not be used'); },
+      cancelTask: async (taskId) => { cancelledTaskIds.push(taskId); },
+      onEvent: () => {},
+      chat: async function* (_messages, _tools, options) {
+        notifyChatStarted();
+        await new Promise<void>((resolve) => {
+          const stop = () => { signalAborted = true; resolve(); };
+          if (options?.signal?.aborted) stop();
+          else options?.signal?.addEventListener('abort', stop, { once: true });
+        });
+        yield { type: 'done', finishReason: 'error' };
+      },
+    };
+
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registry.register(
+      { id: 'agentis.channel.send', family: 'app', description: 'message a human', inputSchema: { type: 'object', properties: {} }, mutating: true, mcpExposed: true },
+      async () => ({ ok: true }),
+    );
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, adapter);
+    const engine = new WorkflowEngine({
+      db: ctx.db, bus: ctx.bus, logger: ctx.logger,
+      ledger: new LedgerService(ctx.db, ctx.bus),
+      scratchpad: new ScratchpadService(ctx.bus, ctx.logger),
+      activity: new ActivityFeedService(ctx.db, ctx.bus),
+      approvals: new ApprovalInboxService(ctx.db, ctx.bus),
+      extensions: {} as unknown as ExtensionRuntime,
+      adapters,
+      toolRegistry: registry,
+    });
+
+    const graph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'trigger', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'A', type: 'agent_task', title: 'Long task', position: { x: 1, y: 0 }, config: { kind: 'agent_task', agentId, agentRole: 'coder', prompt: 'Keep working.', outputKeys: [] } },
+      ],
+      edges: [{ id: 'e', source: 'T', target: 'A' }],
+    } as unknown as WorkflowGraph;
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflows).values({ id: workflowId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, title: 'cancel-harness', graph, settings: {} }).run();
+    ctx.db.insert(schema.workflowRuns).values({ id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id, status: 'CREATED', runState: {} }).run();
+    const initialState = buildInitialRunState({ runId, workflowId, graph, inputs: {} });
+
+    await engine.startRun({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id, triggerId: null, inputs: {}, initialState, graph });
+    await Promise.race([
+      chatStarted,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('chat did not start')), 5_000)),
+    ]);
+    await engine.cancelRun(runId);
+
+    const row = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    expect(row.status).toBe('CANCELLED');
+    expect(signalAborted).toBe(true);
+    expect(cancelledTaskIds).toContain('A');
+  });
 });

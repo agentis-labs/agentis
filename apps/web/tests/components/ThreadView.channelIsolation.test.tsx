@@ -41,7 +41,7 @@ vi.mock('../../src/components/shared/Toast', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), warn: vi.fn() }),
 }));
 
-import { ThreadView } from '../../src/components/chat/ThreadView';
+import { ThreadView, roomRealtimeActivity } from '../../src/components/chat/ThreadView';
 
 function emit(event: RealtimeEventName, payload: unknown) {
   const env = { event, payload, emittedAt: new Date().toISOString() } as RealtimeEnvelope;
@@ -140,5 +140,30 @@ describe('ThreadView channel isolation', () => {
     });
 
     await waitFor(() => expect(screen.getByText('Desktop live reply')).toBeInTheDocument());
+  });
+
+  it('renders stable activity states without terminal narration or work summaries', async () => {
+    const message = roomRealtimeActivity(REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE, {
+      agentId: 'agent-1',
+      message: 'I am deciding which private lead query to run next',
+      at: '2026-06-22T00:03:00.000Z',
+    });
+    const work = roomRealtimeActivity(REALTIME_EVENTS.AGENT_WORK_STEP, {
+      agentId: 'agent-1',
+      phase: 'thinking',
+      summary: 'Search Sete Lagoas WhatsApp and inspect private candidates',
+      at: '2026-06-22T00:03:01.000Z',
+    });
+    const tool = roomRealtimeActivity(REALTIME_EVENTS.AGENT_TERMINAL_TOOL_CALL, {
+      agentId: 'agent-1',
+      tool: 'agentis.code.execute',
+      args: { code: 'const privateSecret = "never display this"' },
+      at: '2026-06-22T00:03:02.000Z',
+    });
+
+    expect(message?.label).toBe('Agent is working');
+    expect(work?.label).toBe('Agent is working');
+    expect(tool?.label).toBe('Using agentis.code.execute');
+    expect(JSON.stringify([message, work, tool])).not.toMatch(/private lead query|Sete Lagoas WhatsApp|never display this/i);
   });
 });

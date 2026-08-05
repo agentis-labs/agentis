@@ -3,7 +3,6 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { AgentisError, CONSTANTS } from '@agentis/core';
@@ -15,8 +14,8 @@ import type { ExtensionKvStore } from '../extensions/kv.js';
 import { ExtensionRuntime, normalizeExtensionManifest, validateExtensionManifest } from '../services/extensionRuntime.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
-import { installComponentBundle } from '../extensions/componentBundle.js';
 import { isDockerSandboxAvailable } from '../extensions/dockerSandboxRuntime.js';
+import { componentInstallPayloadSchema, installComponentExtension } from '../services/componentInstaller.js';
 
 const operationSchema = z.object({
   name: z.string().min(1),
@@ -58,47 +57,6 @@ const installLocalExtensionSchema = z.object({
     outputSchema: z.record(z.unknown()).default({}),
     allowedDomains: z.array(z.string()).default([]),
     timeoutMs: z.number().int().positive().max(CONSTANTS.EXTENSION_EXECUTION_MAX_TIMEOUT_MS).optional(),
-  }),
-  permissionsAcknowledged: z.array(z.string()).default([]),
-});
-
-const extensionPermissionSchema = z.enum([
-  'network', 'network.unrestricted', 'credentials', 'workspace.read',
-  'workspace.write', 'filesystem', 'spawn', 'listener', 'listener.emit',
-  'listener.cursor', 'kv.read', 'kv.write',
-]);
-
-const installComponentSchema = z.object({
-  bundleDir: z.string().min(1),
-  manifest: z.object({
-    name: z.string().min(1),
-    slug: z.string().min(1),
-    version: z.string().min(1),
-    description: z.string().max(2_000).optional(),
-    runtime: z.literal('component_oci'),
-    permissions: z.array(extensionPermissionSchema).default([]),
-    allowedDomains: z.array(z.string()).default([]),
-    capabilityTags: z.array(z.string()).default([]),
-    component: z.object({
-      manifestVersion: z.literal(2),
-      id: z.string().min(1),
-      version: z.string().min(1),
-      runtime: z.object({ language: z.enum(['python', 'node']), version: z.string().min(1) }),
-      entrypoint: z.string().min(1),
-      operations: z.array(operationSchema).min(1),
-      dependencyLock: z.string().min(1),
-      bundleHash: z.string().default(''),
-      permissions: z.array(extensionPermissionSchema).default([]),
-      allowedDomains: z.array(z.string()).default([]),
-      resources: z.object({
-        cpu: z.number().positive().max(8),
-        memoryMb: z.number().int().min(32).max(8192),
-        timeoutSec: z.number().int().min(1).max(3600),
-        tmpMb: z.number().int().positive().max(4096).optional(),
-      }),
-      healthcheck: z.string().optional(),
-      sbom: z.record(z.unknown()).optional(),
-    }),
   }),
   permissionsAcknowledged: z.array(z.string()).default([]),
 });
@@ -172,45 +130,17 @@ export function buildExtensionRoutes(deps: {
 
   app.post('/install-component', async (c) => {
     const ws = getWorkspace(c);
-    const body = installComponentSchema.parse(await c.req.json());
-    assertPermissionsAcknowledged(body.manifest.permissions, body.permissionsAcknowledged);
-    if (JSON.stringify([...body.manifest.permissions].sort()) !== JSON.stringify([...body.manifest.component.permissions].sort())) {
-      throw new AgentisError('EXTENSION_MANIFEST_INVALID', 'component permissions must match the enclosing extension permissions');
-    }
-    const installed = installComponentBundle(body.bundleDir, body.manifest.component);
-    const manifest = normalizeExtensionManifest({
-      ...body.manifest,
-      entrypoint: body.manifest.component.entrypoint,
-      operations: body.manifest.component.operations,
-      bundleDir: installed.bundleDir,
-      component: { ...body.manifest.component, bundleHash: installed.bundleHash },
-      timeoutMs: body.manifest.component.resources.timeoutSec * 1000,
+    const body = componentInstallPayloadSchema.parse(await c.req.json());
+    const installed = installComponentExtension(deps.db, {
+      workspaceId: ws.workspaceId,
+      ambientId: ws.ambientId,
+      userId: ws.user.id,
+      extensionId: body.extensionId,
+      manifest: body.manifest,
+      permissionsAcknowledged: body.permissionsAcknowledged,
+      ...(body.bundleDir ? { bundleDir: body.bundleDir } : { bundleFiles: body.bundleFiles! }),
     });
-    validateExtensionManifest(manifest, { install: true });
-    const existing = deps.db.select().from(schema.extensions)
-      .where(and(eq(schema.extensions.workspaceId, ws.workspaceId), eq(schema.extensions.slug, manifest.slug)))
-      .get();
-    if (existing && existing.version !== manifest.version) {
-      throw new AgentisError('RESOURCE_CONFLICT', `component ${manifest.slug}@${existing.version} is already installed`);
-    }
-    const id = existing?.id ?? randomUUID();
-    if (existing) {
-      deps.db.update(schema.extensions).set({ manifest, runtime: 'component_oci', updatedAt: new Date().toISOString() })
-        .where(eq(schema.extensions.id, id)).run();
-    } else {
-      deps.db.insert(schema.extensions).values({
-        id,
-        workspaceId: ws.workspaceId,
-        ambientId: ws.ambientId,
-        userId: ws.user.id,
-        name: manifest.name,
-        slug: manifest.slug,
-        version: manifest.version,
-        runtime: 'component_oci',
-        manifest,
-      }).run();
-    }
-    return c.json({ extension: { id, manifest, bundle: installed } }, existing ? 200 : 201);
+    return c.json({ extension: installed }, installed.created ? 201 : 200);
   });
 
   app.post('/install-local', async (c) => {

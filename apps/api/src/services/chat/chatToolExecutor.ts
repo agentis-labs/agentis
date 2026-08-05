@@ -66,6 +66,7 @@ export class ChatToolExecutor {
    * that may not be flagged mutating, and the prefixes catch dynamic ids.
    */
   static readonly #HIGH_IMPACT_TOOL_IDS: ReadonlySet<string> = new Set([
+    'agentis.component.install',
     'agentis.extension.create',
     'agentis.extension.test',
     'agentis.ability.create',

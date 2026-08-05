@@ -13,6 +13,7 @@ describe('buildWorkspaceToolCatalog', () => {
     const names = CHAT_TOOL_CATALOG.map((tool) => tool.name);
     expect(names).toContain('agentis.ability.create');
     expect(names).toContain('agentis.extension.create');
+    expect(names).toContain('agentis.component.install');
   });
 
   it('includes the static catalog plus one tool per workflow', () => {

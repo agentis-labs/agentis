@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  compactRuntimeProgressLabel,
   runtimeProgressActivity,
   toolActivityLabel,
 } from '../../src/adapters/runtimeProgress.js';
 
 describe('runtime progress normalization', () => {
-  it('shows the underlying gateway operation without leaking credentials', () => {
+  it('shows only the underlying gateway operation, never tool inputs', () => {
     const label = toolActivityLabel('Using', 'agentis.tools.call', {
       name: 'agentis.workflow.patch_graph',
       arguments: { workflowId: 'wf-1', apiKey: 'should-never-render' },
@@ -14,20 +13,10 @@ describe('runtime progress normalization', () => {
     expect(label).toContain('agentis workflow patch graph');
     expect(label).not.toContain('agentis tools call');
     expect(label).not.toContain('should-never-render');
+    expect(label).toBe('Using agentis workflow patch graph');
   });
 
-  it('keeps long progress text for responsive frontend truncation', () => {
-    const label = compactRuntimeProgressLabel(
-      'I will inspect the entire workspace configuration and compare every runtime adapter before applying the shared protocol fix',
-    );
-
-    expect(label).toBe(
-      'Inspecting the entire workspace configuration and compare every runtime adapter before applying the shared protocol fix',
-    );
-    expect(label.length).toBeGreaterThan(84);
-  });
-
-  it('surfaces the REAL reasoning text by default (operator-facing legibility)', () => {
+  it('never exposes or paraphrases runtime reasoning', () => {
     expect(runtimeProgressActivity({
       id: 'reasoning',
       runtimeName: 'Hermes',
@@ -37,11 +26,11 @@ describe('runtime progress normalization', () => {
       type: 'activity',
       phase: 'runtime',
       status: 'running',
-      label: 'I should inspect the workspace files and repository context.',
+      label: 'Hermes is reasoning',
     });
   });
 
-  it('redacts reasoning to a high-level phase when AGENTIS_REDACT_REASONING is set', () => {
+  it('keeps reasoning private regardless of legacy redaction configuration', () => {
     const prev = process.env.AGENTIS_REDACT_REASONING;
     process.env.AGENTIS_REDACT_REASONING = '1';
     try {
@@ -50,21 +39,21 @@ describe('runtime progress normalization', () => {
         runtimeName: 'Hermes',
         text: 'I should inspect the workspace files and repository context.',
         reasoning: true,
-      }).label).toBe('Reviewing workspace context');
+      }).label).toBe('Hermes is reasoning');
     } finally {
       if (prev === undefined) delete process.env.AGENTIS_REDACT_REASONING;
       else process.env.AGENTIS_REDACT_REASONING = prev;
     }
   });
 
-  it('scrubs secrets from surfaced reasoning text', () => {
+  it('never exposes progress narration or secrets', () => {
     const label = runtimeProgressActivity({
       id: 'reasoning',
       runtimeName: 'Codex',
       text: 'Calling the API with sk-abcd1234efgh5678ijkl now.',
-      reasoning: true,
+      reasoning: false,
     }).label;
     expect(label).not.toContain('sk-abcd1234efgh5678ijkl');
-    expect(label).toContain('sk-***');
+    expect(label).toBe('Codex is working');
   });
 });

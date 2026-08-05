@@ -1132,6 +1132,21 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.component.install',
+    description:
+      'Install or upgrade a portable Component v2 bundle. Use this for deterministic component_task implementations; it verifies every bundle file, persists runtime component_oci and ComponentManifestV2, and preserves an existing extension ID during migration.',
+    parameters: {
+      type: 'object',
+      properties: {
+        extensionId: { type: 'string', description: 'Existing extension ID to upgrade in place.' },
+        manifest: { type: 'object', description: 'Extension metadata plus the ComponentManifestV2 under component.' },
+        bundleFiles: { type: 'array', items: { type: 'object' }, description: 'Files with path, sha256, and dataBase64.' },
+        permissionsAcknowledged: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['manifest', 'bundleFiles', 'permissionsAcknowledged'],
+    },
+  },
+  {
     name: 'agentis.extension.create',
     description:
       'Create or update a reusable workspace extension from JavaScript source and operation manifests. Resolve first and pass extensionId to update a matching capability instead of creating a duplicate. After creation, use the returned extensionId in agentis.build_workflow.',

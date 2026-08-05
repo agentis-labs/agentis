@@ -2,7 +2,7 @@
  * /v1/extensions — route unit tests.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -175,6 +175,104 @@ describe('POST /v1/extensions/install-local', () => {
     expect(res.status).toBe(422);
   });
 });
+
+describe('POST /v1/extensions/install-component', () => {
+  it('persists a portable Component V2 bundle and upgrades the requested extension in place', async () => {
+    const extensionId = randomUUID();
+    ctx.db.insert(schema.extensions).values({
+      id: extensionId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      packageId: null,
+      name: 'Legacy prospect search',
+      slug: 'prospect-search',
+      version: '1.0.0',
+      runtime: 'node_worker',
+      manifest: {
+        name: 'Legacy prospect search',
+        slug: 'prospect-search',
+        version: '1.0.0',
+        runtime: 'node_worker',
+        source: 'export async function execute() { return {}; }',
+        operations: [{ name: 'execute', inputSchema: {}, outputSchema: {} }],
+      },
+    }).run();
+
+    const files = [
+      portableFile('index.js', 'export async function execute(input) { return input; }'),
+      portableFile('package-lock.json', '{"lockfileVersion":3}'),
+    ];
+    const bundleHash = createHash('sha256');
+    for (const file of files) {
+      bundleHash.update(file.path);
+      bundleHash.update('\0');
+      bundleHash.update(Buffer.from(file.dataBase64, 'base64'));
+      bundleHash.update('\0');
+    }
+    const bundleDigest = bundleHash.digest('hex');
+    const previousDataDir = process.env.AGENTIS_DATA_DIR;
+    process.env.AGENTIS_DATA_DIR = dataDir;
+    try {
+      const res = await app().request('/v1/extensions/install-component', {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({
+          extensionId,
+          bundleFiles: files,
+          permissionsAcknowledged: [],
+          manifest: {
+            name: 'Deterministic prospect search',
+            slug: 'prospect-search',
+            version: '2.0.0',
+            runtime: 'component_oci',
+            permissions: [],
+            allowedDomains: [],
+            capabilityTags: ['prospecting'],
+            component: {
+              manifestVersion: 2,
+              id: 'prospect-search',
+              version: '2.0.0',
+              runtime: { language: 'node', version: '20' },
+              entrypoint: 'index.js',
+              operations: [{ name: 'execute', inputSchema: {}, outputSchema: {} }],
+              dependencyLock: 'package-lock.json',
+              bundleHash: bundleDigest,
+              permissions: [],
+              allowedDomains: [],
+              resources: { cpu: 1, memoryMb: 128, timeoutSec: 30 },
+            },
+          },
+        }),
+      });
+
+      const body = (await res.json()) as { extension: { id: string; upgraded: boolean; manifest: Record<string, unknown> }; error?: unknown };
+      if (res.status !== 200) throw new Error(`install-component returned ${res.status}: ${JSON.stringify(body)}`);
+      expect(body.extension.id).toBe(extensionId);
+      expect(body.extension.upgraded).toBe(true);
+      const row = ctx.db.select().from(schema.extensions).all().find((item) => item.id === extensionId)!;
+      expect(row.runtime).toBe('component_oci');
+      expect(row.packageId).toBeNull();
+      expect(row.manifest).toMatchObject({
+        runtime: 'component_oci',
+        bundleDir: expect.stringContaining(bundleDigest),
+        component: { manifestVersion: 2, id: 'prospect-search' },
+      });
+    } finally {
+      if (previousDataDir === undefined) delete process.env.AGENTIS_DATA_DIR;
+      else process.env.AGENTIS_DATA_DIR = previousDataDir;
+    }
+  });
+});
+
+function portableFile(filePath: string, contents: string) {
+  const bytes = Buffer.from(contents);
+  return {
+    path: filePath,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    dataBase64: bytes.toString('base64'),
+  };
+}
 
 describe('GET /v1/extensions/listener-sources', () => {
   it('only returns executable listener sources with listener.emit permission', async () => {

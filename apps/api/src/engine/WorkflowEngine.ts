@@ -3511,6 +3511,14 @@ export class WorkflowEngine {
     const appId = this.deps.resolveAppIdForWorkflow?.(ctx.workspaceId, ctx.workflowId);
     const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
+    ctx.state.activeExecutions[node.id] = {
+      taskId: node.id,
+      nodeId: node.id,
+      executorType: 'agent',
+      executorRef: agentId,
+      startedAt: new Date().toISOString(),
+    };
+    await this.#persistRun(ctx).catch(() => {});
     this.#emitWorkStep(ctx, node, 'thinking', 'Running on its full-power runtime with the Agentis toolset');
     let text = '';
     try {
@@ -3546,10 +3554,12 @@ export class WorkflowEngine {
         maxToolCalls: config.maxToolSteps && config.maxToolSteps > 24 ? config.maxToolSteps : 2000,
         systemAddendum,
       })) {
+        if (ctx.abortController?.signal.aborted || ctx.state.status === 'CANCELLED') break;
         if (delta.type === 'text') text += delta.delta;
         this.#selfHeal.relayChatDelta(ctx, node, agentId, delta, clip);
       }
     } catch (err) {
+      if (ctx.abortController?.signal.aborted || ctx.state.status === 'CANCELLED') return true;
       this.deps.logger.warn('engine.agent_task.harness_loop_failed', { runId: ctx.runId, nodeId: node.id, error: (err as Error).message });
       await this.#failNode(ctx, node.id, `agent runtime failed: ${(err as Error).message}`);
       return true;

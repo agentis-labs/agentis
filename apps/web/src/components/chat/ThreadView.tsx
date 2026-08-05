@@ -266,13 +266,12 @@ function roomWaitingActivity(agentId: string, name: string, startedAt: string): 
     phase: 'runtime',
     status: 'running',
     label: `Starting ${name}`,
-    detail: 'Waiting for the agent runtime to produce a room reply.',
     startedAt,
     agentId,
   };
 }
 
-function roomRealtimeActivity(event: string, payload: Record<string, unknown>): ChatActivity | null {
+export function roomRealtimeActivity(event: string, payload: Record<string, unknown>): ChatActivity | null {
   const agentId = firstString(payload, ['agentId']);
   if (!agentId) return null;
   const at = firstString(payload, ['at', 'timestamp']) ?? new Date().toISOString();
@@ -285,27 +284,23 @@ function roomRealtimeActivity(event: string, payload: Record<string, unknown>): 
       phase: 'tool',
       status: 'running',
       label: `Using ${tool}`,
-      detail: tool,
       startedAt: at,
       agentId,
     };
   }
   if (event === REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE) {
-    const message = firstString(payload, ['message', 'text', 'line']);
-    if (!message) return null;
     return {
       type: 'activity',
       id: `room-message-${agentId}-${at}`,
       phase: 'runtime',
       status: 'running',
-      label: message,
+      label: 'Agent is working',
       startedAt: at,
       agentId,
     };
   }
   if (event === REALTIME_EVENTS.AGENT_WORK_STEP) {
     const phase = firstString(payload, ['phase', 'status']);
-    const text = firstString(payload, ['detail', 'description', 'text', 'summary', 'step', 'message']) ?? 'Working';
     const failed = phase === 'fail' || phase === 'failed' || phase === 'error';
     const complete = phase === 'complete' || phase === 'completed' || phase === 'success';
     return {
@@ -313,7 +308,7 @@ function roomRealtimeActivity(event: string, payload: Record<string, unknown>): 
       id: `room-work-${agentId}-${firstString(payload, ['phase', 'status']) ?? 'step'}-${at}`,
       phase: failed ? 'error' : complete ? 'complete' : 'runtime',
       status: failed ? 'error' : complete ? 'success' : 'running',
-      label: text,
+      label: failed ? 'Agent step failed' : complete ? 'Agent step completed' : 'Agent is working',
       startedAt: at,
       agentId,
     };

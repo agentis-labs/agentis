@@ -178,7 +178,6 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       cwd,
       env,
       windowsHide: true,
-      signal: controller.signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (err) {
@@ -189,6 +188,13 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     yield { type: 'done', finishReason: 'error' };
     return;
   }
+  // Node's spawn AbortSignal terminates only the direct process on Windows.
+  // CLI harnesses launch worker/model children, so Cancel must reap the whole
+  // tree or those descendants keep working and streaming after the run stops.
+  const terminateChild = () => terminateCliProcessTree(child);
+  if (controller.signal.aborted) terminateChild();
+  else controller.signal.addEventListener('abort', terminateChild, { once: true });
+  const unlinkChildAbort = () => controller.signal.removeEventListener('abort', terminateChild);
 
   // LIVENESS model, NOT a time guillotine. A capable agent (e.g. Codex at high
   // reasoning effort) can think silently for minutes on a large task — killing it
@@ -294,6 +300,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   child.on('error', (err) => {
     if (terminalHandled) return;
     terminalHandled = true;
+    unlinkChildAbort();
     unlinkAbort();
     clearTimers();
     if (timedOut && flushPartialOnTimeout()) {
@@ -387,6 +394,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   child.on('exit', (code) => {
     if (terminalHandled) return;
     terminalHandled = true;
+    unlinkChildAbort();
     unlinkAbort();
     clearTimers();
     if (timedOut && flushPartialOnTimeout()) {
@@ -475,7 +483,32 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     clearTimers();
     unlinkAbort();
     controller.abort();
+    unlinkChildAbort();
   }
+}
+
+function terminateCliProcessTree(child: ReturnType<typeof spawn>): void {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    try {
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      killer.unref();
+    } catch {
+      try { child.kill(); } catch { /* already stopped */ }
+    }
+    return;
+  }
+  try { child.kill('SIGTERM'); } catch { return; }
+  const force = setTimeout(() => {
+    if (child.exitCode == null && child.signalCode == null) {
+      try { child.kill('SIGKILL'); } catch { /* already stopped */ }
+    }
+  }, 1_000);
+  force.unref?.();
 }
 
 /**

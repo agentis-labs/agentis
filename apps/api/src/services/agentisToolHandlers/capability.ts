@@ -5,6 +5,7 @@ import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { normalizeExtensionIdentity } from '../extensionLibrary.js';
 import { ExtensionRuntime } from '../extensionRuntime.js';
+import { componentInstallPayloadSchema, installComponentExtension } from '../componentInstaller.js';
 
 export function registerCapabilityTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.register(
@@ -145,6 +146,72 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
     },
   );
 
+  registry.register(
+    {
+      id: 'agentis.component.install',
+      family: 'build',
+      description:
+        'Install or upgrade a portable Component v2 bundle from content-verified bundleFiles. Persists runtime component_oci and the full ComponentManifestV2 while preserving an existing extension ID so workflow references remain valid.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          extensionId: { type: 'string', description: 'Existing extension ID to upgrade in place. Optional when slug uniquely resolves it.' },
+          manifest: {
+            type: 'object',
+            description: 'Component extension manifest: name, slug, version, runtime:"component_oci", permissions, capabilityTags, and component (ComponentManifestV2).',
+          },
+          bundleFiles: {
+            type: 'array',
+            description: 'Portable files with path, sha256, and dataBase64. Include the entrypoint and dependency lockfile.',
+            items: { type: 'object' },
+          },
+          permissionsAcknowledged: {
+            type: 'array',
+            description: 'Exact permission list declared by the component.',
+            items: { type: 'string' },
+          },
+        },
+        required: ['manifest', 'bundleFiles', 'permissionsAcknowledged'],
+      },
+      mutating: true,
+      autoExecute: true,
+      mcpExposed: true,
+    },
+    async (args, ctx) => {
+      const payload = componentInstallPayloadSchema.parse({
+        extensionId: args.extensionId,
+        manifest: args.manifest,
+        bundleFiles: args.bundleFiles,
+        permissionsAcknowledged: args.permissionsAcknowledged,
+      });
+      if (!payload.bundleFiles) throw new Error('bundleFiles are required for agent component installation');
+      const installed = installComponentExtension(deps.db, {
+        workspaceId: ctx.workspaceId,
+        ambientId: ctx.ambientId ?? null,
+        userId: ctx.userId,
+        extensionId: payload.extensionId,
+        manifest: payload.manifest,
+        permissionsAcknowledged: payload.permissionsAcknowledged,
+        bundleFiles: payload.bundleFiles,
+      });
+      return {
+        extensionId: installed.id,
+        runtime: installed.manifest.runtime,
+        slug: installed.manifest.slug,
+        version: installed.manifest.version,
+        component: installed.manifest.component,
+        bundle: {
+          bundleHash: installed.bundle.bundleHash,
+          fileCount: installed.bundle.fileCount,
+          totalBytes: installed.bundle.totalBytes,
+          created: installed.bundle.created,
+        },
+        created: installed.created,
+        upgraded: installed.upgraded,
+        previousRuntime: installed.previousRuntime,
+      };
+    },
+  );
   registry.register(
     {
       id: 'agentis.extension.create',
