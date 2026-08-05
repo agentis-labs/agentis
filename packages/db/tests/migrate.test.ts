@@ -386,6 +386,34 @@ INSERT INTO schema_migrations (version, name) VALUES (1, 'init'), (2, 'company_o
     }
   });
 
+  it('upgrades a pre-v125 plans table before embedded indexes are created', () => {
+    const path = tempDbPath();
+    const initial = openSqlite({ path });
+    initial.sqlite.exec(`
+DROP INDEX IF EXISTS idx_plans_owner_agent;
+ALTER TABLE plans DROP COLUMN owner_agent_id;
+DELETE FROM schema_migrations WHERE version IN (125, 126);
+`);
+    initial.sqlite.close();
+
+    const { sqlite } = openSqlite({ path });
+    try {
+      const columns = sqlite.prepare("PRAGMA table_info('plans')").all() as Array<{ name: string }>;
+      expect(columns.map((column) => column.name)).toContain('owner_agent_id');
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_plans_owner_agent'").get(),
+      ).toBeDefined();
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notification_receipts'").get(),
+      ).toBeDefined();
+      expect(
+        sqlite.prepare('SELECT version FROM schema_migrations WHERE version = 125').get(),
+      ).toBeDefined();
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it('migrate:false on openSqlite skips the runner entirely', () => {
     const path = tempDbPath();
     const { sqlite } = openSqlite({ path, migrate: false });

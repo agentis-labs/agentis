@@ -51,9 +51,9 @@ export function openSqlite(options: SqliteOpenOptions): { db: AgentisSqliteDb; s
 }
 
 function runEmbeddedMigrations(sqlite: Database.Database): void {
-  // Older databases can have a pre-task-spine plans table. EMBEDDED_INIT_SQL
-  // creates an index on plans.session_id before the drift patch below runs, so
-  // add that single compatibility column first if the table already exists.
+  // Older databases can have a plans table without columns referenced by
+  // indexes in EMBEDDED_INIT_SQL. Add those columns before the embedded schema
+  // creates its indexes; the versioned runner records their migrations below.
   {
     const plansTable = sqlite
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'plans'")
@@ -62,6 +62,9 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
       const planColumns = sqlite.prepare("SELECT name FROM pragma_table_info('plans')").all() as Array<{ name: string }>;
       if (!planColumns.some((column) => column.name === 'session_id')) {
         sqlite.exec('ALTER TABLE plans ADD COLUMN session_id TEXT');
+      }
+      if (!planColumns.some((column) => column.name === 'owner_agent_id')) {
+        sqlite.exec('ALTER TABLE plans ADD COLUMN owner_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL');
       }
     }
   }
