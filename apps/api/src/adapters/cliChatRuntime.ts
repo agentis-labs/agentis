@@ -226,6 +226,9 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       queue.push(runtimeProgressActivity({
         id: `${cfg.logTag}-heartbeat`,
         runtimeName: cfg.displayName,
+        safeLabel: firstOutputSeen
+          ? `${cfg.displayName} is working — ${formatElapsed(elapsed)} elapsed`
+          : `Waiting for ${cfg.displayName} to respond — ${formatElapsed(elapsed)} so far, no output yet`,
         text: firstOutputSeen
           ? `${cfg.displayName} is working — ${formatElapsed(elapsed)} elapsed`
           : `Waiting for ${cfg.displayName} to respond — ${formatElapsed(elapsed)} so far, no output yet`,

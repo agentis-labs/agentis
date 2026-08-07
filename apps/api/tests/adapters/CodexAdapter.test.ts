@@ -588,7 +588,7 @@ describe('CodexAdapter', () => {
       .join('');
     expect(answer).toBe('Fixed the extension and verified the workflow.');
     expect(answer).not.toContain('I’ll inspect');
-    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', label: 'Inspecting the failed run first' }));
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', label: 'Codex is working' }));
   });
 
   it('resumes the native Codex thread only for the same Agentis conversation', async () => {

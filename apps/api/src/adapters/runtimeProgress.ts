@@ -6,6 +6,8 @@ export interface RuntimeProgressOptions {
   id: string;
   runtimeName: string;
   text?: string;
+  /** A caller-provided status label that is already safe for operators. */
+  safeLabel?: string;
   reasoning?: boolean;
   agentId?: string;
 }
@@ -17,9 +19,9 @@ export function runtimeProgressActivity(options: RuntimeProgressOptions): Runtim
     id: options.id,
     phase: 'runtime',
     status: 'running',
-    label: options.reasoning
+    label: options.safeLabel?.trim() || (options.reasoning
       ? `${options.runtimeName} is reasoning`
-      : `${options.runtimeName} is working`,
+      : `${options.runtimeName} is working`),
     startedAt: new Date().toISOString(),
     ...(options.agentId ? { agentId: options.agentId } : {}),
   };
