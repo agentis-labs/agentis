@@ -106,7 +106,7 @@ export const REALTIME_EVENTS = {
   // Self-improvement
   INSTINCT_PROPOSED: 'instinct.proposed',
 
-  // Listener runtime (persistent_listener v2)
+  // Persistent listener runtime
   LISTENER_CONNECTED: 'listener.connected',
   LISTENER_DISCONNECTED: 'listener.disconnected',
   LISTENER_EVENT_RECEIVED: 'listener.event.received',
@@ -159,6 +159,8 @@ export const REALTIME_EVENTS = {
   APP_CREATED: 'app.created',
   APP_UPDATED: 'app.updated',
   APP_DELETED: 'app.deleted',
+  APP_BLUEPRINT_UPDATED: 'app.blueprint.updated',
+  BUILD_SESSION_UPDATED: 'build.session.updated',
 
   // Live co-presence (LIVING-APPS-10X §6/G9) — EPHEMERAL, never persisted.
   //   broadcast on heartbeat + on join/leave. Payload: AppPresenceUpdate.

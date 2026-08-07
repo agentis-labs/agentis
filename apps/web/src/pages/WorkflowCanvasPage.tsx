@@ -3824,7 +3824,9 @@ function RunInputDialog({
         init[v.name] = v.default != null ? String(v.default) : '';
       });
       setValues(init);
-      setTarget('active');
+      // Running a draft is always a verification run. Publishing is a separate,
+      // proof-gated operation, so an operator never has to choose a revision here.
+      setTarget(candidateRevision ? 'candidate' : 'active');
     }
   }, [open, variables]);
 
@@ -3854,7 +3856,7 @@ function RunInputDialog({
           </button>
         </header>
         <div className="space-y-4 px-5 py-5">
-          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Revision to run">
+          <div className="hidden grid grid-cols-2 gap-2" role="radiogroup" aria-label="Revision to run">
             <button type="button" role="radio" aria-checked={target === 'active'} onClick={() => setTarget('active')} className={clsx('rounded-lg border p-3 text-left', target === 'active' ? 'border-accent bg-accent/10' : 'border-line bg-surface-2')}>
               <div className="text-[12px] font-semibold text-text-primary">Active · production</div>
               <div className="mt-1 font-mono text-[10px] text-text-muted">{activeRevision ? activeRevision.id.slice(0, 8) : 'Compatibility active'}</div>
@@ -3864,7 +3866,19 @@ function RunInputDialog({
               <div className="mt-1 font-mono text-[10px] text-text-muted">{candidateRevision ? candidateRevision.id.slice(0, 8) : 'No candidate'}</div>
             </button>
           </div>
-          <p className="text-[11px] text-text-muted">Production always runs the active revision. Candidate runs gather proof and never silently replace it.</p>
+          <div className={clsx(
+            'rounded-lg border px-3 py-2.5',
+            candidateRevision ? 'border-warn/35 bg-warn/10' : 'border-accent/35 bg-accent/10',
+          )}>
+            <div className="text-[12px] font-semibold text-text-primary">
+              {candidateRevision ? 'Testing the current draft' : 'Running the published workflow'}
+            </div>
+            <div className="mt-1 text-[11px] text-text-secondary">
+              {candidateRevision
+                ? `Draft ${candidateRevision.id.slice(0, 8)} stays isolated until its checks pass and it is published.`
+                : `Published revision ${activeRevision?.id.slice(0, 8) ?? 'compatibility active'} will run in production.`}
+            </div>
+          </div>
           {variables.length === 0 ? null : (
             <>
               <p className="text-[13px] text-text-secondary">

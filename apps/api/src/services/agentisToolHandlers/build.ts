@@ -18,6 +18,7 @@ import {
   layoutWorkflowGraph,
   layoutWorkflowGraphByPhases,
   normalizeAgentRequirements,
+  repairWorkflowGraphIdentity,
   requiredAffordanceKeys,
   suggestWorkflowPhases,
 } from '@agentis/core';
@@ -4133,13 +4134,13 @@ function parseAgentGraphDraft(value: unknown): WorkflowGraph {
   if (!Array.isArray(draft.edges)) {
     throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'graphDraft.edges must be an array.');
   }
-  return {
+  return repairWorkflowGraphIdentity({
     version: draft.version ?? 1,
     nodes: draft.nodes as WorkflowGraph['nodes'],
-    edges: draft.edges as WorkflowGraph['edges'],
+    edges: draft.edges as unknown as Array<Record<string, unknown>>,
     viewport: draft.viewport ?? { x: 0, y: 0, zoom: 1 },
     ...(draft.phases ? { phases: draft.phases } : {}),
-  };
+  }).graph;
 }
 
 function applyWorkflowMutationPatch(base: WorkflowGraph, value: unknown): WorkflowGraph {
@@ -4439,7 +4440,7 @@ export const SYNTHESIS_SYSTEM_PROMPT = [
   '    filter         — boolean gate (pass / skip) — never returns data',
   '    http_request   — fetch a URL / call a JSON API',
   '    integration    — a connector action (Slack / Gmail / GitHub / Sheets / …)',
-  '    component_task — a version-pinned deterministic Component v2 operation; prefer it over an agent when code can express the work exactly',
+  '    component_task — a revision-pinned deterministic Component operation; prefer it over an agent when code can express the work exactly',
   '    knowledge      — Knowledge-Base (RAG) search over UPLOADED DOCS (not the Brain memory)',
   '    router         — branch by condition',
   '    merge          — join parallel branches',

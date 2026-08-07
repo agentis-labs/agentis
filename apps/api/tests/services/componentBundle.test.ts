@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ComponentManifestV2 } from '@agentis/core';
+import type { ComponentManifest } from '@agentis/core';
 import { createHash } from 'node:crypto';
 import { inspectComponentBundle, installComponentBundle, installPortableComponentBundle, validateComponentManifest } from '../../src/extensions/componentBundle.js';
 
@@ -12,7 +12,7 @@ afterEach(() => {
   delete process.env.AGENTIS_DATA_DIR;
 });
 
-describe('Component v2 bundle', () => {
+describe('Component bundle', () => {
   it('installs a locked Python bundle into content-addressed storage', () => {
     const source = temp('component-source-');
     const data = temp('component-data-');
@@ -55,7 +55,7 @@ describe('Component v2 bundle', () => {
 });
 
 function temp(prefix: string): string { const root = mkdtempSync(join(tmpdir(), prefix)); roots.push(root); mkdirSync(root, { recursive: true }); return root; }
-function component(overrides: Partial<ComponentManifestV2> = {}): ComponentManifestV2 {
+function component(overrides: Partial<ComponentManifest> = {}): ComponentManifest {
   return {
     manifestVersion: 2,
     id: 'python-example',

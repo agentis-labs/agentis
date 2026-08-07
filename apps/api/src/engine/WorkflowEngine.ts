@@ -1557,6 +1557,11 @@ export class WorkflowEngine {
       await this.#cancelPersistedRun(runId);
       return;
     }
+    // Fence the run *before* awaiting adapter cancellation. A completion can race
+    // the adapter's cancel acknowledgement; without this fence that late callback
+    // could re-open nodes and settle the run as completed after the operator has
+    // explicitly cancelled it.
+    ctx.cancellationRequested = true;
     // Stop in-flight work that honors the run signal (e.g. outbound HTTP, agent
     // model calls) rather than letting it run to completion after cancellation
     // (NATIVE-ADVANCEMENT Proposal 7, Agentis-native run-scoped cancellation).
@@ -2281,6 +2286,7 @@ export class WorkflowEngine {
   // ────────────────────────────────────────────────────────────
 
   async #tick(ctx: RunningContext): Promise<void> {
+    if (ctx.cancellationRequested || isTerminalRunStatus(ctx.state.status)) return;
     if (ctx.state.status !== 'RUNNING' && ctx.state.status !== 'WAITING') return;
 
     return await this.#telemetry.span(
@@ -2589,6 +2595,9 @@ export class WorkflowEngine {
     node: WorkflowNode,
     item: ReadyQueueItem,
   ): Promise<void> {
+    // A queued/retry dispatch may wake after cancel. Never start new work once
+    // the run has crossed the cancellation fence.
+    if (ctx.cancellationRequested || isTerminalRunStatus(ctx.state.status)) return;
     // Infinite-cycle backstop (masterplan 1.4): cap how many times any single
     // node may be dispatched in one run. An author-wired retry cycle, a runaway
     // self-heal/retry, or a planner-spliced loop could otherwise re-dispatch a
@@ -7200,6 +7209,9 @@ export class WorkflowEngine {
     nodeId: string,
     output: Record<string, unknown>,
   ): Promise<Record<string, unknown> | null> {
+    // All executor paths converge here. Treat late completion after cancellation
+    // as an acknowledgement only; it must not mutate graph state or fan out.
+    if (ctx.cancellationRequested || isTerminalRunStatus(ctx.state.status)) return null;
     const ns = ctx.state.nodeStates[nodeId];
     if (!ns) return null;
     const completedNode = ctx.graph.nodes.find((n) => n.id === nodeId);
@@ -7634,6 +7646,10 @@ export class WorkflowEngine {
   }
 
   async #failNode(ctx: RunningContext, nodeId: string, error: string): Promise<void> {
+    // A cancellation is terminal intent, not a failure to self-heal, retry, or
+    // route through an error edge. Ignore late executor rejections for the same
+    // reason we ignore late completions above.
+    if (ctx.cancellationRequested || isTerminalRunStatus(ctx.state.status)) return;
     const ns = ctx.state.nodeStates[nodeId];
     if (!ns) return;
     // Recoverable infrastructure failure (model out of credits / billing): do NOT
@@ -7642,6 +7658,7 @@ export class WorkflowEngine {
     // (a catch branch can't fix "no credits"). This is the fix for runs that used
     // to either hang as "running" forever or fail opaquely on an out-of-credits model.
     const node = ctx.graph.nodes.find((candidate) => candidate.id === nodeId);
+    error = contextualizeNodeFailure(error, node);
     const classification = classifyWorkflowFailure(error);
     if (node && this.deps.workflowExperience) {
       try {
@@ -8191,6 +8208,18 @@ export class WorkflowEngine {
 
   async #transitionRunStatus(ctx: RunningContext, status: WorkflowRunStatus): Promise<void> {
     if (ctx.state.status === status) return;
+    // Do not let a late asynchronous executor overwrite a terminal settlement.
+    // CANCELLED is the only permitted transition once an operator has requested
+    // cancellation, even while adapter shutdown is still in progress.
+    if (isTerminalRunStatus(ctx.state.status)) {
+      this.deps.logger.debug('engine.run.transition_ignored_terminal', {
+        runId: ctx.runId,
+        current: ctx.state.status,
+        requested: status,
+      });
+      return;
+    }
+    if (ctx.cancellationRequested && status !== 'CANCELLED') return;
 
     // Output contract enforcement: a run transitioning to COMPLETED must match
     // the workflow's declared `outputContract` (when set). Mismatches downgrade
@@ -8554,6 +8583,7 @@ export class WorkflowEngine {
       executionStatus: settlement.executionStatus,
       outcomeStatus: settlement.outcomeStatus,
       settlement,
+      ...(settledAt ? { settledAt } : {}),
       workflowId: ctx.workflowId,
       workspaceId: ctx.workspaceId,
       // WHY the run parked, on the wire — so a surface can say "out of credits"
@@ -9102,6 +9132,8 @@ export interface RunningContext {
    * running to completion after the run was cancelled.
    */
   abortController?: AbortController;
+  /** Set synchronously when the operator cancels, before adapter shutdown awaits. */
+  cancellationRequested?: boolean;
   /** Per-phase execution runtime (cost accrual + SLA timer). Lazily created. */
   phaseRuntime?: Map<string, PhaseRuntimeState>;
   /** Set when a phase / run / workspace budget is exceeded — settles the run as FAILED. */
@@ -10634,6 +10666,15 @@ function implicitConditionEdgeResult(output: Record<string, unknown> | unknown):
     }
   }
   return true;
+}
+
+/** Turn schema-only errors into an actionable graph diagnostic. */
+function contextualizeNodeFailure(error: string, node: WorkflowNode | undefined): string {
+  if (!node || !/connectionId/i.test(error) || !/(undefined|required|expected)/i.test(error)) return error;
+  if (/Node .+ requires a configured connectionId/i.test(error)) return error;
+  return `Node "${node.title}" (${node.id}) requires a configured connectionId. `
+    + 'Configure its integration connection, or replace/remove this outbound node for a manual workflow. '
+    + `Runtime detail: ${error}`;
 }
 
 function componentAsExtension(config: ComponentTaskNodeConfig): ExtensionTaskNodeConfig {

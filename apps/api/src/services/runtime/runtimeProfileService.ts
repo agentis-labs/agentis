@@ -21,7 +21,7 @@ import type {
   RuntimeResourceWriteResult,
   RuntimeValue,
   RuntimeValueSource,
-  RuntimeProfileV2,
+  RuntimeProfile,
 } from '@agentis/core';
 import { AgentisError } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -322,7 +322,7 @@ export class RuntimeProfileService {
   }
 }
 
-function effectiveRuntimeProfile(config: Record<string, unknown>): RuntimeProfileV2 {
+function effectiveRuntimeProfile(config: Record<string, unknown>): RuntimeProfile {
   const raw = record(config.runtimeProfile);
   const mode = raw.mode === 'hermetic' || raw.mode === 'containerized' ? raw.mode : 'native';
   const permissionProfile = raw.permissionProfile === 'read_only'

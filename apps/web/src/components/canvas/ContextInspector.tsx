@@ -790,12 +790,18 @@ function AgentTaskForm({ data, update, agents, upstream, session = false, onAgen
           so "pick a model on the node" did nothing. Now it always shows. */}
       <ModelPolicyField data={data} update={update} adapterType={adapterType} agentId={agentId} />
       {agentId && (
-        <Accordion title="Change this agent’s runtime everywhere">
-          <p className="mb-2 text-[10.5px] leading-relaxed text-text-muted">
-            Edits the agent itself — affects every workflow and chat that uses it, not just this node. Use this to switch an imported agent onto a runtime that exists on this machine.
-          </p>
+        <section className="mt-3 rounded-lg border border-line bg-surface-2/45 p-3">
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">Agent execution binding</div>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-text-muted">
+                Runtime and model are resolved together. This binding affects every workflow and chat using the agent; the node override above takes precedence only for this node.
+              </p>
+            </div>
+            <span className="shrink-0 rounded-full border border-line bg-canvas px-2 py-1 font-mono text-[9px] text-text-muted">node → agent → workspace</span>
+          </div>
           <SelectedAgentModelControl agentId={agentId} adapterType={adapterType} onUpdated={onAgentsChange} variant="rail" />
-        </Accordion>
+        </section>
       )}
       {session && (
         <Field label="Session behavior" hint="Persistent sessions can pause for input and resume without losing context.">
@@ -1072,7 +1078,7 @@ function ExtensionTaskForm({ data, update, skills, onSkillsChange }: { data: Rec
 function ComponentTaskForm({ data, update }: { data: Record<string, unknown>; update: NodeFormProps['update'] }) {
   return (
     <>
-      <Field label="Component ID or slug" hint="The installed Component v2 bundle. Installation verifies its content hash and manifest.">
+      <Field label="Component ID or slug" hint="The installed Component bundle. Installation verifies its content hash and manifest.">
         <input className={inputCls + ' font-mono'} value={asStr(data.componentSlug) || asStr(data.componentId)} onChange={(event) => update({ componentSlug: event.target.value, componentId: undefined })} placeholder="my-python-component" />
       </Field>
       <Field label="Pinned version" hint="Required by the editor so production runs remain reproducible.">
@@ -3252,5 +3258,3 @@ function RawGenericForm({ data, update }: { data: Record<string, unknown>; updat
     </>
   );
 }
-
-

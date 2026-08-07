@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, type ComponentManifestV2, type ExtensionManifest, type ExtensionPermission } from '@agentis/core';
+import { AgentisError, type ComponentManifest, type ExtensionManifest, type ExtensionPermission } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import {
   installComponentBundle,
@@ -80,7 +80,7 @@ export interface ComponentExtensionManifestInput {
   permissions: ExtensionPermission[];
   allowedDomains?: string[];
   capabilityTags?: string[];
-  component: ComponentManifestV2;
+  component: ComponentManifest;
 }
 
 export interface InstallComponentExtensionInput {

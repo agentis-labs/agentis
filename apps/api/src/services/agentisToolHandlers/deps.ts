@@ -52,6 +52,7 @@ import type { CredentialVault } from '../credentialVault.js';
 import type { SkillMaterializer } from '../skillMaterializer.js';
 import type { WorkflowRevisionService } from '../workflow/workflowRevisionService.js';
 import type { WorkflowExperienceService } from '../workflow/workflowExperienceService.js';
+import type { BuildSessionService } from '../buildSessionService.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -127,6 +128,8 @@ export interface ToolHandlerDeps {
   specialistRuntime?: SpecialistRuntimeService;
   specialistRouter?: SpecialistDemandRouter;
   plans?: PlanService;
+  /** Server-owned App construction state and evidence gate. */
+  buildSessions?: BuildSessionService;
   channels?: ChannelBridge;
   /** Headless Chromium pool — backs the `agentis.browser.*` tools. */
   browserPool?: BrowserPool;

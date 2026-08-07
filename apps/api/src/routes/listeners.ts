@@ -9,7 +9,7 @@
 import { Hono, type Context } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, isListenerConfigV2, schemas } from '@agentis/core';
+import { AgentisError, isListenerConfig, schemas } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
@@ -54,7 +54,7 @@ export function buildListenerRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
       .all();
     const listeners = rows.map(({ webhookSecret: _s, ...rest }) => ({
       ...rest,
-      isV2: isListenerConfigV2(rest.config),
+      configContract: isListenerConfig(rest.config) ? 'canonical' : 'legacy',
       health: deps.runtime.listeners?.health(rest.id) ?? null,
     }));
     return c.json({ listeners });
@@ -64,7 +64,7 @@ export function buildListenerRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
     const row = fetchListener(c, c.req.param('id'));
     const { webhookSecret: _s, ...rest } = row;
     return c.json({
-      listener: { ...rest, isV2: isListenerConfigV2(rest.config) },
+      listener: { ...rest, configContract: isListenerConfig(rest.config) ? 'canonical' : 'legacy' },
       health: deps.runtime.listeners?.health(row.id) ?? null,
     });
   });
@@ -97,7 +97,7 @@ export function buildListenerRoutes(deps: { db: AgentisSqliteDb; auth: AuthServi
 
   app.post('/:id/resume', async (c) => {
     const row = fetchListener(c, c.req.param('id'));
-    if (!isListenerConfigV2(row.config)) {
+    if (!isListenerConfig(row.config)) {
       throw new AgentisError('LISTENER_INVALID_CONFIG', 'listener config must declare a `source` before it can run');
     }
     await deps.runtime.activate(toActiveTrigger(row));

@@ -13,7 +13,7 @@ every settled state carries `compass.next` (the Paved Road: an actionable next c
 
 Families (representative, not exhaustive):
 
-- **Build & prove** — `build_workflow`, `workflow.{create,patch,validate,dry_run,scope,test,harden,restore_blueprint,bless,deliver}`, `plan_workflow`, `evaluate`, `reflect`, `workflow.{patterns,learn}`.
+- **Build & prove** — `build_workflow`, `agentis.app.plan`, `agentis.app.verify`, `workflow.{create,patch,validate,dry_run,scope,test,harden,restore_blueprint,bless,deliver}`, `plan_workflow`, `evaluate`, `reflect`, `workflow.{patterns,learn}`.
 - **Run & observe** — `run.{await,status,diagnose,cancel,replay,inspect}`, `workflow.{status,list}`, `run.query`, `trace.inspect`, `ephemeral.run`.
 - **Data & apps** — `app.{create,list,archive,delete,adopt_workflow,scaffold,plan}`, `data.{define_collection,insert,update,upsert,delete,query,promote_memory}`.
 - **UI** — `ui.{render,patch,compose,perform_region,action_schema,lint}`.
@@ -33,6 +33,11 @@ compatibility. Ask/Plan/Auto policy is still enforced by the registry, including
 inside code-mode; inner calls retain attribution and advance the lease-state frontier. Gateway
 output is bounded to 12,000 characters by default, with explicit `full` or `graph` detail for
 larger responses.
+
+Tool activity is normalized before it reaches Chat, the canvas, or observability: a wrapped
+`agentis.tools.call` event is rendered as the underlying requested operation, with only a safe
+argument summary. Credentials and hidden reasoning are redacted. This keeps the operator-facing
+trace useful without exposing gateway plumbing or treating model narration as evidence.
 
 ## Code-mode
 
@@ -63,7 +68,7 @@ Agent-authored operations in a sandbox (`apps/api/src/extensions/`, `services/ex
   workflow. Tables: `extensions`, `agent_packages`, `extension_executions`. Routes:
   `/v1/extensions`, `/v1/packages`, `/v1/capabilities`, `/v1/tools`.
 
-**Component v2** is the hardened, portable extension path for multi-file Python 3.12 and Node 20
+**Portable components** are the hardened extension path for multi-file Python 3.12 and Node 20
 packages. Its manifest pins the entrypoint, operations, dependency lock, bundle hash, permissions,
 allowed domains, CPU/memory/timeout/tmp limits, and optional SBOM and healthcheck. Installation is
 content-addressed under `AGENTIS_DATA_DIR/components/<hash>` and rejects traversal, symlinks,

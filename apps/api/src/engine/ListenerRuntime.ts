@@ -1,7 +1,7 @@
 /**
  * ListenerRuntime — EXTENSIONS-AND-LISTENER-10X §1, §7.
  *
- * The coordinator for persistent_listener v2 triggers. For each active trigger
+ * The coordinator for persistent listener triggers. For each active trigger
  * whose config is a ListenerConfig (source/predicate/firePolicy), it wires:
  *
  *     SourceDriver ──onEvent──▶ PredicateEvaluator ──matched──▶ FirePolicyController ──▶ fire()
@@ -15,7 +15,7 @@ import {
   AgentisError,
   REALTIME_EVENTS,
   REALTIME_ROOMS,
-  isListenerConfigV2,
+  isListenerConfig,
   type ListenerConfig,
   type FirePolicyMode,
   type PredicateResult,
@@ -66,9 +66,9 @@ export class ListenerRuntime {
 
   constructor(private readonly deps: ListenerRuntimeDeps) {}
 
-  /** Whether a trigger's config is a v2 ListenerConfig (vs legacy adapter shape). */
+  /** Whether a trigger uses the canonical ListenerConfig rather than the legacy adapter shape. */
   static handles(config: unknown): config is ListenerConfig {
-    return isListenerConfigV2(config);
+    return isListenerConfig(config);
   }
 
   health(triggerId: string) {
@@ -86,7 +86,7 @@ export class ListenerRuntime {
   async activate(trigger: ActiveTrigger): Promise<void> {
     await this.deactivate(trigger.triggerId);
     const config = trigger.config as unknown;
-    if (!isListenerConfigV2(config)) {
+    if (!isListenerConfig(config)) {
       throw new AgentisError('LISTENER_INVALID_CONFIG', 'listener config must declare a `source`');
     }
     const instance = this.#build(trigger, config);

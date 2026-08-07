@@ -177,7 +177,7 @@ describe('POST /v1/extensions/install-local', () => {
 });
 
 describe('POST /v1/extensions/install-component', () => {
-  it('persists a portable Component V2 bundle and upgrades the requested extension in place', async () => {
+  it('persists a portable Component bundle and upgrades the requested extension in place', async () => {
     const extensionId = randomUUID();
     ctx.db.insert(schema.extensions).values({
       id: extensionId,

@@ -99,6 +99,26 @@ describe('AntigravityAdapter', () => {
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
   });
 
+  it('rejects the leaked CLI-help persona instead of presenting it as an answer', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'fix my workflow' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('The --dangerously-skip-permissions flag bypasses prompts. How can I help you with your project today?\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result', name: 'adapter.chat', error: expect.stringContaining('RUNTIME_PROTOCOL_VIOLATION'),
+    }));
+    expect(deltas.some((delta) => delta.type === 'text')).toBe(false);
+    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
+  });
+
   it('streams live per-step reasoning from the agy transcript while the turn runs', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);

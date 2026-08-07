@@ -26,10 +26,10 @@ protected by a per-runtime `CircuitBreaker`. Every task is a `NormalizedTask`.
 
 All six CLI/streaming harnesses share a common chat runtime (`adapters/cliChatRuntime.ts`).
 
-## Runtime Profile v2 and the execution envelope
+## Runtime Profile and the execution envelope
 
 An adapter name is not enough to explain what a turn could actually do. Each commissioned
-agent therefore carries a `RuntimeProfileV2` (`packages/core/src/types/adapter.ts`) with an
+agent therefore carries a `RuntimeProfile` (`packages/core/src/types/adapter.ts`) with an
 explicit execution mode (`native | hermetic | containerized`), project root, optional native
 profile name, named permission profile (`read_only | workspace_write | trusted_local |
 externally_sandboxed`), inheritance switches for user config/project instructions/plugins/skills,

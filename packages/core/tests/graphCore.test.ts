@@ -5,7 +5,7 @@
  * workflow dedup, the "Tidy" layout, or the edit-time validation gate.
  */
 import { describe, it, expect } from 'vitest';
-import { canonicalizeGraph } from '../src/graphCanonical.js';
+import { canonicalizeGraph, repairWorkflowGraphIdentity } from '../src/graphCanonical.js';
 import { computeLayeredLayout, layoutWorkflowGraph } from '../src/graphLayout.js';
 import { computePhaseAwareLayout, layoutWorkflowGraphByPhases, suggestWorkflowPhases } from '../src/graphPhases.js';
 import { workflowGraphSchema, workflowNodeSchema } from '../src/schemas/workflow.js';
@@ -25,6 +25,23 @@ function graph(overrides: Partial<WorkflowGraph> = {}): WorkflowGraph {
 }
 
 describe('canonicalizeGraph', () => {
+  it('assigns deterministic edge ids and deduplicates collisions', () => {
+    const input = graph({
+      edges: [
+        { source: 'T', target: 'M' },
+        { source: 'T', target: 'M' },
+        { id: 'kept', source: 'M', target: 'T' },
+        { id: 'kept', source: 'T', target: 'M' },
+      ] as never,
+    });
+    const first = repairWorkflowGraphIdentity(input);
+    const second = repairWorkflowGraphIdentity(first.graph);
+    expect(first.repairs).toHaveLength(3);
+    expect(new Set(first.graph.edges.map((edge) => edge.id)).size).toBe(4);
+    expect(second.repairs).toEqual([]);
+    expect(second.graph.edges.map((edge) => edge.id)).toEqual(first.graph.edges.map((edge) => edge.id));
+  });
+
   it('is stable across viewport and node-position changes (cosmetic)', () => {
     const a = canonicalizeGraph(graph());
     const moved = graph();

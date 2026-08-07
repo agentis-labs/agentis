@@ -49,6 +49,10 @@ export interface DeliveryTimelineEntry { stage: string; detail: string; at: stri
 
 export interface DeliveryResult {
   delivered: boolean;
+  /** True once this verified candidate became the production revision. */
+  published?: boolean;
+  /** Present when a risky verified candidate is waiting in the Approval Inbox. */
+  approvalId?: string;
   outcome: DeliveryOutcome;
   workflowId: string;
   appId?: string | null;
@@ -101,7 +105,6 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
   const maxIterations = Math.max(1, Math.min(args.maxIterations ?? 3, 5));
   const maxWallMs = Math.max(30_000, Math.min(args.maxWallMs ?? 480_000, 1_200_000));
   const deadline = Date.now() + maxWallMs;
-  const autoHarden = false; // delivery proves accomplishment; hardening/arming stays an explicit operator step.
 
   // ── 1. Build a new workflow, or load an existing one. ──────────────────────
   let workflowId = args.workflowId ?? '';
@@ -239,13 +242,43 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
 
     // 2d. ACCOMPLISHED — verified against the world. Done.
     if (verdict.outcome === 'accomplished') {
+      // The engine records this too. Do it at the delivery boundary so a
+      // successful embedded run can always progress through revision gates.
+      revisions.recordProof({
+        workspaceId: ctx.workspaceId,
+        workflowId,
+        revisionId: target.revisionId,
+        gate: 'clean_debug',
+        status: settle.status === 'COMPLETED' ? 'passed' : 'failed',
+        runId: settle.runId,
+        evidence: { status: settle.status, delivery: true },
+      });
+      revisions.recordProof({
+        workspaceId: ctx.workspaceId,
+        workflowId,
+        revisionId: target.revisionId,
+        gate: 'outcome',
+        status: 'passed',
+        runId: settle.runId,
+        evidence: { verdict: verdict.outcome, delivery: true },
+      });
+      const publication = await publishVerifiedCandidate(deps, revisions, ctx, workflowId, target.revisionId);
       mark('accomplished', `Verified: ${verdict.checks.filter((c) => c.passed).length}/${verdict.checks.length} acceptance check(s) passed`);
-      void autoHarden;
+      if (publication.kind === 'promoted') {
+        mark('published', `Promoted verified safe revision ${publication.revisionId}`);
+      } else if (publication.kind === 'approval_required') {
+        mark('approval_required', 'Verified candidate can run code or send data outward; awaiting operator approval to publish');
+        return {
+          delivered: false, outcome: 'blocked_on_human', workflowId, appId, runId: settle.runId, iterations, verdict,
+          approvalId: publication.approvalId, timeline, compass: compassOf(deps, ctx, workflowId),
+          message: 'The draft is verified, but publishing it requires an operator approval because it can run code or send data outward.',
+        };
+      }
       return {
-        delivered: true, outcome: 'accomplished', workflowId, appId, runId: settle.runId, iterations, verdict,
+        delivered: true, published: publication.kind === 'promoted' || publication.kind === 'already_active', outcome: 'accomplished', workflowId, appId, runId: settle.runId, iterations, verdict,
         timeline, compass: compassOf(deps, ctx, workflowId),
         message: `Delivered and VERIFIED against the world in ${i} attempt(s): ${verdict.checks.filter((c) => c.passed).map((c) => c.claim).join('; ')}. `
-          + `Harden it (agentis.workflow.harden) to freeze the proof and enable unattended triggers.`,
+          + (publication.kind === 'promoted' ? 'The verified safe draft is now published.' : 'The published revision already matched this verified workflow.'),
       };
     }
 
@@ -271,6 +304,52 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
   }
 
   return fail(timeline, workflowId, 'failed', 'Delivery loop exited without a verdict.', { appId, runId: lastRunId, verdict: lastVerdict });
+}
+
+/** Publish without discretion only after immutable proof gates pass. */
+async function publishVerifiedCandidate(
+  deps: ToolHandlerDeps,
+  revisions: WorkflowRevisionService,
+  ctx: DeliverCtx,
+  workflowId: string,
+  revisionId: string,
+): Promise<{ kind: 'promoted'; revisionId: string } | { kind: 'already_active' } | { kind: 'not_ready' } | { kind: 'approval_required'; approvalId: string }> {
+  const active = revisions.active(ctx.workspaceId, workflowId);
+  if (active.revision.id === revisionId) return { kind: 'already_active' };
+  const candidate = revisions.candidate(ctx.workspaceId, workflowId);
+  if (!candidate || candidate.revision.id !== revisionId) return { kind: 'not_ready' };
+  const proof = revisions.proofState(ctx.workspaceId, workflowId, revisionId);
+  const missingNonApproval = proof.missing.filter((gate) => gate !== 'operator_approval');
+  if (missingNonApproval.length > 0 || !proof.specMatchesCurrent) return { kind: 'not_ready' };
+  if (!proof.approvalRequired) {
+    const promoted = revisions.promote({
+      workspaceId: ctx.workspaceId,
+      workflowId,
+      revisionId,
+      expectedActiveRevisionId: active.revision.id,
+      actor: { type: ctx.agentId ? 'agent' : 'system', id: ctx.agentId ?? null },
+    });
+    return { kind: 'promoted', revisionId: promoted.revisionId };
+  }
+  const existing = deps.approvals.list(ctx.workspaceId, 'pending').find((approval) =>
+    approval.source === 'workflow_revision'
+    && approval.payload.revisionId === revisionId
+    && approval.payload.semanticHash === candidate.revision.semanticHash);
+  const approval = existing ?? await deps.approvals.create({
+    workspaceId: ctx.workspaceId,
+    ambientId: ctx.ambientId ?? null,
+    userId: ctx.userId,
+    runId: null,
+    taskId: null,
+    targetId: revisionId,
+    gatewayId: null,
+    source: 'workflow_revision',
+    title: `Approve workflow revision: ${active.workflow.title}`,
+    summary: `Promote verified candidate ${revisionId} (${candidate.revision.semanticHash.slice(0, 12)}). It can run code or send data outward.`,
+    confidence: null,
+    payload: { workspaceId: ctx.workspaceId, workflowId, revisionId, semanticHash: candidate.revision.semanticHash, expectedActiveRevisionId: active.revision.id },
+  });
+  return { kind: 'approval_required', approvalId: approval.id };
 }
 
 // ─── Run + settle ────────────────────────────────────────────────────────────

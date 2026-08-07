@@ -1,6 +1,6 @@
 ﻿/**
  * ArtifactPanel — modal/drawer surface for inspecting an artifact
- * (AGENTIS-UX-V2 §5.2).
+ * (Agentis UX artifact panel contract).
  *
  * Supports closed | floating | docked | fullscreen states. Renderer chosen
  * by artifact.type. Sandboxed iframe for HTML; native img for image; pre

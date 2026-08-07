@@ -3132,6 +3132,60 @@ export const appMembers = sqliteTable(
   }),
 );
 
+/**
+ * Validated, revisioned construction blueprint for newly built Apps. The App
+ * reference is nullable until validation succeeds and materialization begins.
+ */
+export const appBlueprints = sqliteTable(
+  'app_blueprints',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    appId: text('app_id').references(() => apps.id, { onDelete: 'set null' }),
+    semanticKey: text('semantic_key').notNull(),
+    name: text('name').notNull(),
+    intent: text('intent').notNull(),
+    revision: integer('revision').notNull().default(1),
+    status: text('status').notNull().default('draft'),
+    topology: text('topology_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    acceptanceCriteria: text('acceptance_json', { mode: 'json' }).notNull().default(sql`'[]'`),
+    validation: text('validation_json', { mode: 'json' }).notNull().default(sql`'{"valid":false,"issues":[]}'`),
+    createdBy: text('created_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    semanticRevision: uniqueIndex('uq_app_blueprints_semantic_revision').on(table.workspaceId, table.semanticKey, table.revision),
+    byApp: index('idx_app_blueprints_app').on(table.workspaceId, table.appId, table.updatedAt),
+  }),
+);
+
+/** Server-owned build state. Chat prose is a projection of this record. */
+export const buildSessions = sqliteTable(
+  'build_sessions',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    blueprintId: text('blueprint_id').notNull().references(() => appBlueprints.id, { onDelete: 'cascade' }),
+    appId: text('app_id').references(() => apps.id, { onDelete: 'set null' }),
+    conversationId: text('conversation_id').references(() => conversations.id, { onDelete: 'set null' }),
+    ownerAgentId: text('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    stage: text('stage').notNull().default('discover'),
+    status: text('status').notNull().default('running'),
+    snapshot: text('snapshot_json', { mode: 'json' }).notNull().default(sql`'{}'`),
+    evidence: text('evidence_json', { mode: 'json' }).notNull().default(sql`'[]'`),
+    diagnostic: text('diagnostic_json', { mode: 'json' }),
+    repairAttempts: integer('repair_attempts').notNull().default(0),
+    createdBy: text('created_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    completedAt: text('completed_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byWorkspace: index('idx_build_sessions_workspace').on(table.workspaceId, table.updatedAt),
+    byApp: index('idx_build_sessions_app').on(table.workspaceId, table.appId, table.updatedAt),
+    byConversation: index('idx_build_sessions_conversation').on(table.workspaceId, table.conversationId, table.updatedAt),
+  }),
+);
+
 // Living Apps Phase 3 — the relationship entity (migration v97). One row per
 // contact an App talks to (a lead/customer), unifying a person across channels
 // via peerId and carrying the pipeline state (stage/goal) + the proactivity

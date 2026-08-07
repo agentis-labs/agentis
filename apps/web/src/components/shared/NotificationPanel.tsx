@@ -55,6 +55,7 @@ export function NotificationPanel() {
   const { workspaceId, notifications: items, loading } = useWorkspaceChromeData();
   const ref = useRef<HTMLDivElement>(null);
   const toast = useToast();
+  const settlementToastKeys = useRef(new Set<string>());
   const [optimisticSeen, setOptimisticSeen] = useState<Set<string>>(new Set());
   const [optimisticDismissed, setOptimisticDismissed] = useState<Set<string>>(new Set());
 
@@ -64,13 +65,28 @@ export function NotificationPanel() {
     const workflowId = payload.workflowId as string | undefined;
     const title = (payload.workflowName as string) || (payload.title as string) || 'Workflow run';
     const outcome = typeof payload.outcomeStatus === 'string' ? payload.outcomeStatus : 'unverified';
+    const settlementKey = `${runId ?? 'unknown'}:${outcome}:${String(payload.settledAt ?? env.emittedAt)}`;
+    if (settlementToastKeys.current.has(settlementKey)) return;
+    settlementToastKeys.current.add(settlementKey);
     const accomplished = outcome === 'accomplished';
     const partial = outcome === 'partial';
+    const cancelled = outcome === 'cancelled';
+    const label = accomplished
+      ? 'Outcome accomplished'
+      : partial
+        ? 'Outcome only partially verified'
+        : cancelled
+          ? 'Run cancelled'
+          : outcome === 'blocked'
+            ? 'Run blocked'
+            : outcome === 'failed' || outcome === 'failed_checks'
+              ? 'Outcome not achieved'
+              : 'Outcome not yet verified';
     
     toast.push({
-      title: accomplished ? 'Outcome accomplished' : partial ? 'Outcome only partially verified' : `Outcome ${outcome}`,
-      body: accomplished ? title : `${title} finished, but delivery was not verified as accomplished.`,
-      tone: accomplished ? 'success' : partial ? 'warn' : 'danger',
+      title: label,
+      body: accomplished ? title : `${title}: ${label.toLowerCase()}.`,
+      tone: accomplished ? 'success' : partial || cancelled || outcome === 'blocked' ? 'warn' : 'danger',
       action: runId ? {
         label: 'View details',
         onClick: () => openRunModal({ runId, workflowId, source: 'toast' }),
@@ -78,7 +94,11 @@ export function NotificationPanel() {
     });
   });
 
-  useEffect(() => { setOptimisticSeen(new Set()); setOptimisticDismissed(new Set()); }, [workspaceId]);
+  useEffect(() => {
+    setOptimisticSeen(new Set());
+    setOptimisticDismissed(new Set());
+    settlementToastKeys.current.clear();
+  }, [workspaceId]);
 
   // One-time import of the legacy browser-only receipts. Keys are removed only
   // after the server accepted the equivalent durable state.

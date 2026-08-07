@@ -70,7 +70,7 @@ export interface TriggerRuntimeDeps {
    */
   jobQueue?: JobQueueBackend;
   /**
-   * Listener Runtime (persistent_listener v2). When wired, triggers whose
+   * Persistent listener runtime. When wired, triggers whose
    * config is a ListenerConfig (source/predicate/firePolicy) are routed here
    * instead of the legacy adapter `createPersistentListener` path.
    */

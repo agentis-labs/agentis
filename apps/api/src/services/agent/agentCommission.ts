@@ -22,7 +22,7 @@ import { repairCliHarnessConfig } from '../harness/harnessConfigRepair.js';
 import { RuntimeSessionStore } from '../runtime/runtimeSessionStore.js';
 import { harnessAgentHomeDir } from '../harness/harnessAgentHome.js';
 import type { SkillMaterializer } from '../skillMaterializer.js';
-import type { RuntimeCapabilityDeclaration, RuntimeCapabilityId, RuntimeProfileV2 } from '@agentis/core';
+import type { RuntimeCapabilityDeclaration, RuntimeCapabilityId, RuntimeProfile } from '@agentis/core';
 
 /** The orchestrator's identity color — distinct from the random palette used for managers/specialists. */
 export const ORCHESTRATOR_DEFAULT_COLOR = '#3b82f6';
@@ -628,7 +628,7 @@ function reasoningEffortOf(value: unknown): 'minimal' | 'low' | 'medium' | 'high
 }
 
 /** Additive migration: old agents retain their prior authority but now expose it. */
-function runtimeProfileOf(config: Record<string, unknown>): RuntimeProfileV2 {
+function runtimeProfileOf(config: Record<string, unknown>): RuntimeProfile {
   const raw = recordObjectOf(config.runtimeProfile) ?? {};
   const mode = raw.mode === 'hermetic' || raw.mode === 'containerized' ? raw.mode : 'native';
   const permissionProfile = raw.permissionProfile === 'read_only'

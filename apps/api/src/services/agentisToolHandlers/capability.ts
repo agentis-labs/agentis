@@ -151,14 +151,14 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
       id: 'agentis.component.install',
       family: 'build',
       description:
-        'Install or upgrade a portable Component v2 bundle from content-verified bundleFiles. Persists runtime component_oci and the full ComponentManifestV2 while preserving an existing extension ID so workflow references remain valid.',
+        'Install or upgrade a portable Component bundle from content-verified bundleFiles. Persists runtime component_oci and the full ComponentManifest while preserving an existing extension ID so workflow references remain valid.',
       inputSchema: {
         type: 'object',
         properties: {
           extensionId: { type: 'string', description: 'Existing extension ID to upgrade in place. Optional when slug uniquely resolves it.' },
           manifest: {
             type: 'object',
-            description: 'Component extension manifest: name, slug, version, runtime:"component_oci", permissions, capabilityTags, and component (ComponentManifestV2).',
+            description: 'Component extension manifest: name, slug, version, runtime:"component_oci", permissions, capabilityTags, and component (ComponentManifest).',
           },
           bundleFiles: {
             type: 'array',

@@ -95,11 +95,49 @@ export function registerAppDoctorTools(registry: AgentisToolRegistry, deps: Tool
         const target = typeof args.target === 'string' && ['debug', 'production', 'unattended'].includes(args.target)
           ? args.target as AppCompileTarget
           : 'debug';
-        const compile = compileAppReadiness(deps.db, ctx.workspaceId, appId, target);
+        let compile = compileAppReadiness(deps.db, ctx.workspaceId, appId, target);
+        const activeBuild = deps.buildSessions?.latestForApp(ctx.workspaceId, appId) ?? null;
+        let deterministicRepair: ReturnType<typeof repairAppConformance> | null = null;
+        if (!compile.readyForExecution && activeBuild && activeBuild.status !== 'completed' && activeBuild.repairAttempts < 1) {
+          deterministicRepair = repairAppConformance(deps.db, ctx.workspaceId, appId, { dryRun: false });
+          compile = compileAppReadiness(deps.db, ctx.workspaceId, appId, target);
+        }
+        const buildSession = deps.buildSessions?.settleAppVerification({
+          workspaceId: ctx.workspaceId,
+          appId,
+          passed: compile.readyForExecution,
+          summary: compile.readyForExecution
+            ? `App verification passed for ${target}.`
+            : `App verification is blocked by ${compile.executionBlockerCount} execution issue(s) and ${compile.evidencePendingCount} pending evidence gate(s).`,
+          payload: {
+            target,
+            structuralReady: compile.structuralReady,
+            executableReady: compile.executableReady,
+            readyForExecution: compile.readyForExecution,
+            executionBlockerCount: compile.executionBlockerCount,
+            evidencePendingCount: compile.evidencePendingCount,
+            checks: compile.checks.map((check) => ({ id: check.id, status: check.status, summary: check.summary })),
+            deterministicRepair: deterministicRepair ? {
+              applied: deterministicRepair.applied,
+              skipped: deterministicRepair.skipped,
+              before: deterministicRepair.before,
+              after: deterministicRepair.after,
+            } : null,
+          },
+          repairAttempted: deterministicRepair !== null,
+        }) ?? null;
         return {
           appId,
+          buildSession,
           verifiedWorkflows: results.length,
           results,
+          deterministicRepair: deterministicRepair ? {
+            attempted: true,
+            applied: deterministicRepair.applied,
+            skipped: deterministicRepair.skipped,
+            before: deterministicRepair.before,
+            after: deterministicRepair.after,
+          } : { attempted: false },
           compile: {
             target,
             structuralReady: compile.structuralReady,

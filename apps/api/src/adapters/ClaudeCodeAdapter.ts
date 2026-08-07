@@ -23,7 +23,7 @@ import type {
   NormalizedTask,
   RuntimeContext,
   RuntimeDescriptor,
-  RuntimeProfileV2,
+  RuntimeProfile,
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
@@ -59,8 +59,8 @@ export interface ClaudeCodeAdapterOptions {
   env?: Record<string, string>;
   timeoutSec?: number;
   dangerouslySkipPermissions?: boolean;
-  /** Effective v2 launch policy; native mode preserves user/project settings. */
-  runtimeProfile?: RuntimeProfileV2;
+  /** Effective launch policy; native mode preserves user/project settings. */
+  runtimeProfile?: RuntimeProfile;
   /**
    * Agentis MCP servers to mount (`--mcp-config`) so the harness calls Agentis
    * tools natively in its own loop. When set, `toolForwarding` becomes
@@ -547,7 +547,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 }
 
-function claudeProfileArgs(profile?: RuntimeProfileV2): string[] {
+function claudeProfileArgs(profile?: RuntimeProfile): string[] {
   if (!profile) return [];
   if (profile.mode === 'hermetic') return ['--safe-mode'];
   const sources = [
@@ -558,7 +558,7 @@ function claudeProfileArgs(profile?: RuntimeProfileV2): string[] {
   return sources.length > 0 ? [`--setting-sources=${sources.join(',')}`] : [];
 }
 
-function claudePermissionArgs(profile: RuntimeProfileV2['permissionProfile']): string[] {
+function claudePermissionArgs(profile: RuntimeProfile['permissionProfile']): string[] {
   if (profile === 'read_only') return ['--permission-mode=dontAsk', '--tools=Read,Glob,Grep'];
   if (profile === 'workspace_write') return ['--permission-mode=acceptEdits'];
   return ['--dangerously-skip-permissions'];

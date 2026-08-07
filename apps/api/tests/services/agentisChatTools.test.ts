@@ -279,7 +279,7 @@ describe('agent-facing capability authoring tools', () => {
     }));
   });
 
-  it('upgrades a node_worker extension to a persisted Component v2 bundle in place', async () => {
+  it('upgrades a node_worker extension to a persisted Component bundle in place', async () => {
     const extensionId = seedSkill({
       name: 'Prospect Search',
       slug: 'prospect-search',

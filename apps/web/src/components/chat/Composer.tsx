@@ -45,17 +45,23 @@ interface SpeechRecognition {
 
 // Module-level draft cache — survives component unmount (panel close/reopen)
 const _draftCache = new Map<string, string>();
-const DRAFT_STORAGE_PREFIX = 'agentis.chatDraft.v2';
+const DRAFT_STORAGE_PREFIX = 'agentis.chatDraft';
+const LEGACY_DRAFT_STORAGE_PREFIX = 'agentis.chatDraft.v2';
 
 function persistedDraftKey(key: string): string {
   return `${DRAFT_STORAGE_PREFIX}:${workspace.get() ?? 'workspace'}:${key}`;
+}
+
+function legacyPersistedDraftKey(key: string): string {
+  return `${LEGACY_DRAFT_STORAGE_PREFIX}:${workspace.get() ?? 'workspace'}:${key}`;
 }
 
 function readDraft(key: string): string | undefined {
   const cached = _draftCache.get(key);
   if (cached !== undefined) return cached;
   try {
-    const stored = localStorage.getItem(persistedDraftKey(key));
+    const stored = localStorage.getItem(persistedDraftKey(key))
+      ?? localStorage.getItem(legacyPersistedDraftKey(key));
     return stored ?? undefined;
   } catch {
     return undefined;
@@ -67,12 +73,16 @@ function writeDraft(key: string, value: string): void {
   try {
     if (value) localStorage.setItem(persistedDraftKey(key), value);
     else localStorage.removeItem(persistedDraftKey(key));
+    localStorage.removeItem(legacyPersistedDraftKey(key));
   } catch {  }
 }
 
 export function clearDraft(key: string): void {
   _draftCache.delete(key);
-  try { localStorage.removeItem(persistedDraftKey(key)); } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(persistedDraftKey(key));
+    localStorage.removeItem(legacyPersistedDraftKey(key));
+  } catch { /* ignore */ }
 }
 
 interface Props {

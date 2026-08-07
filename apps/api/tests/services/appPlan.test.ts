@@ -47,7 +47,7 @@ describe('buildChecklist', () => {
         { workflowId: '${workflows.publish.workflowId}', dependsOn: ['${workflows.ingest.workflowId}'] },
       ],
     });
-    expect(checklist.at(-1)).toMatchObject({ id: 'compile_app', tool: 'agentis.app.compile', args: { appId: 'app-1', target: 'debug' } });
+    expect(checklist.at(-1)).toMatchObject({ id: 'verify_app', tool: 'agentis.app.verify', args: { appId: 'app-1', target: 'debug' } });
   });
 
   it('installs success contracts before compiling workflow rules', () => {
@@ -61,7 +61,7 @@ describe('buildChecklist', () => {
       collections: [],
       cast: [],
     });
-    expect(checklist.map((step) => step.id)).toEqual(['build_work', 'scope_work', 'compile_workflow_rules', 'compile_app']);
+    expect(checklist.map((step) => step.id)).toEqual(['build_work', 'scope_work', 'compile_workflow_rules', 'verify_app']);
     expect(checklist[1]?.args.workflowId).toBe('${workflows.work.workflowId}');
   });
 

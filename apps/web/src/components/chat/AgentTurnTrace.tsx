@@ -3,16 +3,16 @@
  * turn. It replaces the old split between LiveActivityTrace (narration) and
  * ExecutionFeed (tool list) with one cohesive surface:
  *
- *  • While the turn is streaming, the agent's thoughts are written out as small
- *    messages, appearing top-to-bottom. Older lines settle; the latest is alive.
+ *  • While the turn is streaming, sanitized operator events are written out as
+ *    small messages. Hidden reasoning and generic runtime narration are excluded.
  *    The trace grows tall enough to read several steps back and scrolls instead
  *    of hiding history behind a "+N earlier" summary.
  *  • When the turn finishes, the whole thing collapses to a single minimal pill
  *    — "Used 3 tools · 4.2s ›" — that expands on click into the full timeline
- *    (every thought + each tool's input/result/error).
+ *    (every operator event + each tool's sanitized input/result/error).
  *
- * Fed by the same `activity` deltas (which already narrate tool phases as
- * "Using …"/"Running …") and `toolCalls` the turn streams, plus the finalized
+ * Fed by normalized operator `activity` deltas and `toolCalls` the turn streams,
+ * plus the finalized
  * `turn` trace for duration. Trivial replies (a plain answer, no real work)
  * render nothing.
  */
@@ -40,7 +40,6 @@ type ThoughtState = 'active' | 'done' | 'error' | 'recovered';
 interface Thought {
   id: string;
   text: string;
-  detail?: string;
   state: ThoughtState;
 }
 
@@ -58,6 +57,7 @@ function isSetupThought(text: string): boolean {
 
 function buildThoughts(activities: ChatActivity[], streaming: boolean): Thought[] {
   const meaningful = activities
+    .filter((activity) => activity.phase !== 'runtime')
     .map((activity) => ({ activity, label: compactActivityLabel(activity) }))
     .filter((entry): entry is { activity: ChatActivity; label: string } => Boolean(entry.label))
     // Collapse immediate repeats so a re-emitted phase doesn't double a line.
@@ -71,7 +71,6 @@ function buildThoughts(activities: ChatActivity[], streaming: boolean): Thought[
     return {
       id: activity.id,
       text: label,
-      detail: activity.detail,
       state: recovered
         ? 'recovered'
         : activity.status === 'error'
@@ -263,11 +262,6 @@ export function AgentTurnTrace({
               )}>
                 {thought.text}
               </div>
-              {thought.detail && (
-                <div className="mt-0.5 break-words text-[11px] leading-4 text-text-muted [overflow-wrap:anywhere]">
-                  {thought.detail}
-                </div>
-              )}
             </div>
           ))}
 

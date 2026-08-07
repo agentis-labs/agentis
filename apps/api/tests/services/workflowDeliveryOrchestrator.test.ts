@@ -113,6 +113,14 @@ describe('deliverWorkflow', () => {
       actor: { type: 'agent', id: 'builder' },
       reason: 'replace Hermes with deterministic component',
     }).revision;
+    revisions.recordProof({
+      workspaceId: ctx.workspace.id,
+      workflowId: wfId,
+      revisionId: candidate.id,
+      gate: 'regression',
+      status: 'passed',
+      evidence: { suite: 'deterministic fixture' },
+    });
     let executedGraph: WorkflowGraph | undefined;
     let executedRevisionId: string | undefined;
     const { engine } = scriptedEngine([{ status: 'COMPLETED', verdict: 'accomplished' }]);
@@ -129,11 +137,13 @@ describe('deliverWorkflow', () => {
     const result = await deliverWorkflow(deps(wrapped, undefined, revisions), dctx(), { workflowId: wfId });
 
     expect(result.outcome).toBe('accomplished');
+    expect(result.published).toBe(true);
     expect(executedRevisionId).toBe(candidate.id);
     expect(executedGraph?.nodes[1]?.title).toBe('Deterministic candidate producer');
     const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, result.runId!)).get();
     expect(run?.workflowRevisionId).toBe(candidate.id);
     expect((run?.graphSnapshot as WorkflowGraph).nodes[1]?.title).toBe('Deterministic candidate producer');
+    expect(revisions.active(ctx.workspace.id, wfId).revision.id).toBe(candidate.id);
   });
 
   it('ACCOMPLISHED on the first verified run → delivered', async () => {

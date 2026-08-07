@@ -16,7 +16,7 @@ import { api, apiErrorMessage } from '../../lib/api';
 import { useToast } from '../shared/Toast';
 import { startBackgroundInstall, type InstallSession } from '../../lib/backgroundInstall';
 import { useAgentInstallSession } from '../../hooks/useBackgroundInstall';
-import { RuntimePicker, configToRuntimeConfig, isV1AdapterType, runtimeConfigToAdapterConfig, runtimeModelFor } from './RuntimePicker';
+import { RuntimePicker, configToRuntimeConfig, isSupportedAdapterType, runtimeConfigToAdapterConfig, runtimeModelFor } from './RuntimePicker';
 import type { AdapterType, HarnessDetectionResult, RuntimeConfig } from './RuntimePicker';
 import type { CommandAgent } from './AgentCard';
 import { switchAgentRuntime } from '../../lib/agentImport';
@@ -48,7 +48,7 @@ export function AgentConfigPanel({
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const adapterType: AdapterType = isV1AdapterType(agent.adapterType) ? agent.adapterType : 'http';
+  const adapterType: AdapterType = isSupportedAdapterType(agent.adapterType) ? agent.adapterType : 'http';
   const storedConfig = (agent.config ?? {}) as Record<string, unknown>;
 
   // Runtime section state

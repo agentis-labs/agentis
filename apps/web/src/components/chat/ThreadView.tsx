@@ -2,7 +2,7 @@
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { normalizeToolInvocation, REALTIME_EVENTS, type ChatDelta, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS, type AppBlueprint, type BuildSession, type ChatDelta, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
 import { PermissionModePicker } from './PermissionModePicker';
 import { readPlanStepTrack } from '../../lib/workSteps';
 import { StepTrack } from '../shared/StepTrack';
@@ -24,6 +24,7 @@ import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 import { DurablePlanCard } from '../shared/DurablePlanCard';
+import { BuildSessionCard } from '../shared/BuildSessionCard';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -426,6 +427,7 @@ export function ThreadView({
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
   const [latestPlan, setLatestPlan] = useState<ChatPlan | null>(null);
+  const [latestBuild, setLatestBuild] = useState<{ session: BuildSession; blueprint: AppBlueprint } | null>(null);
   const [agentTyping, setAgentTyping] = useState(false);
   // Room loading state: which @mentioned agents we're still waiting on for
   // reply (posted after the mention) shows up. A safety timer caps the wait.
@@ -562,11 +564,18 @@ export function ThreadView({
 
   useEffect(() => {
     const targetConversationId = loadedConversationId ?? conversationId;
-    if (kind !== 'agent' || !targetConversationId) { setLatestPlan(null); return; }
+    if (kind !== 'agent' || !targetConversationId) { setLatestPlan(null); setLatestBuild(null); return; }
     let cancelled = false;
-    void api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?conversationId=${encodeURIComponent(targetConversationId)}`)
-      .then((result) => { if (!cancelled) setLatestPlan(result.task ?? null); })
-      .catch(() => { if (!cancelled) setLatestPlan(null); });
+    void Promise.all([
+      api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?conversationId=${encodeURIComponent(targetConversationId)}`),
+      api<{ session: BuildSession | null; blueprint: AppBlueprint | null }>(`/v1/build-sessions/latest?conversationId=${encodeURIComponent(targetConversationId)}`),
+    ]).then(([planResult, buildResult]) => {
+      if (cancelled) return;
+      setLatestPlan(planResult.task ?? null);
+      setLatestBuild(buildResult.session && buildResult.blueprint ? { session: buildResult.session, blueprint: buildResult.blueprint } : null);
+    }).catch(() => {
+      if (!cancelled) { setLatestPlan(null); setLatestBuild(null); }
+    });
     return () => { cancelled = true; };
   }, [conversationId, kind, loadedConversationId]);
 
@@ -891,6 +900,15 @@ export function ThreadView({
             : message
         )));
       })
+      .catch(() => undefined);
+  });
+
+  useRealtime([REALTIME_EVENTS.BUILD_SESSION_UPDATED, REALTIME_EVENTS.APP_BLUEPRINT_UPDATED], (env) => {
+    const expected = loadedConversationId ?? conversationId ?? null;
+    const payload = env.payload as { conversationId?: string | null };
+    if (!expected || (payload.conversationId && payload.conversationId !== expected)) return;
+    void api<{ session: BuildSession | null; blueprint: AppBlueprint | null }>(`/v1/build-sessions/latest?conversationId=${encodeURIComponent(expected)}`)
+      .then((result) => setLatestBuild(result.session && result.blueprint ? { session: result.session, blueprint: result.blueprint } : null))
       .catch(() => undefined);
   });
 
@@ -1754,6 +1772,7 @@ export function ThreadView({
           </div>
         ) : (
           <ul className="flex min-w-0 flex-col gap-2.5">
+            {latestBuild && <li className="w-full"><BuildSessionCard session={latestBuild.session} blueprint={latestBuild.blueprint} /></li>}
             {latestPlan && !messages.some((message) => message.metadata?.plan?.id === latestPlan.id) && (
               <li className="w-full"><DurablePlanCard plan={latestPlan} recovered /></li>
             )}

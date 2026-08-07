@@ -22,7 +22,7 @@ import type {
   NormalizedTask,
   RuntimeContext,
   RuntimeDescriptor,
-  RuntimeProfileV2,
+  RuntimeProfile,
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
@@ -75,7 +75,7 @@ export interface CodexAdapterOptions {
    */
   browser?: boolean;
   /** Effective, already-migrated launch policy. Native mode preserves Codex. */
-  runtimeProfile?: RuntimeProfileV2;
+  runtimeProfile?: RuntimeProfile;
   /**
    * Agentis MCP servers to mount so the harness calls Agentis tools natively and
    * runs its own loop in ONE invocation (no marker-protocol re-spawn). When set,
@@ -539,7 +539,7 @@ function buildCodexArgs(
   const fastMode = options.fastMode ?? opts.fastMode ?? false;
   const reasoningEffort = options.reasoningEffort ?? opts.modelReasoningEffort ?? (fastMode ? 'minimal' : undefined);
   const fastModeArgs = fastMode ? ['-c', 'service_tier="fast"', '-c', 'features.fast_mode=true'] : [];
-  // Runtime profile v2 defaults locally attached agents to native parity. The
+  // Runtime profiles default locally attached agents to native parity. The
   // legacy environment switch remains a compatibility override, but it no longer
   // silently strips a healthy user's skills/plugins/project configuration.
   // Headless isolation is still available through the explicit hermetic profile.
@@ -616,7 +616,7 @@ function buildCodexArgs(
   ];
 }
 
-function codexPermissionArgs(profile: RuntimeProfileV2['permissionProfile']): string[] {
+function codexPermissionArgs(profile: RuntimeProfile['permissionProfile']): string[] {
   if (profile === 'read_only') return ['--sandbox=read-only', '--ask-for-approval=never'];
   if (profile === 'workspace_write') return ['--sandbox=workspace-write', '--ask-for-approval=never'];
   // trusted_local preserves legacy behavior. externally_sandboxed is safe to

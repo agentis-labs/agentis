@@ -18,6 +18,72 @@
 
 import type { WorkflowGraph } from './types/workflow.js';
 
+export interface GraphIdentityRepair {
+  kind: 'edge_id_assigned' | 'edge_id_deduplicated';
+  edgeIndex: number;
+  previousId?: string;
+  id: string;
+  message: string;
+}
+
+function edgeIdentityPart(value: unknown): string {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return (normalized || 'default')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'default';
+}
+
+/** Repair missing/duplicate edge ids before strict graph validation. */
+export function repairWorkflowGraphIdentity(
+  graph: WorkflowGraph | (Omit<WorkflowGraph, 'edges'> & { edges: Array<Record<string, unknown>> }),
+): { graph: WorkflowGraph; repairs: GraphIdentityRepair[] } {
+  const repairs: GraphIdentityRepair[] = [];
+  const used = new Set<string>();
+  const occurrences = new Map<string, number>();
+  const edges = (graph.edges ?? []).map((rawEdge, edgeIndex) => {
+    const edge = rawEdge as unknown as Record<string, unknown>;
+    const previousId = typeof edge.id === 'string' ? edge.id.trim() : '';
+    const semanticBase = [
+      'edge',
+      edgeIdentityPart(edge.source),
+      edgeIdentityPart(edge.sourceHandle),
+      edgeIdentityPart(edge.target),
+      edgeIdentityPart(edge.targetHandle),
+      edgeIdentityPart(edge.type),
+    ].join('-');
+    const occurrence = (occurrences.get(semanticBase) ?? 0) + 1;
+    occurrences.set(semanticBase, occurrence);
+    let id = previousId;
+    let kind: GraphIdentityRepair['kind'] | null = null;
+    if (!id) {
+      id = occurrence === 1 ? semanticBase : `${semanticBase}-${occurrence}`;
+      kind = 'edge_id_assigned';
+    } else if (used.has(id)) {
+      let suffix = occurrence;
+      let candidate = `${semanticBase}-${suffix}`;
+      while (used.has(candidate)) candidate = `${semanticBase}-${++suffix}`;
+      id = candidate;
+      kind = 'edge_id_deduplicated';
+    }
+    used.add(id);
+    if (kind) {
+      repairs.push({
+        kind,
+        edgeIndex,
+        ...(previousId ? { previousId } : {}),
+        id,
+        message: previousId
+          ? `Replaced duplicate edge id '${previousId}' with stable id '${id}'.`
+          : `Assigned stable id '${id}' to edge ${edgeIndex + 1}.`,
+      });
+    }
+    return { ...edge, id };
+  });
+  return { graph: { ...graph, edges } as WorkflowGraph, repairs };
+}
+
 /** Recursively sort object keys so JSON.stringify is order-independent. */
 function sortValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortValue);

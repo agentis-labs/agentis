@@ -181,6 +181,47 @@ export const appSurfaces = pgTable('app_surfaces', {
   ...baseTimestamps(),
 });
 
+export const appBlueprints = pgTable('app_blueprints', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  appId: uuid('app_id').references(() => apps.id, { onDelete: 'set null' }),
+  semanticKey: text('semantic_key').notNull(),
+  name: text('name').notNull(),
+  intent: text('intent').notNull(),
+  revision: integer('revision').notNull().default(1),
+  status: text('status').notNull().default('draft'),
+  topology: jsonb('topology_json').notNull().default(sql`'{}'::jsonb`),
+  acceptanceCriteria: jsonb('acceptance_json').notNull().default(sql`'[]'::jsonb`),
+  validation: jsonb('validation_json').notNull().default(sql`'{"valid":false,"issues":[]}'::jsonb`),
+  createdBy: uuid('created_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  ...baseTimestamps(),
+}, (table) => ({
+  semanticRevision: uniqueIndex('uq_app_blueprints_semantic_revision').on(table.workspaceId, table.semanticKey, table.revision),
+  byApp: index('idx_app_blueprints_app').on(table.workspaceId, table.appId, table.updatedAt),
+}));
+
+export const buildSessions = pgTable('build_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  blueprintId: uuid('blueprint_id').notNull().references(() => appBlueprints.id, { onDelete: 'cascade' }),
+  appId: uuid('app_id').references(() => apps.id, { onDelete: 'set null' }),
+  conversationId: uuid('conversation_id'),
+  ownerAgentId: uuid('owner_agent_id'),
+  stage: text('stage').notNull().default('discover'),
+  status: text('status').notNull().default('running'),
+  snapshot: jsonb('snapshot_json').notNull().default(sql`'{}'::jsonb`),
+  evidence: jsonb('evidence_json').notNull().default(sql`'[]'::jsonb`),
+  diagnostic: jsonb('diagnostic_json'),
+  repairAttempts: integer('repair_attempts').notNull().default(0),
+  createdBy: uuid('created_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  ...baseTimestamps(),
+}, (table) => ({
+  byWorkspace: index('idx_build_sessions_workspace').on(table.workspaceId, table.updatedAt),
+  byApp: index('idx_build_sessions_app').on(table.workspaceId, table.appId, table.updatedAt),
+  byConversation: index('idx_build_sessions_conversation').on(table.workspaceId, table.conversationId, table.updatedAt),
+}));
+
 export const appInterfaceRevisions = pgTable('app_interface_revisions', {
   id: uuid('id').primaryKey().defaultRandom(),
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),

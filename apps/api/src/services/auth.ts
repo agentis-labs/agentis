@@ -1,7 +1,7 @@
 /**
  * Auth service — bcrypt password hashing + RS256 JWTs via jose.
  *
- * V1 is single-operator local auth. SSO/OAuth land in V2/V3 (V1-SPEC §0.3).
+ * The current local-auth contract is single-operator; SSO/OAuth evolve behind capability flags.
  */
 
 import bcrypt from 'bcryptjs';

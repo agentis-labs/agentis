@@ -114,6 +114,8 @@ export function publishChatDeltaProgress(bus: EventBus, ctx: AgentWorkContext, d
 }
 
 export function publishActivityProgress(bus: EventBus, ctx: AgentWorkContext, activity: ChatActivity): void {
+  // This stream is an operator audit trail, not a transcript of model reasoning.
+  // Concrete tool calls/results have their own normalized events below.
   publishAgentWorkStep(bus, {
     ...ctx,
     workflowId: activity.workflowId ?? ctx.workflowId,
@@ -121,7 +123,7 @@ export function publishActivityProgress(bus: EventBus, ctx: AgentWorkContext, ac
     nodeId: activity.nodeId ?? ctx.nodeId,
     phase: activity.status === 'error' ? 'fail' : activity.status === 'success' ? 'complete' : activity.phase,
     step: activity.phase,
-    description: [activity.label, activity.detail].filter(Boolean).join(' - '),
+    description: activity.label || `Agent ${activity.status === 'error' ? 'reported an error' : 'is working'}`,
     at: activity.startedAt,
   });
 }

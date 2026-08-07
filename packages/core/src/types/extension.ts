@@ -8,7 +8,7 @@ export type ExtensionRuntime = 'builtin' | 'node_worker' | 'docker_sandbox' | 'c
 
 export type ComponentLanguage = 'python' | 'node';
 
-export interface ComponentManifestV2 {
+export interface ComponentManifest {
   manifestVersion: 2;
   id: string;
   version: string;
@@ -97,7 +97,7 @@ export interface ExtensionManifest {
   /** docker_sandbox only: absolute path to the unpacked extension bundle. */
   bundleDir?: string;
   /** component_oci only: language-neutral, locked multi-file bundle contract. */
-  component?: ComponentManifestV2;
+  component?: ComponentManifest;
   /** Operation names that are valid Listener sources (mirror of operation.isListenerSource). */
   listenerOperations?: string[];
 }

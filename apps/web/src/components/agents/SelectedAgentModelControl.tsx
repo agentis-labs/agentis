@@ -6,7 +6,7 @@ import { ModelChooser } from './ModelChooser';
 import {
   configToRuntimeConfig,
   DEFAULT_RUNTIME_CONFIG,
-  isV1AdapterType,
+  isSupportedAdapterType,
   runtimeConfigToAdapterConfig,
   runtimeModelFor,
   type AdapterType,
@@ -46,7 +46,7 @@ export function SelectedAgentModelControl({
   const [catalogLoading, setCatalogLoading] = useState(false);
 
   useEffect(() => {
-    if (!isV1AdapterType(adapterType ?? '')) {
+    if (!isSupportedAdapterType(adapterType ?? '')) {
       setAgent(null);
       setSelectedModel('');
       setLoading(false);
@@ -61,7 +61,7 @@ export function SelectedAgentModelControl({
         if (cancelled) return;
         const fullAgent = data.agent;
         setAgent(fullAgent);
-        if (!isV1AdapterType(fullAgent.adapterType ?? '')) {
+        if (!isSupportedAdapterType(fullAgent.adapterType ?? '')) {
           setSelectedModel('');
           return;
         }
@@ -81,17 +81,17 @@ export function SelectedAgentModelControl({
     return () => { cancelled = true; };
   }, [agentId, adapterType]);
 
-  if (!isV1AdapterType(adapterType ?? '')) return null;
+  if (!isSupportedAdapterType(adapterType ?? '')) return null;
   const requestedAdapterType = adapterType as AdapterType;
-  if (agent && !isV1AdapterType(agent.adapterType ?? '')) return null;
+  if (agent && !isSupportedAdapterType(agent.adapterType ?? '')) return null;
 
-  const fetchedAdapterType = isV1AdapterType(agent?.adapterType ?? '')
+  const fetchedAdapterType = isSupportedAdapterType(agent?.adapterType ?? '')
     ? (agent?.adapterType as AdapterType)
     : null;
   const effectiveAdapterType: AdapterType = fetchedAdapterType ?? requestedAdapterType;
 
   async function updateModel(nextModel: string) {
-    if (!agent || !isV1AdapterType(agent.adapterType ?? '')) return;
+    if (!agent || !isSupportedAdapterType(agent.adapterType ?? '')) return;
     const agentAdapterType = agent.adapterType as AdapterType;
     const previousModel = selectedModel;
     const storedConfig = (agent.config ?? {}) as Record<string, unknown>;
@@ -156,7 +156,7 @@ export function SelectedAgentModelControl({
       onUpdated?.();
     } catch (error) {
       setAgent(previous);
-      if (isV1AdapterType(previous.adapterType ?? '')) {
+      if (isSupportedAdapterType(previous.adapterType ?? '')) {
         setSelectedModel(runtimeModelValue(configToRuntimeConfig(previous.adapterType as AdapterType, (previous.config ?? {}) as Record<string, unknown>), previous.adapterType as AdapterType));
       }
       toast.error('Runtime update failed', apiErrorMessage(error));

@@ -424,6 +424,13 @@ export class AntigravityAdapter implements AgentAdapter {
           queue.push({ type: 'done', finishReason: 'error' });
           return;
         }
+        const protocolError = invalidAntigravityResponse(result.text);
+        if (protocolError) {
+          this.opts.logger.warn('antigravity.chat.protocol_violation', { reason: protocolError });
+          queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: protocolError });
+          queue.push({ type: 'done', finishReason: 'error' });
+          return;
+        }
         // The agent may have answered with Agentis tool-call markers — split them
         // out so the platform executes them, exactly like the other CLI adapters.
         const { cleaned, calls } = extractMarkerToolCalls(result.text);
@@ -516,6 +523,20 @@ function buildAntigravityArgs(
     ...(opts.timeoutSec && opts.timeoutSec > 0 ? ['--print-timeout', `${opts.timeoutSec}s`] : []),
     ...(opts.extraArgs ?? []),
   ];
+}
+
+/**
+ * agy can occasionally return its launcher/help persona instead of answering
+ * the supplied conversation. Do not pass that text to an operator as an answer.
+ */
+function invalidAntigravityResponse(text: string): string | null {
+  const compact = text.replace(/\s+/g, ' ').trim();
+  const leakedHarnessFlag = /--dangerously-skip-permissions/i.test(compact);
+  const genericHarnessReply = /how can i help you (with your project|today)|not quite sure what you'd like me to do with/i.test(compact);
+  if (leakedHarnessFlag && genericHarnessReply) {
+    return 'RUNTIME_PROTOCOL_VIOLATION: Antigravity returned its CLI help persona instead of answering this turn.';
+  }
+  return null;
 }
 
 function buildAntigravityPrompt(task: NormalizedTask): string {

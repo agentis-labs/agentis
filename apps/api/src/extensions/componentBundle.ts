@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { AgentisError, type ComponentManifestV2 } from '@agentis/core';
+import { AgentisError, type ComponentManifest } from '@agentis/core';
 import { resolveDefaultDataDir } from '../defaultDataDir.js';
 
 const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
@@ -21,14 +21,14 @@ export interface PortableComponentBundleFile {
   dataBase64: string;
 }
 
-export function validateComponentManifest(manifest: ComponentManifestV2): void {
+export function validateComponentManifest(manifest: ComponentManifest): void {
   if (manifest.manifestVersion !== 2) throw new AgentisError('VALIDATION_FAILED', 'component manifestVersion must be 2');
   if (!manifest.id.trim() || !manifest.version.trim()) throw new AgentisError('VALIDATION_FAILED', 'component id and version are required');
   if (manifest.runtime.language === 'python' && manifest.runtime.version !== '3.12') {
-    throw new AgentisError('VALIDATION_FAILED', 'component runtime supports Python 3.12 in v2');
+    throw new AgentisError('VALIDATION_FAILED', 'component runtime supports Python 3.12');
   }
   if (manifest.runtime.language === 'node' && manifest.runtime.version !== '20') {
-    throw new AgentisError('VALIDATION_FAILED', 'component runtime supports Node 20 in v2');
+    throw new AgentisError('VALIDATION_FAILED', 'component runtime supports Node 20');
   }
   assertRelativeFile(manifest.entrypoint, 'entrypoint');
   assertRelativeFile(manifest.dependencyLock, 'dependencyLock');
@@ -55,7 +55,7 @@ export function inspectComponentBundle(sourceDir: string): { hash: string; fileC
   return { hash: hash.digest('hex'), fileCount: files.length, totalBytes };
 }
 
-export function installComponentBundle(sourceDir: string, manifest: ComponentManifestV2): InstalledComponentBundle {
+export function installComponentBundle(sourceDir: string, manifest: ComponentManifest): InstalledComponentBundle {
   validateComponentManifest(manifest);
   const source = path.resolve(sourceDir);
   for (const relative of [manifest.entrypoint, manifest.dependencyLock]) {
@@ -76,10 +76,10 @@ export function installComponentBundle(sourceDir: string, manifest: ComponentMan
   return { bundleDir: target, bundleHash: inspected.hash, fileCount: inspected.fileCount, totalBytes: inspected.totalBytes, created: true };
 }
 
-/** Install a Component v2 bundle supplied over HTTP/MCP without trusting a host path. */
+/** Install a Component bundle supplied over HTTP/MCP without trusting a host path. */
 export function installPortableComponentBundle(
   bundleFiles: PortableComponentBundleFile[],
-  manifest: ComponentManifestV2,
+  manifest: ComponentManifest,
 ): InstalledComponentBundle {
   validateComponentManifest(manifest);
   if (bundleFiles.length === 0 || bundleFiles.length > MAX_FILES) {

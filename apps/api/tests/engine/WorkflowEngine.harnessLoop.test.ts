@@ -153,7 +153,10 @@ describe('WorkflowEngine — E1 harness chat tool loop', () => {
           if (options?.signal?.aborted) stop();
           else options?.signal?.addEventListener('abort', stop, { once: true });
         });
-        yield { type: 'done', finishReason: 'error' };
+        // Deliberately complete *after* cancellation. This simulates a CLI that
+        // acknowledges abort but flushes a late final response from its process.
+        yield { type: 'text', delta: 'late answer that must not revive the run' };
+        yield { type: 'done', finishReason: 'stop' };
       },
     };
 
@@ -200,5 +203,7 @@ describe('WorkflowEngine — E1 harness chat tool loop', () => {
     expect(row.status).toBe('CANCELLED');
     expect(signalAborted).toBe(true);
     expect(cancelledTaskIds).toContain('A');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()?.status).toBe('CANCELLED');
   });
 });

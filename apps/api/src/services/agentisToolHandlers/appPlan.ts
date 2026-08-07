@@ -27,6 +27,21 @@ const planWorkflowSchema = z.object({
   trigger: z.string().optional(),
   /** Runtime activation is distinct from build order/decomposition. */
   activation: z.enum(['after_success', 'event', 'operator']).optional(),
+  ownerRoleKey: z.string().min(1).optional(),
+  swarmKey: z.string().min(1).optional(),
+  inputs: z.array(z.object({
+    key: z.string().min(1),
+    type: z.enum(['string', 'number', 'boolean', 'array', 'object', 'any']),
+    required: z.boolean().optional(),
+    description: z.string().optional(),
+  })).default([]),
+  outputs: z.array(z.object({
+    key: z.string().min(1),
+    type: z.enum(['string', 'number', 'boolean', 'array', 'object', 'any']),
+    required: z.boolean().optional(),
+    description: z.string().optional(),
+  })).default([]),
+  acceptanceCriteria: z.array(z.string().min(1)).default([]),
   /** Persisted definition of done installed after authoring. */
   success: z.object({
     objective: z.string().min(1),
@@ -44,7 +59,39 @@ const appPlanSchema = z.object({
   /** True when the App drives a per-contact outreach conversation (→ define a script). */
   conversation: z.boolean().default(false),
   collections: z.array(z.object({ name: z.string().min(1), purpose: z.string().optional() })).default([]),
-  cast: z.array(z.object({ role: z.string().min(1), name: z.string().optional() })).default([]),
+  cast: z.array(z.object({
+    key: z.string().min(1),
+    role: z.string().min(1),
+    name: z.string().optional(),
+    durable: z.literal(true).default(true),
+    runtime: z.object({
+      runtime: z.string().optional(),
+      model: z.string().optional(),
+      capabilities: z.array(z.string()).default([]),
+    }).optional(),
+    skillIds: z.array(z.string()).default([]),
+    brainIds: z.array(z.string()).default([]),
+  })).default([]),
+  swarms: z.array(z.object({
+    key: z.string().min(1),
+    purpose: z.string().min(1),
+    workerRole: z.string().min(1),
+    maxWorkers: z.number().int().min(1).max(32),
+    runtime: z.object({
+      runtime: z.string().optional(),
+      model: z.string().optional(),
+      capabilities: z.array(z.string()).default([]),
+    }).optional(),
+    skillIds: z.array(z.string()).default([]),
+    brainIds: z.array(z.string()).default([]),
+    persist: z.literal('evidence_only').default('evidence_only'),
+  })).default([]),
+  interfaces: z.array(z.object({
+    key: z.string().min(1),
+    title: z.string().min(1),
+    purpose: z.string().min(1),
+  })).default([]),
+  acceptanceCriteria: z.array(z.string().min(1)).default([]),
   policy: z
     .object({
       maxPerHour: z.number().int().positive().optional(),
@@ -95,8 +142,8 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
           + 'build checklist. Use this whenever the intent is multi-step, conversational, recurring, or names more than '
           + 'one job (e.g. "find leads AND message them AND build their store") — do NOT collapse it into one workflow. '
           + 'You enumerate: the workflows (each with a purpose + build dependencies + runtime activation), whether it needs a per-contact conversation '
-          + 'script, the datastore collections, the resident cast, and the outbound policy (rate/quiet-hours). It ensures '
-          + 'the App, applies the policy, records the blueprint, and returns the exact next calls IN ORDER '
+          + 'script, the datastore collections, the resident cast, bounded swarms, and the outbound policy (rate/quiet-hours). It captures '
+          + 'a grounded workspace snapshot, validates the blueprint before creating the App, and returns the exact next calls IN ORDER '
           + '(build each workflow → free SWIFT proof → wire the senses/surface → compile the whole App → one real debug run). Then execute the checklist.',
         inputSchema: {
           type: 'object',
@@ -111,7 +158,10 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
             },
             conversation: { type: 'boolean', description: 'True when the App runs a per-contact outreach script (→ agentis.conversation.define).' },
             collections: { type: 'array', description: 'Datastore collections: [{ name, purpose }].', items: { type: 'object' } },
-            cast: { type: 'array', description: 'Resident specialists: [{ role, name? }] (operator + workers).', items: { type: 'object' } },
+            cast: { type: 'array', description: 'Enduring roles only: [{ key, role, name?, durable:true, runtime?, skillIds?, brainIds? }]. Temporary workers belong in swarms.', items: { type: 'object' } },
+            swarms: { type: 'array', description: 'Bounded temporary workers: [{ key, purpose, workerRole, maxWorkers, runtime?, skillIds?, brainIds?, persist:"evidence_only" }].', items: { type: 'object' } },
+            interfaces: { type: 'array', description: 'Operator/App surfaces: [{ key, title, purpose }].', items: { type: 'object' } },
+            acceptanceCriteria: { type: 'array', description: 'App-level evidence-checkable completion criteria. Required by the blueprint gate.', items: { type: 'string' } },
             policy: { type: 'object', description: 'Outbound safety envelope: { maxPerHour?, quietHours?: { start, end } }.' },
           },
           required: ['intent'],
@@ -121,8 +171,58 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
       },
       handler: (rawArgs, ctx) => {
         const args = appPlanSchema.parse(rawArgs);
+        if (!deps.buildSessions) throw new AgentisError('VALIDATION_FAILED', 'The authoritative build-session service is unavailable.');
         const stores = buildAppStores({ db: deps.db, bus: deps.bus });
+        const existingAppId = (args.appId && args.appId.trim()) || ctx.appId || null;
+        const appName = args.name?.trim()
+          || (existingAppId ? stores.store.get(ctx.workspaceId, existingAppId).name : '');
+        if (!appName) throw new AgentisError('VALIDATION_FAILED', 'app.plan needs a semantic name when creating an App.');
+        const created = deps.buildSessions.create({
+          workspaceId: ctx.workspaceId,
+          userId: ctx.userId,
+          ownerAgentId: ctx.agentId ?? null,
+          conversationId: ctx.conversationId ?? null,
+          appId: existingAppId,
+          name: appName,
+          intent: args.intent,
+          topology: {
+            roles: args.cast,
+            swarms: args.swarms,
+            workflows: args.workflows.map((workflow) => ({
+              key: workflow.key,
+              title: workflow.title,
+              purpose: workflow.purpose,
+              dependsOn: workflow.dependsOn,
+              activation: workflowActivation(workflow),
+              ...(workflow.trigger ? { trigger: workflow.trigger } : {}),
+              ...(workflow.ownerRoleKey ? { ownerRoleKey: workflow.ownerRoleKey } : {}),
+              ...(workflow.swarmKey ? { swarmKey: workflow.swarmKey } : {}),
+              inputs: workflow.inputs,
+              outputs: workflow.outputs,
+              acceptanceCriteria: workflow.acceptanceCriteria.length > 0
+                ? workflow.acceptanceCriteria
+                : workflow.success
+                  ? [workflow.success.objective]
+                  : [],
+            })),
+            collections: args.collections.map((collection) => ({ key: collection.name, purpose: collection.purpose })),
+            interfaces: args.interfaces,
+          },
+          acceptanceCriteria: args.acceptanceCriteria,
+          capabilityCatalogHash: registry.catalog().hash,
+        });
+        if (!created.blueprint.validation.valid) {
+          throw new AgentisError('VALIDATION_FAILED', 'The App blueprint is incomplete; no App was materialized.', {
+            remediation: 'Repair every reported topology/acceptance issue, then call agentis.app.plan again.',
+            details: {
+              buildSessionId: created.session.id,
+              blueprintId: created.blueprint.id,
+              issues: created.blueprint.validation.issues,
+            },
+          });
+        }
         const appId = ensureApp(stores, args, ctx);
+        const buildSession = deps.buildSessions.bindApp(ctx.workspaceId, created.session.id, appId);
 
         // Apply the outbound safety envelope now (the agent rarely sets it later).
         if (args.policy) {
@@ -133,34 +233,27 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
           }
         }
 
-        // Record the blueprint (best-effort) so the plan is durable + inspectable.
-        try {
-          const existing = new Set(stores.data.listCollections(ctx.workspaceId, appId).map((c) => c.name));
-          if (!existing.has('app_blueprint')) {
-            stores.data.defineCollection(ctx.workspaceId, appId, {
-              name: 'app_blueprint',
-              schema: { fields: [{ key: 'key', type: 'string', required: true, indexed: true }] },
-            });
-          }
-          stores.data.upsert(ctx.workspaceId, appId, 'app_blueprint', { key: 'blueprint' }, { key: 'blueprint', blueprint: args, updatedAt: new Date().toISOString() });
-        } catch (err) {
-          deps.logger.warn('app.plan.blueprint_persist_failed', { appId, err: (err as Error).message });
-        }
-
         const checklist = buildChecklist(appId, args);
         return {
           appId,
+          buildSessionId: buildSession.id,
+          blueprintId: created.blueprint.id,
+          blueprintRevision: created.blueprint.revision,
+          blueprintStatus: created.blueprint.status,
+          workspaceSnapshotAt: buildSession.snapshot.capturedAt,
           intent: args.intent,
           parts: {
             workflows: args.workflows.length,
             conversation: args.conversation,
             collections: args.collections.length,
             cast: args.cast.length,
+            swarms: args.swarms.length,
+            interfaces: args.interfaces.length,
             policy: Boolean(args.policy),
           },
           checklist,
           message:
-            `App plan recorded (${args.workflows.length} workflow(s)${args.conversation ? ' + a conversation script' : ''}). `
+            `Validated App blueprint recorded (${args.workflows.length} workflow(s)${args.conversation ? ' + a conversation script' : ''}). `
             + 'Now EXECUTE the checklist in order: build each workflow and complete its FREE proof (scope → dry_run → suite), '
             + 'then wire the senses (script/triggers) and compile the whole App. Spend on one real debug run only after app.compile is ready. Do not collapse these into one workflow.',
           compass: { stage: 'authored' as const, summary: 'App decomposed into parts. Execute the checklist top-to-bottom.', next: checklist.slice(0, 1).map(({ tool, args: a, why }) => ({ tool, args: a, why })) },
@@ -255,10 +348,10 @@ export function buildChecklist(appId: string, args: z.infer<typeof appPlanSchema
   const prerequisites = steps.map((step) => step.id);
   steps.push({
     step: n++,
-    id: 'compile_app',
-    tool: 'agentis.app.compile',
+    id: 'verify_app',
+    tool: 'agentis.app.verify',
     args: { appId, target: 'debug' },
-    why: 'Compile the whole executable App — topology, activation, contracts, current-graph free tests, runtime/channels, and surfaces — before spending on one real debug run.',
+    why: 'Verify and compile the whole executable App — topology, activation, contracts, current-graph tests, runtime/channels, and surfaces — before spending on one real debug run. This evidence settles the durable build session.',
     dependsOnSteps: prerequisites,
   });
   return steps;

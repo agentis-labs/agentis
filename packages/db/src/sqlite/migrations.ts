@@ -3167,6 +3167,57 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_kv_key
   ON workflow_kv_entries(workspace_id, workflow_id, key);
 `,
   },
+  {
+    version: 127,
+    name: 'authoritative_app_build_sessions',
+    sql: `
+CREATE TABLE app_blueprints (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  app_id          TEXT REFERENCES apps(id) ON DELETE SET NULL,
+  semantic_key    TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  intent          TEXT NOT NULL,
+  revision        INTEGER NOT NULL DEFAULT 1,
+  status          TEXT NOT NULL DEFAULT 'draft',
+  topology_json   TEXT NOT NULL DEFAULT '{}',
+  acceptance_json TEXT NOT NULL DEFAULT '[]',
+  validation_json TEXT NOT NULL DEFAULT '{"valid":false,"issues":[]}',
+  created_by      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_app_blueprints_semantic_revision
+  ON app_blueprints(workspace_id, semantic_key, revision);
+CREATE INDEX idx_app_blueprints_app
+  ON app_blueprints(workspace_id, app_id, updated_at);
+
+CREATE TABLE build_sessions (
+  id                TEXT PRIMARY KEY,
+  workspace_id      TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  blueprint_id      TEXT NOT NULL REFERENCES app_blueprints(id) ON DELETE CASCADE,
+  app_id            TEXT REFERENCES apps(id) ON DELETE SET NULL,
+  conversation_id   TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  owner_agent_id    TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  stage             TEXT NOT NULL DEFAULT 'discover',
+  status            TEXT NOT NULL DEFAULT 'running',
+  snapshot_json     TEXT NOT NULL DEFAULT '{}',
+  evidence_json     TEXT NOT NULL DEFAULT '[]',
+  diagnostic_json   TEXT,
+  repair_attempts   INTEGER NOT NULL DEFAULT 0,
+  created_by        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  completed_at      TEXT,
+  created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_build_sessions_workspace
+  ON build_sessions(workspace_id, updated_at);
+CREATE INDEX idx_build_sessions_app
+  ON build_sessions(workspace_id, app_id, updated_at);
+CREATE INDEX idx_build_sessions_conversation
+  ON build_sessions(workspace_id, conversation_id, updated_at);
+`,
+  },
 ];
 
 

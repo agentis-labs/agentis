@@ -1,4 +1,4 @@
-import { canonicalizeWorkflowGraphContracts, type HttpRequestNodeConfig, type WorkflowGraph, type WorkflowNode } from '@agentis/core';
+import { canonicalizeWorkflowGraphContracts, repairWorkflowGraphIdentity, type HttpRequestNodeConfig, type WorkflowGraph, type WorkflowNode } from '@agentis/core';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import { repairIntegrationOperations, type OperationRepair } from '../integrationOperationRepair.js';
 import { listIntegrationManifests } from '../integrationRegistry.js';
@@ -9,7 +9,8 @@ export interface GraphShapeRepair {
     | 'http_response_mapping_normalized'
     | 'router_branch_shape_normalized'
     | 'router_condition_normalized'
-    | 'workflow_contract_normalized';
+    | 'workflow_contract_normalized'
+    | 'edge_identity_normalized';
   nodeId: string;
   message: string;
 }
@@ -24,7 +25,13 @@ export function normalizeWorkflowGraph(
   workspaceId: string,
   graph: WorkflowGraph,
 ): WorkflowGraphNormalizationResult {
-  const contractNormalized = canonicalizeWorkflowGraphContracts(graph);
+  const identityNormalized = repairWorkflowGraphIdentity(graph);
+  const identityRepairs: GraphShapeRepair[] = identityNormalized.repairs.map((repair) => ({
+    kind: 'edge_identity_normalized',
+    nodeId: '__graph__',
+    message: repair.message,
+  }));
+  const contractNormalized = canonicalizeWorkflowGraphContracts(identityNormalized.graph);
   const contractRepairs: GraphShapeRepair[] = contractNormalized.changed ? [{
     kind: 'workflow_contract_normalized',
     nodeId: '__graph__',
@@ -40,7 +47,7 @@ export function normalizeWorkflowGraph(
   const operationNormalized = repairIntegrationOperations(shapeNormalized.graph, operationCatalog);
   return {
     graph: operationNormalized.graph,
-    repairs: [...contractRepairs, ...shapeNormalized.repairs, ...operationNormalized.repairs],
+    repairs: [...identityRepairs, ...contractRepairs, ...shapeNormalized.repairs, ...operationNormalized.repairs],
   };
 }
 

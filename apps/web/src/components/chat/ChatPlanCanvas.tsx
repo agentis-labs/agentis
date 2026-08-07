@@ -50,10 +50,10 @@ function ArchitectureNode({ data, selected }: NodeProps<Node<ArchitectureNodeDat
 const nodeTypes = { architecture: ArchitectureNode };
 
 function architectureLabel(kind: ArchitectureCanvasKind): string {
-  if (kind === 'workflow') return 'Workflow architecture';
-  if (kind === 'extension') return 'Extension architecture';
-  if (kind === 'app') return 'App architecture';
-  return 'System architecture';
+  if (kind === 'workflow') return 'Proposed workflow map';
+  if (kind === 'extension') return 'Proposed extension map';
+  if (kind === 'app') return 'Proposed App map';
+  return 'Proposed system map';
 }
 
 export function ChatPlanCanvas({
@@ -103,7 +103,7 @@ export function ChatPlanCanvas({
           <div className="min-w-0">
             <div className="text-[11px] font-semibold text-text-primary">{title}</div>
             <div className="truncate text-[9.5px] text-text-muted">
-              {hasArchitecture ? `${architecture!.nodes.length} preview node${architecture!.nodes.length === 1 ? '' : 's'}` : 'Plan text'}
+              {hasArchitecture ? `${architecture!.nodes.length} proposed node${architecture!.nodes.length === 1 ? '' : 's'} · not materialized` : 'Plan text'}
             </div>
           </div>
         </div>
@@ -131,6 +131,9 @@ export function ChatPlanCanvas({
 
       {view === 'canvas' && hasArchitecture ? (
         <div className="relative h-[340px] min-h-[300px]">
+          <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 rounded-md border border-warn/25 bg-canvas/90 px-2.5 py-1.5 text-[9.5px] text-warn shadow-card backdrop-blur">
+            Proposal only. Durable plans and build sessions below are the authoritative workspace state.
+          </div>
           <CanvasEngine
             className="absolute inset-0 h-full w-full"
             style={{ height: 340, width: '100%' }}

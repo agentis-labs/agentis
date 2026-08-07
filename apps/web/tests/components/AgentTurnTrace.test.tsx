@@ -10,7 +10,7 @@ function activity(index: number, overrides: Partial<Activity> = {}): Activity {
   return {
     type: 'activity',
     id: `activity-${index}`,
-    phase: 'runtime',
+    phase: 'tool',
     status: 'running',
     label: `Step ${index}`,
     ...overrides,
@@ -18,7 +18,7 @@ function activity(index: number, overrides: Partial<Activity> = {}): Activity {
 }
 
 describe('AgentTurnTrace', () => {
-  it('writes out the recent thoughts while streaming, latest alive', () => {
+  it('writes out recent operator-facing activity while streaming, latest alive', () => {
     render(
       <AgentTurnTrace
         streaming
@@ -67,7 +67,7 @@ describe('AgentTurnTrace', () => {
       <AgentTurnTrace
         streaming={false}
         turn={{ startedAt: new Date().toISOString(), status: 'completed', durationMs: 800 }}
-        activities={[activity(1, { status: 'success', label: 'Reading context' })]}
+        activities={[activity(1, { phase: 'runtime', status: 'success', label: 'Reading context' })]}
       />,
     );
 

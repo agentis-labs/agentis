@@ -1320,7 +1320,7 @@ export interface RunEvidenceRef {
   summary: string;
 }
 
-/** Executes a portable Component v2 bundle through the hardened OCI runtime. */
+/** Executes a portable Component bundle through the hardened OCI runtime. */
 export interface ComponentTaskNodeConfig {
   kind: 'component_task';
   componentId?: string;

@@ -82,14 +82,25 @@ run; verification and delivery evidence determine whether the result is ready to
 Runtime, channel, surface, and test checks feed those facets, so a polished interface cannot hide
 an unavailable binary, component runtime, permission mismatch, or unverified business outcome.
 
-Portable `.agentisapp` bundles use manifest version 2. Exports include the App's transitive
-workflows, surfaces, data contracts, and content-addressed Component v2 files. The export target is
-revision-explicit: `active` is the safe default and `candidate` must be requested deliberately;
-preview and export resolve the same target. Local executable paths, commands, working directories,
-environment values, repository paths, and runtime project roots are removed from the bundle.
-Import verifies manifest/runtime compatibility, file hashes, dependency locks, and component
-entrypoints before activating anything. A missing manifest version remains readable as legacy v1;
-unsafe or conflicting bundles fail closed.
+New App construction is gated by a durable `BuildSession` and validated `AppBlueprint`. The
+blueprint captures durable roles, runtime/capability requirements, Brain and skill bindings,
+workflow ports, typed contracts, acceptance criteria, and bounded swarm templates. Agentis takes a
+tool-backed `WorkspaceSnapshot` before materialization; a model cannot create an App by merely
+claiming that it did so.
+
+Portable `.agentisapp` bundles carry the App's transitive workflows, surfaces, data contracts,
+runtime requirements, and content-addressed portable component files. The operator-facing export
+terms are **Published workflow** (the verified graph used by production) and **Saved draft** (the
+editable graph currently being viewed). Historical revision fields remain available for lineage and
+compatibility. Local executable paths, commands, working directories, environment values,
+repository paths, and runtime project roots are removed from the bundle. Import verifies
+manifest/runtime compatibility, file hashes, dependency locks, and component entrypoints before
+activating anything; unsafe or conflicting bundles fail closed.
+
+`GET /v1/build-sessions/latest?conversationId=...` and `...?appId=...` recover the latest build
+evidence. `agentis.app.verify` settles the session from compiler, dry-run, suite, runtime, and
+delivery evidence. A failed verification gets one bounded deterministic repair attempt; otherwise
+the session is blocked with an actionable diagnostic.
 
 ## App Goals & the Evolution Loop
 

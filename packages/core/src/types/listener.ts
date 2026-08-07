@@ -221,7 +221,7 @@ export interface ListenerConfig {
  * Type guard distinguishing the new ListenerConfig shape from the legacy
  * adapter-coupled `{ agentId }` config. TriggerRuntime routes on this.
  */
-export function isListenerConfigV2(config: unknown): config is ListenerConfig {
+export function isListenerConfig(config: unknown): config is ListenerConfig {
   return (
     !!config &&
     typeof config === 'object' &&

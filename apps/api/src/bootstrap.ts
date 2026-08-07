@@ -150,6 +150,7 @@ import { AgentToolRuntime, type AgentToolRuntimeDeps, type PlatformToolBridge } 
 import { AgentSessionService } from './services/agent/agentSession.js';
 import { AgentSessionRuntime } from './services/agent/agentSessionRuntime.js';
 import { PlanService } from './services/planService.js';
+import { BuildSessionService } from './services/buildSessionService.js';
 import { LlmSessionAdapter } from './services/llmSessionAdapter.js';
 import { PlatformModelService } from './services/platformModelService.js';
 import { AgentMemoryService } from './services/agent/agentMemory.js';
@@ -655,6 +656,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // tool loop / single-shot dispatch instead of failing.
   const sessionStore = new AgentSessionService(sqlite, logger);
   const planService = new PlanService(sqlite, bus);
+  const buildSessionService = new BuildSessionService(sqlite, bus);
   // Late-bound (assigned once the model router exists, below) per-workspace
   // session-adapter resolver + cache so the hot path reuses one adapter instance.
   let resolveSessionAdapter: ((workspaceId: string) => LlmSessionAdapter | undefined) | undefined;
@@ -960,7 +962,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // engine is constructed; stopped on shutdown.
   const jobQueue = new DurableJobQueue({ db: sqlite, engine, logger });
 
-  // Listener Runtime (persistent_listener v2). Its fire() is bound to the
+  // Persistent listener runtime. Its fire() is bound to the
   // TriggerRuntime constructed just below; we use a late ref to break the cycle
   // (fire is only ever invoked at runtime, after assignment).
   const listenerHealth = new ListenerHealthStore();
@@ -1153,6 +1155,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     specialistRuntime,
     specialistRouter,
     plans: planService,
+    buildSessions: buildSessionService,
     channels: channelBridge,
     browserPool,
     browserSessions: browserSessionManager,
@@ -1963,6 +1966,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     orchestratorModelRouter,
     outboundPolicy,
     planService,
+    buildSessionService,
     scheduler,
     sessionStore,
     skillMaterializer,

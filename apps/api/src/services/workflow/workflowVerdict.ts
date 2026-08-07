@@ -1,5 +1,5 @@
 /**
- * Run Verdict engine — SWIFT layer-3 truth (SWIFT-WORKFLOW-QUALITY-10X §2-T/V2).
+ * Run Verdict engine — SWIFT layer-3 execution truth.
  *
  * COMPLETED is a topology fact; ACCOMPLISHED is a world fact. After a run
  * settles, this module executes the spec's acceptance checks against the WORLD

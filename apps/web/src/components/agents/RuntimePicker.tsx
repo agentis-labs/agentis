@@ -833,7 +833,7 @@ export function runtimeLabelFor(adapterType: AdapterType, config: RuntimeConfig)
   return config.httpModel || 'HTTP / Webhook';
 }
 
-export function isV1AdapterType(value: string): value is AdapterType {
+export function isSupportedAdapterType(value: string): value is AdapterType {
   return ADAPTERS.some((adapter) => adapter.id === value);
 }
 

@@ -85,6 +85,7 @@ import { buildSovereigntyRoutes } from '../routes/sovereignty.js';
 import { buildSpecialistRoutes } from '../routes/specialists.js';
 import { buildStorageRoutes } from '../routes/storage.js';
 import { buildTaskRoutes } from '../routes/tasks.js';
+import { buildBuildSessionRoutes } from '../routes/buildSessions.js';
 import { buildTranscriptionRoutes } from '../routes/transcription.js';
 import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
 import { buildTerminalRoutes } from '../routes/terminal.js';
@@ -143,6 +144,7 @@ import type { KnowledgeAutoLinker } from '../services/knowledge/knowledgeAutoLin
 import type { OutboundPolicyService } from '../services/outboundPolicy.js';
 import type { PeerProfileService } from '../services/peerProfileService.js';
 import type { PlanService } from '../services/planService.js';
+import type { BuildSessionService } from '../services/buildSessionService.js';
 import type { ReflectionService } from '../services/reflectionService.js';
 import type { SchedulerService } from '../services/scheduler.js';
 import type { SessionMomentService } from '../services/sessionMomentService.js';
@@ -203,6 +205,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   orchestratorModelRouter: ReturnType<typeof OrchestratorModelRouter.fromEnv>;
   outboundPolicy: OutboundPolicyService;
   planService: PlanService;
+  buildSessionService: BuildSessionService;
   scheduler: SchedulerService;
   runCompaction: import('../services/run/runCompactionService.js').RunCompactionService;
   sessionStore: AgentSessionService;
@@ -301,6 +304,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     outboundPolicy,
     personalBrain,
     planService,
+    buildSessionService,
     registry,
     replay,
     scheduler,
@@ -524,6 +528,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
   app.route('/v1/capabilities', buildCapabilityRoutes({ db: sqlite, auth, capabilities: capabilityRegistry }));
   app.route('/v1/agents', buildAgentRoutes({ db: sqlite, auth, vault: credentialVault, adapters, logger, conversations, harnessMemoryIngestion, mcpHarness, skillMaterializer, episodes: episodicMemoryStore }));
   app.route('/v1/tasks', buildTaskRoutes({ db: sqlite, auth, plans: planService, sessions: sessionStore }));
+  app.route('/v1/build-sessions', buildBuildSessionRoutes({ db: sqlite, auth, sessions: buildSessionService }));
   app.route('/v1/domains', buildDomainRoutes({ db: sqlite, auth, logger, adapters, bus }));
   const appStaffing = new AppStaffingService({
     store: appStores.store,

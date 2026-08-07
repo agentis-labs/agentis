@@ -115,7 +115,7 @@ const CONSOLE: ViewNode = {
             { type: 'ProgressBar', label: 'Error budget', value: 38, style: { tone: 'danger' } },
           ] },
           { type: 'Timeline', title: 'Recent events', items: [
-            { title: 'Deployed v2.3.1', at: '09:12', tone: 'success' },
+            { title: 'Deployed revision 2.3.1', at: '09:12', tone: 'success' },
             { title: 'Latency spike on /search', at: '09:40', tone: 'warning' },
             { title: 'Auto-scaled +3 workers', at: '09:41', tone: 'accent' },
             { title: 'Recovered', at: '09:48', tone: 'success' },
@@ -243,5 +243,4 @@ export function GenUIShowcasePage() {
     </div>
   );
 }
-
 

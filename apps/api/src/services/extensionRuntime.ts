@@ -6,7 +6,7 @@
 
 import { and, eq } from 'drizzle-orm';
 import { CONSTANTS, AgentisError } from '@agentis/core';
-import type { ComponentManifestV2, ExtensionExecutionOutcome, ExtensionManifest, ExtensionOperation, ExtensionPermission } from '@agentis/core';
+import type { ComponentManifest, ExtensionExecutionOutcome, ExtensionManifest, ExtensionOperation, ExtensionPermission } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../logger.js';
@@ -433,7 +433,7 @@ export function normalizeExtensionManifest(
     allowedDomains: Array.isArray(source.allowedDomains) ? source.allowedDomains.filter((v): v is string => typeof v === 'string') : undefined,
     source: typeof source.source === 'string' ? source.source : undefined,
     bundleDir: typeof source.bundleDir === 'string' ? source.bundleDir : undefined,
-    component: source.component && typeof source.component === 'object' ? source.component as ComponentManifestV2 : undefined,
+    component: source.component && typeof source.component === 'object' ? source.component as ComponentManifest : undefined,
     listenerOperations: Array.isArray(source.listenerOperations)
       ? source.listenerOperations.filter((v): v is string => typeof v === 'string')
       : operations.filter((o) => o.isListenerSource).map((o) => o.name),
@@ -452,7 +452,7 @@ export function validateExtensionManifest(manifest: ExtensionManifest, opts: { i
     throw new AgentisError('EXTENSION_MANIFEST_INVALID', `Extension ${manifest.slug} must declare at least one operation`);
   }
   if (manifest.runtime === 'component_oci') {
-    if (!manifest.component) throw new AgentisError('EXTENSION_MANIFEST_INVALID', 'component_oci requires component manifest v2');
+    if (!manifest.component) throw new AgentisError('EXTENSION_MANIFEST_INVALID', 'component_oci requires a ComponentManifest');
     validateComponentManifest(manifest.component);
     if (manifest.component.operations.map((operation) => operation.name).join('|') !== manifest.operations.map((operation) => operation.name).join('|')) {
       throw new AgentisError('EXTENSION_MANIFEST_INVALID', 'component and extension operation catalogs must match');

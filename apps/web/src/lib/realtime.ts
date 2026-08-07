@@ -96,7 +96,10 @@ export function useRealtimeStatus(): RealtimeStatus {
     getSocket();
     setStatus(getRealtimeStatus());
     statusListeners.add(setStatus);
-    return () => { statusListeners.delete(setStatus); };
+    return () => {
+      statusListeners.delete(setStatus);
+      disconnectTransportWhenIdle();
+    };
   }, []);
   return status;
 }
@@ -175,6 +178,26 @@ export function disconnectRealtime() {
   setRealtimeStatus('connecting');
 }
 
+/**
+ * A workspace transport is shared, but it must not outlive its final consumer.
+ * This prevents hidden reconnect loops after navigation and guarantees unit/E2E
+ * runners can terminate without leaked Socket.IO or SSE handles.
+ */
+function disconnectTransportWhenIdle(): void {
+  if (localListeners.size > 0 || activeSubscriptions.size > 0 || statusListeners.size > 0) return;
+  for (const record of workspaceStreams.values()) record.controller.abort();
+  workspaceStreams.clear();
+  for (const record of runStreams.values()) record.controller.abort();
+  runStreams.clear();
+  sharedSocket?.disconnect();
+  sharedSocket = null;
+  sharedSocketToken = null;
+  socketConnected = false;
+  socketConnecting = false;
+  fallbackOpenCount = 0;
+  setRealtimeStatus('disconnected');
+}
+
 if (typeof window !== 'undefined') {
   window.addEventListener('agentis:auth-changed', () => {
     disconnectRealtime();
@@ -229,6 +252,7 @@ export function useRealtime(events: string[], handler: (env: RealtimeEnvelope) =
     getSocket();
     return () => {
       unsubs.forEach((unsubscribe) => unsubscribe());
+      disconnectTransportWhenIdle();
     };
   }, [events.join('|')]);
 }
@@ -245,7 +269,10 @@ export function subscribeRealtimeEvents(
 ): () => void {
   getSocket();
   const unsubs = events.map((ev) => addLocalListener(ev, handler));
-  return () => unsubs.forEach((unsubscribe) => unsubscribe());
+  return () => {
+    unsubs.forEach((unsubscribe) => unsubscribe());
+    disconnectTransportWhenIdle();
+  };
 }
 
 export function rtSubscribe(
@@ -281,6 +308,7 @@ export function rtSubscribe(
     if (kind === 'workspace' && workspaceId) releaseWorkspaceStream(workspaceId);
     if (kind === 'run' && args.runId) releaseRunStream(args.runId);
     if (sharedSocket?.connected) emitRoomSubscription(sharedSocket, kind, nextArgs, false);
+    disconnectTransportWhenIdle();
   };
 }
 

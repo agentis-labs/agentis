@@ -548,6 +548,15 @@ export const workflowGraphSchema = z.object({
   phases: z.array(workflowPhaseSchema).optional(),
 }).passthrough();
 
+/** Editor/API ingress accepts id-less edges; persistence canonicalization supplies stable ids. */
+export const workflowIngressEdgeSchema = workflowEdgeSchema.extend({
+  id: z.string().trim().min(1).optional(),
+});
+
+export const workflowGraphIngressSchema = workflowGraphSchema.extend({
+  edges: z.array(workflowIngressEdgeSchema),
+});
+
 
 // ────────────────────────────────────────────────────────────
 // API request bodies
@@ -561,7 +570,7 @@ export const createWorkflowSchema = z.object({
   ownerAgentId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(255),
   description: z.string().max(8000).nullable().optional(),
-  graph: workflowGraphSchema.optional(),
+  graph: workflowGraphIngressSchema.optional(),
   settings: z.record(z.string(), z.unknown()).default({}),
 });
 
@@ -570,7 +579,7 @@ export const updateWorkflowSchema = z.object({
   spaceId: z.string().uuid().nullable().optional(),
   ownerAgentId: z.string().uuid().nullable().optional(),
   description: z.string().max(8000).nullable().optional(),
-  graph: workflowGraphSchema.optional(),
+  graph: workflowGraphIngressSchema.optional(),
   settings: z.record(z.string(), z.unknown()).optional(),
   /** Optimistic-concurrency base for semantic graph edits. */
   baseRevisionId: z.string().min(1).optional(),

@@ -25,6 +25,7 @@ export * from './memory.js';
 export * from './retrieval.js';
 export * from './baseline.js';
 export * from './plan.js';
+export * from './buildSession.js';
 
 
 

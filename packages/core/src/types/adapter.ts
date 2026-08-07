@@ -24,7 +24,7 @@ export type RuntimePermissionProfile =
  * Portable runtime policy stored inside the existing agent config JSON. Keeping
  * this additive lets old agents run while every launch gets an auditable policy.
  */
-export interface RuntimeProfileV2 {
+export interface RuntimeProfile {
   version: 2;
   mode: RuntimeProfileMode;
   projectRoot?: string;
@@ -44,7 +44,7 @@ export interface AgentExecutionEnvelope {
   observedAt: string;
   agentId: string;
   adapterType: AdapterType;
-  runtimeProfile: RuntimeProfileV2;
+  runtimeProfile: RuntimeProfile;
   binary: string;
   cliVersion?: string | null;
   cwd: string;
@@ -231,8 +231,8 @@ export interface RuntimeDescriptor {
   resourceCount: number;
   probedAt: string;
   limitations?: string[];
-  /** Effective v2 policy plus the latest discoverable launch facts. */
-  runtimeProfile?: RuntimeProfileV2;
+  /** Effective runtime policy plus the latest discoverable launch facts. */
+  runtimeProfile?: RuntimeProfile;
   executionEnvelope?: AgentExecutionEnvelope;
 }
 
@@ -425,7 +425,7 @@ export interface ClaudeCodeAdapterConfig {
   env?: Record<string, string>;
   timeoutSec?: number;
   dangerouslySkipPermissions?: boolean;
-  runtimeProfile?: RuntimeProfileV2;
+  runtimeProfile?: RuntimeProfile;
 }
 
 export interface CodexAdapterConfig {
@@ -446,7 +446,7 @@ export interface CodexAdapterConfig {
   extraArgs?: string[];
   env?: Record<string, string>;
   timeoutSec?: number;
-  runtimeProfile?: RuntimeProfileV2;
+  runtimeProfile?: RuntimeProfile;
 }
 
 export interface CursorAdapterConfig {
@@ -574,7 +574,7 @@ export interface NormalizedTask {
    */
   toolManifest?: ToolManifestEntry[];
 
-  // -- V2 Features --
+  // Runtime features
   abilities?: { id: string; name: string; version: string; mode: 'compiled' | 'static' }[];
   abilityEnv?: Record<string, string>;
   preferredModel?: string | null;

@@ -78,8 +78,8 @@ describe('<ChatPlanCanvas />', () => {
   it('renders a read-only architecture canvas from explicit architecture payload', () => {
     render(<ChatPlanCanvas planText={agentPlan} architecture={architecture} />);
 
-    expect(screen.getByText('Workflow architecture')).toBeInTheDocument();
-    expect(screen.getByText('3 preview nodes')).toBeInTheDocument();
+    expect(screen.getByText('Proposed workflow map')).toBeInTheDocument();
+    expect(screen.getByText('3 proposed nodes · not materialized')).toBeInTheDocument();
     expect(screen.getByTestId('react-flow')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /approve/i })).toBeNull();
   });

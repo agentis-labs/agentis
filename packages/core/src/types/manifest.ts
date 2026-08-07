@@ -204,9 +204,8 @@ export type AppDependency = z.infer<typeof appDependencySchema>;
  * the projection (rows ↔ manifest) is a straight map.
  */
 export const appManifestSchema = z.object({
-  // Missing means the original v1 contract. New exporters set v2 explicitly;
-  // retaining the legacy default keeps authentic pre-version-field packages
-  // importable instead of silently reclassifying them as v2.
+  // Missing means the legacy contract. New exporters set the current schema
+  // revision explicitly; retaining the default keeps old packages importable.
   manifestVersion: z.union([z.literal(1), z.literal(2)]).default(1),
   agentisVersion: z.string().min(1).default('1.0.0'),
   /**

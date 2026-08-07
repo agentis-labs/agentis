@@ -5,7 +5,7 @@ import { rtSubscribe, useRealtime } from './realtime';
 
 export type ResourceDomain =
   | 'agents' | 'apps' | 'workflows' | 'interfaces' | 'appData' | 'artifacts'
-  | 'approvals' | 'runs' | 'spaces' | 'packages' | 'conversations' | 'brain' | 'history';
+  | 'approvals' | 'runs' | 'spaces' | 'packages' | 'conversations' | 'brain' | 'history' | 'builds';
 
 const ALL_EVENTS = [...new Set(Object.values(REALTIME_EVENTS))];
 const revisions = new Map<ResourceDomain, number>();
@@ -27,12 +27,14 @@ const CACHE_MATCHES: Record<ResourceDomain, string[]> = {
   conversations: ['/v1/conversations', '/v1/rooms', '/v1/channels', '/v1/tasks/spines'],
   brain: ['/v1/brain', '/v1/memory', '/v1/knowledge'],
   history: ['/v1/history', '/v1/activity', '/v1/observability', '/v1/dashboard'],
+  builds: ['/v1/build-sessions', '/v1/apps', '/v1/tasks/spines'],
 };
 
 export function resourceDomainsForEvent(event: string): ResourceDomain[] {
   const domains = new Set<ResourceDomain>();
   if (event.startsWith('agent.')) domains.add('agents');
   if (event.startsWith('app.')) domains.add('apps');
+  if (event.startsWith('build.') || event === REALTIME_EVENTS.APP_BLUEPRINT_UPDATED) domains.add('builds');
   if (event.startsWith('workflow.')) domains.add('workflows');
   if (event.startsWith('app.interface_') || event.startsWith('app.surface_')) domains.add('interfaces');
   if (event === REALTIME_EVENTS.DATA_CHANGED) domains.add('appData');

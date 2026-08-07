@@ -14,6 +14,23 @@ afterEach(() => {
 });
 
 describe('normalizeWorkflowGraph', () => {
+  it('repairs id-less autosave edges before strict graph validation', () => {
+    const graph = {
+      version: 1 as const,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'start', type: 'trigger', title: 'Start', config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'done', type: 'return_output', title: 'Done', config: { kind: 'return_output', renderAs: 'json' } },
+      ],
+      edges: [{ source: 'start', target: 'done' }],
+    } as unknown as WorkflowGraph;
+    const normalized = normalizeWorkflowGraph(ctx.db, ctx.workspace.id, graph);
+    expect(normalized.graph.edges[0]?.id).toBe('edge-start-default-done-default-default');
+    expect(normalized.repairs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'edge_identity_normalized' }),
+    ]));
+  });
+
   it('promotes filter nodes that return structured payloads into transform nodes', () => {
     const graph: WorkflowGraph = {
       version: 1,

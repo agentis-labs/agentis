@@ -199,6 +199,17 @@ export class ChatSessionExecutor {
     return adapter;
   }
 
+  /** A disclosed retry target when the selected CLI runtime is definitively down. */
+  static #healthyFallbackAdapter(exclude: AgentAdapter, workspaceId?: string, task?: string | null): AgentAdapter | undefined {
+    const fallback = task
+      ? this.#deps.modelRouter?.resolveRouted({ role: 'conversation', workspaceId, task, purpose: 'runtime_recovery' })
+        ?? this.#deps.orchestratorRuntime
+        ?? this.#deps.workspaceHarnesses?.resolve(workspaceId)?.adapter
+      : this.orchestratorAdapter(workspaceId);
+    if (!fallback || fallback === exclude || !fallback.chat || fallback.capabilities?.().interactiveChat === false) return undefined;
+    return fallback;
+  }
+
   /**
    * Bounded health probe used as a chat preflight. Races the adapter's own
    * `healthCheck()` against a short deadline so a hung probe can't itself freeze
@@ -545,15 +556,26 @@ export class ChatSessionExecutor {
             adapterType: adapter.adapterType,
             error: reason,
           });
-          yield {
-            type: 'tool_result',
-            id: 'adapter',
-            name: 'adapter.chat',
-            result: null,
-            error: `The ${label} runtime is unavailable: ${reason}`,
-          };
-          yield { type: 'done', finishReason: 'error' };
-          return;
+          const fallback = this.#healthyFallbackAdapter(adapter, ctx.workspaceId, effectiveUserMessage);
+          if (!fallback) {
+            yield {
+              type: 'tool_result',
+              id: 'adapter',
+              name: 'adapter.chat',
+              result: null,
+              error: `The ${label} runtime is unavailable: ${reason}`,
+            };
+            yield { type: 'done', finishReason: 'error' };
+            return;
+          }
+          adapter = fallback;
+          yield this.#activity(
+            ctx,
+            'runtime',
+            'Retrying on a healthy runtime',
+            `${label} is unavailable; this turn is being retried once on ${fallback.adapterType ?? 'the workspace fallback'}.`,
+            'runtime-recovery',
+          );
         }
       }
     }
@@ -987,6 +1009,10 @@ export class ChatSessionExecutor {
     let producedThinking = false;
     // One-shot recovery guard + the bumped output budget used on the retry.
     let emptyRetryUsed = false;
+    // A runtime can pass a binary health probe and still violate the turn
+    // protocol (for example returning CLI-help prose). Retry exactly once on a
+    // different configured runtime before showing an adapter failure.
+    let runtimeRecoveryUsed = false;
     let retryMaxTokens: number | undefined;
     // Per-round + whole-turn budgets are ADAPTER-DERIVED, not one-size-fits-all. A
     // CLI harness (Codex / Claude Code — `marker_protocol` or `mcp_native`) re-spawns
@@ -1114,6 +1140,25 @@ export class ChatSessionExecutor {
         yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
         yield { type: 'done', finishReason: 'error' };
         return;
+      }
+
+      const adapterFailure = bufferedDeltas.find((delta) =>
+        delta.type === 'tool_result' && delta.name === 'adapter.chat' && Boolean(delta.error));
+      if (adapterFailure && !runtimeRecoveryUsed && toolCalls.length === 0) {
+        const adapterError = adapterFailure.type === 'tool_result' ? adapterFailure.error : undefined;
+        const fallback = this.#healthyFallbackAdapter(adapter, ctx.workspaceId, String(messages.at(-1)?.content ?? ''));
+        if (fallback) {
+          runtimeRecoveryUsed = true;
+          adapter = fallback;
+          yield this.#activity(
+            ctx,
+            'runtime',
+            'Retrying on a healthy runtime',
+            `${adapterError ?? 'The selected runtime failed'} Retrying once on ${fallback.adapterType ?? 'the workspace fallback'}.`,
+            'runtime-recovery',
+          );
+          continue;
+        }
       }
 
       if (toolCalls.length === 0 || finishReason !== 'tool_calls') {
