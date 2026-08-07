@@ -168,7 +168,7 @@ describe('agent runtime routes', () => {
       getRuntimeContext: async () => ({
         provider: 'antigravity',
         models: [],
-        currentModel: 'Gemini 3.6 Flash (High)',
+      currentModel: 'gemini-3.6-flash-high',
         fastModeSupported: false,
       }),
     } as AgentAdapter);
@@ -183,11 +183,10 @@ describe('agent runtime routes', () => {
       models: Array<{ id: string; label: string }>;
       efforts: Array<{ id: string; label: string }>;
     };
-    expect(body.currentModel).toBe('Gemini 3.6 Flash');
+    expect(body.currentModel).toBe('gemini-3.6-flash-high');
     expect(body.currentEffort).toBe('high');
     expect(body.efforts.map((effort) => effort.label)).toEqual(['High', 'Medium', 'Low']);
-    expect(body.models.filter((model) => model.id === 'Gemini 3.6 Flash')).toHaveLength(1);
-    expect(body.models.some((model) => /\((?:High|Medium|Low)\)$/.test(model.label))).toBe(false);
+    expect(body.models.filter((model) => model.id === 'gemini-3.6-flash-high')).toHaveLength(1);
   });
 });
 

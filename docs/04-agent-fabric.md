@@ -18,7 +18,7 @@ protected by a per-runtime `CircuitBreaker`. Every task is a `NormalizedTask`.
 | `ClaudeCodeAdapter` | Claude Code CLI | native or hermetic profile; native MCP when a server is mounted |
 | `CodexAdapter` | OpenAI Codex CLI | native profile preserves user/project config, skills, plugins, browser, and named permissions |
 | `CursorAdapter` | Cursor | semantic code index |
-| `AntigravityAdapter` | Google Antigravity (agy) | native MCP; reads transcript for output |
+| `AntigravityAdapter` | Google Antigravity (agy) | structured `stream-json` stdout; canonical CLI model ids |
 | `HermesAgentAdapter` | Hermes Agent (ACP) | dual-transport ACP client |
 | `HermesAdapter` / `LocalLlmAdapter` | OpenAI-compatible streaming | Nous / LM Studio / llama.cpp |
 | `OpenClawAdapter` | OpenClaw gateway | unified LLM gateway, session persistence |

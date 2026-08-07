@@ -15,6 +15,7 @@ import { CodexAdapter } from '../../adapters/CodexAdapter.js';
 import { CursorAdapter } from '../../adapters/CursorAdapter.js';
 import { HermesAgentAdapter } from '../../adapters/HermesAgentAdapter.js';
 import { AntigravityAdapter } from '../../adapters/AntigravityAdapter.js';
+import { normalizeAntigravityModel } from '../../adapters/antigravityModels.js';
 import { assertSafeUrl } from '../safeUrl.js';
 import { joinUrl, testHarnessConfig, type V1HarnessAdapterType } from '../harness/harnessProbe.js';
 import type { McpHarnessServer, McpHarnessSessionService } from '../mcp/mcpHarnessSession.js';
@@ -466,8 +467,11 @@ export async function switchRuntime(
   const sameAdapter = existing.adapterType === input.adapterType;
   const mergedConfig = sameAdapter ? { ...priorConfig, ...(input.config ?? {}) } : { ...(input.config ?? {}) };
   const repaired = await repairCliHarnessConfig(input.adapterType, mergedConfig);
-  const config = repaired.config;
-  const runtimeModel = input.runtimeModel ?? runtimeModelFromConfig(input.adapterType, config) ?? null;
+  const rawModel = input.runtimeModel ?? runtimeModelFromConfig(input.adapterType, repaired.config) ?? null;
+  const runtimeModel = input.adapterType === 'antigravity' ? normalizeAntigravityModel(rawModel) : rawModel;
+  const config = input.adapterType === 'antigravity'
+    ? { ...repaired.config, ...(runtimeModel ? { model: runtimeModel } : {}) }
+    : repaired.config;
   const isPaused = Boolean(existing.isPaused);
 
   let status: SwitchRuntimeResult['status'] = isPaused ? 'paused' : 'online';

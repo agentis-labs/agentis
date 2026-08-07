@@ -42,6 +42,7 @@ import { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js'
 import { registerAdapter } from '../services/agent/agentCommission.js';
 import { repairCliHarnessConfig } from '../services/harness/harnessConfigRepair.js';
 import type { V1HarnessAdapterType } from '../services/harness/harnessProbe.js';
+import { normalizeAntigravityModel } from '../adapters/antigravityModels.js';
 
 export interface AgentRoutesDeps {
   db: AgentisSqliteDb;
@@ -399,11 +400,14 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       const catalog = await listRuntimeModels(adapterType, agent.id, deps.db);
       const detectedRuntime = detectRuntimeState(adapterType);
       const config = recordFromUnknown(agent.config);
-      const currentModel = modelConfiguredOnAgent(agent)
+      const currentModelRaw = modelConfiguredOnAgent(agent)
         ?? detectedRuntime.model
         ?? baseContext.currentModel
         ?? catalog.defaultModel
         ?? 'unknown';
+      const currentModel = adapterType === 'antigravity'
+        ? (normalizeAntigravityModel(currentModelRaw) ?? currentModelRaw)
+        : currentModelRaw;
       const detectedEffort = adapterType === 'codex'
         ? stringOf(config.modelReasoningEffort) ?? detectedRuntime.reasoningEffort ?? baseContext.currentEffort
         : adapterType === 'antigravity'
@@ -412,12 +416,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       const detectedFastMode = adapterType === 'codex'
         ? booleanOf(config.fastMode) ?? detectedRuntime.fastMode ?? baseContext.fastModeEnabled
         : undefined;
-      const presentedCurrentModel = adapterType === 'antigravity'
-        ? antigravityBaseModel(currentModel)
-        : currentModel;
       const catalogModels = catalog.models.map((model) => ({
-        id: adapterType === 'antigravity' ? antigravityBaseModel(model.id) : model.id,
-        label: adapterType === 'antigravity' ? antigravityBaseModel(model.label) : model.label,
+        id: adapterType === 'antigravity' ? (normalizeAntigravityModel(model.id) ?? model.id) : model.id,
+        label: model.label,
         recommended: model.recommended,
         source: model.source,
         verified: model.verified,
@@ -450,9 +451,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
           : {}),
         models: mergeRuntimeContextModels(
           presentedModels,
-          presentedCurrentModel,
+          currentModel,
         ),
-        currentModel: presentedCurrentModel,
+        currentModel,
       });
     } catch (err) {
       deps.logger.error('agents.runtime_context_failed', { agentId: id, err: (err as Error).message });
@@ -650,8 +651,12 @@ function presentAgent<T extends { id: string; status: string; lastHeartbeatAt?: 
     : null;
   const configured = configuredAffordances(meta.adapterType ?? null, config);
   const potential = potentialAffordances(meta.adapterType ?? null);
+  const normalizedRuntimeModel = meta.adapterType === 'antigravity'
+    ? normalizeAntigravityModel((agent as { runtimeModel?: string | null }).runtimeModel)
+    : (agent as { runtimeModel?: string | null }).runtimeModel;
   return {
     ...agent,
+    ...(normalizedRuntimeModel !== undefined ? { runtimeModel: normalizedRuntimeModel } : {}),
     status,
     ...(adapterCapabilities ? { adapterCapabilities } : {}),
     ...(runtimeCapabilities ? { runtimeCapabilityManifest: runtimeCapabilities } : {}),
@@ -722,12 +727,8 @@ function recordFromUnknown(value: unknown): Record<string, unknown> {
 }
 
 function antigravityEffort(model: string): 'high' | 'medium' | 'low' | undefined {
-  const match = /\((high|medium|low)\)$/i.exec(model);
+  const match = /(?:\(|-)(high|medium|low)\)?$/i.exec(model);
   return match?.[1]?.toLowerCase() as 'high' | 'medium' | 'low' | undefined;
-}
-
-function antigravityBaseModel(model: string): string {
-  return model.replace(/\s*\((?:high|medium|low)\)$/i, '').trim();
 }
 
 function stringOf(value: unknown): string | undefined {

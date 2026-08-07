@@ -201,6 +201,10 @@ export class ChatSessionExecutor {
 
   /** A disclosed retry target when the selected CLI runtime is definitively down. */
   static #healthyFallbackAdapter(exclude: AgentAdapter, workspaceId?: string, task?: string | null): AgentAdapter | undefined {
+    // Runtime bindings are authoritative. In particular, never send an
+    // Antigravity/Gemini model id to the workspace Codex fallback: that produces
+    // a misleading Codex-account error and hides the real Antigravity failure.
+    if (exclude.adapterType === 'antigravity') return undefined;
     const fallback = task
       ? this.#deps.modelRouter?.resolveRouted({ role: 'conversation', workspaceId, task, purpose: 'runtime_recovery' })
         ?? this.#deps.orchestratorRuntime
@@ -1083,7 +1087,11 @@ export class ChatSessionExecutor {
                 executionMode: permissionMode === 'plan' ? 'plan' : permissionMode === 'ask' ? 'ask' : 'chat',
               }
             : {}),
-          ...(options.preferredModel ? { preferredModel: options.preferredModel } : {}),
+          // A recovery adapter has its own model catalogue. Never forward the
+          // selected runtime's model across that boundary (e.g. Gemini -> Codex).
+          ...(options.preferredModel && adapter.adapterType === options.adapterType
+            ? { preferredModel: options.preferredModel }
+            : {}),
         };
         if (ctx.signal) chatOptions.signal = ctx.signal;
         if (retryMaxTokens) chatOptions.maxTokens = retryMaxTokens;

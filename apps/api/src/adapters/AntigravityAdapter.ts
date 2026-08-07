@@ -9,10 +9,9 @@
  * (config under `~/.gemini/antigravity-cli/`) and is a multi-vendor harness
  * (Gemini, Claude, GPT-OSS models).
  *
- * Like the Codex/Cursor adapters this is a streaming CLI adapter: spawn
- * `agy --print --dangerously-skip-permissions` (the prompt is piped on stdin) and
- * normalize to the same NormalizedAgentEvent / ChatDelta streams as every other
- * adapter. Flags verified against agy v1.0.13.
+ * Like the Codex/Cursor adapters this is a streaming CLI adapter. Current agy
+ * releases use `agy [options] --print <prompt>` with structured JSON on stdout;
+ * the prompt is positional, not piped on stdin.
  *
  * ⚠️ KNOWN agy v1.0.13 LIMITATION: `--print` runs the turn and exits 0, but writes
  * the model response only to an interactive TTY renderer — it emits NOTHING to a
@@ -55,13 +54,16 @@ import {
   DEFAULT_CHAT_TURN_TIMEOUT_MS,
   type CliChatPart,
 } from './cliChatRuntime.js';
-import { runtimeProgressActivity } from './runtimeProgress.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
+import { antigravityModelLabel, normalizeAntigravityModel } from './antigravityModels.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 20_000;
 const DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS = 30_000;
+// Windows CreateProcess rejects a command line longer than 32,767 UTF-16 code
+// units. Leave generous room for the executable path and agy flags.
+const MAX_AGY_POSITIONAL_PROMPT_CHARS = 22_000;
 
 export interface AntigravityAdapterOptions {
   agentId: string;
@@ -145,11 +147,11 @@ export class AntigravityAdapter implements AgentAdapter {
   }
 
   async getRuntimeContext(): Promise<RuntimeContext> {
-    const configuredModel = this.opts.model?.trim();
+    const configuredModel = normalizeAntigravityModel(this.opts.model);
     return {
       provider: 'Google Antigravity',
       models: configuredModel
-        ? [{ id: configuredModel, label: configuredModel, source: 'agent_config', verified: false }]
+        ? [{ id: configuredModel, label: antigravityModelLabel(configuredModel) ?? configuredModel, source: 'agent_config', verified: false }]
         : [],
       currentModel: configuredModel ?? 'unknown',
       currentModelSource: configuredModel ? 'agent_config' : 'fallback',
@@ -216,7 +218,7 @@ export class AntigravityAdapter implements AgentAdapter {
     const args = buildAntigravityArgs(this.opts, task.preferredModel);
     const result = await this.#runAgy({
       args,
-      stdin: buildAntigravityPrompt(task),
+      prompt: buildAntigravityPrompt(task),
       cwd: task.workdir ?? this.opts.cwd,
       env: task.abilityEnv,
       signal: controller.signal,
@@ -240,22 +242,25 @@ export class AntigravityAdapter implements AgentAdapter {
   }
 
   /**
-   * Run one `agy --print` turn and return its answer. Because agy v1.0.13 does
+   * Run one `agy --print` turn and return its answer. Current agy emits
    * not emit the response to a piped stdout, the answer is read back from the
    * conversation transcript agy writes under its brain dir
    * (`<brain>/<conversation-id>/.system_generated/logs/transcript_full.jsonl`) —
    * the last `source: "MODEL"` content. A forward-compatible stdout answer (if a
    * future agy emits one) takes precedence. This is the only way to capture agy
    * output today without a PTY; it tolerates the file being flushed slightly
-   * after exit by retrying briefly.
+   * after exit by retrying briefly. Current agy 1.1 structured stdout is the
+   * only authoritative answer; shared transcript files are never used.
    */
   async #runAgy(input: {
     args: string[];
-    stdin: string;
+    prompt: string;
     cwd?: string;
     env?: Record<string, string>;
     signal?: AbortSignal;
     timeoutMs?: number;
+    onTextDelta?: (text: string) => void;
+    onActivity?: (delta: Extract<ChatDelta, { type: 'activity' }>) => void;
     /**
      * Live-stream callbacks. agy emits nothing to stdout, but it writes its
      * conversation transcript progressively while it works (verified: rows appear
@@ -263,101 +268,89 @@ export class AntigravityAdapter implements AgentAdapter {
      * reasoning + tool actions as they happen — the same live trace Codex gives —
      * instead of only revealing the final answer after exit.
      */
-    onThought?: (text: string) => void;
-    onActivity?: (delta: Extract<ChatDelta, { type: 'activity' }>) => void;
   }): Promise<{ text: string; error?: string }> {
     const binary = this.opts.binaryPath || 'agy';
     const env = withExpandedPath({ ...process.env, ...(this.opts.env ?? {}), ...(input.env ?? {}) });
-    const brainDir = agyBrainDir(this.opts.env, input.env);
-    const before = listConversationDirs(brainDir);
     const controller = new AbortController();
     const unlink = linkAbortSignal(input.signal, controller);
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
-    const streaming = Boolean(input.onThought || input.onActivity);
-    // Tail state: the conversation dir agy created for this turn, the model steps
-    // we have already surfaced, and the last reasoning text (so a replace-in-place
-    // thought row only re-emits when it actually changes).
-    let tailTimer: NodeJS.Timeout | undefined;
-    let convDir: string | null = null;
-    let lastThought = '';
-    const emittedActivity = new Set<number>();
-    const pollTranscript = () => {
-      try {
-        if (!convDir) {
-          const id = newestNewConversation(brainDir, before);
-          if (id) convDir = join(brainDir, id);
-        }
-        if (!convDir) return;
-        for (const row of readTranscriptRows(convDir)) {
-          if (String(row.source ?? '').toUpperCase() !== 'MODEL') continue;
-          const thinking = firstString(row.thinking);
-          if (input.onThought && thinking && thinking !== lastThought) {
-            lastThought = thinking;
-            input.onThought(thinking);
-          }
-          const step = typeof row.step_index === 'number' ? row.step_index : -1;
-          if (input.onActivity && step >= 0 && !emittedActivity.has(step)) {
-            const activity = transcriptRowActivity(row, step);
-            if (activity) { emittedActivity.add(step); input.onActivity(activity); }
-          }
-        }
-      } catch {
-        // A transient read while agy rewrites the file must never break the turn.
-      }
-    };
-    const stopTail = () => { if (tailTimer) { clearInterval(tailTimer); tailTimer = undefined; } };
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: { text: string; error?: string }) => {
+        if (settled) return;
+        settled = true;
+        unlink();
+        if (timer) clearTimeout(timer);
+        resolve(result);
+      };
       let child: ReturnType<typeof spawn>;
       try {
         const cwd = resolveSpawnCwd(input.cwd, { create: true });
-        const target = resolveSpawnTarget(binary, input.args, cwd ?? process.cwd(), env);
+        // `agy --print` consumes a positional prompt. It does not read stdin;
+        // writing there made the CLI/model answer its own launch flags instead.
+        const prompt = compactAgyPositionalPrompt(input.prompt);
+        if (prompt.length !== input.prompt.length) {
+          this.opts.logger.warn('antigravity.prompt_compacted', {
+            originalChars: input.prompt.length,
+            retainedChars: prompt.length,
+          });
+        }
+        const target = resolveSpawnTarget(binary, [...input.args, prompt], cwd ?? process.cwd(), env);
         child = spawn(target.command, target.args, {
-          cwd, env, windowsHide: true, signal: controller.signal, stdio: ['pipe', 'pipe', 'pipe'],
+          cwd, env, windowsHide: true, signal: controller.signal, stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (err) {
-        unlink();
-        resolve({ text: '', error: `antigravity_spawn_failed: ${(err as Error).message}` });
+        finish({ text: '', error: `antigravity_spawn_failed: ${(err as Error).message}` });
         return;
       }
       if (input.timeoutMs && input.timeoutMs > 0) {
         timer = setTimeout(() => { timedOut = true; controller.abort(); }, input.timeoutMs);
         timer.unref?.();
       }
-      if (streaming) {
-        tailTimer = setInterval(pollTranscript, 350);
-        tailTimer.unref?.();
-      }
       let stderrText = '';
       let stdoutText = '';
+      let stdoutRemainder = '';
+      const consumeStdout = (chunk: string) => {
+        stdoutRemainder += chunk;
+        const lines = stdoutRemainder.split('\n');
+        stdoutRemainder = lines.pop() ?? '';
+        for (const line of lines) {
+          const parsed = parseAntigravityStdoutLine(line);
+          if (parsed.delta) input.onTextDelta?.(parsed.delta);
+          if (parsed.activity) input.onActivity?.(parsed.activity);
+        }
+      };
       child.stderr?.on('data', (d) => {
         const chunk = String(d);
         stderrText = `${stderrText}${chunk}`.slice(-4096);
         this.opts.logger.warn('antigravity.stderr', { data: chunk.slice(0, 256) });
       });
-      child.stdout?.on('data', (d) => { stdoutText = `${stdoutText}${String(d)}`.slice(-65536); });
+      child.stdout?.on('data', (d) => {
+        const chunk = String(d);
+        stdoutText = `${stdoutText}${chunk}`.slice(-65536);
+        consumeStdout(chunk);
+      });
       child.on('error', (err) => {
-        unlink(); stopTail(); if (timer) clearTimeout(timer);
-        resolve({ text: '', error: timedOut ? `Antigravity (agy) timed out` : `antigravity_error: ${err.message}` });
+        finish({ text: '', error: timedOut ? `Antigravity (agy) timed out` : `antigravity_error: ${err.message}` });
       });
       child.on('exit', (code) => {
-        unlink(); stopTail(); if (timer) clearTimeout(timer);
-        pollTranscript(); // final sweep for any rows written just before exit
+        if (stdoutRemainder.trim()) {
+          const parsedLine = parseAntigravityStdoutLine(stdoutRemainder);
+          if (parsedLine.delta) input.onTextDelta?.(parsedLine.delta);
+          if (parsedLine.activity) input.onActivity?.(parsedLine.activity);
+        }
         // Read stdout synchronously (it's fully delivered by exit time).
         const parsed = extractStdoutAnswer(stdoutText);
         if (code !== 0) {
-          resolve({ text: '', error: formatAntigravityExitError(code, stderrText, parsed.error ?? '') });
+          finish({ text: '', error: formatAntigravityExitError(code, stderrText, parsed.error ?? '') });
           return;
         }
         // Forward-compat: if a future agy prints the answer to stdout, use it.
-        if (parsed.text) { resolve({ text: parsed.text }); return; }
-        // Otherwise read it back from the on-disk conversation transcript (async).
-        void readNewConversationAnswer(brainDir, before).then((text) => {
-          if (!text) this.opts.logger.warn('antigravity.no_transcript_answer', { brainDir });
-          resolve({ text });
-        });
+        if (parsed.error) { finish({ text: '', error: parsed.error }); return; }
+        if (parsed.text) { finish({ text: parsed.text }); return; }
+        finish({ text: '', error: 'RUNTIME_PROTOCOL_VIOLATION: Antigravity completed without a structured response. Verify agy 1.1+ is installed and retry.' });
       });
-      child.stdin?.end(input.stdin);
     });
   }
 
@@ -371,13 +364,10 @@ export class AntigravityAdapter implements AgentAdapter {
     tools: ToolDefinition[],
     options?: ChatInvocationOptions,
   ): AsyncIterable<ChatDelta> {
-    // agy emits nothing to stdout (see #runAgy / the file header), so the final
-    // answer is still read back from its transcript after exit. But that same
-    // transcript is written progressively WHILE agy works, so we tail it live and
+    // agy emits response deltas and real tool-step lifecycle events on stdout;
     // stream per-step reasoning + tool actions as the run unfolds — the same live
     // trace Codex gives, instead of a silent "waiting for agent output" until the
-    // very end. The full history travels in the stdin prompt, so a fresh
-    // conversation per turn is fine.
+    // very end. Hidden reasoning and shared transcript files are not exposed.
     const configuredTimeoutMs = this.opts.timeoutSec && this.opts.timeoutSec > 0
       ? this.opts.timeoutSec * 1000
       : options?.latencyClass === 'interactive'
@@ -394,7 +384,7 @@ export class AntigravityAdapter implements AgentAdapter {
       type: 'activity',
       id: `antigravity-runtime-${sessionKey}`,
       label: 'Starting Antigravity',
-      detail: 'Running the turn and streaming its reasoning live.',
+      detail: 'Running the turn and waiting for verified runtime output.',
       phase: 'runtime',
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -403,19 +393,21 @@ export class AntigravityAdapter implements AgentAdapter {
 
     void (async () => {
       try {
+        let streamedText = '';
+        let streamSuppressed = false;
         const result = await this.#runAgy({
           args: buildAntigravityArgs(this.opts, options?.preferredModel),
-          stdin: buildAntigravityChatPrompt(messages, tools),
+          prompt: buildAntigravityChatPrompt(messages, tools),
           cwd: this.opts.cwd,
           signal: options?.signal,
           timeoutMs: hardCeilingMs > 0 ? hardCeilingMs : timeoutMs,
-          onThought: (text) => queue.push(runtimeProgressActivity({
-            id: `antigravity-thought-${sessionKey}`,
-            runtimeName: 'Antigravity',
-            text,
-            reasoning: true,
-            agentId: this.opts.agentId,
-          })),
+          onTextDelta: (delta) => {
+            streamedText += delta;
+            // Never stream the known CLI-help persona or an Agentis marker before
+            // the complete response has been validated and tool calls extracted.
+            if (/--dangerously-skip-permissions|AGENTIS_TOOL_CALL/i.test(streamedText)) streamSuppressed = true;
+            if (!streamSuppressed && delta) queue.push({ type: 'text', delta });
+          },
           onActivity: (delta) => queue.push(delta),
         });
 
@@ -435,13 +427,22 @@ export class AntigravityAdapter implements AgentAdapter {
         // out so the platform executes them, exactly like the other CLI adapters.
         const { cleaned, calls } = extractMarkerToolCalls(result.text);
         const body = (cleaned || result.text).trim();
-        if (body) queue.push({ type: 'text', delta: body });
+        if (body && (!streamedText || streamSuppressed)) queue.push({ type: 'text', delta: body });
         for (const call of calls) {
           queue.push({ type: 'tool_call', id: randomUUID(), name: call.name, args: call.args });
         }
         if (!body && calls.length === 0) {
           this.opts.logger.warn('antigravity.chat.empty_answer', {});
         }
+        queue.push({
+          type: 'activity',
+          id: `antigravity-runtime-${sessionKey}`,
+          label: 'Antigravity response ready',
+          phase: 'complete',
+          status: 'success',
+          completedAt: new Date().toISOString(),
+          agentId: this.opts.agentId,
+        });
         queue.push({ type: 'done', finishReason: calls.length > 0 ? 'tool_calls' : 'stop' });
       } catch (err) {
         queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: `antigravity_chat_failed: ${(err as Error).message}` });
@@ -478,6 +479,7 @@ export class AntigravityAdapter implements AgentAdapter {
 }
 
 type AntigravityJsonEvent = {
+  event?: unknown;
   type?: unknown;
   role?: unknown;
   content?: unknown;
@@ -497,6 +499,8 @@ type AntigravityJsonEvent = {
   session_id?: unknown;
   sessionId?: unknown;
   model?: unknown;
+  result?: unknown;
+  step_update?: unknown;
 };
 
 /**
@@ -513,15 +517,16 @@ function buildAntigravityArgs(
   preferredModel?: string | null,
   options: { conversationId?: string } = {},
 ): string[] {
-  const model = (preferredModel || opts.model || '').trim();
+  const model = normalizeAntigravityModel(preferredModel || opts.model);
   const skipPermissions = opts.yolo !== false; // default ON — no human is present to approve
   return [
-    '--print',
     ...(skipPermissions ? ['--dangerously-skip-permissions'] : []),
     ...(model ? ['--model', model] : []),
     ...(options.conversationId ? ['--conversation', options.conversationId] : []),
     ...(opts.timeoutSec && opts.timeoutSec > 0 ? ['--print-timeout', `${opts.timeoutSec}s`] : []),
+    '--output-format', 'stream-json',
     ...(opts.extraArgs ?? []),
+    '--print',
   ];
 }
 
@@ -532,9 +537,12 @@ function buildAntigravityArgs(
 function invalidAntigravityResponse(text: string): string | null {
   const compact = text.replace(/\s+/g, ' ').trim();
   const leakedHarnessFlag = /--dangerously-skip-permissions/i.test(compact);
-  const genericHarnessReply = /how can i help you (with your project|today)|not quite sure what you'd like me to do with/i.test(compact);
+  const genericHarnessReply = /how can i (help|assist) you|not quite sure what you'd like me to do with|if you were looking to/i.test(compact);
   if (leakedHarnessFlag && genericHarnessReply) {
     return 'RUNTIME_PROTOCOL_VIOLATION: Antigravity returned its CLI help persona instead of answering this turn.';
+  }
+  if (/no output produced.*permission|auto[- ]denied|requires? the .*permission/i.test(compact)) {
+    return 'RUNTIME_PERMISSION_REQUIRED: Antigravity could not run a requested tool because this agent is not allowed to approve it. Enable the agent runtime permission mode or configure an allow-rule, then retry.';
   }
   return null;
 }
@@ -552,6 +560,19 @@ function buildAntigravityPrompt(task: NormalizedTask): string {
     'Scratchpad snapshot:',
     safeJson(task.scratchpadSnapshot),
   ].join('\n');
+}
+
+/**
+ * `agy --print` accepts only a positional prompt, so on Windows it is bounded by
+ * CreateProcess' command-line limit. Keep the opening operating contract and the
+ * newest request intact rather than allowing a large history to prevent launch.
+ */
+export function compactAgyPositionalPrompt(prompt: string): string {
+  if (prompt.length <= MAX_AGY_POSITIONAL_PROMPT_CHARS) return prompt;
+  const marker = '\n\n[Earlier conversation context omitted to fit the Antigravity CLI command limit. Use the retained system instructions and latest messages.]\n\n';
+  const headLength = Math.floor((MAX_AGY_POSITIONAL_PROMPT_CHARS - marker.length) * 0.45);
+  const tailLength = MAX_AGY_POSITIONAL_PROMPT_CHARS - marker.length - headLength;
+  return `${prompt.slice(0, headLength)}${marker}${prompt.slice(-tailLength)}`;
 }
 
 function buildAntigravityChatPrompt(messages: ChatMessage[], tools: ToolDefinition[]): string {
@@ -612,27 +633,70 @@ function extractAssistantText(event: AntigravityJsonEvent): string {
   return firstString(event.content, event.text, event.delta, message?.content, message?.text) ?? '';
 }
 
-/**
- * Forward-compatible stdout reader: if a future agy prints the answer/JSON to a
- * pipe, capture it. Today agy emits nothing to a pipe, so this returns empty and
- * the transcript path takes over.
- */
+type ParsedAntigravityStdoutLine = {
+  delta?: string;
+  final?: string;
+  error?: string;
+  activity?: Extract<ChatDelta, { type: 'activity' }>;
+};
+
+function parseAntigravityStdoutLine(line: string): ParsedAntigravityStdoutLine {
+  const trimmed = line.trim();
+  if (!trimmed) return {};
+  try {
+    const event = JSON.parse(trimmed) as AntigravityJsonEvent;
+    const parsed: ParsedAntigravityStdoutLine = { error: extractAntigravityError(event) ?? undefined };
+    const eventName = String(event.event ?? '').toLowerCase();
+    if (eventName === 'step_update') {
+      const update = objectOf(event.step_update);
+      const stepType = String(update?.step_type ?? '').toLowerCase();
+      if (stepType === 'agent_response') {
+        parsed.delta = firstString(update?.text_delta, update?.text, update?.content);
+      } else if (String(update?.state ?? '').trim()) {
+        const step = typeof update?.step_index === 'number' ? String(update.step_index) : 'runtime';
+        const state = String(update?.state ?? '').toLowerCase();
+        if (/user_input|checkpoint/.test(stepType)) return parsed;
+        const label = /tool|command|browser|exec|run|function/.test(stepType)
+          ? prettyToolName(stepType)
+          : 'Antigravity runtime step';
+        parsed.activity = {
+          type: 'activity',
+          id: `antigravity-step-${step}`,
+          phase: 'runtime',
+          status: /done|success|complete/.test(state) ? 'success' : 'running',
+          label: `${/done|success|complete/.test(state) ? 'Completed' : 'Running'} ${label}`,
+          ...(state && !/done|success|complete/.test(state) ? { startedAt: new Date().toISOString() } : { completedAt: new Date().toISOString() }),
+        };
+      }
+    } else if (eventName === 'result') {
+      const result = objectOf(event.result);
+      const status = String(result?.status ?? '').toLowerCase();
+      if (status && status !== 'success') {
+        parsed.error = firstString(objectOf(result?.error)?.message, result?.error, result?.message)
+          ?? `Antigravity reported ${status}.`;
+      }
+      parsed.final = firstString(result?.response, result?.text, result?.content);
+    } else {
+      parsed.delta = extractAssistantText(event);
+    }
+    return parsed;
+  } catch {
+    const text = stripProcessNoise(trimmed).trim();
+    return text ? { delta: text } : {};
+  }
+}
+
 function extractStdoutAnswer(stdout: string): { text: string; error?: string } {
-  let text = '';
+  let streamedText = '';
+  let finalText = '';
   let error: string | undefined;
   for (const line of stdout.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const event = JSON.parse(trimmed) as AntigravityJsonEvent;
-      error = extractAntigravityError(event) ?? error;
-      const answer = extractAssistantText(event);
-      if (answer) text += answer;
-    } catch {
-      if (stripProcessNoise(trimmed).trim()) text += `${trimmed}\n`;
-    }
+    const parsed = parseAntigravityStdoutLine(line);
+    if (parsed.error) error = parsed.error;
+    if (parsed.delta) streamedText += `${parsed.delta}`;
+    if (parsed.final) finalText = parsed.final;
   }
-  return { text: text.trim(), error };
+  return { text: (finalText || streamedText).trim(), error };
 }
 
 const AGY_CONVERSATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

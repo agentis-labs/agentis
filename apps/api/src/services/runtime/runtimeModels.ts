@@ -6,6 +6,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { V1HarnessAdapterType } from '../harness/harnessProbe.js';
 import { inferModelTierFromId, routingMetadataForModelId, type ModelTier } from '../modelRoutingPolicy.js';
+import { ANTIGRAVITY_MODELS, normalizeAntigravityModel } from '../../adapters/antigravityModels.js';
 
 export interface RuntimeModelOption {
   id: string;
@@ -43,7 +44,10 @@ export async function listRuntimeModels(
   const agent = agentId && db
     ? db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get()
     : null;
-  const configuredModel = agent ? modelConfiguredOnAgent(agent) : null;
+  const configuredModelRaw = agent ? modelConfiguredOnAgent(agent) : null;
+  const configuredModel = adapterType === 'antigravity'
+    ? normalizeAntigravityModel(configuredModelRaw)
+    : configuredModelRaw;
   const detectedRuntime = detectRuntimeState(adapterType);
   const detectedRuntimeModel = detectedRuntime.model;
   const runtimeDefaultModel = detectedRuntimeModel ?? defaultModelFor(adapterType);
@@ -238,7 +242,7 @@ export function detectRuntimeState(adapterType: V1HarnessAdapterType): DetectedR
   }
   if (adapterType === 'antigravity') {
     const agyHome = process.env.ANTIGRAVITY_HOME?.trim() || path.join(homePath(), '.gemini', 'antigravity-cli');
-    return { model: readConfiguredModel([path.join(agyHome, 'settings.json')]) };
+    return { model: normalizeAntigravityModel(readConfiguredModel([path.join(agyHome, 'settings.json')])) };
   }
   return { model: null };
 }
@@ -404,16 +408,8 @@ function fallbackModelOptions(adapterType: V1HarnessAdapterType): RuntimeModelOp
     ];
   }
   if (adapterType === 'antigravity') {
-    // Antigravity's quality suffixes are execution presets, not distinct model
-    // families. Show one stable, runnable preset for each family so the picker
-    // does not repeat Gemini 3.6/3.5 several times during agent creation.
     return [
-      antigravityOption('Gemini 3.6 Flash (High)', 'Gemini 3.6 Flash', true),
-      antigravityOption('Gemini 3.5 Flash (High)', 'Gemini 3.5 Flash'),
-      antigravityOption('Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro'),
-      antigravityOption('Claude Sonnet 4.6 (Thinking)', 'Claude Sonnet 4.6'),
-      antigravityOption('Claude Opus 4.6 (Thinking)', 'Claude Opus 4.6'),
-      antigravityOption('GPT-OSS 120B (Medium)', 'GPT-OSS 120B'),
+      ...ANTIGRAVITY_MODELS.map((model, index) => antigravityOption(model.id, model.label, index === 0)),
     ];
   }
   return [];

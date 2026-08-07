@@ -27,6 +27,7 @@ import { testHarnessConfig, type V1HarnessAdapterType } from '../services/harnes
 import { repairCliHarnessConfig } from '../services/harness/harnessConfigRepair.js';
 import type { McpHarnessSessionService } from '../services/mcp/mcpHarnessSession.js';
 import { ORCHESTRATOR_DEFAULT_COLOR, registerAdapter, runtimeModelFromConfig, switchRuntime } from '../services/agent/agentCommission.js';
+import { normalizeAntigravityModel } from '../adapters/antigravityModels.js';
 
 const adapterTypeSchema = z.enum(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
 const agentStatusSchema = z.enum(['online', 'busy', 'offline', 'error', 'paused', 'setting_up']);
@@ -124,7 +125,12 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
         ? ORCHESTRATOR_DEFAULT_COLOR
         : CONSTANTS.AGENT_COLOR_PALETTE[Math.floor(Math.random() * CONSTANTS.AGENT_COLOR_PALETTE.length)]);
     const repaired = await repairCliHarnessConfig(body.adapterType, body.config);
-    const config = repaired.config;
+    const config = body.adapterType === 'antigravity'
+      ? { ...repaired.config, ...(normalizeAntigravityModel(String(repaired.config.model ?? body.runtimeModel ?? '')) ? { model: normalizeAntigravityModel(String(repaired.config.model ?? body.runtimeModel ?? '')) } : {}) }
+      : repaired.config;
+    const runtimeModel = body.adapterType === 'antigravity'
+      ? normalizeAntigravityModel(body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, config))
+      : (body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, config));
     const isPaused = body.isPaused ?? false;
     let status = body.status === 'setting_up' ? 'setting_up' : isPaused ? 'paused' : 'offline';
     deps.db.transaction(() => {
@@ -147,7 +153,7 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           instructions: body.instructions ?? null,
           avatarGlyph: body.avatarGlyph ?? null,
           avatarUrl: body.avatarUrl ?? null,
-          runtimeModel: body.runtimeModel ?? runtimeModelFromConfig(body.adapterType, config),
+          runtimeModel,
           role: body.role ?? null,
           reportsTo: body.reportsTo ?? null,
           spaceTag: domain.spaceTag,
@@ -231,7 +237,14 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
     });
     const rawNextConfig = body.config ?? (existing.config as Record<string, unknown>);
     const repairedConfig = await repairCliHarnessConfig(existing.adapterType as V1HarnessAdapterType, rawNextConfig);
-    const nextConfig = repairedConfig.config;
+    const nextConfig = existing.adapterType === 'antigravity'
+      ? { ...repairedConfig.config, ...(normalizeAntigravityModel(String(repairedConfig.config.model ?? body.runtimeModel ?? '')) ? { model: normalizeAntigravityModel(String(repairedConfig.config.model ?? body.runtimeModel ?? '')) } : {}) }
+      : repairedConfig.config;
+    const nextRuntimeModel = body.runtimeModel === undefined
+      ? existing.runtimeModel
+      : existing.adapterType === 'antigravity'
+        ? normalizeAntigravityModel(body.runtimeModel)
+        : body.runtimeModel;
     ensureOrEstablishSingleOrchestrator(deps.db, ws.workspaceId, nextRole, id, body.replaceExistingOrchestrator === true);
     deps.db.transaction(() => {
       deps.db
@@ -243,7 +256,7 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           config: nextConfig,
           instructions: nextInstructions,
           avatarGlyph: body.avatarGlyph === undefined ? existing.avatarGlyph : body.avatarGlyph,
-          runtimeModel: body.runtimeModel === undefined ? existing.runtimeModel : body.runtimeModel,
+          runtimeModel: nextRuntimeModel,
           role: nextRole,
           reportsTo: nextReportsTo,
           spaceTag: nextDomain.spaceTag,

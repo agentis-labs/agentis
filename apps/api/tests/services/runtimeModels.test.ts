@@ -39,12 +39,16 @@ describe('runtimeModels', () => {
     const catalog = await listRuntimeModels('antigravity');
 
     expect(catalog.models.map((model) => model.label)).toEqual([
-      'Gemini 3.6 Flash',
-      'Gemini 3.5 Flash',
-      'Gemini 3.1 Pro',
-      'Claude Sonnet 4.6',
-      'Claude Opus 4.6',
-      'GPT-OSS 120B',
+      'Gemini 3.6 Flash (High)',
+      'Gemini 3.5 Flash (High)',
+      'Gemini 3.1 Pro (High)',
+      'Claude Sonnet 4.6 (Thinking)',
+      'Claude Opus 4.6 (Thinking)',
+      'GPT-OSS 120B (Medium)',
+    ]);
+    expect(catalog.models.map((model) => model.id)).toEqual([
+      'gemini-3.6-flash-high', 'gemini-3.5-flash-high', 'gemini-3.1-pro-high',
+      'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium',
     ]);
   });
 });

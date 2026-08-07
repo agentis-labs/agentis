@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ChatDelta, ChatMessage, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
-import { AntigravityAdapter, antigravityJsonEventToChatPart } from '../../src/adapters/AntigravityAdapter.js';
+import { AntigravityAdapter, antigravityJsonEventToChatPart, compactAgyPositionalPrompt } from '../../src/adapters/AntigravityAdapter.js';
+import { normalizeAntigravityModel } from '../../src/adapters/antigravityModels.js';
 import type { Logger } from '../../src/logger.js';
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
@@ -39,6 +40,22 @@ describe('AntigravityAdapter', () => {
     spawnMock.mockReset();
   });
 
+  it('normalizes picker labels and effort changes to agy model ids', () => {
+    expect(normalizeAntigravityModel('Gemini 3.6 Flash (High)')).toBe('gemini-3.6-flash-high');
+    expect(normalizeAntigravityModel('Gemini 3.6 Flash (Medium)')).toBe('gemini-3.6-flash-medium');
+    expect(normalizeAntigravityModel('gemini-3.6-flash-high (low)')).toBe('gemini-3.6-flash-low');
+    expect(normalizeAntigravityModel('Claude Sonnet 4.6 (Thinking) (High)')).toBe('claude-sonnet-4-6');
+  });
+
+  it('compacts an oversized positional prompt without losing its opening contract or latest request', () => {
+    const prompt = `SYSTEM CONTRACT\n${'x'.repeat(35_000)}\nLATEST REQUEST: say anything`;
+    const compacted = compactAgyPositionalPrompt(prompt);
+    expect(compacted.length).toBeLessThanOrEqual(22_000);
+    expect(compacted).toContain('SYSTEM CONTRACT');
+    expect(compacted).toContain('LATEST REQUEST: say anything');
+    expect(compacted).toContain('Earlier conversation context omitted');
+  });
+
   it('runs agy with the verified flags and completes the task with its answer', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
@@ -54,13 +71,17 @@ describe('AntigravityAdapter', () => {
 
     const args = spawnMock.mock.calls[0]![1] as string[];
     expect(spawnMock.mock.calls[0]![0]).toBe('agy-test');
-    // Verified agy v1.0.13 flags: --print (prompt on stdin) + skip-permissions + model.
-    expect(args.slice(0, 2)).toEqual(['--print', '--dangerously-skip-permissions']);
+    // agy 1.1 requires flags before --print and the prompt as the final positional argument.
+    expect(args.slice(0, 2)).toEqual(['--dangerously-skip-permissions', '--model']);
     expect(args).toContain('--model');
-    expect(args).toContain('Gemini 3.5 Flash (High)');
-    expect(args).not.toContain('--output-format');
+    expect(args).toContain('gemini-3.5-flash-high');
+    expect(args).toContain('--output-format');
+    expect(args).toContain('stream-json');
+    expect(args.at(-2)).toBe('--print');
+    expect(args.at(-1)).toContain('Task: Write patch');
     expect(args).not.toContain('--session-id');
     expect(args).not.toContain('--yolo');
+    expect(child.stdinChunks).toEqual([]);
     expect(events.map((event) => event.eventType)).toEqual(['task.started', 'task.completed']);
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.completed', output: { text: 'Working' } }));
   });
@@ -119,7 +140,58 @@ describe('AntigravityAdapter', () => {
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'error' });
   });
 
-  it('streams live per-step reasoning from the agy transcript while the turn runs', async () => {
+  it('rejects the other observed CLI-help persona wording', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'hello' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('The --dangerously-skip-permissions flag is a CLI option. If you were looking to run a command, let me know.\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'tool_result', name: 'adapter.chat', error: expect.stringContaining('RUNTIME_PROTOCOL_VIOLATION'),
+    }));
+  });
+
+  it('reports denied tool permissions as a runtime diagnostic', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'run it' }], [])) deltas.push(delta);
+    })();
+    child.stdout.write('jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.\n');
+    child.emit('exit', 0);
+    await consume;
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_result', error: expect.stringContaining('RUNTIME_PERMISSION_REQUIRED') }));
+  });
+
+  it('reads agy 1.1 stream-json responses without duplicating their final result', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'hi' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"pong"}}\n');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(deltas).toContainEqual({ type: 'text', delta: 'pong' });
+    child.stdout.write('{"event":"result","result":{"status":"SUCCESS","response":"pong"}}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas.filter((delta) => delta.type === 'text')).toHaveLength(1);
+  });
+
+  it('does not use an unrelated transcript as this turn\'s answer', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const home = mkdtempSync(join(tmpdir(), 'agy-home-'));
@@ -142,18 +214,10 @@ describe('AntigravityAdapter', () => {
       + `${JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', thinking: 'Planning the poem structure and imagery.', content: 'Here is a short poem about the sea.' })}\n`,
       'utf8');
 
-    // Wait past the 350ms tail interval so the poller surfaces the thought.
-    await new Promise((r) => setTimeout(r, 700));
-    const thought = deltas.find((d): d is Extract<ChatDelta, { type: 'activity' }> =>
-      d.type === 'activity' && d.id === 'antigravity-thought-default');
-    expect(thought).toBeDefined();           // live reasoning streamed mid-run
-    expect(deltas.some((d) => d.type === 'done')).toBe(false); // before the turn ended
-
-    // Finish: the final answer is read back from the same transcript.
     child.emit('exit', 0);
     await consume;
-    expect(deltas.some((d) => d.type === 'text' && /poem/i.test((d as Extract<ChatDelta, { type: 'text' }>).delta))).toBe(true);
-    expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
+    expect(deltas.some((d) => d.type === 'text')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_result', error: expect.stringContaining('without a structured response') }));
   }, 10_000);
 
   it('decodes a not-signed-in exit into an actionable `agy` sign-in hint', async () => {
