@@ -960,8 +960,7 @@ async function runConversationTurn(
         )) {
           if (isAdapterErrorDelta(delta)) {
             if (delta.error.startsWith('canceled:')) {
-              finishReason = 'max_turns';
-              finalText = 'Stopped by operator.';
+              finishReason = 'interrupted';
               break;
             }
             adapterError = delta.error;
@@ -1008,8 +1007,15 @@ async function runConversationTurn(
       }
     }
 
+    // A stop endpoint and a disconnected client share the same lease/signal.
+    // Do not let a late adapter error turn that intentional interruption into a
+    // failed answer while the request is unwinding.
+    if (args.turnSignal.aborted) finishReason = 'interrupted';
+
     if (!finalText.trim() && !streamedMetadata.confirmation) {
-      if (finishReason === 'error') {
+      if (finishReason === 'interrupted') {
+        finalText = 'Response interrupted.';
+      } else if (finishReason === 'error') {
         finalText = relevantTurnError(streamedMetadata, adapterError);
       } else {
         finishReason = 'error';
@@ -1020,7 +1026,7 @@ async function runConversationTurn(
     // Backstop: a plan-mode turn that wrote a plan but skipped/malformed the
     // architecture_canvas on a design-shaped request gets one cheap repair
     // completion so ChatPlanCanvas still renders the visual graph, not just text.
-    if (permissionMode === 'plan' && finishReason !== 'error' && reg?.adapter) {
+    if (permissionMode === 'plan' && finishReason !== 'error' && finishReason !== 'interrupted' && reg?.adapter) {
       finalText = await repairArchitectureCanvas(reg.adapter, finalText, runtimeUserMessage, args.turnSignal).catch(() => finalText);
     }
 
@@ -1031,7 +1037,9 @@ async function runConversationTurn(
     // It prevents a polished final answer from hiding unresolved critical/error
     // findings such as missing event rules, stale outcome specs, or unbound
     // channels. The extra text delta also corrects already-streamed prose.
-    const completionGuard = appCompletionGuard(deps.db, ws.workspaceId, activeViewport, finalText);
+    const completionGuard = finishReason === 'interrupted'
+      ? null
+      : appCompletionGuard(deps.db, ws.workspaceId, activeViewport, finalText);
     if (completionGuard) {
       finalText = `${finalText.trimEnd()}\n\n${completionGuard}`;
       await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, {
@@ -1045,14 +1053,15 @@ async function runConversationTurn(
     finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
     const failed = streamedMetadata.turn.status === 'failed';
     const stopped = streamedMetadata.turn.status === 'stopped';
+    const interrupted = streamedMetadata.turn.status === 'interrupted';
     await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, createChatActivity({
       clientTurnId: args.clientTurnId,
       agentId: args.agentId,
       workflowId: streamedMetadata.workflowId ?? viewportWorkflowId,
       phase: failed ? 'error' : 'complete',
       status: failed ? 'error' : 'success',
-      label: failed ? 'Response failed' : stopped ? 'Stopped before completion' : 'Response ready',
-      detail: failed ? finalText : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
+      label: failed ? 'Response failed' : interrupted ? 'Response interrupted' : stopped ? 'Stopped before completion' : 'Response ready',
+      detail: failed ? finalText : interrupted ? 'Stopped by the operator. Late runtime output was ignored.' : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
       suffix: 'terminal',
       startedAt: turnCompletedAt,
       completedAt: turnCompletedAt,
@@ -1121,7 +1130,7 @@ async function runConversationTurn(
         outputSummary: `coalesced_reads=${efficiency.coalescedReads}; args_chars=${efficiency.argumentCharsObserved}; result_chars=${efficiency.resultCharsObserved}; repeated_result_chars=${efficiency.repeatedResultChars}`,
       });
     }
-    const capture = await deps.memoryCapture?.captureTurn({
+    const capture = interrupted ? null : await deps.memoryCapture?.captureTurn({
       workspaceId: ws.workspaceId,
       conversationId: args.conversation.id,
       userId: ws.user.id,
@@ -1454,6 +1463,8 @@ async function confirmConversationAction(
         if (delta.type === 'text') finalText += delta.delta;
       }
 
+      if (c.req.raw.signal.aborted) finishReason = 'interrupted';
+
       const turnPlan = deps.plans?.latest(ws.workspaceId, conversation.id) ?? null;
       if (turnPlan && Date.parse(turnPlan.updatedAt) >= turnStartedAtMs) {
         streamedMetadata.plan = turnPlan;
@@ -1467,7 +1478,9 @@ async function confirmConversationAction(
       }
 
       if (!finalText.trim() && !streamedMetadata.confirmation) {
-        if (finishReason === 'error') {
+        if (finishReason === 'interrupted') {
+          finalText = 'Response interrupted.';
+        } else if (finishReason === 'error') {
           finalText = relevantTurnError(streamedMetadata, adapterError);
         } else {
           finishReason = 'error';
@@ -1479,13 +1492,14 @@ async function confirmConversationAction(
       const durationMs = Math.max(0, Date.now() - turnStartedAtMs);
       finalizeTurnTrace(streamedMetadata, finishReason, turnCompletedAt, durationMs);
       const failed = streamedMetadata.turn.status === 'failed';
+      const interrupted = streamedMetadata.turn.status === 'interrupted';
       await writeChatDelta(stream, deps, ws, agentId, conversation.id, clientTurnId, createChatActivity({
         clientTurnId,
         agentId,
         phase: failed ? 'error' : 'complete',
         status: failed ? 'error' : 'success',
-        label: failed ? 'Action failed' : 'Action complete',
-        detail: failed ? finalText : 'The confirmation turn finished.',
+        label: failed ? 'Action failed' : interrupted ? 'Response interrupted' : 'Action complete',
+        detail: failed ? finalText : interrupted ? 'Stopped by the operator.' : 'The confirmation turn finished.',
         suffix: 'terminal',
         startedAt: turnCompletedAt,
         completedAt: turnCompletedAt,

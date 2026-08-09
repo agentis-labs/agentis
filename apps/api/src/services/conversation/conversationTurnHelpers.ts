@@ -121,7 +121,9 @@ export function finalizeTurnTrace(
     completedAt,
     durationMs,
     finishReason,
-    status: finishReason === 'error'
+    status: finishReason === 'interrupted'
+      ? 'interrupted'
+      : finishReason === 'error'
       ? 'failed'
       : finishReason === 'max_turns' || finishReason === 'length'
         ? 'stopped'

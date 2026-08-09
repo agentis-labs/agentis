@@ -128,7 +128,7 @@ export function AgentTurnTrace({
 
   const thoughts = useMemo(() => buildThoughts(activities, streaming), [activities, streaming]);
   const turnFailed = failed || turn?.status === 'failed' || toolCalls.some((c) => c.status === 'error');
-  const turnStopped = turn?.status === 'stopped';
+  const turnStopped = turn?.status === 'stopped' || turn?.status === 'interrupted';
   const toolCount = toolCalls.length;
   const durationMs = resolveDurationMs(turn, activities);
   const liveScrollRef = useRef<HTMLDivElement>(null);

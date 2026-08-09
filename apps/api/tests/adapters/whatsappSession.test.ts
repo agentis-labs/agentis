@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { extractWhatsAppText, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent } from '../../src/adapters/channels/whatsappSession.js';
+import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent } from '../../src/adapters/channels/whatsappSession.js';
 import type { OutboundAttachment } from '../../src/adapters/channels/types.js';
 
 describe('whatsappMediaContent', () => {
@@ -52,6 +52,47 @@ describe('whatsappMediaContent', () => {
     expect(c.document).toBeInstanceOf(Buffer);
     expect(c.fileName).toBe('report.pdf');
     expect(c.caption).toBe('q3');
+  });
+});
+
+describe('resolveWhatsAppInboundBody', () => {
+  it('describes an image even when it already has a caption', async () => {
+    const body = await resolveWhatsAppInboundBody(
+      { message: { imageMessage: { mimetype: 'image/jpeg', caption: 'Sabe o que e isto?' } } },
+      {
+        downloadMedia: async () => Buffer.from('image'),
+        describeImage: async (_bytes, _mime, caption) => `A workflow canvas. Sender asks: ${caption}`,
+      },
+    );
+    expect(body).toContain('Caption: Sabe o que e isto?');
+    expect(body).toContain('Visual analysis: A workflow canvas.');
+  });
+
+  it('keeps a voice note actionable when transcription is unavailable', async () => {
+    const body = await resolveWhatsAppInboundBody({ message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus' } } });
+    expect(body).toContain('Voice note received');
+    expect(body).toContain('Transcription is unavailable');
+  });
+
+  it('passes a downloaded voice note to transcription', async () => {
+    const body = await resolveWhatsAppInboundBody(
+      { message: { audioMessage: { mimetype: 'audio/ogg; codecs=opus' } } },
+      {
+        downloadMedia: async () => Buffer.from('voice'),
+        transcribeAudio: async (bytes, mime) => `${bytes.toString()}:${mime}`,
+      },
+    );
+    expect(body).toBe('[Voice note transcript]\nvoice:audio/ogg; codecs=opus');
+  });
+});
+
+describe('classifyWhatsAppReconnect', () => {
+  it('uses stable, reason-specific recovery classes without exposing provider details to chat', () => {
+    expect(classifyWhatsAppReconnect(408)).toBe('connection_lost');
+    expect(classifyWhatsAppReconnect(440)).toBe('session_conflict');
+    expect(classifyWhatsAppReconnect(503)).toBe('service_unavailable');
+    expect(classifyWhatsAppReconnect(515)).toBe('restart_required');
+    expect(classifyWhatsAppReconnect(undefined)).toBe('connection_closed');
   });
 });
 

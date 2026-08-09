@@ -76,6 +76,7 @@ interface ChannelConnection {
   rateLimit?: { perMinute?: number; perDay?: number } | null;
   requireOptIn?: boolean;
   warmupStartedAt?: string | null;
+  whatsappProfile?: { version: 1; ownerReasoningVisibility: 'off' | 'indicator' } | null;
   capabilities?: ChannelCapabilities;
   health: ChannelHealth;
   lastError?: string | null;
@@ -773,6 +774,20 @@ function ChannelBehaviorControls({
             >
               {warming ? 'Stop warmup' : 'Start warmup'}
             </Button>
+            {connection.kind === 'whatsapp' && (
+              <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={connection.whatsappProfile?.ownerReasoningVisibility === 'indicator'}
+                  disabled={saving}
+                  onChange={(e) => void patch(
+                    { ownerReasoningVisibility: e.target.checked ? 'indicator' : 'off' },
+                    e.target.checked ? 'Owner reasoning indicator enabled' : 'Owner reasoning indicator disabled',
+                  )}
+                />
+                Owner-only reasoning indicator
+              </label>
+            )}
           </div>
 
           {caps && (
@@ -982,5 +997,3 @@ function firstProblem(health: ChannelHealth): string | null {
   const problem = health.checks.find((check) => !check.ok);
   return problem?.remediation ?? problem?.message ?? null;
 }
-
-

@@ -1320,6 +1320,26 @@ export interface RunEvidenceRef {
   summary: string;
 }
 
+/** Public build input shared by chat, MCP, REST, import, and canvas callers. */
+export interface WorkflowBuildRequest {
+  description: string;
+  title?: string;
+  workflowId?: string;
+  appId?: string;
+  graphDraft?: WorkflowGraph | { graph: WorkflowGraph };
+  patchDraft?: Record<string, unknown>;
+  trigger?: { type?: 'manual' | 'cron' | 'webhook' | 'persistent_listener'; cron?: string };
+}
+
+/** Stable, repair-oriented validation response for authored workflow drafts. */
+export interface WorkflowDraftDiagnostic {
+  code: 'WORKFLOW_DRAFT_INVALID';
+  summary: string;
+  field?: string;
+  acceptedShape: string;
+  repair: string;
+}
+
 /** Executes a portable Component bundle through the hardened OCI runtime. */
 export interface ComponentTaskNodeConfig {
   kind: 'component_task';

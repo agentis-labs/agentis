@@ -77,6 +77,7 @@ const behaviorSchema = z.object({
     .optional(),
   requireOptIn: z.boolean().optional(),
   startWarmup: z.boolean().optional(),
+  ownerReasoningVisibility: z.enum(['off', 'indicator']).optional(),
 });
 
 const sendAttachmentSchema = z.object({

@@ -1055,12 +1055,13 @@ export class ChatSessionExecutor {
       // context build). In-flight model/tool work is aborted via ctx.signal too.
       if (ctx.signal?.aborted) {
         this.#logTurn(ctx, options.startedAt, toolCallCount, 'aborted', timings);
-        yield { type: 'done', finishReason: 'error' };
+        yield { type: 'done', finishReason: 'interrupted' };
         return;
       }
       const toolCalls: ChatToolCall[] = [];
       let assistantText = '';
       let reasoningSeg = '';
+      let surfacedReasoning = false;
       const bufferedDeltas: ChatDelta[] = [];
       let surfacedConfirmation = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
@@ -1124,8 +1125,11 @@ export class ChatSessionExecutor {
             // chat AND in agent_task (the run relay picks up these activity deltas
             // run-scoped). Flush on a natural boundary / readable chunk so it flows
             // like a thought stream without per-token event spam.
-            reasoningSeg += delta.delta;
-            if (/\n/.test(delta.delta) || reasoningSeg.length >= 80) {
+            if (!surfacedReasoning) {
+              surfacedReasoning = true;
+              yield this.#activity(ctx, 'runtime', 'Model is reasoning', 'The runtime is preparing the next operator-visible step.', 'reasoning');
+            }
+            if (false && reasoningSeg.length >= 80) {
               const seg = reasoningSeg.replace(/\s+/g, ' ').trim();
               reasoningSeg = '';
               if (seg) yield this.#activity(ctx, 'runtime', seg.length > 600 ? `${seg.slice(0, 599)}…` : seg, '', 'reasoning');
@@ -1135,7 +1139,7 @@ export class ChatSessionExecutor {
           }
         }
         // Flush any trailing reasoning that didn't hit a boundary.
-        if (reasoningSeg.trim()) {
+        if (false && reasoningSeg.trim()) {
           const seg = reasoningSeg.replace(/\s+/g, ' ').trim();
           reasoningSeg = '';
           yield this.#activity(ctx, 'runtime', seg.length > 600 ? `${seg.slice(0, 599)}…` : seg, '', 'reasoning');
@@ -1143,6 +1147,11 @@ export class ChatSessionExecutor {
         timings.modelMs += Date.now() - roundStart;
         this.#recordModelUsage(ctx, roundUsage ?? estimateRoundUsage(messages, assistantText), turn + 1, options.adapterType);
       } catch (err) {
+        if (ctx.signal?.aborted) {
+          this.#logTurn(ctx, options.startedAt, toolCallCount, 'aborted', timings);
+          yield { type: 'done', finishReason: 'interrupted' };
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         this.#deps.logger?.warn('chat.turn.adapter_failed', { agentId: ctx.agentId, err: message });
         yield { type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: message };
@@ -1284,7 +1293,7 @@ export class ChatSessionExecutor {
       // the turn was canceled while the model round was streaming.
       if (ctx.signal?.aborted) {
         this.#logTurn(ctx, options.startedAt, toolCallCount, 'aborted', timings);
-        yield { type: 'done', finishReason: 'error' };
+        yield { type: 'done', finishReason: 'interrupted' };
         return;
       }
       // If the model is building a workflow this round, give the build a known

@@ -341,6 +341,14 @@ export function WorkspaceEcosystemCanvas({
     return () => window.removeEventListener('agentis:workspace-changed', refresh);
   }, [refresh]);
 
+  // One-time legacy repair. The endpoint only writes missing/invalid positions,
+  // publishes an agent revision, and never moves a valid manual layout.
+  useEffect(() => {
+    void api<{ reconciled: number }>('/v1/agents/reconcile-layout', { method: 'POST' })
+      .then((result) => { if (result.reconciled > 0) void refresh(); })
+      .catch(() => undefined);
+  }, [refresh]);
+
   useRealtime([...ECOSYSTEM_REFRESH_EVENTS], () => {
     void refresh();
   });
@@ -1202,7 +1210,7 @@ export function buildCanvasModel(
 
   const orchestratorId = roles.orchestrator ? `agent-${roles.orchestrator.id}` : 'ghost-orchestrator';
   if (roles.orchestrator) {
-    nodes.push(agentNode(roles.orchestrator, 'orchestrator', { x: canvasSize.width / 2, y: 170 }, workingAgentIds, approvals));
+    nodes.push(agentNode(roles.orchestrator, 'orchestrator', homeAgentPosition(roles.orchestrator, { x: canvasSize.width / 2, y: 170 }, canvasSize), workingAgentIds, approvals));
     if (availableAgentIds.has(roles.orchestrator.id)) availableCommandSourceIds.add(orchestratorId);
   } else {
     nodes.push(ghostNode('ghost-orchestrator', 'orchestrator', 'Orchestrator', 'commission your workspace orchestrator', { x: canvasSize.width / 2, y: 170 }, NODE.orchestrator));
@@ -1221,7 +1229,7 @@ export function buildCanvasModel(
   }
 
   roles.managers.forEach((agent, index) => {
-    const pos = { x: managerSlots[index]?.centerX ?? canvasSize.width / 2, y: 350 };
+    const pos = homeAgentPosition(agent, { x: managerSlots[index]?.centerX ?? canvasSize.width / 2, y: 350 }, canvasSize);
     const node = agentNode(agent, 'manager', pos, workingAgentIds, approvals);
     node.specialistCount = specialistCountByManager.get(node.id) ?? 0;
     nodes.push(node);
@@ -1264,7 +1272,7 @@ export function buildCanvasModel(
     const raw = workerPositions[index] ?? { x: canvasSize.width / 2, y: 530 };
     // Fan the focused manager's workers out under the manager itself, not the
     // canvas center, so the drilled-in subtree stays a clean vertical pyramid.
-    const pos = { x: raw.x + workerShift, y: raw.y };
+    const pos = homeAgentPosition(agent, { x: raw.x + workerShift, y: raw.y }, canvasSize);
     const node = agentNode(agent, 'worker', pos, workingAgentIds, approvals, workerSize);
     nodes.push(node);
     const parentId = expandedManagerId ?? findParentManager(agent, managerNodeIds, roles.managers, index) ?? orchestratorId;
@@ -3309,6 +3317,22 @@ function classifyAgents(agents: WorkspaceAgent[]) {
     .filter((agent) => agent.id !== orchestrator?.id && !managers.some((manager) => manager.id === agent.id))
     .sort(rankAgentByStatus);
   return { orchestrator, managers, workers };
+}
+
+/**
+ * Agents-page coordinates are centered around its hierarchy origin. Home uses
+ * an absolute virtual canvas; this is the one documented transform between the
+ * two surfaces. Invalid legacy values deliberately fall back to deterministic
+ * placement (the Agents canvas persists that repair on its next reconciliation).
+ */
+function homeAgentPosition(agent: WorkspaceAgent, fallback: Vec2, canvasSize: VirtualCanvasSize): Vec2 {
+  const value = agent.canvasPosition;
+  if (!value || !Number.isFinite(value.x) || !Number.isFinite(value.y)
+    || Math.abs(value.x) > 3000 || value.y < -120 || value.y > 1800) return fallback;
+  return {
+    x: clamp(canvasSize.width / 2 + value.x, 120, canvasSize.width - 120),
+    y: clamp(50 + value.y, 100, Math.max(100, canvasSize.height - 90)),
+  };
 }
 
 function agentNode(

@@ -138,6 +138,35 @@ explicitly for harness smoke testing.
 - **Chat** exposes sticky **Ask / Plan / Auto** permission modes shared across web and every
   channel.
 
+### Execution truth and operator progress
+
+Every turn terminates as `completed`, `failed`, `interrupted`, or `blocked`. An operator Stop
+revokes its execution lease, aborts the adapter and child runs, and fences late results; it is
+recorded as **Response interrupted**, never as a provider failure. CLI adapters share this rule,
+including non-zero child-process exits produced while their process tree is being cancelled.
+
+The live trace contains durable, operator-safe progress events: lifecycle state, normalized tool
+operation, safe result summary, resource, duration, and failure category. It intentionally does
+not store or display private model reasoning. Events survive a chat or panel reload and are also
+used by the workspace canvas.
+
+Codex model-catalogue parse failures (including a missing `base_instructions` field) are treated
+as recoverable runtime state. Agentis only quarantines an identified `models-cache.json` or
+`models_cache.json` file, then retries once; it never deletes Codex credentials or configuration.
+
+## Workflow authoring contract
+
+`agentis.build_workflow` accepts a natural-language `description` with an optional authored
+`graphDraft`. When a synthesis runtime is unavailable, Agentis creates a deterministic,
+editable baseline through the same validation and enrichment gates rather than asking a runtime
+to guess a private graph format. `agentis.workflow.draft_contract` exposes the public request
+shape, a minimal valid graph, and graph identity repair rules. Draft validation returns
+`WORKFLOW_DRAFT_INVALID` with the affected field, accepted shape, and repair action.
+
+Agent positions are durable workspace data. `/v1/agents/reconcile-layout` backfills only
+missing or invalid legacy coordinates, preserves manual layouts, and emits an agent update so
+Home and Agents canvases converge immediately.
+
 ## API surface
 
 - HTTP: `/v1/agents`, `/v1/specialists`, `/v1/adapters`, `/v1/harness`, `/v1/command`,

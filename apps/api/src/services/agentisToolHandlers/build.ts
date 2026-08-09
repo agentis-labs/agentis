@@ -462,6 +462,34 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
   registry.registerMany([
     {
       definition: {
+        id: 'agentis.workflow.draft_contract',
+        family: 'inspect',
+        description: 'Return the public WorkflowBuildRequest contract, a minimal valid draft, and deterministic graph-repair rules. Use before authoring graphDraft; description-only build requests are also supported.',
+        inputSchema: { type: 'object', properties: {} },
+        mutating: false,
+        autoExecute: true,
+        mcpExposed: true,
+      },
+      handler: async () => ({
+        contract: {
+          required: ['description'],
+          optional: ['title', 'workflowId', 'appId', 'trigger', 'graphDraft', 'patchDraft'],
+          graphDraft: '{ version: 1, nodes: WorkflowNode[], edges: WorkflowEdge[], viewport: { x, y, zoom } }',
+          edgeRepair: 'Missing or duplicate edge ids are assigned stable ids. Endpoint and node-contract errors are returned as WORKFLOW_DRAFT_INVALID.',
+        },
+        minimalDraft: {
+          version: 1,
+          viewport: { x: 0, y: 0, zoom: 1 },
+          nodes: [
+            { id: 'trigger', type: 'trigger', title: 'Manual trigger', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+            { id: 'output', type: 'return_output', title: 'Return output', position: { x: 280, y: 0 }, config: { kind: 'return_output', renderAs: 'text' } },
+          ],
+          edges: [{ id: 'trigger-output', source: 'trigger', target: 'output' }],
+        },
+      }),
+    },
+    {
+      definition: {
         id: 'agentis.workflow.create',
         family: 'build',
         description:
@@ -2191,15 +2219,14 @@ export async function createWorkflowFromDescription(deps: ToolHandlerDeps, args:
     synthesis = 'agent_draft';
     phase('drafting', 'Accepted the agent-authored workflow graph');
   } else if (!synthCompleter) {
-    // Do not recursively invoke a slow runtime-native harness from inside its own
-    // build tool call. The selected agent should draft the graph/patch and let
-    // Agentis validate, repair, enrich, and persist it.
-    deps.logger.warn('createWorkflow.no_model', { workspaceId: args.workspaceId, agentId: args.agentId ?? null });
-    phase('blocked', 'The agent must provide graphDraft or patchDraft');
-    throw new AgentisError(
-      'WORKFLOW_DRAFT_REQUIRED',
-      'This runtime owns the work. Inspect the user request and current Agentis state, then call agentis.build_workflow again with graphDraft for a new workflow or patchDraft for an edit. Agentis will validate, repair, enrich, save, and stream it.',
-    );
+    // A runtime-native caller must never be forced to reverse-engineer an
+    // internal graph shape. When no independent synthesis runtime is available,
+    // produce the same safe, editable baseline the planner uses. The normal
+    // enrich/validation/publish gates still run below.
+    const deterministicPlan = planWorkflow(description, brief.classification);
+    rawGraphBase = assembleGraphFromPlan(deterministicPlan, description, args.trigger);
+    synthesis = 'plan';
+    phase('drafting', 'Created a deterministic editable draft (no synthesis runtime was available)');
   } else {
     const outcome = await synthesizeWithLlm(
       description,
@@ -4124,15 +4151,29 @@ function parseAgentGraphDraft(value: unknown): WorkflowGraph {
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
     throw new AgentisError(
       'WORKFLOW_DRAFT_INVALID',
-      'graphDraft must be a WorkflowGraph object, or an object with a graph property.',
+      'Workflow draft is not a graph object.',
+      {
+        remediation: 'Pass graphDraft with nodes, edges, and viewport, or omit graphDraft and provide a description so Agentis can create an editable draft.',
+        details: {
+          field: 'graphDraft',
+          acceptedShape: '{ version: 1, nodes: WorkflowNode[], edges: WorkflowEdge[], viewport: { x, y, zoom } }',
+          repair: 'Call agentis.workflow.draft_contract for node templates and the complete public schema.',
+        },
+      },
     );
   }
   const draft = candidate as Partial<WorkflowGraph>;
   if (!Array.isArray(draft.nodes) || draft.nodes.length === 0) {
-    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'graphDraft must include at least one workflow node.');
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Workflow draft needs at least one node.', {
+      remediation: 'Add a trigger node and a terminal return_output node, or omit graphDraft to let Agentis create the initial draft.',
+      details: { field: 'graphDraft.nodes', acceptedShape: 'WorkflowNode[] (minimum one trigger or executable node)', repair: 'Use agentis.workflow.draft_contract for a minimal working example.' },
+    });
   }
   if (!Array.isArray(draft.edges)) {
-    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'graphDraft.edges must be an array.');
+    throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Workflow draft edges must be an array.', {
+      remediation: 'Set graphDraft.edges to [] for a one-node draft or provide source/target edges.',
+      details: { field: 'graphDraft.edges', acceptedShape: 'WorkflowEdge[]', repair: 'Missing and duplicate edge ids are repaired automatically; endpoints still must name real nodes.' },
+    });
   }
   return repairWorkflowGraphIdentity({
     version: draft.version ?? 1,

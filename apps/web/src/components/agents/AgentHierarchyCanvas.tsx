@@ -143,7 +143,7 @@ export function AgentHierarchyCanvas({
 
   useEffect(() => {
     const unplacedSignature = agents
-      .filter((agent) => !agent.isGhost && !isPosition(agent.canvasPosition))
+      .filter((agent) => !agent.isGhost && !isPersistedCanvasPosition(agent.canvasPosition))
       .map((agent) => agent.id)
       .sort()
       .join('|');
@@ -949,6 +949,16 @@ function requestFleetFit(instance: ReactFlowInstance<Node<AgentNodeData>, Edge> 
 
 function isPosition(value: unknown): value is { x: number; y: number } {
   return Boolean(value && typeof value === 'object' && typeof (value as { x?: unknown }).x === 'number' && typeof (value as { y?: unknown }).y === 'number');
+}
+
+/** Legacy rows can contain null, NaN, or coordinates outside a usable canvas. */
+function isPersistedCanvasPosition(value: unknown): value is { x: number; y: number } {
+  return isPosition(value)
+    && Number.isFinite(value.x)
+    && Number.isFinite(value.y)
+    && value.y >= -120
+    && value.y <= 1800
+    && Math.abs(value.x) <= 3000;
 }
 
 function normalizeRole(agent: AgentHierarchyAgent): 'orchestrator' | 'manager' | 'worker' | 'unassigned' {

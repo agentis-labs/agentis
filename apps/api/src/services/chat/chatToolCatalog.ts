@@ -972,10 +972,15 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
 
   // ─── Builder & Planner ───────────────────────────────────────────────────
   {
+    name: 'agentis.workflow.draft_contract',
+    description: 'Inspect the complete public workflow build contract and a minimal valid graph draft. Call this before supplying graphDraft; description-only build requests are supported.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'agentis.build_workflow',
     description:
       'Validate, enrich, save, and stream an agent-authored workflow graph or patch. ' +
-      'For a new workflow, inspect the request and relevant Agentis state, design a complete WorkflowGraph, and pass it as graphDraft. ' +
+      'For a new workflow, pass a description alone and Agentis will create a validated, editable baseline when no synthesis runtime is configured; graphDraft is optional for precise authored graphs. ' +
       'For a precise field-level edit use agentis.workflow.graph.patch; use workflowId plus patchDraft here when the edit should also pass through builder repair and enrichment. A configured fast synthesis runtime may accept description-only calls, but runtime-native agents should author the draft themselves. ' +
       'Every build belongs to an Agentic App: pass appId to add a new workflow to an existing App, or omit it for an App-of-one. The tool returns workflowId AND appId plus runId and emits live canvas build events.',
     examples: [

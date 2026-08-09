@@ -10,13 +10,14 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { and, eq, ne } from 'drizzle-orm';
 import { z } from 'zod';
-import { AgentisError, CONSTANTS } from '@agentis/core';
+import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { CredentialVault } from '../services/credentialVault.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { Logger } from '../logger.js';
+import type { EventBus } from '../event-bus.js';
 import type { ConversationStore } from '../services/conversation/conversationStore.js';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
@@ -81,6 +82,29 @@ const terminalSendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
 });
 
+function isValidCanvasPosition(value: unknown): value is { x: number; y: number } {
+  return Boolean(value && typeof value === 'object'
+    && typeof (value as { x?: unknown }).x === 'number'
+    && typeof (value as { y?: unknown }).y === 'number'
+    && Number.isFinite((value as { x: number }).x)
+    && Number.isFinite((value as { y: number }).y)
+    && Math.abs((value as { x: number }).x) <= 3000
+    && (value as { y: number }).y >= -120
+    && (value as { y: number }).y <= 1800);
+}
+
+function canonicalCanvasPosition(role: 'orchestrator' | 'manager' | 'worker', index: number, count: number): { x: number; y: number } {
+  if (role === 'orchestrator') return { x: 0, y: 120 };
+  const columns = role === 'manager' ? Math.min(6, Math.max(1, count)) : Math.min(5, Math.max(1, count));
+  const row = Math.floor(index / columns);
+  const col = index % columns;
+  const inRow = Math.min(columns, count - row * columns);
+  return {
+    x: (col - (inRow - 1) / 2) * (role === 'manager' ? 300 : 220),
+    y: (role === 'manager' ? 300 : 480) + row * (role === 'manager' ? 150 : 132),
+  };
+}
+
 /**
  * Rebind an agent to a different runtime (AGENT-TRANSITION §2, Track R). The
  * agent's identity, Brain, abilities and hierarchy are untouched — only the
@@ -98,6 +122,7 @@ export interface AgentRouteDeps {
   vault: CredentialVault;
   adapters: AdapterManager;
   logger: Logger;
+  bus?: EventBus;
   conversations: ConversationStore;
   mcpHarness?: McpHarnessSessionService;
   /** Optional: lets agent deletion decide the fate of the agent's memory (B11). */
@@ -188,6 +213,11 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
           .run();
       }
     }
+    deps.bus?.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_CREATED, {
+      agentId: id,
+      canvasPosition: body.canvasPosition ?? null,
+      reportsTo: body.reportsTo ?? null,
+    });
     return c.json({
       id,
       name: body.name,
@@ -199,6 +229,40 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
       spaceName: domain.spaceName,
       agent: { id, name: body.name, adapterType: body.adapterType, colorHex, status, spaceId: domain.spaceId, spaceTag: domain.spaceTag, spaceName: domain.spaceName },
     }, 201);
+  });
+
+  /**
+   * Backfill only absent/invalid legacy positions. Valid manual positions are
+   * immutable to this repair and every update is published to every canvas.
+   */
+  app.post('/reconcile-layout', (c) => {
+    const ws = getWorkspace(c);
+    const rows = deps.db.select().from(schema.agents)
+      .where(eq(schema.agents.workspaceId, ws.workspaceId)).all();
+    const groups = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const role = row.role === 'orchestrator' || row.role === 'manager' ? row.role : 'worker';
+      const list = groups.get(role) ?? [];
+      list.push(row);
+      groups.set(role, list);
+    }
+    const changed: Array<{ id: string; canvasPosition: { x: number; y: number } }> = [];
+    for (const [role, group] of groups) {
+      const sorted = [...group].sort((a, b) => a.name.localeCompare(b.name));
+      sorted.forEach((row, index) => {
+        if (isValidCanvasPosition(row.canvasPosition)) return;
+        const position = canonicalCanvasPosition(role as 'orchestrator' | 'manager' | 'worker', index, sorted.length);
+        deps.db.update(schema.agents).set({ canvasPosition: position, updatedAt: new Date().toISOString() })
+          .where(eq(schema.agents.id, row.id)).run();
+        changed.push({ id: row.id, canvasPosition: position });
+      });
+    }
+    if (changed.length) {
+      deps.bus?.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_UPDATED, {
+        reason: 'legacy_layout_reconciled', changed,
+      });
+    }
+    return c.json({ reconciled: changed.length, changed });
   });
 
   app.patch('/:id', async (c) => {
@@ -301,6 +365,12 @@ export function buildAgentMutationRoutes(deps: AgentRouteDeps) {
         }
       }
     }
+    deps.bus?.publish(REALTIME_ROOMS.workspace(ws.workspaceId), REALTIME_EVENTS.AGENT_UPDATED, {
+      agentId: id,
+      changed: Object.keys(body),
+      canvasPosition: body.canvasPosition,
+      reportsTo: nextReportsTo,
+    });
     return c.json({ ok: true });
   });
 

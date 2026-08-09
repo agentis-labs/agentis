@@ -98,6 +98,68 @@ export interface UpdateConnectionTargetsInput {
   access?: ChannelAccess | null;
 }
 
+/** The only external execution signal WhatsApp may expose. Never raw reasoning. */
+export type OwnerReasoningVisibility = 'off' | 'indicator';
+
+/**
+ * Stable WhatsApp behavior contract. It is persisted in `settings` so existing
+ * connections migrate lazily on read/write instead of requiring a database
+ * migration. Socket/browser knobs intentionally do not belong here.
+ */
+export interface WhatsAppConnectionProfile {
+  version: 1;
+  reliability: {
+    sessionRecovery: true;
+    classifiedReconnect: true;
+    cachedProtocolVersion: true;
+    durableDeliveryReconciliation: true;
+    reachoutCircuitBreaker: true;
+  };
+  conversation: {
+    typingPresence: true;
+    boundedNaturalPacing: true;
+    responseChunking: true;
+    cancelStalePacing: true;
+    mediaHandling: true;
+  };
+  observability: {
+    structuredDiagnostics: true;
+    chatSocketLogs: false;
+  };
+  ownerReasoningVisibility: OwnerReasoningVisibility;
+}
+
+export const DEFAULT_WHATSAPP_CONNECTION_PROFILE: WhatsAppConnectionProfile = {
+  version: 1,
+  reliability: {
+    sessionRecovery: true,
+    classifiedReconnect: true,
+    cachedProtocolVersion: true,
+    durableDeliveryReconciliation: true,
+    reachoutCircuitBreaker: true,
+  },
+  conversation: {
+    typingPresence: true,
+    boundedNaturalPacing: true,
+    responseChunking: true,
+    cancelStalePacing: true,
+    mediaHandling: true,
+  },
+  observability: { structuredDiagnostics: true, chatSocketLogs: false },
+  ownerReasoningVisibility: 'off',
+};
+
+/** Backward-compatible, allow-listed profile resolver for JSON connection settings. */
+export function resolveWhatsAppConnectionProfile(value: unknown): WhatsAppConnectionProfile {
+  const candidate = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Partial<WhatsAppConnectionProfile>
+    : null;
+  return {
+    ...DEFAULT_WHATSAPP_CONNECTION_PROFILE,
+    ownerReasoningVisibility: candidate?.ownerReasoningVisibility === 'indicator' ? 'indicator' : 'off',
+  };
+}
+
 export interface PublicConnection {
   id: string;
   workspaceId: string;
@@ -125,6 +187,8 @@ export interface PublicConnection {
   requireOptIn: boolean;
   /** Warmup window start (ISO), or null. */
   warmupStartedAt: string | null;
+  /** Versioned, allow-listed WhatsApp behavior. Null for other channels. */
+  whatsappProfile: WhatsAppConnectionProfile | null;
   /** What this channel can send — media kinds, reactions, presence, etc. */
   capabilities: ChannelCapabilities;
   health: ChannelHealth;
@@ -191,6 +255,8 @@ type ChannelSettings = {
   warmupStartedAt?: string;
   /** Require a prior inbound before cold-messaging a new contact. */
   requireOptIn?: boolean;
+  /** Versioned WhatsApp-only behavior contract. */
+  whatsappProfile?: WhatsAppConnectionProfile;
 };
 
 const GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v20.0';
@@ -541,7 +607,10 @@ export class ChannelBridge {
     if (defaultTarget) settings.defaultChatId = this.#normalizeTargetForKind(input.kind, defaultTarget);
     if (input.transport) settings.transport = input.transport;
     if (input.kind === 'telegram' && !settings.transport && !this.#publicWebhookUrl(id)) settings.transport = 'polling';
-    if (input.kind === 'whatsapp') settings.mode = input.mode ?? 'qr_local';
+    if (input.kind === 'whatsapp') {
+      settings.mode = input.mode ?? 'qr_local';
+      settings.whatsappProfile = DEFAULT_WHATSAPP_CONNECTION_PROFILE;
+    }
     if (input.targetAliases) settings.targetAliases = this.#normalizeAliases(input.kind, input.targetAliases);
     if (input.signingSecret) settings.signingSecretEncrypted = this.deps.vault.encrypt(input.signingSecret);
     if (input.phoneNumberId) settings.phoneNumberId = input.phoneNumberId;
@@ -664,6 +733,8 @@ export class ChannelBridge {
   updateTargets(workspaceId: string, id: string, input: UpdateConnectionTargetsInput): PublicConnection {
     const row = this.#row(workspaceId, id);
     const settings = { ...this.#settings(row) };
+    // Any behavior save upgrades legacy WhatsApp rows to the explicit v1 profile.
+    if (row.kind === 'whatsapp') settings.whatsappProfile = resolveWhatsAppConnectionProfile(settings.whatsappProfile);
     if ('defaultChatId' in input) {
       const target = input.defaultChatId?.trim();
       if (target) settings.defaultChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, target);
@@ -717,6 +788,7 @@ export class ChannelBridge {
     rateLimit?: { perMinute?: number | null; perDay?: number | null } | null;
     requireOptIn?: boolean;
     startWarmup?: boolean;
+    ownerReasoningVisibility?: OwnerReasoningVisibility;
   }): PublicConnection {
     const row = this.#row(workspaceId, id);
     const settings = { ...this.#settings(row) };
@@ -732,6 +804,15 @@ export class ChannelBridge {
     if (typeof input.requireOptIn === 'boolean') settings.requireOptIn = input.requireOptIn;
     if (input.startWarmup === true) settings.warmupStartedAt = new Date().toISOString();
     else if (input.startWarmup === false) delete settings.warmupStartedAt;
+    if (input.ownerReasoningVisibility !== undefined) {
+      if (row.kind !== 'whatsapp') {
+        throw new AgentisError('VALIDATION_FAILED', 'owner reasoning visibility is available only for WhatsApp');
+      }
+      settings.whatsappProfile = {
+        ...resolveWhatsAppConnectionProfile(settings.whatsappProfile),
+        ownerReasoningVisibility: input.ownerReasoningVisibility,
+      };
+    }
     this.deps.db
       .update(schema.channelConnections)
       .set({ settings, updatedAt: new Date().toISOString() })
@@ -1738,6 +1819,7 @@ export class ChannelBridge {
       rateLimit: settings.rateLimit ?? null,
       requireOptIn: settings.requireOptIn === true,
       warmupStartedAt: settings.warmupStartedAt ?? null,
+      whatsappProfile: row.kind === 'whatsapp' ? resolveWhatsAppConnectionProfile(settings.whatsappProfile) : null,
       capabilities: channelCapabilities(row.kind as ChannelKind, settings.mode ? { whatsappMode: settings.mode } : undefined),
       health: this.#healthFromRow(row),
       lastEventAt: row.lastEventAt,

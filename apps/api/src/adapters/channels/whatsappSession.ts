@@ -44,6 +44,14 @@ export interface WhatsAppObservedOutbound {
   body: string;
 }
 
+export type WhatsAppReconnectClass = 'connection_lost' | 'restart_required' | 'service_unavailable' | 'session_conflict' | 'connection_closed' | 'reachout_paused' | 'exhausted';
+
+export interface WhatsAppRecoveryState {
+  reason: WhatsAppReconnectClass;
+  attempt: number;
+  nextRetryAt?: string;
+}
+
 export interface WhatsAppSessionOptions {
   connectionId: string;
   authDir: string;
@@ -52,7 +60,7 @@ export interface WhatsAppSessionOptions {
   /** Mirror messages sent from the primary phone or another companion. */
   onOutboundObserved?: (msg: WhatsAppObservedOutbound) => void;
   /** Notified whenever status/QR changes (for the login UI + DB status). */
-  onStateChange?: (state: { status: WhatsAppSessionStatus; qr?: string; selfId?: string }) => void;
+  onStateChange?: (state: { status: WhatsAppSessionStatus; qr?: string; selfId?: string; recovery?: WhatsAppRecoveryState }) => void;
   /**
    * Provider acknowledgement received after (or during) sendText. This is
    * intentionally separate from the socket write: Baileys' returned key id is
@@ -186,6 +194,17 @@ function normalizeWhatsAppJid(jid: string): string {
   return jid.trim().toLowerCase().replace(/:\d+@/u, '@');
 }
 
+/** Stable recovery classes persisted as diagnostics; provider codes stay in logs. */
+export function classifyWhatsAppReconnect(statusCode: number | undefined): WhatsAppReconnectClass {
+  switch (statusCode) {
+    case 408: return 'connection_lost';
+    case 440: return 'session_conflict';
+    case 503: return 'service_unavailable';
+    case 515: return 'restart_required';
+    default: return 'connection_closed';
+  }
+}
+
 export class WhatsAppSession {
   #status: WhatsAppSessionStatus = 'idle';
   #qr: string | undefined;
@@ -199,6 +218,7 @@ export class WhatsAppSession {
   #reachoutBlockedUntil: number | undefined;
   /** Fires after a SUSTAINED open; only then is the backoff reset (so a flap can't reset it every time). */
   #stableOpenTimer: ReturnType<typeof setTimeout> | undefined;
+  #recovery: WhatsAppRecoveryState | undefined;
   #startPromise: Promise<void> | undefined;
   // Set during connect — downloads media for the current socket/baileys module.
   #downloadMedia: ((msg: unknown) => Promise<Buffer>) | undefined;
@@ -226,6 +246,7 @@ export class WhatsAppSession {
     if (this.#startPromise && live) return this.#startPromise;
     this.#closed = false;
     this.#reconnectAttempts = 0;
+    this.#recovery = undefined;
     // An explicit (re)start is the operator choosing to try now — clear any pause.
     this.#reachoutBlockedUntil = undefined;
     this.#clearStableOpenTimer();
@@ -251,6 +272,7 @@ export class WhatsAppSession {
     this.#deliveryWaiters.clear();
     this.#deliveryRecipients.clear();
     this.#locallySubmittedMessageIds.clear();
+    this.#recovery = undefined;
     this.#setStatus('closed');
   }
 
@@ -603,6 +625,7 @@ export class WhatsAppSession {
         this.#qrDataUrl = undefined;
         this.#selfId = sock.user?.id;
         this.#reachoutBlockedUntil = undefined; // a real open clears any reach-out pause
+        this.#recovery = undefined;
         this.#setStatus('open');
         // Only reset the backoff after the connection STAYS open — a flap
         // (open→close during enforcement) must grow the backoff, not zero it each time.
@@ -617,7 +640,7 @@ export class WhatsAppSession {
           return;
         }
         this.#setStatus('closed');
-        this.#scheduleReconnect();
+        this.#scheduleReconnect(classifyWhatsAppReconnect(statusCode));
       }
     });
 
@@ -693,55 +716,13 @@ export class WhatsAppSession {
     const externalId = String(key.id ?? `${chatJid}:${msg.messageTimestamp ?? Date.now()}`);
     const from = msg.pushName ? String(msg.pushName) : undefined;
 
-    let body = extractWhatsAppText(msg.message);
-
-    // Voice note → transcribe to text (OMNICHANNEL §3.3). Only when a
-    // transcription model is configured; otherwise the voice note is skipped.
-    if (!body) {
-      const audio = unwrapAudioMessage(msg.message);
-      if (audio && this.opts.transcribeAudio && this.#downloadMedia) {
-        try {
-          const bytes = await this.#downloadMedia(msg);
-          const transcript = await this.opts.transcribeAudio(bytes, String(audio.mimetype ?? 'audio/ogg'));
-          if (transcript) body = `🎤 ${transcript}`;
-        } catch (err) {
-          this.opts.logger.warn('whatsapp.transcribe_failed', { err: (err as Error).message });
-        }
-      }
-    }
-
-    // Image → describe via the vision model (OMNICHANNEL §3.3 media ingestion).
-    if (!body) {
-      const image = unwrapImageMessage(msg.message);
-      if (image && this.opts.describeImage && this.#downloadMedia) {
-        try {
-          const bytes = await this.#downloadMedia(msg);
-          const caption = typeof image.caption === 'string' ? image.caption : undefined;
-          const description = await this.opts.describeImage(bytes, String(image.mimetype ?? 'image/jpeg'), caption);
-          if (description) body = `??? ${description}`;
-        } catch (err) {
-          this.opts.logger.warn('whatsapp.describe_image_failed', { err: (err as Error).message });
-        }
-      }
-    }
-
-    // Document (PDF / text) → extract text so the orchestrator can read it.
-    if (!body) {
-      const doc = unwrapDocumentMessage(msg.message);
-      if (doc && this.opts.extractDocument && this.#downloadMedia) {
-        try {
-          const bytes = await this.#downloadMedia(msg);
-          const fileName = typeof doc.fileName === 'string' ? doc.fileName : undefined;
-          const text = await this.opts.extractDocument(bytes, String(doc.mimetype ?? 'application/octet-stream'), fileName);
-          if (text) {
-            const label = fileName ? `📄 ${fileName}\n` : '📄 ';
-            body = `${label}${text}`;
-          }
-        } catch (err) {
-          this.opts.logger.warn('whatsapp.extract_document_failed', { err: (err as Error).message });
-        }
-      }
-    }
+    const body = await resolveWhatsAppInboundBody(msg, {
+      downloadMedia: this.#downloadMedia,
+      transcribeAudio: this.opts.transcribeAudio,
+      describeImage: this.opts.describeImage,
+      extractDocument: this.opts.extractDocument,
+      onFailure: (kind, err) => this.opts.logger.warn(`whatsapp.${kind}_failed`, { err: err.message }),
+    });
 
     if (!body) return; // nothing usable (non-text, no transcription/description/extraction)
     this.opts.onInbound({ externalId, chatId: chatJid, body, ...(from ? { from } : {}) });
@@ -783,7 +764,7 @@ export class WhatsAppSession {
     });
   }
 
-  #scheduleReconnect(): void {
+  #scheduleReconnect(reason: WhatsAppReconnectClass = 'connection_closed'): void {
     if (this.#closed || this.#reconnectTimer) return;
     const now = Date.now();
     // Respect an active reach-out timelock — do NOT hammer the companion while
@@ -791,6 +772,8 @@ export class WhatsAppSession {
     // try once. An operator relink (start) clears the pause immediately.
     if (this.#reachoutBlockedUntil && this.#reachoutBlockedUntil > now) {
       const wait = Math.min(this.#reachoutBlockedUntil - now + 5_000, REACHOUT_PAUSE_CAP_MS);
+      this.#recovery = { reason: 'reachout_paused', attempt: this.#reconnectAttempts, nextRetryAt: new Date(now + wait).toISOString() };
+      this.#emitState();
       this.opts.logger.warn('whatsapp.reconnect_paused_reachout', { connectionId: this.opts.connectionId, resumeInMs: wait });
       this.#reconnectTimer = setTimeout(() => {
         this.#reconnectTimer = undefined;
@@ -803,6 +786,7 @@ export class WhatsAppSession {
     }
     if (this.#reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
       this.opts.logger.warn('whatsapp.reconnect_exhausted', { connectionId: this.opts.connectionId });
+      this.#recovery = { reason: 'exhausted', attempt: this.#reconnectAttempts };
       this.#setStatus('error');
       return;
     }
@@ -811,6 +795,8 @@ export class WhatsAppSession {
       Math.round(RECONNECT_INITIAL_MS * RECONNECT_FACTOR ** this.#reconnectAttempts * (0.85 + Math.random() * 0.3)),
     );
     this.#reconnectAttempts += 1;
+    this.#recovery = { reason, attempt: this.#reconnectAttempts, nextRetryAt: new Date(now + delay).toISOString() };
+    this.#emitState();
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = undefined;
       this.#doReconnect();
@@ -829,8 +815,99 @@ export class WhatsAppSession {
       status: this.#status,
       ...(this.#qr ? { qr: this.#qr } : {}),
       ...(this.#selfId ? { selfId: this.#selfId } : {}),
+      ...(this.#recovery ? { recovery: this.#recovery } : {}),
     });
   }
+}
+
+/**
+ * Turn every supported inbound WhatsApp media message into useful turn context.
+ *
+ * Captions must not suppress media understanding: an image often has both a
+ * caption ("what is this?") and the actual question encoded in its pixels. When
+ * a model is unavailable or a provider call fails, retain a truthful placeholder
+ * instead of silently dropping the message and making the customer wait forever.
+ */
+export async function resolveWhatsAppInboundBody(
+  message: unknown,
+  options: {
+    downloadMedia?: (message: unknown) => Promise<Buffer>;
+    transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
+    describeImage?: (bytes: Buffer, mimeType: string, caption?: string) => Promise<string | null>;
+    extractDocument?: (bytes: Buffer, mimeType: string, fileName?: string) => Promise<string | null>;
+    onFailure?: (kind: 'transcribe' | 'describe_image' | 'extract_document', error: Error) => void;
+  } = {},
+): Promise<string | undefined> {
+  // Baileys hands the live session an envelope (`{ key, message, ... }`), while
+  // tests and callers may pass the message content directly. Normalize once but
+  // retain the original envelope for `downloadMediaMessage`.
+  const content = message && typeof message === 'object' && 'message' in message
+    ? (message as { message?: unknown }).message
+    : message;
+  const audio = unwrapAudioMessage(content);
+  if (audio) {
+    if (options.downloadMedia && options.transcribeAudio) {
+      try {
+        const transcript = await options.transcribeAudio(
+          await options.downloadMedia(message),
+          String(audio.mimetype ?? 'audio/ogg'),
+        );
+        if (transcript?.trim()) return `[Voice note transcript]\n${transcript.trim()}`;
+      } catch (error) {
+        options.onFailure?.('transcribe', error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    return '[Voice note received. Transcription is unavailable, so ask the sender to write the request or configure a transcription model.]';
+  }
+
+  const image = unwrapImageMessage(content);
+  if (image) {
+    const caption = typeof image.caption === 'string' && image.caption.trim() ? image.caption.trim() : null;
+    let description: string | null = null;
+    if (options.downloadMedia && options.describeImage) {
+      try {
+        description = await options.describeImage(
+          await options.downloadMedia(message),
+          String(image.mimetype ?? 'image/jpeg'),
+          caption ?? undefined,
+        );
+      } catch (error) {
+        options.onFailure?.('describe_image', error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    return [
+      '[Image received]',
+      ...(caption ? [`Caption: ${caption}`] : []),
+      description?.trim()
+        ? `Visual analysis: ${description.trim()}`
+        : 'Visual analysis is unavailable. Do not claim to know what is in the image.',
+    ].join('\n');
+  }
+
+  const doc = unwrapDocumentMessage(content);
+  if (doc) {
+    const fileName = typeof doc.fileName === 'string' && doc.fileName.trim() ? doc.fileName.trim() : null;
+    const caption = typeof doc.caption === 'string' && doc.caption.trim() ? doc.caption.trim() : null;
+    let text: string | null = null;
+    if (options.downloadMedia && options.extractDocument) {
+      try {
+        text = await options.extractDocument(
+          await options.downloadMedia(message),
+          String(doc.mimetype ?? 'application/octet-stream'),
+          fileName ?? undefined,
+        );
+      } catch (error) {
+        options.onFailure?.('extract_document', error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    return [
+      `[Document received${fileName ? `: ${fileName}` : ''}]`,
+      ...(caption ? [`Caption: ${caption}`] : []),
+      text?.trim() ? text.trim() : 'Text extraction is unavailable. Do not claim to have read the document.',
+    ].join('\n');
+  }
+
+  return extractWhatsAppText(content);
 }
 
 /**

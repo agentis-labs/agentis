@@ -63,7 +63,30 @@ export interface ChatConfirmationRequest {
   expiresAt: string;
 }
 
-export type ChatFinishReason = 'stop' | 'tool_calls' | 'max_turns' | 'error' | 'length';
+/** A terminal reason is an execution fact, not a provider-specific error string. */
+export type ChatFinishReason = 'stop' | 'tool_calls' | 'max_turns' | 'error' | 'length' | 'interrupted';
+
+/**
+ * Durable, operator-safe execution progress. `detail` is intentionally a
+ * summary: adapters must never place private chain-of-thought in this record.
+ */
+export interface OperatorProgressEvent {
+  id: string;
+  kind: 'lifecycle' | 'tool' | 'progress' | 'artifact' | 'error';
+  label: string;
+  detail?: string;
+  status: 'running' | 'success' | 'error';
+  tool?: string;
+  gatewayTool?: string;
+  resourceId?: string;
+  resourceType?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  conversationId?: string;
+  runId?: string;
+  agentId?: string;
+}
 
 export interface ChatTurnTrace {
   clientTurnId?: string;
@@ -71,7 +94,7 @@ export interface ChatTurnTrace {
   completedAt?: string;
   durationMs?: number;
   finishReason?: ChatFinishReason;
-  status: 'running' | 'completed' | 'failed' | 'stopped';
+  status: 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted' | 'blocked';
 }
 
 /**
@@ -95,6 +118,9 @@ export type ChatDelta =
       nodeId?: string;
       agentId?: string;
       clientTurnId?: string;
+      /** Normalized underlying operation; wrapper names remain only as gatewayTool. */
+      tool?: string;
+      gatewayTool?: string;
     }
   | { type: 'thinking'; delta: string }
   | { type: 'text'; delta: string }

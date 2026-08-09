@@ -31,7 +31,7 @@ import type { Logger } from '../../logger.js';
 import type { CredentialVault } from '../credentialVault.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
-import { WhatsAppSession, type WhatsAppObservedOutbound } from '../../adapters/channels/whatsappSession.js';
+import { WhatsAppSession, type WhatsAppObservedOutbound, type WhatsAppRecoveryState } from '../../adapters/channels/whatsappSession.js';
 import { TelegramSession } from '../../adapters/channels/telegramSession.js';
 import { resolveTelegramTransport } from '../../adapters/channels/telegram.js';
 import { DiscordSession } from '../../adapters/channels/discordSession.js';
@@ -40,6 +40,14 @@ import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, Channel
 import { chunkText, sleep, typingDelayMs, type HumanizeConfig } from './humanize.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
+
+/** A newer inbound superseded a delayed, humanized outbound response. */
+export class ChannelPacingCancelledError extends Error {
+  constructor(connectionId: string, chatId: string) {
+    super(`channel pacing cancelled for ${connectionId}:${chatId}`);
+    this.name = 'ChannelPacingCancelledError';
+  }
+}
 
 /** Collapse a burst of per-message receipts into one, preserving every provider id. */
 function aggregateReceipts(receipts: ChannelDeliveryReceipt[]): ChannelDeliveryReceipt {
@@ -91,6 +99,8 @@ function whatsappIsQrLocal(settings: unknown): boolean {
 
 export class ChannelConnectionSupervisor {
   readonly #sessions = new Map<string, LiveSession>();
+  /** Incremented by a newer inbound so delayed humanized sends never go stale. */
+  readonly #pacingEpoch = new Map<string, number>();
   #dispatcher: ChannelTurnDispatcher | undefined;
 
   constructor(private readonly deps: ChannelConnectionSupervisorDeps) {
@@ -231,20 +241,28 @@ export class ChannelConnectionSupervisor {
     const cfg = humanize?.enabled ? humanize : undefined;
     const typer = session as { setTyping?: (chatId: string, on: boolean) => Promise<void> };
     const canType = Boolean(cfg && typeof typer.setTyping === 'function');
+    const pacingKey = `${connectionId}:${chatId}`;
+    const pacingEpoch = this.#pacingEpoch.get(pacingKey) ?? 0;
+    const isStale = () => (this.#pacingEpoch.get(pacingKey) ?? 0) !== pacingEpoch;
+    const assertFresh = () => {
+      if (isStale()) throw new ChannelPacingCancelledError(connectionId, chatId);
+    };
 
     // Text-only: optionally chunk into a burst, typing before each piece.
     if (media.length === 0) {
       if (!cfg) return session.sendText(chatId, body);
       const chunks = chunkText(body, cfg);
       if (chunks.length <= 1) {
-        await this.#typingPause(typer, chatId, body.length, cfg, canType);
+        await this.#typingPause(typer, chatId, body.length, cfg, canType, isStale);
+        assertFresh();
         return session.sendText(chatId, chunks[0] ?? body);
       }
       const receipts: ChannelDeliveryReceipt[] = [];
       for (let i = 0; i < chunks.length; i += 1) {
-        await this.#typingPause(typer, chatId, chunks[i]!.length, cfg, canType);
+        await this.#typingPause(typer, chatId, chunks[i]!.length, cfg, canType, isStale);
+        assertFresh();
         receipts.push(await session.sendText(chatId, chunks[i]!));
-        if (i < chunks.length - 1) await sleep(cfg.interMessageMs);
+        if (i < chunks.length - 1) await this.#waitForPacing(cfg.interMessageMs, isStale);
       }
       return aggregateReceipts(receipts);
     }
@@ -260,9 +278,10 @@ export class ChannelConnectionSupervisor {
     const receipts: ChannelDeliveryReceipt[] = [];
     for (let i = 0; i < media.length; i += 1) {
       const caption = i === 0 && body.trim() ? body : undefined;
-      if (cfg) await this.#typingPause(typer, chatId, (caption ?? '').length + 120, cfg, canType);
+      if (cfg) await this.#typingPause(typer, chatId, (caption ?? '').length + 120, cfg, canType, isStale);
+      assertFresh();
       receipts.push(await mediaSession.sendMedia(chatId, media[i]!, caption));
-      if (cfg && i < media.length - 1) await sleep(cfg.interMessageMs);
+      if (cfg && i < media.length - 1) await this.#waitForPacing(cfg.interMessageMs, isStale);
     }
     return aggregateReceipts(receipts);
   }
@@ -278,18 +297,34 @@ export class ChannelConnectionSupervisor {
     textLen: number,
     cfg: HumanizeConfig,
     canType: boolean,
+    isStale: () => boolean,
   ): Promise<void> {
     const delay = typingDelayMs(textLen, cfg);
     if (delay <= 0) return;
-    if (!canType || !typer.setTyping) { await sleep(delay); return; }
+    if (!canType || !typer.setTyping) {
+      await this.#waitForPacing(delay, isStale);
+      return;
+    }
     const REEMIT_MS = 8_000;
     let waited = 0;
     while (waited < delay) {
+      if (isStale()) throw new ChannelPacingCancelledError('', chatId);
       try { await typer.setTyping(chatId, true); } catch { /* presence is best-effort */ }
       const step = Math.min(REEMIT_MS, delay - waited);
+      await this.#waitForPacing(step, isStale);
+      waited += step;
+    }
+  }
+
+  async #waitForPacing(delayMs: number, isStale: () => boolean): Promise<void> {
+    let waited = 0;
+    while (waited < delayMs) {
+      if (isStale()) throw new ChannelPacingCancelledError('', '');
+      const step = Math.min(250, delayMs - waited);
       await sleep(step);
       waited += step;
     }
+    if (isStale()) throw new ChannelPacingCancelledError('', '');
   }
 
   async outboundHealth(connectionId: string): Promise<ChannelHealthCheck | null> {
@@ -382,6 +417,8 @@ export class ChannelConnectionSupervisor {
   }
 
   #onInbound(connectionId: string, msg: { externalId: string; chatId: string; body: string; from?: string; threadId?: string }): void {
+    const pacingKey = `${connectionId}:${msg.chatId}`;
+    this.#pacingEpoch.set(pacingKey, (this.#pacingEpoch.get(pacingKey) ?? 0) + 1);
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
@@ -635,7 +672,7 @@ export class ChannelConnectionSupervisor {
     }
   }
 
-  #onStateChange(connectionId: string, state: { status: string; qr?: string; selfId?: string }): void {
+  #onStateChange(connectionId: string, state: { status: string; qr?: string; selfId?: string; recovery?: WhatsAppRecoveryState }): void {
     const now = new Date().toISOString();
     const row = this.deps.db
       .select({ workspaceId: schema.channelConnections.workspaceId, kind: schema.channelConnections.kind, settings: schema.channelConnections.settings, lastError: schema.channelConnections.lastError })
@@ -650,12 +687,14 @@ export class ChannelConnectionSupervisor {
     const currentHealth = isChannelHealth(currentSettings.health) ? currentSettings.health : null;
     const reconciledHealth = currentHealth ? reconcileTransportHealth(currentHealth, dbStatus, state.status, now) : null;
     const persistedStatus = reconciledHealth?.status ?? dbStatus;
-    const settings = {
+    const settings: Record<string, unknown> = {
       ...currentSettings,
       transportStatus: state.status,
       ...(state.selfId ? { selfId: state.selfId } : {}),
+      ...(state.recovery ? { whatsappRecovery: state.recovery } : {}),
       ...(reconciledHealth ? { health: reconciledHealth } : {}),
     };
+    if (state.status === 'open') delete settings.whatsappRecovery;
     this.deps.db
       .update(schema.channelConnections)
       .set({ status: persistedStatus, settings, updatedAt: now, ...(state.status === 'open' ? { lastEventAt: now, lastError: persistedStatus === 'active' ? null : row.lastError } : {}) })

@@ -8,7 +8,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type {
@@ -39,6 +39,7 @@ import {
   messagesForRuntimeSession,
   runCliChatTurn,
   type CliChatPart,
+  type CliChatRuntimeConfig,
 } from './cliChatRuntime.js';
 import { probeCliRuntime } from './cliRuntimeProbe.js';
 import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
@@ -482,7 +483,7 @@ export class CodexAdapter implements AgentAdapter {
       return parts;
     };
 
-    yield* runCliChatTurn({
+    const runtimeConfig: CliChatRuntimeConfig = {
       binary: this.opts.binaryPath ?? 'codex',
       args,
       cwd: this.opts.cwd,
@@ -497,7 +498,35 @@ export class CodexAdapter implements AgentAdapter {
       interpret,
       formatExitError: (code, stderr, stdoutErr) => formatCodexExitError(code, stderr, stdoutErr),
       onEmptyResult: () => this.opts.logger.warn('codex.chat.no_output_parsed', { types: [...seenTypes].slice(0, 40) }),
-    });
+    };
+    let cacheRecoveryUsed = false;
+    for (;;) {
+      let retry = false;
+      for await (const delta of runCliChatTurn(runtimeConfig)) {
+        if (!cacheRecoveryUsed && delta.type === 'tool_result' && delta.id === 'adapter'
+          && delta.name === 'adapter.chat' && typeof delta.error === 'string'
+          && isCodexModelCacheFailure(delta.error)) {
+          const recovered = recoverCodexModelCache();
+          if (recovered) {
+            cacheRecoveryUsed = true;
+            retry = true;
+            yield {
+              type: 'activity', id: 'codex-model-cache-recovery', phase: 'runtime', status: 'running',
+              label: 'Refreshing incompatible Codex model cache',
+              detail: `Quarantined ${recovered}; retrying this turn once.`,
+            };
+            continue;
+          }
+        }
+        if (retry && delta.type === 'done') continue;
+        yield delta;
+      }
+      if (!retry) return;
+      yield {
+        type: 'activity', id: 'codex-model-cache-recovery', phase: 'runtime', status: 'success',
+        label: 'Codex model cache refreshed', detail: 'Retrying the original request with a fresh model catalogue.',
+      };
+    }
   }
 
   #emit(event: NormalizedAgentEvent): void {
@@ -996,6 +1025,27 @@ export function resolveCodexModel(
   return hasApiKey ? model : 'gpt-5.5';
 }
 
+export function isCodexModelCacheFailure(detail: string): boolean {
+  return /failed to (load models cache|renew cache TTL)|missing field [`'\"]?(?:supports_\w+|base_instructions)[`'\"]?/i.test(detail);
+}
+
+/** Quarantine only a positively identified Codex model catalogue cache. */
+export function recoverCodexModelCache(cacheRoot = join(homedir(), '.codex')): string | null {
+  for (const name of ['models-cache.json', 'models_cache.json']) {
+    const file = join(cacheRoot, name);
+    if (!existsSync(file)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+      if (!parsed || typeof parsed !== 'object') continue;
+      renameSync(file, `${file}.incompatible-${Date.now()}`);
+      return name;
+    } catch {
+      // Never alter unreadable/non-cache files or anything we cannot rename.
+    }
+  }
+  return null;
+}
+
 function formatCodexExitError(code: number | null, stderrText: string, stdoutError: string, signal?: NodeJS.Signals | null): string {
   const stderr = stripProcessNoise(stderrText).trim();
   const detail = normalizeCodexError(stdoutError) ?? normalizeCodexError(stderr) ?? stderr;
@@ -1012,7 +1062,7 @@ function formatCodexExitError(code: number | null, stderrText: string, stdoutErr
     // Codex then fails to load ANY model — so every model change appears broken
     // and looks like Agentis pinning the model. It is neither our cache nor our
     // constraint; name the file so the operator can clear it.
-    if (/failed to (load models cache|renew cache TTL)|missing field `supports_\w+`/i.test(detail)) {
+    if (isCodexModelCacheFailure(detail)) {
       return `Codex could not read its own model cache (${detail}). This is a stale cache from a different Codex version, not an Agentis setting. Delete the cache files under ~/.codex (e.g. models-cache.json) and/or run \`npm install -g @openai/codex@latest\`, then retry — model selection will work again.`;
     }
     return `Codex exited with ${exit}: ${detail}`;

@@ -1,11 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ChatDelta, ChatMessage, NormalizedAgentEvent, NormalizedTask } from '@agentis/core';
-import { CodexAdapter } from '../../src/adapters/CodexAdapter.js';
+import { CodexAdapter, isCodexModelCacheFailure, recoverCodexModelCache } from '../../src/adapters/CodexAdapter.js';
 import type { Logger } from '../../src/logger.js';
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
@@ -643,6 +643,16 @@ describe('CodexAdapter', () => {
     ]));
     expect((spawnMock.mock.calls[1]![1] as string[]).slice(0, 3)).toEqual(['exec', 'resume', 'thread-a']);
     expect((spawnMock.mock.calls[2]![1] as string[]).slice(0, 2)).toEqual(['exec', '--json']);
+  });
+
+  it('recognizes the newer base_instructions cache mismatch and only quarantines a model cache', () => {
+    expect(isCodexModelCacheFailure('failed to load models cache: missing field base_instructions at line 86 column 5')).toBe(true);
+    const cacheRoot = mkdtempSync(join(tmpdir(), 'codex-model-cache-'));
+    const cache = join(cacheRoot, 'models-cache.json');
+    writeFileSync(cache, JSON.stringify({ models: [] }));
+
+    expect(recoverCodexModelCache(cacheRoot)).toBe('models-cache.json');
+    expect(existsSync(cache)).toBe(false);
   });
 
   it('native profile preserves user config/profile while enforcing the named permission envelope', async () => {

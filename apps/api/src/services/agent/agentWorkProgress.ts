@@ -158,11 +158,12 @@ export function publishToolCallProgress(bus: EventBus, ctx: AgentWorkContext, de
 }
 
 export function publishToolResultProgress(bus: EventBus, ctx: AgentWorkContext, delta: ChatToolResult): void {
+  const invocation = normalizeToolInvocation(delta.name, undefined);
   publishAgentWorkStep(bus, {
     ...ctx,
     phase: delta.error ? 'fail' : 'complete',
-    step: delta.name,
-    description: delta.error ? `${delta.name} failed: ${delta.error}` : `${delta.name} completed`,
+    step: invocation.tool,
+    description: delta.error ? `${invocation.tool} failed: ${delta.error}` : `${invocation.tool} completed`,
   });
 }
 

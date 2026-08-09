@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { schema } from '@agentis/db/sqlite';
 import { eq } from 'drizzle-orm';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
-import { ChannelBridge, type PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
+import { ChannelBridge, DEFAULT_WHATSAPP_CONNECTION_PROFILE, type PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { SlackChannelAdapter } from '../../src/adapters/channels/slack.js';
 
@@ -80,6 +80,28 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect(row.tokenEncrypted).toBeTruthy();
     expect(ctx.vault.decrypt(row.tokenEncrypted)).toContain('persistent:whatsapp');
+    expect(connection.whatsappProfile).toEqual(DEFAULT_WHATSAPP_CONNECTION_PROFILE);
+  });
+
+  it('migrates legacy WhatsApp settings lazily and persists the owner indicator choice', () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA',
+    });
+    // Simulate a connection saved before the v1 profile existed.
+    ctx.db.update(schema.channelConnections).set({ settings: { mode: 'qr_local' } })
+      .where(eq(schema.channelConnections.id, connection.id)).run();
+    expect(bridge.get(ctx.workspace.id, connection.id).whatsappProfile?.ownerReasoningVisibility).toBe('off');
+
+    const updated = bridge.updateBehavior(ctx.workspace.id, connection.id, { ownerReasoningVisibility: 'indicator' });
+    expect(updated.whatsappProfile).toMatchObject({ version: 1, ownerReasoningVisibility: 'indicator' });
+    const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
+    expect((row.settings as { whatsappProfile?: { version?: number; ownerReasoningVisibility?: string } }).whatsappProfile)
+      .toMatchObject({ version: 1, ownerReasoningVisibility: 'indicator' });
   });
 
   it('rejects a non-persistent kind without a token', () => {

@@ -315,6 +315,11 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
       : cfg.signal?.aborted
         ? `${cfg.displayName} request was canceled`
         : `${cfg.displayName} process error: ${err.message}`;
+    if (cfg.signal?.aborted) {
+      queue.push({ type: 'done', finishReason: 'interrupted', ...(reportedUsage ? { usage: reportedUsage } : {}) });
+      queue.close();
+      return;
+    }
     queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error });
     queue.push({ type: 'done', finishReason: 'error', ...(reportedUsage ? { usage: reportedUsage } : {}) });
     queue.close();
@@ -401,6 +406,14 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     unlinkAbort();
     clearTimers();
     if (timedOut && flushPartialOnTimeout()) {
+      queue.close();
+      return;
+    }
+    // Cancellation is controlled by Agentis's turn lease. The CLI may report a
+    // non-zero process exit after its process tree is terminated; that is not a
+    // model/runtime failure and must not overwrite the interruption outcome.
+    if (cfg.signal?.aborted) {
+      queue.push({ type: 'done', finishReason: 'interrupted', ...(reportedUsage ? { usage: reportedUsage } : {}) });
       queue.close();
       return;
     }
