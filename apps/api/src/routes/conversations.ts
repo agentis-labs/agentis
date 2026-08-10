@@ -25,11 +25,17 @@ import {
   REALTIME_EVENTS,
   REALTIME_ROOMS,
   type ChatDelta,
+  type ChatContextManifest,
+  type ChatExecutionEnvelope,
   type ChatFinishReason,
   type ChatPermissionMode,
+  type ApprovalSensitivity,
   type ChatTurnContext,
   type ChatTurnTrace,
+  type ConversationExecutionMode,
+  type EffectiveConversationExecutionMode,
   type ViewportContext,
+  type WorkspaceContext,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -53,6 +59,18 @@ import { collectAppDoctorSnapshot } from '../services/app/appDoctorSnapshot.js';
 import { validateAppConformance, type AppDoctorReport } from '../services/app/appDoctor.js';
 import type { ConversationTurnExperience, ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
 import type { PlanService } from '../services/planService.js';
+import { ArtifactService } from '../services/artifactService.js';
+import { DocumentExtractionService } from '../services/documentExtractionService.js';
+import type { VisionService } from '../services/visionService.js';
+import type { TranscriptionService } from '../services/transcriptionService.js';
+import type { RuntimeProfileService } from '../services/runtime/runtimeProfileService.js';
+import { ConversationAttachmentContextService } from '../services/conversation/conversationAttachmentContext.js';
+import {
+  ConversationTurnService,
+  classifyConversationExecutionMode,
+  type ConversationTurnRow,
+  type DurableTurnEventSink,
+} from '../services/conversation/conversationTurnService.js';
 
 const sendSchema = z.object({
   body: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
@@ -62,6 +80,10 @@ const sendSchema = z.object({
   attachments: z.array(z.string().min(1)).max(10).optional(),
   /** Composer toggle: persist the sticky permission mode alongside this turn. */
   permissionMode: z.enum(['ask', 'plan', 'auto']).optional(),
+  /** Optional programmatic control; normal users may also ask the agent in chat. */
+  approvalSensitivity: z.enum(['cautious', 'balanced', 'autonomous']).optional(),
+  /** Adaptive quality/durability mode. */
+  executionMode: z.enum(['auto', 'quick', 'deep', 'mission']).optional().default('auto'),
   viewportOverride: z.object({
     surface: z.string().min(1),
     route: z.string().optional(),
@@ -105,6 +127,11 @@ type ConversationRouteDeps = {
   /** Durable, runtime-neutral efficiency evidence for interactive turns. */
   audit?: Pick<AuditTrailService, 'record'>;
   plans?: PlanService;
+  artifacts?: ArtifactService;
+  documents?: DocumentExtractionService;
+  vision?: VisionService;
+  transcription?: TranscriptionService;
+  runtimeProfiles?: RuntimeProfileService;
   memoryCapture?: {
     captureImmediateCorrection?(args: {
       workspaceId: string;
@@ -164,6 +191,31 @@ const hardStoppedConversations = new Set<string>();
 export function buildConversationRoutes(deps: ConversationRouteDeps) {
   const app = new Hono();
   app.use('*', requireAuth(deps), requireWorkspace(deps));
+  const documents = deps.documents ?? new DocumentExtractionService({ logger: deps.logger });
+  const artifacts = deps.artifacts ?? new ArtifactService(deps.db, deps.logger, deps.bus);
+  const attachmentContext = new ConversationAttachmentContextService({
+    artifacts,
+    documents,
+    logger: deps.logger,
+    ...(deps.vision ? { vision: deps.vision } : {}),
+    ...(deps.transcription ? { transcription: deps.transcription } : {}),
+  });
+  const durableTurns = new ConversationTurnService({
+    db: deps.db,
+    logger: deps.logger,
+    execute: (turn, sink, signal) => executeDurableConversationTurn(deps, turn, sink, signal),
+    onCancel: async (turn) => {
+      deps.turnLeases?.revoke(turn.workspaceId, turn.conversationId);
+      if (!deps.engine) return;
+      const runs = deps.db.select({ id: schema.workflowRuns.id }).from(schema.workflowRuns).where(and(
+        eq(schema.workflowRuns.workspaceId, turn.workspaceId),
+        eq(schema.workflowRuns.conversationId, turn.conversationId),
+        inArray(schema.workflowRuns.status, ['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']),
+      )).all();
+      await Promise.allSettled(runs.map((run) => deps.engine!.cancelRun(run.id)));
+    },
+  });
+  queueMicrotask(() => durableTurns.recover());
 
   app.get('/orchestrator', (c) => {
     const ws = getWorkspace(c);
@@ -199,7 +251,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     if (!orchestrator) {
       throw new AgentisError('RESOURCE_NOT_FOUND', 'workspace orchestrator not found');
     }
-    return sendConversationMessage(c, deps, ws, orchestrator.id);
+    return sendConversationMessage(c, deps, ws, orchestrator.id, attachmentContext);
   });
 
   app.post('/orchestrator/confirm', async (c) => {
@@ -208,7 +260,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     if (!orchestrator) {
       throw new AgentisError('RESOURCE_NOT_FOUND', 'workspace orchestrator not found');
     }
-    return confirmConversationAction(c, deps, ws, orchestrator.id);
+    return confirmConversationAction(c, deps, ws, orchestrator.id, durableTurns);
   });
 
   app.post('/orchestrator/read', (c) => {
@@ -306,7 +358,170 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     const agentId = c.req.param('agentId');
     const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
     if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
-    return sendConversationMessage(c, deps, ws, agentId);
+    return sendConversationMessage(c, deps, ws, agentId, attachmentContext);
+  });
+
+  /** Chat V2: persist first, execute independently, subscribe by replay cursor. */
+  app.post('/:agentId/turns', async (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const agent = deps.db.select().from(schema.agents).where(and(
+      eq(schema.agents.id, agentId),
+      eq(schema.agents.workspaceId, ws.workspaceId),
+    )).get();
+    if (!agent) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
+    const body = sendSchema.parse(await c.req.json());
+    const clientTurnId = body.clientTurnId ?? randomUUID();
+    const requestedMode = body.executionMode as ConversationExecutionMode;
+    const conversationId = c.req.query('conversationId') || null;
+    const conversation = conversationId
+      ? deps.conversations.getById(ws.workspaceId, conversationId)
+      : deps.conversations.getOrCreateByAgent({
+          workspaceId: ws.workspaceId,
+          ambientId: ws.ambientId,
+          userId: ws.user.id,
+          agentId,
+        });
+    if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
+
+    const permissionMode = body.permissionMode ?? (conversation.permissionMode as ChatPermissionMode | null) ?? 'ask';
+    const approvalSensitivity = body.approvalSensitivity
+      ?? (conversation.approvalSensitivity as ApprovalSensitivity | null)
+      ?? 'balanced';
+    if (permissionMode !== conversation.permissionMode || approvalSensitivity !== conversation.approvalSensitivity) {
+      deps.db.update(schema.conversations).set({
+        permissionMode,
+        approvalSensitivity,
+        executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
+        updatedAt: new Date().toISOString(),
+      }).where(eq(schema.conversations.id, conversation.id)).run();
+    }
+    captureImmediateConversationCorrection(deps, ws, {
+      agentId,
+      conversationId: conversation.id,
+      userMessage: body.body,
+      useViewportContext: body.useViewportContext,
+      viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
+    });
+
+    const message = deps.conversations.appendOutbound({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+      operatorId: ws.user.id,
+      body: body.body,
+      metadata: body.attachments?.length
+        ? { clientTurnId, artifactIds: body.attachments, executionMode: requestedMode }
+        : { clientTurnId, executionMode: requestedMode },
+    });
+    const compiled = await attachmentContext.compile({
+      workspaceId: ws.workspaceId,
+      body: body.body,
+      attachmentIds: body.attachments,
+      historyMessages: conversationHistoryForTurn(deps, conversation.id, message.id).length,
+    });
+    const classified = classifyConversationExecutionMode(requestedMode, {
+      body: body.body,
+      attachmentCount: body.attachments?.length ?? 0,
+      permissionMode,
+    });
+    const envelope = await buildChatExecutionEnvelope(deps, agent, requestedMode, classified.mode, classified.reason);
+    const activeViewport = body.useViewportContext
+      ? (body.viewportOverride as ViewportContext | null | undefined) ?? deps.viewportStore?.get(ws.user.id) ?? null
+      : (body.viewportOverride as ViewportContext | null | undefined) ?? null;
+    const plan = classified.mode === 'mission' && deps.plans
+      ? deps.plans.createTask({
+          workspaceId: ws.workspaceId,
+          userId: ws.user.id,
+          objective: body.body,
+          conversationId: conversation.id,
+          ownerAgentId: agentId,
+          title: missionTitle(body.body),
+          acceptanceCriteria: ['All requested deliverables are persisted.', 'Verification passes before completion.', 'The final response cites concrete evidence.'],
+        })
+      : null;
+    if (plan) deps.plans?.setStatus(ws.workspaceId, ws.user.id, plan.id, 'executing');
+
+    const turn = durableTurns.enqueue({
+      workspaceId: ws.workspaceId,
+      conversationId: conversation.id,
+      agentId,
+      userId: ws.user.id,
+      messageId: message.id,
+      clientTurnId,
+      prompt: compiled.prompt,
+      requestedMode,
+      effectiveMode: classified.mode,
+      permissionMode,
+      attachmentIds: body.attachments ?? [],
+      viewport: activeViewport,
+      contextManifest: compiled.manifest,
+      executionEnvelope: envelope,
+      planId: plan?.id ?? null,
+    });
+    return c.json({ turn: serializeDurableTurn(turn), conversationId: conversation.id, message }, 202);
+  });
+
+  app.get('/:agentId/turns/active', (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const conversationId = c.req.query('conversationId');
+    if (!conversationId) throw new AgentisError('VALIDATION_FAILED', 'conversationId is required');
+    const conversation = deps.conversations.getById(ws.workspaceId, conversationId);
+    if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
+    return c.json({ turns: durableTurns.listActive(ws.workspaceId, conversationId).map(serializeDurableTurn) });
+  });
+
+  app.get('/:agentId/turns/:turnId', (c) => {
+    const ws = getWorkspace(c);
+    const turn = durableTurns.require(ws.workspaceId, c.req.param('turnId'));
+    if (turn.agentId !== c.req.param('agentId')) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation turn not found');
+    return c.json({ turn: serializeDurableTurn(turn) });
+  });
+
+  app.get('/:agentId/turns/:turnId/events', (c) => {
+    const ws = getWorkspace(c);
+    const turnId = c.req.param('turnId');
+    const turn = durableTurns.require(ws.workspaceId, turnId);
+    if (turn.agentId !== c.req.param('agentId')) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation turn not found');
+    const headerCursor = Number(c.req.header('last-event-id') ?? 0);
+    const queryCursor = Number(c.req.query('after') ?? 0);
+    return streamSSE(c, async (stream) => {
+      let cursor = Math.max(Number.isFinite(headerCursor) ? headerCursor : 0, Number.isFinite(queryCursor) ? queryCursor : 0);
+      while (!c.req.raw.signal.aborted) {
+        const events = durableTurns.events(ws.workspaceId, turnId, cursor);
+        for (const event of events) {
+          cursor = event.seq;
+          await stream.writeSSE({ id: String(event.seq), event: event.event, data: JSON.stringify(event.data) });
+        }
+        const latest = durableTurns.require(ws.workspaceId, turnId);
+        if (['completed', 'failed', 'cancelled', 'paused', 'awaiting_approval', 'interrupted'].includes(latest.status) && cursor >= latest.lastEventSeq) break;
+        await delay(350);
+      }
+    });
+  });
+
+  app.post('/:agentId/turns/:turnId/pause', (c) => {
+    const ws = getWorkspace(c);
+    const before = durableTurns.require(ws.workspaceId, c.req.param('turnId'));
+    if (before.agentId !== c.req.param('agentId')) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation turn not found');
+    const turn = durableTurns.pause(ws.workspaceId, before.id);
+    return c.json({ turn: serializeDurableTurn(turn) });
+  });
+
+  app.post('/:agentId/turns/:turnId/resume', (c) => {
+    const ws = getWorkspace(c);
+    const before = durableTurns.require(ws.workspaceId, c.req.param('turnId'));
+    if (before.agentId !== c.req.param('agentId')) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation turn not found');
+    const turn = durableTurns.resume(ws.workspaceId, before.id);
+    return c.json({ turn: serializeDurableTurn(turn) });
+  });
+
+  app.post('/:agentId/turns/:turnId/cancel', async (c) => {
+    const ws = getWorkspace(c);
+    const before = durableTurns.require(ws.workspaceId, c.req.param('turnId'));
+    if (before.agentId !== c.req.param('agentId')) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation turn not found');
+    const turn = await durableTurns.cancel(ws.workspaceId, before.id);
+    return c.json({ turn: serializeDurableTurn(turn) });
   });
 
   // Queue-then-auto-continue composer: still-pending messages queued while a
@@ -375,6 +590,8 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
         });
     if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
 
+    const durableActive = durableTurns.listActive(ws.workspaceId, conversation.id);
+    await Promise.allSettled(durableActive.map((turn) => durableTurns.cancel(ws.workspaceId, turn.id)));
     const activeTurn = activeConversationTurns.get(conversation.id);
     const leaseRevoked = deps.turnLeases?.revoke(ws.workspaceId, conversation.id) ?? false;
     if (activeTurn) {
@@ -407,6 +624,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       workspaceId: ws.workspaceId,
       conversationId: conversation.id,
       agentId,
+      durableTurnIds: durableActive.map((turn) => turn.id),
       turnAborted: Boolean(activeTurn),
       leaseRevoked,
       discardedMessages: discarded.length,
@@ -416,7 +634,8 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     return c.json({
       ok: failedRunIds.length === 0,
       conversationId: conversation.id,
-      turnAborted: Boolean(activeTurn),
+      turnAborted: Boolean(activeTurn || durableActive.length),
+      cancelledTurnIds: durableActive.map((turn) => turn.id),
       leaseRevoked,
       discardedMessages: discarded.length,
       cancelledRunIds,
@@ -461,7 +680,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     const agentId = c.req.param('agentId');
     const agent = deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
     if (!agent || agent.workspaceId !== ws.workspaceId) throw new AgentisError('RESOURCE_NOT_FOUND', 'agent not found');
-    return confirmConversationAction(c, deps, ws, agentId);
+    return confirmConversationAction(c, deps, ws, agentId, durableTurns);
   });
 
   app.post('/:agentId/continue/:sessionId', (c) => {
@@ -545,6 +764,23 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       ))
       .run();
     return c.json({ ok: true, permissionMode: mode });
+  });
+
+  app.post('/session/:conversationId/approval-sensitivity', async (c) => {
+    const ws = getWorkspace(c);
+    const conversationId = c.req.param('conversationId');
+    const { sensitivity } = z.object({
+      sensitivity: z.enum(['cautious', 'balanced', 'autonomous']),
+    }).parse(await c.req.json());
+    const result = deps.db.update(schema.conversations)
+      .set({ approvalSensitivity: sensitivity, updatedAt: new Date().toISOString() })
+      .where(and(
+        eq(schema.conversations.id, conversationId),
+        eq(schema.conversations.workspaceId, ws.workspaceId),
+      ))
+      .run();
+    if (result.changes === 0) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found');
+    return c.json({ ok: true, approvalSensitivity: sensitivity });
   });
 
   app.delete('/session/:conversationId', (c) => {
@@ -798,6 +1034,186 @@ function conversationHistoryForTurn(
     }));
 }
 
+const MISSION_MODE_SYSTEM_ADDENDUM = `
+MISSION EXECUTION CONTRACT
+- This is a durable, high-quality mission, not a one-shot answer.
+- Maintain the task spine as the authoritative objective, steps, decisions, deviations, and acceptance criteria.
+- Use at most three concurrently active specialist agents for independent work when that improves quality; keep ownership and integration with the primary agent.
+- Persist real artifacts and state as you work. Do not substitute prose for implementation.
+- Verify the result against every acceptance criterion. Never claim completion without concrete evidence.
+- If blocked by an approval or unavailable capability, state the exact blocker and the smallest operator decision required.
+`.trim();
+
+async function executeDurableConversationTurn(
+  deps: ConversationRouteDeps,
+  turn: ConversationTurnRow,
+  sink: DurableTurnEventSink,
+  signal: AbortSignal,
+) {
+  const conversation = deps.conversations.getById(turn.workspaceId, turn.conversationId);
+  const user = deps.db.select().from(schema.users).where(eq(schema.users.id, turn.userId)).get();
+  const workspace = deps.db.select().from(schema.workspaces).where(eq(schema.workspaces.id, turn.workspaceId)).get();
+  if (!user || !workspace) throw new AgentisError('RESOURCE_NOT_FOUND', 'turn workspace or operator no longer exists');
+  const ws: WorkspaceContext = {
+    workspaceId: turn.workspaceId,
+    ambientId: workspace.defaultAmbientId ?? null,
+    user,
+  };
+  const reg = deps.adapters.get(turn.agentId);
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal.reason ?? new Error('durable_turn_cancelled'));
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort, { once: true });
+  activeConversationTurns.set(turn.conversationId, controller);
+  hardStoppedConversations.delete(turn.conversationId);
+  const turnLease = deps.turnLeases?.issue(turn.workspaceId, turn.conversationId);
+  let finishReason: ChatFinishReason = 'stop';
+  let awaitingApproval = false;
+  let sawError = false;
+  let finalMessageId: string | null = null;
+  let finalMessageText = '';
+  const trackingSink: ChatSseStream = {
+    writeSSE: async (event) => {
+      if (event.event === 'delta') {
+        try {
+          const delta = JSON.parse(event.data) as ChatDelta;
+          if (delta.type === 'confirmation_required') awaitingApproval = true;
+          if (delta.type === 'done') finishReason = delta.finishReason;
+        } catch { /* persisted transport still receives the original event */ }
+      } else if (event.event === 'done') {
+        try { finishReason = (JSON.parse(event.data) as { finishReason?: ChatFinishReason }).finishReason ?? finishReason; } catch { /* noop */ }
+      } else if (event.event === 'message') {
+        try {
+          const message = JSON.parse(event.data) as { id?: string; body?: string };
+          finalMessageId = message.id ?? finalMessageId;
+          finalMessageText = message.body ?? finalMessageText;
+        } catch { /* noop */ }
+      } else if (event.event === 'error') {
+        sawError = true;
+      }
+      await sink.writeSSE(event);
+    },
+  };
+  try {
+    await runConversationTurn(trackingSink, deps, ws, {
+      agentId: turn.agentId,
+      conversation,
+      clientTurnId: turn.clientTurnId,
+      currentMessageId: turn.messageId,
+      userMessage: turn.prompt,
+      useViewportContext: false,
+      viewportOverride: (turn.viewport as ViewportContext | null) ?? null,
+      turnSignal: controller.signal,
+      ...(turnLease ? { turnLease } : {}),
+      qualityMode: turn.effectiveMode as EffectiveConversationExecutionMode,
+      executionEnvelope: (turn.executionEnvelope as ChatExecutionEnvelope | null) ?? null,
+      contextManifest: (turn.contextManifest as ChatContextManifest | null) ?? null,
+    }, reg);
+  } finally {
+    signal.removeEventListener('abort', abort);
+    if (turnLease) deps.turnLeases?.complete(turn.workspaceId, turn.conversationId, turnLease);
+    if (activeConversationTurns.get(turn.conversationId) === controller) activeConversationTurns.delete(turn.conversationId);
+    if (!controller.signal.aborted && !hardStoppedConversations.delete(turn.conversationId)) {
+      deps.conversations.dispatchNextQueued({ workspaceId: turn.workspaceId, conversationId: turn.conversationId });
+    }
+  }
+  if (awaitingApproval) {
+    if (turn.planId && deps.plans) deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, 'blocked');
+    return { status: 'awaiting_approval' as const };
+  }
+  const terminalReason = finishReason as ChatFinishReason;
+  if (controller.signal.aborted || terminalReason === 'interrupted') return { status: 'interrupted' as const };
+  if (sawError || terminalReason === 'error') {
+    if (turn.planId && deps.plans) deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, 'failed');
+    return { status: 'failed' as const, error: 'The agent runtime failed during this turn.' };
+  }
+  if (turn.planId && deps.plans) {
+    if (/verification blocked|cannot truthfully mark|\bnot (?:done|complete|ready)\b/i.test(finalMessageText)) {
+      deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, 'blocked');
+      return { status: 'failed' as const, error: 'Mission completion was blocked by verification.' };
+    }
+    const verification = await deps.plans.verifyCompletion(turn.workspaceId, turn.userId, turn.planId, {
+      output: { messageId: finalMessageId, text: finalMessageText },
+      evidence: finalMessageId ? [{ label: 'Persisted final conversation output', payload: { messageId: finalMessageId } }] : [],
+    });
+    if (!verification.passed) return { status: 'failed' as const, error: 'Mission acceptance verification did not pass.' };
+  }
+  return { status: 'completed' as const };
+}
+
+async function buildChatExecutionEnvelope(
+  deps: ConversationRouteDeps,
+  agent: AgentRow,
+  requestedMode: ConversationExecutionMode,
+  effectiveMode: EffectiveConversationExecutionMode,
+  classificationReason: string,
+): Promise<ChatExecutionEnvelope> {
+  const descriptor = deps.runtimeProfiles
+    ? await deps.runtimeProfiles.captureExecution(agent.workspaceId, agent.id).catch(() => null)
+    : null;
+  const native = descriptor?.executionEnvelope;
+  const configured = native?.reasoningEffort ?? null;
+  const effectiveReasoningEffort = effectiveMode === 'quick'
+    ? 'low'
+    : effectiveMode === 'mission'
+      ? reasoningEffortFloor(configured, 'high')
+      : configured;
+  const forwarding = deps.adapters.get(agent.id)?.adapter.capabilities?.().toolForwarding;
+  return {
+    version: 1,
+    requestedMode,
+    effectiveMode,
+    classificationReason,
+    adapterType: agent.adapterType,
+    model: native?.model ?? agent.runtimeModel ?? null,
+    configuredReasoningEffort: configured,
+    effectiveReasoningEffort,
+    fastMode: effectiveMode === 'quick' && agent.adapterType === 'codex',
+    runtimeProfile: native?.runtimeProfile.mode ?? null,
+    cwd: native?.cwd ?? null,
+    loadedSources: native?.loadedSources ?? ['agentis'],
+    toolMode: forwarding === 'mcp_native' ? 'adapter_native' : forwarding === 'marker_protocol' ? 'caller_loop' : 'none',
+    durable: effectiveMode === 'mission',
+    createdAt: new Date().toISOString(),
+    warnings: native?.capabilityWarnings ?? (descriptor ? [] : ['Runtime envelope could not be inspected before launch.']),
+  };
+}
+
+function serializeDurableTurn(turn: ConversationTurnRow) {
+  return {
+    id: turn.id,
+    conversationId: turn.conversationId,
+    agentId: turn.agentId,
+    clientTurnId: turn.clientTurnId,
+    messageId: turn.messageId,
+    planId: turn.planId,
+    requestedMode: turn.requestedMode,
+    effectiveMode: turn.effectiveMode,
+    permissionMode: turn.permissionMode,
+    status: turn.status,
+    executionEnvelope: turn.executionEnvelope,
+    contextManifest: turn.contextManifest,
+    lastEventSeq: turn.lastEventSeq,
+    error: turn.error,
+    startedAt: turn.startedAt,
+    completedAt: turn.completedAt,
+    createdAt: turn.createdAt,
+    updatedAt: turn.updatedAt,
+  };
+}
+
+function missionTitle(body: string): string {
+  const first = body.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? 'Mission';
+  return first.replace(/^#+\s*/, '').slice(0, 96);
+}
+
+const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+function reasoningEffortFloor(current: string | null, floor: string): string {
+  const currentIndex = current ? REASONING_EFFORTS.indexOf(current) : -1;
+  const floorIndex = REASONING_EFFORTS.indexOf(floor);
+  return currentIndex >= floorIndex ? current! : floor;
+}
+
 function streamConversationTurnReply(
   c: Context,
   deps: ConversationRouteDeps,
@@ -810,6 +1226,7 @@ function streamConversationTurnReply(
     userMessage: string;
     useViewportContext: boolean;
     viewportOverride?: ViewportContext | null;
+    contextManifest?: ChatContextManifest | null;
   },
 ) {
   const reg = deps.adapters.get(args.agentId);
@@ -822,7 +1239,7 @@ function streamConversationTurnReply(
     activeConversationTurns.set(args.conversation.id, turnController);
     hardStoppedConversations.delete(args.conversation.id);
     try {
-      await runConversationTurn(stream, c, deps, ws, {
+      await runConversationTurn(stream, deps, ws, {
         ...args,
         turnSignal: turnController.signal,
         ...(turnLease ? { turnLease } : {}),
@@ -856,9 +1273,8 @@ function streamConversationTurnReply(
 
 async function runConversationTurn(
   stream: ChatSseStream,
-  c: Context,
   deps: ConversationRouteDeps,
-  ws: ReturnType<typeof getWorkspace>,
+  ws: WorkspaceContext,
   args: {
     agentId: string;
     conversation: ConversationRow;
@@ -869,6 +1285,9 @@ async function runConversationTurn(
     viewportOverride?: ViewportContext | null;
     turnSignal: AbortSignal;
     turnLease?: string;
+    qualityMode?: EffectiveConversationExecutionMode;
+    executionEnvelope?: ChatExecutionEnvelope | null;
+    contextManifest?: ChatContextManifest | null;
   },
   reg: ReturnType<AdapterManager['get']>,
 ) {
@@ -878,7 +1297,10 @@ async function runConversationTurn(
     let finalText = '';
     let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
     let adapterError: string | null = null;
+    let operatorStopped = false;
     const streamedMetadata = createStreamedChatMetadata(args.clientTurnId, turnStartedAt);
+    streamedMetadata.executionEnvelope = args.executionEnvelope ?? null;
+    streamedMetadata.contextManifest = args.contextManifest ?? null;
     const activeViewport = args.useViewportContext
       ? args.viewportOverride ?? deps.viewportStore?.get(ws.user.id) ?? null
       : args.viewportOverride ?? null;
@@ -934,6 +1356,8 @@ async function runConversationTurn(
         clientTurnId: args.clientTurnId,
         executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
         permissionMode,
+        approvalSensitivity: (args.conversation.approvalSensitivity as ApprovalSensitivity | null) ?? 'balanced',
+        qualityMode: args.qualityMode ?? 'deep',
         maxTurns: 8,
         viewport: activeViewport,
         signal: args.turnSignal,
@@ -954,13 +1378,19 @@ async function runConversationTurn(
       } else try {
         for await (const delta of withChatHeartbeats(
           ChatSessionExecutor.turn(reg.adapter, history, runtimeUserMessage, turnContext, {
-            ...(permissionMode === 'plan' ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM } : {}),
+            qualityMode: args.qualityMode ?? 'deep',
+            ...(permissionMode === 'plan'
+              ? { systemAddendum: PLAN_MODE_SYSTEM_ADDENDUM }
+              : args.qualityMode === 'mission'
+                ? { systemAddendum: MISSION_MODE_SYSTEM_ADDENDUM }
+                : {}),
           }),
           { clientTurnId: args.clientTurnId, agentId: args.agentId, workflowId: viewportWorkflowId },
         )) {
           if (isAdapterErrorDelta(delta)) {
             if (delta.error.startsWith('canceled:')) {
-              finishReason = 'interrupted';
+              operatorStopped = true;
+              finishReason = 'max_turns';
               break;
             }
             adapterError = delta.error;
@@ -1010,11 +1440,12 @@ async function runConversationTurn(
     // A stop endpoint and a disconnected client share the same lease/signal.
     // Do not let a late adapter error turn that intentional interruption into a
     // failed answer while the request is unwinding.
-    if (args.turnSignal.aborted) finishReason = 'interrupted';
+    operatorStopped ||= args.turnSignal.aborted || hardStoppedConversations.has(args.conversation.id);
+    if (operatorStopped) finishReason = 'max_turns';
 
     if (!finalText.trim() && !streamedMetadata.confirmation) {
-      if (finishReason === 'interrupted') {
-        finalText = 'Response interrupted.';
+      if (finishReason === 'interrupted' || operatorStopped) {
+        finalText = 'Stopped by operator.';
       } else if (finishReason === 'error') {
         finalText = relevantTurnError(streamedMetadata, adapterError);
       } else {
@@ -1061,7 +1492,7 @@ async function runConversationTurn(
       phase: failed ? 'error' : 'complete',
       status: failed ? 'error' : 'success',
       label: failed ? 'Response failed' : interrupted ? 'Response interrupted' : stopped ? 'Stopped before completion' : 'Response ready',
-      detail: failed ? finalText : interrupted ? 'Stopped by the operator. Late runtime output was ignored.' : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
+      detail: failed ? finalText : interrupted ? 'Stopped by operator. Late runtime output was ignored.' : stopped ? 'The turn reached a runtime limit.' : 'The agent finished this turn.',
       suffix: 'terminal',
       startedAt: turnCompletedAt,
       completedAt: turnCompletedAt,
@@ -1203,28 +1634,12 @@ async function runConversationTurn(
  * yet see the bytes of (no multimodal ingestion wired up here — this is just
  * enough context for the agent to acknowledge and ask about it if relevant).
  */
-async function withAttachmentNote(
-  db: AgentisSqliteDb,
-  workspaceId: string,
-  body: string,
-  attachmentIds: string[] | undefined,
-): Promise<string> {
-  if (!attachmentIds?.length) return body;
-  const rows = db
-    .select({ title: schema.artifacts.title })
-    .from(schema.artifacts)
-    .where(and(inArray(schema.artifacts.id, attachmentIds), eq(schema.artifacts.workspaceId, workspaceId)))
-    .all();
-  if (!rows.length) return body;
-  const names = rows.map((row) => row.title).filter(Boolean).join(', ');
-  return `${body}\n\n[Attached file(s): ${names}]`;
-}
-
 async function sendConversationMessage(
   c: Context,
   deps: ConversationRouteDeps,
   ws: ReturnType<typeof getWorkspace>,
   agentId: string,
+  attachmentContext: ConversationAttachmentContextService,
 ) {
   const body = sendSchema.parse(await c.req.json());
   const clientTurnId = body.clientTurnId ?? randomUUID();
@@ -1250,6 +1665,13 @@ async function sendConversationMessage(
       .where(eq(schema.conversations.id, conversation.id))
       .run();
     conversation.permissionMode = body.permissionMode;
+  }
+  if (body.approvalSensitivity && body.approvalSensitivity !== conversation.approvalSensitivity) {
+    deps.db.update(schema.conversations)
+      .set({ approvalSensitivity: body.approvalSensitivity, updatedAt: new Date().toISOString() })
+      .where(eq(schema.conversations.id, conversation.id))
+      .run();
+    conversation.approvalSensitivity = body.approvalSensitivity;
   }
 
   // Explicit corrections are durable before the agent begins work (and even
@@ -1286,14 +1708,21 @@ async function sendConversationMessage(
     metadata: body.attachments?.length ? { clientTurnId, artifactIds: body.attachments } : { clientTurnId },
   });
   if (c.req.header('accept')?.includes('text/event-stream')) {
+    const compiled = await attachmentContext.compile({
+      workspaceId: ws.workspaceId,
+      body: body.body,
+      attachmentIds: body.attachments,
+      historyMessages: conversationHistoryForTurn(deps, conversation.id, message.id).length,
+    });
     return streamConversationTurnReply(c, deps, ws, {
       agentId,
       conversation,
       clientTurnId,
       currentMessageId: message.id,
-      userMessage: await withAttachmentNote(deps.db, ws.workspaceId, body.body, body.attachments),
+      userMessage: compiled.prompt,
       useViewportContext: body.useViewportContext,
       viewportOverride: body.viewportOverride as ViewportContext | null | undefined,
+      contextManifest: compiled.manifest,
     });
   }
   const reg = deps.adapters.get(agentId);
@@ -1371,6 +1800,7 @@ async function confirmConversationAction(
   deps: ConversationRouteDeps,
   ws: ReturnType<typeof getWorkspace>,
   agentId: string,
+  durableTurns?: ConversationTurnService,
 ) {
   const body = confirmSchema.parse(await c.req.json());
   const conversationId = c.req.query('conversationId') || null;
@@ -1479,7 +1909,7 @@ async function confirmConversationAction(
 
       if (!finalText.trim() && !streamedMetadata.confirmation) {
         if (finishReason === 'interrupted') {
-          finalText = 'Response interrupted.';
+          finalText = 'Stopped by operator.';
         } else if (finishReason === 'error') {
           finalText = relevantTurnError(streamedMetadata, adapterError);
         } else {
@@ -1554,6 +1984,12 @@ async function confirmConversationAction(
         streamedMetadata,
       );
       await stream.writeSSE({ event: 'done', data: JSON.stringify({ finishReason }) });
+      durableTurns?.resolveAwaiting(
+        ws.workspaceId,
+        conversation.id,
+        finishReason === 'error' ? 'failed' : body.confirmed ? 'completed' : 'cancelled',
+        finishReason === 'error' ? finalText : null,
+      );
     });
   }
 
@@ -1579,6 +2015,12 @@ async function confirmConversationAction(
       body: finalText,
     });
   }
+  durableTurns?.resolveAwaiting(
+    ws.workspaceId,
+    conversation.id,
+    finishReason === 'error' ? 'failed' : body.confirmed ? 'completed' : 'cancelled',
+    finishReason === 'error' ? finalText : null,
+  );
   return c.json({ deltas, conversationId: conversation.id, agentId });
 }
 

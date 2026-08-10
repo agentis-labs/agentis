@@ -93,8 +93,8 @@ export async function repairArchitectureCanvas(
 
 /**
  * Parse a leading slash command that switches the conversation's sticky
- * permission mode. `/ask` confirms mutations, `/plan` proposes before acting,
- * `/auto` (alias `/bypass`) runs freely; `/chat` and `/act` are legacy aliases
+ * permission mode. `/ask` escalates consequential actions by risk, `/plan`
+ * proposes before acting, `/auto` (alias `/bypass`) runs freely; `/chat` and `/act` are legacy aliases
  * for `/ask`. Returns the new mode plus any remaining message text (so
  * `/plan build X` switches mode AND runs the task), or null when the message is
  * not a mode command.

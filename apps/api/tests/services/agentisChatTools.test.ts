@@ -414,18 +414,29 @@ describe('agent-facing native channel tools', () => {
     expect(listed.ok).toBe(true);
     expect(listed.output).toEqual(expect.objectContaining({
       count: 1,
-      channels: [expect.objectContaining({ id: connection.id, kind: 'telegram', defaultChatId: '777' })],
+      channels: [expect.objectContaining({
+        id: connection.id,
+        kind: 'telegram',
+        defaultChatId: '777',
+        capabilities: expect.objectContaining({
+          mediaKinds: ['image', 'video', 'audio', 'voice', 'sticker', 'file'],
+          supportsLocation: true,
+          supportsContacts: true,
+        }),
+        mediaGeneration: { modalities: [], note: expect.any(String) },
+      })],
     }));
 
     const sent = await registry.execute({
       toolId: 'agentis.channel.send',
-      arguments: { kind: 'telegram', to: 'default', body: 'hello over native channel' },
+      arguments: { kind: 'telegram', to: 'default', body: 'hello over native channel', deliveryRole: 'progress' },
     }, toolContext());
     expect(sent.ok).toBe(true);
     expect(sent.output).toEqual(expect.objectContaining({
       sent: true,
       connectionId: connection.id,
       to: '777',
+      deliveryRole: 'progress',
     }));
     expect(adapter.sent).toEqual([{ chatId: '777', body: 'hello over native channel' }]);
   });

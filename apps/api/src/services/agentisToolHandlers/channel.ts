@@ -1,7 +1,7 @@
 import { AgentisError } from '@agentis/core';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import type { ChannelKind, OutboundAttachmentRef } from '../../adapters/channels/types.js';
+import type { ChannelKind, OutboundAttachmentRef, OutboundNativeContent } from '../../adapters/channels/types.js';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { resolveAndSend } from '../conversation/channelSend.js';
@@ -22,13 +22,32 @@ const ATTACHMENT_ITEM_SCHEMA = {
   },
 } as const;
 
+const NATIVE_CONTENT_SCHEMA = {
+  type: 'object',
+  description: 'Provider-native location, contact card, or poll. Send separately from file attachments.',
+  properties: {
+    kind: { type: 'string', enum: ['location', 'contact', 'poll'] },
+    latitude: { type: 'number' },
+    longitude: { type: 'number' },
+    name: { type: 'string' },
+    address: { type: 'string' },
+    displayName: { type: 'string' },
+    phone: { type: 'string' },
+    vcard: { type: 'string' },
+    question: { type: 'string' },
+    options: { type: 'array', items: { type: 'string' } },
+    selectableCount: { type: 'number' },
+  },
+  required: ['kind'],
+} as const;
+
 export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
     {
       definition: {
         id: 'agentis.channel.list',
         family: 'inspect',
-        description: 'List native Agentis messaging channels and their health. Use before sending to Telegram, WhatsApp, Slack, or Discord.',
+        description: 'List native Agentis messaging channels, health, and transport capabilities. Use before sending to Telegram, WhatsApp, Slack, or Discord. mediaKinds means the channel can transport an existing artifact; it does not imply Agentis can generate that medium.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -58,6 +77,11 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             defaultChatId: connection.defaultChatId,
             targetAliases: connection.targetAliases,
             health: connection.health,
+            capabilities: deps.channels!.capabilitiesFor(connection.id),
+            mediaGeneration: {
+              modalities: deps.media?.modalities(ctx.workspaceId) ?? [],
+              note: 'Separate from transport mediaKinds; only these modalities can be created from a prompt.',
+            },
             lastError: connection.lastError,
           }));
         return { count: channels.length, channels };
@@ -124,11 +148,17 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             kind: { type: 'string', enum: [...CHANNEL_KINDS], description: 'Channel kind to use when connectionId is omitted.' },
             to: { type: 'string', description: 'Channel destination. Use "default" or omit for the saved default target. WhatsApp may be a phone number, JID, or saved alias.' },
             body: { type: 'string', description: 'Message body / caption. May be empty when sending attachments only. Ignored when messages[] is provided.' },
+            deliveryRole: {
+              type: 'string',
+              enum: ['progress', 'final'],
+              description: 'Optional lifecycle role. "progress" is a non-terminal update/acknowledgement; "final" means this tool delivery is the turn final answer.',
+            },
             attachments: {
               type: 'array',
               description: 'Media to deliver. Each item points at one source: an artifact ("artifact:<id>" or artifactId), a data: URL, or an http(s) URL.',
               items: ATTACHMENT_ITEM_SCHEMA,
             },
+            native: NATIVE_CONTENT_SCHEMA,
             messages: {
               type: 'array',
               description: 'Send these as a natural burst, in order, to the same destination. Each item is its own message with an optional body and attachments. When set, top-level body/attachments are ignored.',
@@ -137,12 +167,14 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
                 properties: {
                   body: { type: 'string' },
                   attachments: { type: 'array', items: ATTACHMENT_ITEM_SCHEMA },
+                  native: NATIVE_CONTENT_SCHEMA,
                 },
               },
             },
           },
         },
         mutating: true,
+        approval: { riskLevel: 'medium', reversible: false, externalSideEffects: true },
         mcpExposed: true,
       },
       handler: async (args, ctx) => {
@@ -158,7 +190,9 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             connectionId: typeof args.connectionId === 'string' ? args.connectionId : null,
             to: typeof args.to === 'string' ? args.to : null,
             agentId: ctx.agentId ?? null,
+            ...(args.deliveryRole === 'progress' || args.deliveryRole === 'final' ? { deliveryRole: args.deliveryRole } : {}),
             attachments: parseAttachments(args.attachments),
+            ...(args.native != null ? { native: parseNativeContent(args.native) } : {}),
             ...(Array.isArray(args.messages) ? { messages: parseMessages(args.messages) } : {}),
           },
         );
@@ -168,7 +202,7 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.channel.capabilities',
         family: 'inspect',
-        description: 'Report what a channel connection can send (media kinds, reactions, typing/presence, location, contacts, polls, quoted replies, mentions, bursts, human-like pacing). Call before composing rich content so you only attempt what the channel supports.',
+        description: 'Report what a channel connection can transport (media kinds, reactions, typing/presence, location, contacts, polls, quoted replies, mentions, bursts, human-like pacing). Transport support means an existing artifact can be delivered; creating an image/audio/video requires a separate configured media capability.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -380,18 +414,54 @@ function parseAttachments(value: unknown): OutboundAttachmentRef[] {
 }
 
 /** Normalize a burst of loosely-typed messages into typed send messages. */
-function parseMessages(value: unknown): { body?: string; attachments?: OutboundAttachmentRef[] }[] {
+function parseMessages(value: unknown): { body?: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent }[] {
   if (!Array.isArray(value)) throw new AgentisError('VALIDATION_FAILED', 'messages must be an array');
   return value.map((raw, i) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new AgentisError('VALIDATION_FAILED', `messages[${i}] must be an object`);
     }
     const obj = raw as Record<string, unknown>;
-    const message: { body?: string; attachments?: OutboundAttachmentRef[] } = {};
+    const message: { body?: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent } = {};
     if (typeof obj.body === 'string') message.body = obj.body;
     if (obj.attachments != null) message.attachments = parseAttachments(obj.attachments);
+    if (obj.native != null) message.native = parseNativeContent(obj.native);
     return message;
   });
+}
+
+function parseNativeContent(value: unknown): OutboundNativeContent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentisError('VALIDATION_FAILED', 'native must be a location, contact, or poll object');
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.kind === 'location') {
+    if (typeof obj.latitude !== 'number' || !Number.isFinite(obj.latitude) || typeof obj.longitude !== 'number' || !Number.isFinite(obj.longitude)) {
+      throw new AgentisError('VALIDATION_FAILED', 'native location requires finite latitude and longitude');
+    }
+    return {
+      kind: 'location', latitude: obj.latitude, longitude: obj.longitude,
+      ...(typeof obj.name === 'string' && obj.name.trim() ? { name: obj.name.trim() } : {}),
+      ...(typeof obj.address === 'string' && obj.address.trim() ? { address: obj.address.trim() } : {}),
+    };
+  }
+  if (obj.kind === 'contact') {
+    const displayName = typeof obj.displayName === 'string' ? obj.displayName.trim() : '';
+    const phone = typeof obj.phone === 'string' ? obj.phone.trim() : '';
+    if (!displayName || !phone) throw new AgentisError('VALIDATION_FAILED', 'native contact requires displayName and phone');
+    return { kind: 'contact', displayName, phone, ...(typeof obj.vcard === 'string' && obj.vcard.trim() ? { vcard: obj.vcard.trim() } : {}) };
+  }
+  if (obj.kind === 'poll') {
+    const question = typeof obj.question === 'string' ? obj.question.trim() : '';
+    const options = Array.isArray(obj.options)
+      ? obj.options.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+      : [];
+    if (!question || options.length < 2) throw new AgentisError('VALIDATION_FAILED', 'native poll requires a question and at least two options');
+    return {
+      kind: 'poll', question, options,
+      ...(typeof obj.selectableCount === 'number' && Number.isInteger(obj.selectableCount) && obj.selectableCount > 0 ? { selectableCount: obj.selectableCount } : {}),
+    };
+  }
+  throw new AgentisError('VALIDATION_FAILED', 'native.kind must be location, contact, or poll');
 }
 
 function parseKind(value: unknown): ChannelKind | null {

@@ -59,6 +59,7 @@ const REQUIRED_ASSETS = [
 const REQUIRED_EXACT_DEPENDENCIES = {
   '@huggingface/transformers': '4.2.0',
   'onnxruntime-node': '1.24.3',
+  '@audio/decode': '3.11.3',
 };
 
 function fail(lines) {

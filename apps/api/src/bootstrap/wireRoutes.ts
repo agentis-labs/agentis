@@ -161,6 +161,9 @@ import type { WorkflowRevisionService } from '../services/workflow/workflowRevis
 import type { WorkflowExperienceService } from '../services/workflow/workflowExperienceService.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
 import { TranscriptionService } from '../services/transcriptionService.js';
+import type { DocumentExtractionService } from '../services/documentExtractionService.js';
+import type { VisionService } from '../services/visionService.js';
+import type { RuntimeProfileService } from '../services/runtime/runtimeProfileService.js';
 import type { WorkspaceModelConfigService } from '../services/workspace/workspaceModelConfigService.js';
 import type { WorkspaceMediaConfigService } from '../services/workspace/workspaceMediaConfigService.js';
 import { buildMediaConfigRoutes } from '../routes/mediaConfig.js';
@@ -171,6 +174,10 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   Reflection: ReflectionService;
   SessionMoments: SessionMomentService;
   SharedIntelligence: SharedIntelligenceService;
+  documentExtraction: DocumentExtractionService;
+  vision: VisionService;
+  transcription: TranscriptionService;
+  runtimeProfiles: RuntimeProfileService;
   appContacts: AppContactService;
   appLearning: AppLearningService;
   appOrchestrator: AppOrchestratorService;
@@ -276,6 +283,10 @@ export function wireRoutes(deps: WireRoutesDeps) {
     credentialVault,
     db,
     defaultCognitiveCompleter,
+    documentExtraction,
+    vision,
+    transcription,
+    runtimeProfiles,
     embeddingBackfill,
     engine,
     env,
@@ -593,7 +604,25 @@ export function wireRoutes(deps: WireRoutesDeps) {
     allowPrivateNetwork: mcpAllowPrivate,
   }));
   app.route('/v1/integrations', buildIntegrationRoutes({ db: sqlite, auth }));
-  app.route('/v1/conversations', buildConversationRoutes({ db: sqlite, auth, conversations, adapters, logger, viewportStore, bus, engine, plans: planService, turnLeases: conversationTurnLeases, memoryCapture: chatMemoryCapture, audit: auditTrail }));
+  app.route('/v1/conversations', buildConversationRoutes({
+    db: sqlite,
+    auth,
+    conversations,
+    adapters,
+    logger,
+    viewportStore,
+    bus,
+    engine,
+    plans: planService,
+    turnLeases: conversationTurnLeases,
+    memoryCapture: chatMemoryCapture,
+    audit: auditTrail,
+    artifacts: artifactService,
+    documents: documentExtraction,
+    vision,
+    transcription,
+    runtimeProfiles,
+  }));
   const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));
   app.route('/v1/history', buildHistoryRoutes({ db: sqlite, auth }));

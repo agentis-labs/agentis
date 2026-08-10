@@ -10,6 +10,7 @@
     "./backup": "./src/services/backup.ts",
     "./defaultDataDir": "./src/defaultDataDir.ts",
     "./embeddingProvider": "./src/services/embedding/embeddingProvider.ts",
+    "./transcriptionRuntime": "./src/services/localTranscriptionService.ts",
     "./autostart": "./src/services/system/autostartService.ts"
   },
   "scripts": {
@@ -28,6 +29,7 @@
     "@agentis/db": "workspace:*",
     "@agentis/integrations": "workspace:*",
     "@agentis/runtime": "workspace:*",
+    "@audio/decode": "3.11.3",
     "@hono/node-server": "^1.13.1",
     "@hono/zod-openapi": "^0.16.0",
     "@huggingface/transformers": "4.2.0",

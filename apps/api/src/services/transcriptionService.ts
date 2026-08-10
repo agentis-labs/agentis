@@ -2,12 +2,11 @@
  * TranscriptionService — speech-to-text for channel voice notes
  * (OMNICHANNEL-ORCHESTRATOR-10X §3.3, "WhatsApp voice just works").
  *
- * Posts audio to an OpenAI-compatible `/audio/transcriptions` endpoint resolved
- * from the orchestrator model router's `transcription` role. WhatsApp voice
- * notes are OGG/Opus, which Whisper-class models accept directly — no local
- * decode needed. Entirely optional: with no transcription model configured (or
- * on any failure) it returns null and the caller falls back to a placeholder, so
- * voice never breaks a connection.
+ * Managed local Whisper is the zero-configuration baseline for inbound audio.
+ * An OpenAI-compatible `/audio/transcriptions` profile resolved from the
+ * orchestrator model router's `transcription` role may override/accelerate it.
+ * Local FFmpeg decoding handles WhatsApp OGG/Opus and other common formats. A
+ * terminal failure returns null rather than breaking the channel connection.
  */
 
 import type { ModelProfile } from './orchestrator/orchestratorModelRouter.js';
@@ -25,13 +24,15 @@ export interface TranscriptionServiceDeps {
   profile: () => ModelProfile | null;
   logger?: Logger;
   fetchImpl?: typeof fetch;
+  /** Managed on-device fallback. Input understanding must work without BYO API configuration. */
+  localFallback?: { transcribe(input: TranscriptionInput): Promise<string | null> };
 }
 
 export class TranscriptionService {
   constructor(private readonly deps: TranscriptionServiceDeps) {}
 
   get enabled(): boolean {
-    return this.deps.profile() !== null;
+    return this.deps.profile() !== null || Boolean(this.deps.localFallback);
   }
 
   /**
@@ -40,7 +41,7 @@ export class TranscriptionService {
    */
   async transcribe(input: TranscriptionInput): Promise<string | null> {
     const profile = this.deps.profile();
-    if (!profile) return null;
+    if (!profile) return this.deps.localFallback?.transcribe(input) ?? null;
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     try {
       const url = resolveTranscriptionsUrl(profile.baseUrl);
@@ -62,14 +63,14 @@ export class TranscriptionService {
       });
       if (!res.ok) {
         this.deps.logger?.warn?.('transcription.failed', { status: res.status });
-        return null;
+        return this.deps.localFallback?.transcribe(input) ?? null;
       }
       const json = (await res.json().catch(() => null)) as { text?: string } | null;
       const text = json?.text?.trim();
-      return text && text.length > 0 ? text : null;
+      return text && text.length > 0 ? text : (this.deps.localFallback?.transcribe(input) ?? null);
     } catch (err) {
       this.deps.logger?.warn?.('transcription.error', { err: (err as Error).message });
-      return null;
+      return this.deps.localFallback?.transcribe(input) ?? null;
     }
   }
 }

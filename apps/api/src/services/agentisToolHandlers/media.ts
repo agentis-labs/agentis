@@ -17,11 +17,29 @@ export function registerMediaTools(registry: AgentisToolRegistry, deps: ToolHand
   registry.registerMany([
     {
       definition: {
+        id: 'agentis.media.capabilities',
+        family: 'inspect',
+        mcpExposed: true,
+        description: 'Report which media modalities this workspace can actually generate. This is separate from channel transport capabilities: a channel may send an existing video even when no video generator is configured.',
+        inputSchema: { type: 'object', properties: {} },
+        mutating: false,
+      },
+      handler: (_args, ctx) => {
+        const modalities = deps.media?.modalities(ctx.workspaceId) ?? [];
+        return {
+          configured: modalities.length > 0,
+          generationModalities: modalities,
+          unsupportedModalities: MODALITIES.filter((modality) => !modalities.includes(modality)),
+        };
+      },
+    },
+    {
+      definition: {
         id: 'agentis.media.generate',
         family: 'run',
         mcpExposed: true,
         description:
-          '[MEDIA] Generate media from a prompt — image today (audio/speech/video as providers are added) — and optionally EDIT / re-render reference images by passing `images`. Returns artifact refs that render inline in chat and attach via agentis.channel.send (url: "artifact:<id>"). Modality dispatches to whatever model/provider is configured; no fixed vendor. Reach for this on "make / generate / render / edit an image".',
+          '[MEDIA] Generate media from a prompt and optionally EDIT / re-render reference images by passing `images`. Call agentis.media.capabilities first: only listed generationModalities are available. Returns artifact refs that render inline in chat and attach via agentis.channel.send (url: "artifact:<id>"). Modality dispatches to whatever model/provider is configured; no fixed vendor.',
         inputSchema: {
           type: 'object',
           properties: {

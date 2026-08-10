@@ -22,6 +22,14 @@ describe('DocumentExtractionService', () => {
     expect(text).toBe('hello world');
   });
 
+  it('decodes UTF-16 Windows text files with and without a BOM', async () => {
+    const content = 'Large Windows specification — ação e verificação';
+    const utf16 = Buffer.from(content, 'utf16le');
+    const withBom = Buffer.concat([Buffer.from([0xff, 0xfe]), utf16]);
+    expect(await svc.extract({ bytes: withBom, mimeType: 'text/plain', fileName: 'spec.txt' })).toBe(content);
+    expect(await svc.extract({ bytes: utf16, mimeType: 'application/octet-stream', fileName: 'spec.txt' })).toBe(content);
+  });
+
   it('truncates very long text', async () => {
     const long = 'x'.repeat(10_000);
     const text = await svc.extract({ bytes: Buffer.from(long), mimeType: 'text/plain' });

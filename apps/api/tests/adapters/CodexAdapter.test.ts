@@ -524,8 +524,10 @@ describe('CodexAdapter', () => {
       .map((d) => d.delta)
       .join('');
     expect(textJoined).toBe('Hi! How can I help?');
-    // Raw reasoning is never exposed; only a compact status signal is emitted.
+    // The completed provider summary is operator-safe commentary; raw token-level
+    // chain-of-thought is never emitted through the private thinking channel.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'commentary', id: 'codex-commentary-1', text: 'Greeting the user.' }));
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'runtime' }));
     // The MCP tool it ran is surfaced as an informational step.
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_call', name: 'agentis.status' }));
@@ -559,8 +561,10 @@ describe('CodexAdapter', () => {
     expect(running).toMatchObject({ type: 'activity', phase: 'tool', label: 'Running Get-ChildItem -Force' });
     expect(done).toMatchObject({ type: 'activity', phase: 'tool', label: 'Ran Get-ChildItem -Force' });
     expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
-    // Raw reasoning stays private; agent_message becomes the answer text.
+    // The provider's completed summary becomes commentary; agent_message remains
+    // the only final answer text.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'commentary', id: 'codex-commentary-r0', text: 'I should list the files first.' }));
     expect(deltas).toContainEqual({ type: 'text', delta: 'This is the adapters folder.' });
     expect(deltas.at(-1)).toEqual({
       type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 },

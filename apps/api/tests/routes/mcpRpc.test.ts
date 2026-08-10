@@ -71,7 +71,15 @@ beforeEach(async () => {
     (_args, toolCtx) => ({ agentId: toolCtx.agentId ?? null }),
   );
   registry.register(
-    { id: 'agentis.mutate', family: 'build', description: 'A mutating tool', inputSchema: { type: 'object' }, mutating: true, mcpExposed: true },
+    { id: 'agentis.mutate', family: 'build', description: 'A high-risk mutating tool', inputSchema: { type: 'object' }, mutating: true, mcpExposed: true, approval: { riskLevel: 'high' } },
+    () => ({ mutated: true }),
+  );
+  registry.register(
+    {
+      id: 'agentis.low_risk_mutate', family: 'build', description: 'A reversible local mutation',
+      inputSchema: { type: 'object' }, mutating: true, mcpExposed: true,
+      approval: { riskLevel: 'low', reversible: true, externalSideEffects: false },
+    },
     () => ({ mutated: true }),
   );
 });
@@ -397,10 +405,23 @@ describe('/v1/mcp/rpc', () => {
     expect(payload.code).toBe('ASK_MODE_CONFIRMATION_REQUIRED');
     // The directive must tell the model NOT to retry and to ask the operator.
     expect(payload.error).toMatch(/do not retry/i);
-    expect(payload.error).toMatch(/approve|Auto/i);
+    expect(payload.error).toMatch(/approve|approval/i);
 
     const allowed = await rpc(app(), 'tools/call', { name: 'agentis.echo', arguments: { ok: 1 } }, 2, { 'x-agentis-execution-mode': 'ask' });
     expect((await allowed.json() as { result: { isError?: boolean } }).result.isError).toBeFalsy();
+  });
+
+  it('allows routine mutations in Ask and honors the per-turn sensitivity header', async () => {
+    const routine = await rpc(app(), 'tools/call', { name: 'agentis.low_risk_mutate', arguments: {} }, 1, {
+      'x-agentis-execution-mode': 'ask',
+    });
+    expect((await routine.json() as { result: { isError?: boolean } }).result.isError).toBeFalsy();
+
+    const autonomous = await rpc(app(), 'tools/call', { name: 'agentis.mutate', arguments: {} }, 2, {
+      'x-agentis-execution-mode': 'ask',
+      'x-agentis-approval-sensitivity': 'autonomous',
+    });
+    expect((await autonomous.json() as { result: { isError?: boolean } }).result.isError).toBeFalsy();
   });
 
   it('allows the same mutating tool on a normal (chat) turn — no execution-mode header', async () => {

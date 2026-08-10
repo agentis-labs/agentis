@@ -3218,6 +3218,68 @@ CREATE INDEX idx_build_sessions_conversation
   ON build_sessions(workspace_id, conversation_id, updated_at);
 `,
   },
+  {
+    version: 128,
+    name: 'durable_mission_grade_conversation_turns',
+    sql: `
+CREATE TABLE conversation_turns (
+  id                    TEXT PRIMARY KEY,
+  workspace_id          TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id       TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  agent_id              TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id            TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+  plan_id               TEXT,
+  client_turn_id        TEXT NOT NULL,
+  prompt                TEXT NOT NULL,
+  requested_mode        TEXT NOT NULL DEFAULT 'auto',
+  effective_mode        TEXT NOT NULL DEFAULT 'deep',
+  permission_mode       TEXT NOT NULL DEFAULT 'ask',
+  status                TEXT NOT NULL DEFAULT 'queued',
+  attachments           TEXT NOT NULL DEFAULT '[]',
+  viewport              TEXT,
+  execution_envelope    TEXT,
+  context_manifest      TEXT,
+  last_event_seq        INTEGER NOT NULL DEFAULT 0,
+  lease_owner           TEXT,
+  lease_expires_at      TEXT,
+  error                 TEXT,
+  started_at            TEXT,
+  completed_at          TEXT,
+  created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_conversation_turns_client
+  ON conversation_turns(workspace_id, conversation_id, client_turn_id);
+CREATE INDEX idx_conversation_turns_conversation_status
+  ON conversation_turns(workspace_id, conversation_id, status, created_at);
+CREATE INDEX idx_conversation_turns_agent_status
+  ON conversation_turns(workspace_id, agent_id, status, created_at);
+
+CREATE TABLE conversation_turn_events (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  turn_id       TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+  seq           INTEGER NOT NULL,
+  event         TEXT NOT NULL,
+  data          TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_conversation_turn_events_sequence
+  ON conversation_turn_events(turn_id, seq);
+CREATE INDEX idx_conversation_turn_events_turn
+  ON conversation_turn_events(workspace_id, turn_id, seq);
+`,
+  },
+  {
+    version: 129,
+    name: 'conversation_approval_sensitivity',
+    sql: `
+-- Ask mode is risk-adaptive rather than a blanket mutation gate. The user or
+-- agent may tune how readily a conversation escalates routine actions.
+ALTER TABLE conversations ADD COLUMN approval_sensitivity TEXT NOT NULL DEFAULT 'balanced';
+`,
+  },
 ];
 
 

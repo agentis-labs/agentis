@@ -42,10 +42,12 @@ describe('<ComposerStatusBar />', () => {
 
     const { container } = render(<ComposerStatusBar agentId="agent-1" />);
 
-    await screen.findByRole('button', { name: 'Select model' });
-    await user.click(screen.getByRole('button', { name: 'Select model' }));
+    await screen.findByRole('button', { name: 'Model and response settings' });
+    await user.click(screen.getByRole('button', { name: 'Model and response settings' }));
 
-    await waitFor(() => expect(document.body).toHaveTextContent('Enable fast mode'));
-    expect(container).not.toHaveTextContent('Enable fast mode');
+    await waitFor(() => expect(document.body).toHaveTextContent('Model'));
+    expect(document.body).toHaveTextContent('Effort');
+    expect(document.body).toHaveTextContent('Speed');
+    expect(container).not.toHaveTextContent('Speed');
   });
 });

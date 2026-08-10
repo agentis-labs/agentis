@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { ChatDelta } from '@agentis/core';
+import type { ChatCommentary, ChatDelta } from '@agentis/core';
 import { AgentTurnTrace } from '../../src/components/chat/AgentTurnTrace';
 import type { ToolCallData } from '../../src/components/chat/toolCalls';
 
@@ -19,9 +19,16 @@ function activity(index: number, overrides: Partial<Activity> = {}): Activity {
 
 describe('AgentTurnTrace', () => {
   it('writes out recent operator-facing activity while streaming, latest alive', () => {
+    const commentary: ChatCommentary[] = [{
+      id: 'commentary-1',
+      text: 'I found the relevant surface and I am tracing its runtime state.',
+      source: 'reasoning_summary',
+      createdAt: new Date().toISOString(),
+    }];
     render(
       <AgentTurnTrace
         streaming
+        commentary={commentary}
         activities={[
           activity(1, { status: 'success', label: 'Reading the run' }),
           activity(2, { status: 'running', label: 'Testing the extension' }),
@@ -32,6 +39,7 @@ describe('AgentTurnTrace', () => {
     // Unlike the old single-line trace, prior thoughts stay visible as they settle.
     expect(screen.getByText('Reading the run')).toBeInTheDocument();
     expect(screen.getByText('Testing the extension')).toBeInTheDocument();
+    expect(screen.getByText(commentary[0]!.text)).toBeInTheDocument();
   });
 
   it('collapses a finished turn into one pill and expands the timeline on click', () => {
@@ -52,8 +60,7 @@ describe('AgentTurnTrace', () => {
     );
 
     // Compact summary: "Used 2 tools · 4.2s".
-    expect(screen.getByText('Used 2 tools')).toBeInTheDocument();
-    expect(screen.getByText('4.2s')).toBeInTheDocument();
+    expect(screen.getByText('Worked for 4s')).toBeInTheDocument();
     // Timeline detail is hidden until the operator opens it.
     expect(screen.queryByText('Drafting the workflow graph')).not.toBeInTheDocument();
 
@@ -84,7 +91,7 @@ describe('AgentTurnTrace', () => {
       />,
     );
 
-    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText(/^Work failed/)).toBeInTheDocument();
   });
 
   it('downgrades a mid-turn error to a softer tone once the agent moves past it, but keeps the last error alarming', () => {
@@ -100,7 +107,7 @@ describe('AgentTurnTrace', () => {
     );
 
     // The turn as a whole succeeded — the summary pill must not read "Failed".
-    expect(screen.getByText('Done')).toBeInTheDocument();
+    expect(screen.getByText('Worked for 2s')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Show work' }));
     const recovered = screen.getByText('Failed agentis.build_workflow');

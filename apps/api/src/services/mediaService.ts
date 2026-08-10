@@ -75,9 +75,19 @@ export class MediaService {
     this.deps.logger.info('media.provider.configurable_registered', { modality: factory.modality, hasEnvDefault: Boolean(factory.envDefaults.apiKey) });
   }
 
-  /** Modalities the workspace can currently produce (drives capability advertising). */
-  modalities(): MediaModality[] {
-    return [...new Set(this.providers.flatMap((p) => [...p.modalities]))];
+  /** Modalities the instance/workspace can currently produce (drives honest capability advertising). */
+  modalities(workspaceId?: string): MediaModality[] {
+    const available = new Set(this.providers.flatMap((p) => [...p.modalities]));
+    if (workspaceId) {
+      for (const modality of this.configurable.keys()) {
+        try {
+          if (this.resolveProvider(workspaceId, modality)) available.add(modality);
+        } catch {
+          // A saved model without usable credentials is not an available capability.
+        }
+      }
+    }
+    return [...available];
   }
 
   private providerFor(modality: MediaModality): MediaProvider | undefined {
@@ -114,7 +124,7 @@ export class MediaService {
   async generate(ctx: MediaGenerateContext, req: MediaGenerateRequest): Promise<{ provider: string; assets: MediaGeneratedAsset[] }> {
     const provider = this.resolveProvider(ctx.workspaceId, req.modality);
     if (!provider) {
-      throw new AgentisError('MEDIA_UNAVAILABLE', `No media provider is configured for "${req.modality}". Available: ${this.modalities().join(', ') || 'none'}.`);
+      throw new AgentisError('MEDIA_UNAVAILABLE', `No media provider is configured for "${req.modality}". Available: ${this.modalities(ctx.workspaceId).join(', ') || 'none'}.`);
     }
     if (!this.deps.assetStore) throw new AgentisError('MEDIA_UNAVAILABLE', 'Asset store not configured — cannot persist generated media.');
 

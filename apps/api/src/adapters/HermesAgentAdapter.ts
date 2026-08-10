@@ -11,6 +11,7 @@ import type {
   NormalizedTask,
   RuntimeContext,
   RuntimeDescriptor,
+  RuntimeInputAttachment,
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
@@ -689,7 +690,7 @@ export class HermesAgentAdapter implements AgentAdapter {
         const turnServers = withHarnessTurnHeaders(
           this.opts.mcpServers ?? [],
           options?.executionMode ?? 'chat',
-          { conversationId: options?.conversationId, turnLease: options?.turnLease },
+          { conversationId: options?.conversationId, turnLease: options?.turnLease, approvalSensitivity: options?.approvalSensitivity },
         );
         const session = await this.#openSession(client, sessionKey, startupTimeoutMs, turnServers, Boolean(options?.turnLease));
         queue.push({
@@ -771,7 +772,7 @@ export class HermesAgentAdapter implements AgentAdapter {
         options?.signal?.addEventListener('abort', abortHandler, { once: true });
 
         const result = await client.sessionPrompt(
-          { sessionId, prompt: [{ type: 'text', text: formatAcpPrompt(messagesForRuntimeSession(messages, session.resumed)) }] },
+          { sessionId, prompt: [{ type: 'text', text: appendRuntimeInputAttachments(formatAcpPrompt(messagesForRuntimeSession(messages, session.resumed)), options?.inputAttachments) }] },
           (update) => {
             const delta = acpUpdateToDelta(update, turnState);
             // Lifecycle metadata (usage/command catalogs) is not model output.
@@ -822,7 +823,10 @@ export class HermesAgentAdapter implements AgentAdapter {
       : DEFAULT_CHAT_TURN_TIMEOUT_MS;
     const idleTimeoutMs = Math.max(30_000, options?.timeoutMs ?? configuredTimeoutMs);
     const requestedModel = normalizeHermesCliModel(options?.preferredModel) ?? normalizeHermesCliModel(this.opts.model);
-    const invocation = this.#buildChatInvocation(buildHermesCliPrompt(messages, tools), requestedModel);
+    const invocation = this.#buildChatInvocation(
+      appendRuntimeInputAttachments(buildHermesCliPrompt(messages, tools), options?.inputAttachments),
+      requestedModel,
+    );
 
     yield {
       type: 'activity',
@@ -1432,6 +1436,18 @@ function formatAcpPrompt(messages: ChatMessage[]): string {
     }
     return `${message.role.toUpperCase()}:\n${content}`;
   }).join('\n\n');
+}
+
+function appendRuntimeInputAttachments(prompt: string, attachments?: RuntimeInputAttachment[]): string {
+  if (!attachments?.length) return prompt;
+  return [
+    prompt,
+    '',
+    '<runtime_input_attachments>',
+    'These are files attached by the user. Inspect them directly with your file/image tools before answering; never infer their contents from filenames.',
+    ...attachments.map((attachment) => `- ${attachment.name} (${attachment.mimeType}): ${attachment.path}`),
+    '</runtime_input_attachments>',
+  ].join('\n');
 }
 
 type HermesJsonEvent = {

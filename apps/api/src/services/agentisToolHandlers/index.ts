@@ -38,6 +38,7 @@ import { registerAppDataTools } from './appData.js';
 import { registerAppDoctorTools } from './appDoctor.js';
 import { registerBrainTools } from './brain.js';
 import { registerSpaceTools } from './spaceTools.js';
+import { registerPermissionTools } from './permissions.js';
 
 export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registerOrientTools(registry, deps);
@@ -69,6 +70,7 @@ export function registerAllTools(registry: AgentisToolRegistry, deps: ToolHandle
   registerAppDoctorTools(registry, deps);
   registerBrainTools(registry, deps);
   registerSpaceTools(registry, deps);
+  registerPermissionTools(registry, deps);
   // Registered last, but its SDK surface is resolved lazily at call time, so it
   // still exposes every tool above (§3.7 code-mode over the whole registry).
   registerCodeTools(registry, deps);

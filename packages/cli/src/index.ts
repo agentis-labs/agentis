@@ -91,8 +91,10 @@ const HELP = `agentis — the operating system for agentic software
 
 Usage:
   agentis up                              Start Agentis (default if no command given).
-  agentis setup                           Prepare the embedding model and Chromium runtime.
+  agentis setup [--channels]              Prepare embedding + Chromium; --channels also prepares inbound audio.
   agentis warmup [--repair]               Download and verify the embedding model (~129 MB q8).
+  agentis warmup --transcription [--repair]
+                                          Prepare verified local speech-to-text (~76 MB q8).
                                           --repair preserves the old cache before rebuilding it.
   agentis doctor [--json]                 Report embedding runtime/cache health.
   agentis backup [--out <dir>]            Snapshot the data dir into <dir>.
@@ -130,6 +132,10 @@ Environment:
   AGENTIS_EMBEDDING_MODEL_PATH   Directory of pre-downloaded model files (offline installs).
   AGENTIS_EMBEDDING_OFFLINE      true = never fetch the model remotely (use the local path only).
   AGENTIS_EMBEDDING_DTYPE        q8 = smaller download + faster CPU inference. Default: q8 on fresh installs.
+  AGENTIS_TRANSCRIPTION_CACHE_DIR  Durable cache for the optional local STT runtime.
+  AGENTIS_TRANSCRIPTION_MODEL_PATH Pre-downloaded STT model directory for offline installs.
+  AGENTIS_TRANSCRIPTION_OFFLINE    true = never fetch STT model files remotely.
+  AGENTIS_TRANSCRIPTION_LANGUAGE   Whisper language hint (for example: portuguese). Default: host locale.
 
 Run \`agentis up\` and open http://127.0.0.1:3737 in your browser.
 `;
@@ -262,16 +268,47 @@ async function runWarmupCmd(options: { showOfflineHint?: boolean; background?: b
   }
 }
 
+/** Prepare the optional, channel-scoped local speech-to-text capability. */
+async function runTranscriptionWarmupCmd(options: { repair?: boolean; background?: boolean } = {}): Promise<number> {
+  const dir = await dataDir();
+  process.env.AGENTIS_DATA_DIR ??= dir;
+  const cacheDir = process.env.AGENTIS_TRANSCRIPTION_CACHE_DIR ?? join(dir, 'models', 'transcription');
+  process.stdout.write(
+    `${options.repair ? 'Repairing' : options.background ? 'Preparing' : 'Downloading'} ` +
+    `the verified local transcription model (~76 MB q8) → ${cacheDir}\n`,
+  );
+  try {
+    const { warmLocalTranscriptionModel } = await import('@agentis/api/transcriptionRuntime');
+    const started = Date.now();
+    const result = await warmLocalTranscriptionModel({ dataDir: dir, repair: options.repair });
+    if (result.backupDir) process.stdout.write(`Previous transcription cache preserved at ${result.backupDir}.\n`);
+    process.stdout.write(`Transcription model ready in ${((Date.now() - started) / 1_000).toFixed(1)}s.\n`);
+    process.stdout.write(
+      'For an offline host, copy this cache and set AGENTIS_TRANSCRIPTION_MODEL_PATH and AGENTIS_TRANSCRIPTION_OFFLINE=true.\n',
+    );
+    return 0;
+  } catch (err) {
+    process.stderr.write(`agentis transcription warmup failed: ${(err as Error).message}\n`);
+    return 1;
+  }
+}
+
 async function runDoctorCmd(argv: string[]): Promise<number> {
   const { flags } = parseFlags(argv);
   const dir = await dataDir();
   process.env.AGENTIS_DATA_DIR ??= dir;
-  const { configuredDtype, embeddingCacheDir, embeddingRuntimeState } = await import('@agentis/api/embeddingProvider');
+  const [{ configuredDtype, embeddingCacheDir, embeddingRuntimeState }, transcription] = await Promise.all([
+    import('@agentis/api/embeddingProvider'),
+    import('@agentis/api/transcriptionRuntime'),
+  ]);
   const cacheDir = embeddingCacheDir() ?? join(dir, 'models');
   const runtime = embeddingRuntimeState(cacheDir);
+  const transcriptionCache = transcription.transcriptionCacheDir(dir);
+  const transcriptionState = new transcription.LocalTranscriptionService({ dataDir: dir }).runtimeState();
   const report = {
     ok: runtime.status === 'ready' || (runtime.status === 'uninitialized' && runtime.readyAt != null),
     embedding: { ...runtime, cacheDir, configuredDtype: configuredDtype() ?? 'fp32' },
+    transcription: { ...transcriptionState, cacheDir: transcriptionCache, optional: true },
   };
   if (flags.json) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -282,6 +319,11 @@ async function runDoctorCmd(argv: string[]): Promise<number> {
     process.stdout.write(`  progress: ${runtime.progress}%\n`);
     if (runtime.error) process.stdout.write(`  failure: ${runtime.errorCode ?? 'unknown'} - ${runtime.error}\n`);
     if (runtime.retryAt) process.stdout.write(`  retry at: ${runtime.retryAt}\n`);
+    process.stdout.write(`Transcription runtime: ${transcriptionState.status} (optional, prepared when channels are used)\n`);
+    process.stdout.write(`  model: ${transcriptionState.model}@${transcriptionState.revision ?? 'custom'} (${transcriptionState.dtype})\n`);
+    process.stdout.write(`  cache: ${transcriptionCache}\n`);
+    process.stdout.write(`  progress: ${transcriptionState.progress}%\n`);
+    if (transcriptionState.error) process.stdout.write(`  failure: ${transcriptionState.errorCode ?? 'unknown'} - ${transcriptionState.error}\n`);
   }
   return report.ok ? 0 : 1;
 }
@@ -360,7 +402,7 @@ async function prepareChromium(options: { background?: boolean } = {}): Promise<
   }
 }
 
-async function prepareRuntime(options: { showOfflineHint?: boolean; background?: boolean; includeChromium?: boolean } = {}): Promise<number> {
+async function prepareRuntime(options: { showOfflineHint?: boolean; background?: boolean; includeChromium?: boolean; includeTranscription?: boolean } = {}): Promise<number> {
   // §PERF-BOOT — Chromium (~250 MB) is opt-in here, not automatic. `agentis up`
   // used to trigger the download on every fresh host whether or not browser
   // tools were ever used; browserPool already self-installs on the first real
@@ -371,6 +413,9 @@ async function prepareRuntime(options: { showOfflineHint?: boolean; background?:
   ];
   if (options.includeChromium !== false) jobs.push(prepareChromium({ background: options.background }));
   const results = await Promise.all(jobs);
+  // Load the two ONNX models sequentially. Parallel embedding + Whisper setup
+  // causes avoidable RAM/threadpool spikes on the smaller desktops OSS users run.
+  if (options.includeTranscription) results.push(await runTranscriptionWarmupCmd({ background: options.background }));
   return results.every((code) => code === 0) ? 0 : 1;
 }
 
@@ -712,12 +757,15 @@ async function main() {
     return;
   }
   if (cmd === 'setup') {
-    process.exitCode = await prepareRuntime();
+    const { flags } = parseFlags(process.argv.slice(3));
+    process.exitCode = await prepareRuntime({ includeTranscription: Boolean(flags.channels || flags.transcription) });
     return;
   }
   if (cmd === 'warmup') {
     const { flags } = parseFlags(process.argv.slice(3));
-    process.exitCode = await runWarmupCmd({ repair: Boolean(flags.repair) });
+    process.exitCode = flags.transcription
+      ? await runTranscriptionWarmupCmd({ repair: Boolean(flags.repair) })
+      : await runWarmupCmd({ repair: Boolean(flags.repair) });
     return;
   }
   if (cmd === 'doctor') {

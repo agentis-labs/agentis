@@ -2839,8 +2839,8 @@ export function assembleGraphFromPlan(
           ...(phase.model ? { modelOverride: phase.model } : {}),
         },
       };
-    } else if (phase.requiredCredential || phase.nodeKinds.includes('integration')) {
-      const slug = phase.requiredCredential ?? '';
+    } else if (phase.requiredCredential) {
+      const slug = phase.requiredCredential;
       node = {
         id, type: 'integration', title: phase.name, position: { x, y: 80 },
         // `integrationId` is the connector slug; preflight binds credentialId.
@@ -2882,7 +2882,13 @@ export function assembleGraphFromPlan(
     } else {
       const rollbackId = `rollback_${b.id}`;
       const rolledId = `rolled_back_${b.id}`;
-      nodes.push({ id: rollbackId, type: 'integration', title: 'Rollback / cleanup', position: { x: bx, y: 320 }, config: { kind: 'integration', integrationId: '', operationId: defaultOperationForSlug(''), inputs: {} } });
+      nodes.push({
+        id: rollbackId,
+        type: 'transform',
+        title: 'Rollback / cleanup',
+        position: { x: bx, y: 320 },
+        config: { kind: 'transform', expression: '({ ...input, rollbackRequested: true })' },
+      });
       nodes.push({ id: rolledId, type: 'return_output', title: 'Rolled back', position: { x: bx + 280, y: 320 }, config: { kind: 'return_output', renderAs: 'markdown' } });
       edges.push({ id: `edge_${b.id}_${rollbackId}`, source: b.id, target: rollbackId, type: 'condition', condition: 'output.passed == false' });
       edges.push({ id: `edge_${rollbackId}_${rolledId}`, source: rollbackId, target: rolledId });

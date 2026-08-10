@@ -9,7 +9,8 @@
  */
 
 import type { Logger } from '../../logger.js';
-import type { ChannelDeliveryReceipt, OutboundAttachment } from './types.js';
+import type { ChannelDeliveryReceipt, OutboundAttachment, OutboundNativeContent } from './types.js';
+import type { InboundChannelMedia } from './whatsappSession.js';
 
 export type TelegramSessionStatus = 'idle' | 'starting' | 'open' | 'closed' | 'error';
 
@@ -43,6 +44,8 @@ export interface TelegramInbound {
   chatId: string;
   body: string;
   from?: string;
+  /** Durable artifacts created from provider media. Kept typed through the turn. */
+  attachmentIds?: string[];
   /** Forum-topic subject boundary, when the message is in a topic. */
   threadId?: string;
 }
@@ -53,6 +56,10 @@ export interface TelegramSessionOptions {
   logger: Logger;
   onInbound: (msg: TelegramInbound) => void;
   onStateChange?: (state: { status: TelegramSessionStatus }) => void;
+  transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
+  describeImage?: (bytes: Buffer, mimeType: string, caption?: string) => Promise<string | null>;
+  extractDocument?: (bytes: Buffer, mimeType: string, fileName?: string) => Promise<string | null>;
+  persistMedia?: (media: InboundChannelMedia) => Promise<string | null>;
 }
 
 type GrammyModule = typeof import('grammy');
@@ -164,22 +171,12 @@ export class TelegramSession {
     const bot = new loaded.mod.Bot(this.opts.token);
     this.#bot = bot;
 
-    bot.on('message:text', (ctx) => {
-      try {
-        const text = ctx.message?.text;
-        if (!text) return;
-        const chatId = String(ctx.chat.id);
-        const topicId = (ctx.message as { message_thread_id?: number } | undefined)?.message_thread_id;
-        this.opts.onInbound({
-          externalId: String(ctx.update.update_id),
-          chatId,
-          body: text,
-          ...(ctx.from?.first_name ? { from: ctx.from.first_name } : {}),
-          ...(topicId ? { threadId: `${chatId}:${topicId}` } : {}),
-        });
-      } catch (err) {
+    // Register for every message, not just `message:text`: Telegram users treat
+    // voice, photos, files, locations, contacts and stickers as normal turns.
+    bot.on('message', (ctx) => {
+      void this.#handleInbound(ctx).catch((err) => {
         this.opts.logger.warn('telegram.inbound_handler_threw', { err: (err as Error).message });
-      }
+      });
     });
 
     bot.catch((err) => {
@@ -237,6 +234,79 @@ export class TelegramSession {
     });
   }
 
+  async sendNative(chatId: string, native: OutboundNativeContent): Promise<ChannelDeliveryReceipt> {
+    if (!this.#bot) throw new Error(`telegram session ${this.opts.connectionId} is not started`);
+    let sent: { message_id?: number };
+    if (native.kind === 'location') {
+      sent = await this.#bot.api.sendLocation(chatId, native.latitude, native.longitude);
+    } else if (native.kind === 'contact') {
+      const names = native.displayName.trim().split(/\s+/);
+      sent = await this.#bot.api.sendContact(chatId, native.phone, names[0] || native.displayName, {
+        ...(names.length > 1 ? { last_name: names.slice(1).join(' ') } : {}),
+        ...(native.vcard ? { vcard: native.vcard } : {}),
+      });
+    } else {
+      sent = await this.#bot.api.sendPoll(chatId, native.question, native.options, {
+        allows_multiple_answers: (native.selectableCount ?? 1) > 1,
+      });
+    }
+    const providerMessageId = sent?.message_id == null ? '' : String(sent.message_id);
+    if (!providerMessageId) throw new Error('telegram provider accepted no message id for native content');
+    return { provider: 'telegram', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async #handleInbound(ctx: any): Promise<void> {
+    const message = ctx.message;
+    if (!message || !ctx.chat?.id) return;
+    const attachmentIds: string[] = [];
+    const body = await resolveTelegramInboundBody(message, {
+      downloadFile: (fileId) => this.#downloadFile(fileId),
+      transcribeAudio: this.opts.transcribeAudio,
+      describeImage: this.opts.describeImage,
+      extractDocument: this.opts.extractDocument,
+      persistMedia: this.opts.persistMedia
+        ? async (media) => {
+            const ref = await this.opts.persistMedia!(media);
+            const artifactId = artifactIdFromRef(ref);
+            if (artifactId) attachmentIds.push(artifactId);
+            return ref;
+          }
+        : undefined,
+      onFailure: (kind, error) => this.opts.logger.warn(`telegram.${kind}_failed`, {
+        connectionId: this.opts.connectionId,
+        err: error.message,
+      }),
+    });
+    if (!body) return;
+    const chatId = String(ctx.chat.id);
+    const topicId = message.message_thread_id;
+    const from = ctx.from
+      ? [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || ctx.from.username
+      : undefined;
+    this.opts.onInbound({
+      externalId: `telegram:${ctx.update.update_id}`,
+      chatId,
+      body,
+      ...(from ? { from } : {}),
+      ...(attachmentIds.length ? { attachmentIds: [...new Set(attachmentIds)] } : {}),
+      ...(topicId ? { threadId: `${chatId}:${topicId}` } : {}),
+    });
+  }
+
+  async #downloadFile(fileId: string): Promise<Buffer> {
+    if (!this.#bot) throw new Error('telegram session is not started');
+    const file = await this.#bot.api.getFile(fileId);
+    if (!file.file_path) throw new Error('telegram file has no downloadable path');
+    const response = await fetch(`https://api.telegram.org/file/bot${this.opts.token}/${file.file_path}`);
+    if (!response.ok) throw new Error(`telegram file download failed (${response.status})`);
+    const declared = Number(response.headers.get('content-length') ?? 0);
+    if (declared > 20 * 1024 * 1024) throw new Error('telegram inbound media exceeds the 20 MB safety limit');
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > 20 * 1024 * 1024) throw new Error('telegram inbound media exceeds the 20 MB safety limit');
+    return bytes;
+  }
+
   /** The long-poll loop is running. Only a SUSTAINED open resets the backoff — a
    *  brief open that's immediately kicked by a competing poller must not, or the
    *  backoff never grows and two instances flap forever. */
@@ -279,4 +349,179 @@ export class TelegramSession {
     this.#status = status;
     this.opts.onStateChange?.({ status });
   }
+}
+
+function artifactIdFromRef(ref: string | null): string | null {
+  if (!ref?.startsWith('artifact:')) return null;
+  const id = ref.slice('artifact:'.length).trim();
+  return id || null;
+}
+
+type TelegramMediaDescriptor = Omit<InboundChannelMedia, 'bytes'> & { fileId: string };
+
+export interface TelegramInboundResolvers {
+  downloadFile?: (fileId: string) => Promise<Buffer>;
+  transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
+  describeImage?: (bytes: Buffer, mimeType: string, caption?: string) => Promise<string | null>;
+  extractDocument?: (bytes: Buffer, mimeType: string, fileName?: string) => Promise<string | null>;
+  persistMedia?: (media: InboundChannelMedia) => Promise<string | null>;
+  onFailure?: (kind: 'download_media' | 'persist_media' | 'transcribe' | 'describe_image' | 'extract_document', error: Error) => void;
+}
+
+/** Convert every Telegram message shape into useful agent context. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function resolveTelegramInboundBody(message: any, options: TelegramInboundResolvers = {}): Promise<string | undefined> {
+  const text = telegramCleanText(message?.text);
+  const caption = telegramCleanText(message?.caption);
+  const media = telegramMediaDescriptor(message, caption);
+  if (media) {
+    let bytesPromise: Promise<Buffer | null> | undefined;
+    const bytes = async (): Promise<Buffer | null> => {
+      if (!bytesPromise) {
+        bytesPromise = options.downloadFile
+          ? options.downloadFile(media.fileId).catch((error) => {
+            options.onFailure?.('download_media', asError(error));
+            return null;
+          })
+          : Promise.resolve(null);
+      }
+      return bytesPromise;
+    };
+    let ref: string | null = null;
+    if (options.persistMedia) {
+      const data = await bytes();
+      if (data) {
+        try { ref = await options.persistMedia({ ...media, bytes: data }); }
+        catch (error) { options.onFailure?.('persist_media', asError(error)); }
+      }
+    }
+    const attachment = ref ? `Attachment: ${ref}` : null;
+    if (media.kind === 'voice' || media.kind === 'audio') {
+      let transcript: string | null = null;
+      if (options.transcribeAudio) {
+        try {
+          const data = await bytes();
+          transcript = data ? await options.transcribeAudio(data, media.mimeType) : null;
+        } catch (error) { options.onFailure?.('transcribe', asError(error)); }
+      }
+      return [
+        media.kind === 'voice' ? '[Voice note received]' : '[Audio received]',
+        ...(caption ? [`Caption: ${caption}`] : []),
+        ...(transcript?.trim() ? [`Transcript:\n${transcript.trim()}`] : ['Transcription is unavailable.']),
+        attachment,
+      ].filter(Boolean).join('\n');
+    }
+    if (media.kind === 'image' || media.kind === 'sticker') {
+      let description: string | null = null;
+      if (options.describeImage && !media.mimeType.includes('tgsticker')) {
+        try {
+          const data = await bytes();
+          description = data ? await options.describeImage(data, media.mimeType, caption ?? undefined) : null;
+        } catch (error) { options.onFailure?.('describe_image', asError(error)); }
+      }
+      return [
+        media.kind === 'sticker' ? '[Sticker received]' : '[Image received]',
+        ...(caption ? [`Caption: ${caption}`] : []),
+        attachment,
+        ...(description?.trim() ? [`Visual analysis: ${description.trim()}`] : ['Visual analysis is unavailable.']),
+      ].filter(Boolean).join('\n');
+    }
+    if (media.kind === 'file') {
+      let extracted: string | null = null;
+      if (options.extractDocument) {
+        try {
+          const data = await bytes();
+          extracted = data ? await options.extractDocument(data, media.mimeType, media.filename) : null;
+        } catch (error) { options.onFailure?.('extract_document', asError(error)); }
+      }
+      return [
+        `[Document received: ${media.filename}]`,
+        ...(caption ? [`Caption: ${caption}`] : []),
+        attachment,
+        extracted?.trim() || 'Text extraction is unavailable. Do not claim to have read the document.',
+      ].filter(Boolean).join('\n');
+    }
+    return [
+      media.gifPlayback ? '[Animated GIF received]' : '[Video received]',
+      ...(caption ? [`Caption: ${caption}`] : []),
+      attachment,
+    ].filter(Boolean).join('\n');
+  }
+
+  const location = message?.location ?? message?.venue?.location;
+  if (location && Number.isFinite(location.latitude) && Number.isFinite(location.longitude)) {
+    return [
+      message.venue ? '[Venue received]' : '[Location received]',
+      ...(telegramCleanText(message.venue?.title) ? [`Name: ${telegramCleanText(message.venue.title)}`] : []),
+      ...(telegramCleanText(message.venue?.address) ? [`Address: ${telegramCleanText(message.venue.address)}`] : []),
+      `Coordinates: ${location.latitude}, ${location.longitude}`,
+      `Map: https://maps.google.com/?q=${location.latitude},${location.longitude}`,
+    ].join('\n');
+  }
+  if (message?.contact) {
+    const contact = message.contact;
+    return [
+      '[Contact card received]',
+      `Name: ${[contact.first_name, contact.last_name].filter(Boolean).join(' ')}`,
+      `Phone: ${contact.phone_number}`,
+      ...(telegramCleanText(contact.vcard) ? [`vCard:\n${telegramCleanText(contact.vcard)}`] : []),
+    ].join('\n');
+  }
+  if (message?.poll) {
+    return [
+      '[Poll received]',
+      `Question: ${message.poll.question}`,
+      ...(Array.isArray(message.poll.options)
+        ? message.poll.options.map((option: { text?: string }, index: number) => `${index + 1}. ${option.text ?? ''}`)
+        : []),
+    ].join('\n');
+  }
+  return text ?? caption ?? undefined;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function telegramMediaDescriptor(message: any, caption: string | null): TelegramMediaDescriptor | null {
+  const common = caption ? { caption } : {};
+  const photos = Array.isArray(message?.photo) ? message.photo : [];
+  const photo = photos.at(-1);
+  if (photo?.file_id) return { fileId: photo.file_id, kind: 'image', mimeType: 'image/jpeg', filename: 'photo.jpg', ...common };
+  if (message?.voice?.file_id) return {
+    fileId: message.voice.file_id, kind: 'voice', mimeType: message.voice.mime_type ?? 'audio/ogg', filename: 'voice-note.ogg', ...common,
+  };
+  if (message?.audio?.file_id) return {
+    fileId: message.audio.file_id, kind: 'audio', mimeType: message.audio.mime_type ?? 'audio/mpeg',
+    filename: message.audio.file_name ?? 'audio.mp3', ...common,
+  };
+  const video = message?.animation ?? message?.video ?? message?.video_note;
+  if (video?.file_id) return {
+    fileId: video.file_id, kind: 'video', mimeType: video.mime_type ?? 'video/mp4',
+    filename: video.file_name ?? (message.animation ? 'animation.mp4' : 'video.mp4'),
+    ...(message.animation ? { gifPlayback: true } : {}), ...common,
+  };
+  if (message?.sticker?.file_id) return {
+    fileId: message.sticker.file_id, kind: 'sticker',
+    mimeType: message.sticker.is_animated ? 'application/x-tgsticker' : message.sticker.is_video ? 'video/webm' : 'image/webp',
+    filename: message.sticker.is_animated ? 'sticker.tgs' : message.sticker.is_video ? 'sticker.webm' : 'sticker.webp',
+  };
+  const document = message?.document;
+  if (document?.file_id) {
+    const mimeType = document.mime_type ?? 'application/octet-stream';
+    const filename = document.file_name ?? 'document.bin';
+    return {
+      fileId: document.file_id,
+      kind: mimeType.startsWith('image/') ? 'image' : 'file',
+      mimeType,
+      filename,
+      ...common,
+    };
+  }
+  return null;
+}
+
+function telegramCleanText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

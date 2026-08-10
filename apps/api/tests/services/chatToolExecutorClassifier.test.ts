@@ -42,7 +42,8 @@ describe('ChatToolExecutor.requiresConfirmation', () => {
     expect(ChatToolExecutor.requiresConfirmation('workflow.x', 'plan')).toBe(false);
   });
 
-  it('confirms workflow runs in ask mode', () => {
-    expect(ChatToolExecutor.requiresConfirmation('workflow.x', 'ask')).toBe(true);
+  it('uses the conversation sensitivity for medium-risk workflow runs', () => {
+    expect(ChatToolExecutor.requiresConfirmation('workflow.x', 'ask', 'balanced')).toBe(false);
+    expect(ChatToolExecutor.requiresConfirmation('workflow.x', 'ask', 'cautious')).toBe(true);
   });
 });

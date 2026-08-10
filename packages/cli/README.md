@@ -17,7 +17,7 @@ apps powered by a workflow engine. No lock-in.
 
 **No token tax. No data extraction. No forgetting.**
 
-> **Status: 1.0.6 stable.** Agentis is now in public release, and the CLI,
+> **Status: 1.0.8 stable.** Agentis is now in public release, and the CLI,
 > dashboard, and core runtime are ready for production use across 1.x updates.
 
 This package launches the whole local runtime: API, WebSocket bridge, workflow engine,
@@ -96,7 +96,9 @@ Everything runtime lives under `AGENTIS_DATA_DIR` by default.
 ```text
 agentis up                         Start Agentis (default if no command is given).
 agentis warmup [--repair]          Download, verify, or recover the local q8 embedding runtime.
-agentis doctor [--json]            Inspect embedding runtime and cache health.
+agentis warmup --transcription     Prepare the optional local speech-to-text runtime.
+agentis setup --channels           Prepare embedding, browser, and channel media runtimes.
+agentis doctor [--json]            Inspect embedding and optional transcription runtime health.
 agentis bootstrap ...              Commission an orchestrator, manager, or specialist.
 agentis create <dir>               Scaffold a code-authored Agentic App.
 agentis app <pack|validate|install|test|export> ...   Work with .agentisapp packages.
@@ -104,6 +106,14 @@ agentis backup [--out <dir>]       Snapshot the data dir.
 agentis restore <dir> [--force]    Restore a backup directory into the data dir.
 agentis help                       Show the full command reference.
 ```
+
+`agentis up` does not globally download the transcription model. The pinned q8
+Whisper fallback is prepared when a WhatsApp/Telegram connection needs inbound audio,
+or explicitly with `setup --channels`/`warmup --transcription`. Set
+`AGENTIS_TRANSCRIPTION_OFFLINE=true` to prohibit network acquisition, or
+`AGENTIS_TRANSCRIPTION_MODEL_PATH` to use a pre-provisioned compatible model directory.
+Set `AGENTIS_TRANSCRIPTION_LANGUAGE=portuguese` when a headless or multilingual host needs a
+deterministic Whisper language hint; otherwise Agentis uses the host locale.
 
 ## Requirements
 

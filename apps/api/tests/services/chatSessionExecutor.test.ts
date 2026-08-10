@@ -80,6 +80,7 @@ describe('ChatSessionExecutor', () => {
         description: 'Test write action.',
         inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
         mutating: true,
+        approval: { riskLevel: 'high', reversible: false, externalSideEffects: true },
       },
       async (args) => {
         mutatingToolCalls += 1;
@@ -165,9 +166,31 @@ describe('ChatSessionExecutor', () => {
     expect(adapter.calls[0]![0]!.role).toBe('system');
     expect(adapter.calls[0]!.at(-1)).toMatchObject({ role: 'user', content: 'answer normally' });
     expect(adapter.chatOptions[0]).toMatchObject({
-      latencyClass: 'interactive',
+      latencyClass: 'deliberate',
       timeoutMs: 15_000,
     });
+  });
+
+  it('uses low-latency inference only when the turn is explicitly Quick', async () => {
+    const adapter = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'quick answer' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    await collect(ChatSessionExecutor.turn(adapter, [], 'summarize this', {
+      workspaceId: 'ws_quick', agentId: 'agent_quick', userId: 'user_quick', conversationId: 'conv_quick', qualityMode: 'quick',
+    }, { qualityMode: 'quick' }));
+    expect(adapter.chatOptions[0]).toMatchObject({ latencyClass: 'interactive' });
+  });
+
+  it('enforces deliberate inference and a high reasoning floor for Missions', async () => {
+    const adapter = new FakeChatAdapter(async function* () {
+      yield { type: 'text', delta: 'mission complete' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    await collect(ChatSessionExecutor.turn(adapter, [], 'build and verify the complete application', {
+      workspaceId: 'ws_mission', agentId: 'agent_mission', userId: 'user_mission', conversationId: 'conv_mission', qualityMode: 'mission',
+    }, { qualityMode: 'mission' }));
+    expect(adapter.chatOptions[0]).toMatchObject({ latencyClass: 'deliberate', reasoningEffort: 'high', fastMode: false });
   });
 
   it('records provider-reported chat usage in audit and agent monthly spend telemetry', async () => {
@@ -298,6 +321,33 @@ describe('ChatSessionExecutor', () => {
     expect(adapter.calls[1]!.some((message) => message.role === 'tool' && String(message.content).includes('ship chat loop'))).toBe(true);
   });
 
+  it('joins live inbox messages at the next safe model boundary without cancelling completed work', async () => {
+    const adapter = new FakeChatAdapter(async function* (messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'tool_call', id: 'tool_1', name: 'agentis.plan', args: { goal: 'long task' } };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      expect(messages).toContainEqual({ role: 'user', content: 'What is the status?' });
+      yield { type: 'text', delta: 'The task continued with the new context.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    let inboxReads = 0;
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'perform the long task', {
+      workspaceId: 'ws_live', agentId: 'agent_live', userId: 'user_live', conversationId: 'conv_live',
+    }, {
+      liveInput: () => {
+        inboxReads += 1;
+        return inboxReads === 1 ? [{ role: 'user', content: 'What is the status?' }] : [];
+      },
+    }));
+
+    expect(adapter.calls).toHaveLength(2);
+    expect(inboxReads).toBe(1);
+    expect(deltas).toContainEqual({ type: 'text', delta: 'The task continued with the new context.' });
+  });
+
   it('emits live "Using <tool>" activity cards for the marker-protocol tool round', async () => {
     const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
       if (callIndex === 0) {
@@ -372,7 +422,7 @@ describe('ChatSessionExecutor', () => {
     expect(confirmation).toBeTruthy();
     expect(confirmation!.impact).toEqual(expect.objectContaining({
       summary: 'Test write action.',
-      riskLevel: 'medium',
+      riskLevel: 'high',
       reversible: false,
     }));
     expect(initial.some((delta) => delta.type === 'tool_result')).toBe(false);
@@ -762,7 +812,7 @@ describe('ChatSessionExecutor', () => {
       conversationId: 'conv_harness',
     }));
 
-    expect(seenOptions[0]?.latencyClass).toBe('interactive');
+    expect(seenOptions[0]?.latencyClass).toBe('deliberate');
     expect(seenOptions[0]?.timeoutMs).toBe(240_000);
     expect(seenOptions[0]?.timeoutMs).not.toBe(15_000);
   });
@@ -1286,6 +1336,7 @@ describe('ChatSessionExecutor', () => {
     const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
       if (callIndex === 0) {
         yield { type: 'thinking', delta: 'private reasoning' };
+        yield { type: 'commentary', id: 'summary-1', text: 'I will inspect the available agents first.', source: 'reasoning_summary', createdAt: new Date().toISOString() };
         yield { type: 'text', delta: 'I will inspect the repository first.' };
         yield { type: 'tool_call', id: 'inspect-1', name: 'agentis.list_agents', args: {} };
         yield { type: 'done', finishReason: 'tool_calls' };
@@ -1305,6 +1356,7 @@ describe('ChatSessionExecutor', () => {
       .join('');
     expect(text).toBe('The repository is ready.');
     expect(deltas.some((delta) => delta.type === 'thinking')).toBe(false);
+    expect(deltas.some((delta) => delta.type === 'commentary' && delta.text === 'I will inspect the available agents first.')).toBe(true);
     expect(deltas.some((delta) => delta.type === 'tool_call' && delta.id === 'inspect-1')).toBe(true);
   });
 

@@ -338,7 +338,7 @@ export class CodexAdapter implements AgentAdapter {
           // interpreter chat uses (guarded to `reasoning` so it can't double with
           // the text/tool emits above). (Reasoning parity, all harnesses.)
           const interp = interpretCodexChatEvent(event);
-          if (interp.kind === 'reasoning' && interp.text) {
+          if (interp.kind === 'commentary' && interp.text) {
             this.#emit({
               eventType: 'agent.thinking',
               agentId: this.opts.agentId,
@@ -401,17 +401,31 @@ export class CodexAdapter implements AgentAdapter {
     const structured = options?.latencyClass === 'structured';
     const callerOwnsToolLoop = options?.toolMode === 'caller_loop';
     const execMode = options?.executionMode ?? 'chat';
-    const baseArgs = buildCodexArgs(this.opts, options?.preferredModel, interactive
+    const explicitQuality = options?.reasoningEffort || options?.fastMode !== undefined
+      ? {
+          ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort as CodexAdapterOptions['modelReasoningEffort'] } : {}),
+          ...(options?.fastMode !== undefined ? { fastMode: options.fastMode } : {}),
+          mountMcp: !callerOwnsToolLoop,
+          executionMode: execMode,
+          conversationId: options?.conversationId,
+          turnLease: options?.turnLease,
+          approvalSensitivity: options?.approvalSensitivity,
+        }
+      : null;
+    const baseArgs = buildCodexArgs(this.opts, options?.preferredModel, explicitQuality ?? (interactive
       // `minimal` is rejected when Codex built-ins such as web_search or
       // image_gen are available. `low` is the fastest universally compatible
       // interactive profile.
-      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease }
+      ? { reasoningEffort: 'low', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease, approvalSensitivity: options?.approvalSensitivity }
       : structured
-        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease }
-        : { mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease });
+        ? { reasoningEffort: 'medium', fastMode: true, mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease, approvalSensitivity: options?.approvalSensitivity }
+        : { mountMcp: !callerOwnsToolLoop, executionMode: execMode, conversationId: options?.conversationId, turnLease: options?.turnLease, approvalSensitivity: options?.approvalSensitivity }));
+    const imageArgs = (options?.inputAttachments ?? [])
+      .filter((attachment) => attachment.kind === 'image')
+      .flatMap((attachment) => ['--image', attachment.path]);
     const args = storedSession
-      ? ['exec', 'resume', storedSession, ...baseArgs.slice(1)]
-      : baseArgs;
+      ? ['exec', 'resume', storedSession, ...baseArgs.slice(1), ...imageArgs]
+      : [...baseArgs, ...imageArgs];
     // IDLE-based budget, not wall-clock (see cliChatRuntime). Browser turns load
     // the heavy native config (node_repl has a 120s startup), which is silent —
     // give them a longer idle floor or the watchdog kills the boot before the
@@ -460,9 +474,8 @@ export class CodexAdapter implements AgentAdapter {
       if (error) parts.push({ kind: 'error', message: error });
       const interp = interpretCodexChatEvent(ev);
       switch (interp.kind) {
-        case 'reasoning':
-          // Reasoning becomes a generic progress signal, never answer text.
-          parts.push({ kind: 'thinking', text: interp.text });
+        case 'commentary':
+          parts.push({ kind: 'commentary', id: interp.id, text: interp.text, source: 'reasoning_summary' });
           break;
         case 'text':
           parts.push({ kind: 'text', text: interp.text });
@@ -563,6 +576,7 @@ function buildCodexArgs(
     executionMode?: 'chat' | 'plan' | 'ask';
     conversationId?: string;
     turnLease?: string;
+    approvalSensitivity?: import('@agentis/core').ApprovalSensitivity;
   } = {},
 ): string[] {
   const fastMode = options.fastMode ?? opts.fastMode ?? false;
@@ -608,6 +622,7 @@ function buildCodexArgs(
     : harnessMcpArgs('codex', opts.mcpServers ?? [], options.executionMode ?? 'chat', {
         conversationId: options.conversationId,
         turnLease: options.turnLease,
+        approvalSensitivity: options.approvalSensitivity,
       });
   // Honor the model Agentis resolved for this agent/turn. With the user config
   // ignored the CLI no longer reads `model` from config.toml, so we MUST pass it
@@ -745,7 +760,7 @@ function extractText(event: CodexJsonEvent): string {
 type CodexChatInterpretation =
   | { kind: 'text'; text: string }
   | { kind: 'final'; text: string }
-  | { kind: 'reasoning'; text: string }
+  | { kind: 'commentary'; id: string; text: string }
   | { kind: 'tool'; tool: string; input: unknown }
   | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> }
   | { kind: 'ignore' };
@@ -780,8 +795,8 @@ function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation
     if (itemType.includes('reason') || itemType.includes('think')) {
       // Consolidated reasoning, taken once so streamed partials don't double it.
       if (!completed) return { kind: 'ignore' };
-      const text = firstString(item.text, item.content, item.summary) ?? '';
-      return text ? { kind: 'reasoning', text } : { kind: 'ignore' };
+      const text = firstString(item.summary, item.text, item.content) ?? '';
+      return text ? { kind: 'commentary', id: `codex-commentary-${String(item.id ?? randomUUID())}`, text } : { kind: 'ignore' };
     }
     if (itemType === 'agent_message' || itemType === 'assistant_message' || itemType === 'message') {
       if (!completed) return { kind: 'ignore' };
@@ -815,7 +830,9 @@ function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation
     if (type.includes('reason') || type.includes('think')) {
       // Take the consolidated reasoning event, not the per-token deltas.
       if (type.includes('delta')) return { kind: 'ignore' };
-      return { kind: 'reasoning', text: firstString(msg.text, msg.message, msg.content) ?? '' };
+      const text = firstString(msg.summary, msg.text, msg.message, msg.content) ?? '';
+      const eventId = firstString((event as unknown as Record<string, unknown>).id, msg.id);
+      return text ? { kind: 'commentary', id: `codex-commentary-${eventId ?? randomUUID()}`, text } : { kind: 'ignore' };
     }
     if ((type.includes('tool') || type.includes('function')) && (type.includes('begin') || type.includes('call') || type.includes('start'))) {
       const inv = objectOf(msg.invocation) ?? objectOf(msg.tool_call);
@@ -828,7 +845,7 @@ function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation
   // Legacy / non-envelope events: {"type":"assistant","text":"..."} and friends.
   if (isReasoningEvent(event)) {
     const reasoning = extractText(event);
-    return reasoning ? { kind: 'reasoning', text: reasoning } : { kind: 'ignore' };
+    return reasoning ? { kind: 'commentary', id: `codex-commentary-${firstString((event as unknown as Record<string, unknown>).id) ?? randomUUID()}`, text: reasoning } : { kind: 'ignore' };
   }
   const toolCall = extractToolCall(event);
   if (toolCall) return { kind: 'tool', tool: toolCall.tool, input: toolCall.input };

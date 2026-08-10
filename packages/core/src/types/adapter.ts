@@ -100,6 +100,10 @@ export interface ChatInvocationOptions {
    * reasoning. Deliberate calls retain the adapter's configured task profile.
    */
   latencyClass?: 'interactive' | 'structured' | 'deliberate';
+  /** Transparent per-turn quality override used by Adaptive Chat. */
+  reasoningEffort?: string;
+  /** Explicit per-turn service-tier choice; never inferred invisibly. */
+  fastMode?: boolean;
   /** Per-call wall-clock deadline for one model round. */
   timeoutMs?: number;
   /**
@@ -125,16 +129,27 @@ export interface ChatInvocationOptions {
    * tags the per-turn Agentis MCP descriptor with an execution-mode header so the
    * tool registry gates mutating tools directly instead of relying on the prompt:
    * - `plan` — read-only; mutations hard-blocked (`PLAN_MODE_MUTATION_BLOCKED`).
-   * - `ask`  — mutations blocked with `ASK_MODE_CONFIRMATION_REQUIRED` so the
-   *            harness summarizes the action and waits for the operator (who can
-   *            switch to Auto to proceed). Reads always pass.
+   * - `ask`  — only actions at or above the conversation's approval threshold
+   *            are blocked with `ASK_MODE_CONFIRMATION_REQUIRED`; routine reads
+   *            and low-risk work continue autonomously.
    * - `chat` (or omitted) — Auto: mutations allowed.
    */
   executionMode?: 'chat' | 'plan' | 'ask';
+  /** Ask-mode risk threshold, propagated to native MCP tools. */
+  approvalSensitivity?: import('./chat.js').ApprovalSensitivity;
   /** Conversation-scoped MCP cancellation capability for this invocation. */
   conversationId?: string;
   /** Opaque lease paired with conversationId; late calls are rejected after Stop. */
   turnLease?: string;
+  /** Host-materialized inbound files supplied as native model inputs when supported. */
+  inputAttachments?: RuntimeInputAttachment[];
+}
+
+export interface RuntimeInputAttachment {
+  path: string;
+  name: string;
+  mimeType: string;
+  kind: 'image' | 'file';
 }
 
 export type RuntimeValueSource =

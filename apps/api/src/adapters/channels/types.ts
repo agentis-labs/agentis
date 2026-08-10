@@ -42,6 +42,14 @@ export interface ParsedInboundMessage {
   threadId?: string;
   body: string;
   from?: string;
+  /** Provider file handle for webhook transports; ChannelBridge downloads and enriches it. */
+  media?: {
+    providerFileId: string;
+    kind: OutboundMediaKind;
+    mimeType?: string;
+    filename?: string;
+    caption?: string;
+  };
 }
 
 /**
@@ -100,6 +108,12 @@ export interface OutboundAttachmentRef {
   gifPlayback?: boolean;
   viewOnce?: boolean;
 }
+
+/** Provider-native, non-file payloads that should not be flattened into text. */
+export type OutboundNativeContent =
+  | { kind: 'location'; latitude: number; longitude: number; name?: string; address?: string }
+  | { kind: 'contact'; displayName: string; phone: string; vcard?: string }
+  | { kind: 'poll'; question: string; options: string[]; selectableCount?: number };
 
 /**
  * Provider-issued proof that an outbound message was accepted by the channel.
@@ -175,6 +189,7 @@ export interface ChannelAdapter {
     body: string;
     settings?: Record<string, unknown>;
     attachments?: OutboundAttachment[];
+    native?: OutboundNativeContent;
   }): Promise<ChannelDeliveryReceipt>;
 
   /**

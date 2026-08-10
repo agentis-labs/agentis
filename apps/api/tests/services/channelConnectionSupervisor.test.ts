@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS } from '@agentis/core';
@@ -48,6 +48,23 @@ function fixture() {
 }
 
 describe('ChannelConnectionSupervisor observed outbound synchronization', () => {
+  it('prepares optional STT when a media channel is configured, not at global API bootstrap', async () => {
+    const prepareInboundAudio = vi.fn(async () => {});
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const supervisor = new ChannelConnectionSupervisor({
+      db: ctx.db,
+      bus: ctx.bus,
+      logger: ctx.logger,
+      vault: ctx.vault,
+      conversations,
+      dataDir: '.',
+      prepareInboundAudio,
+    });
+
+    supervisor.onCreated({ id: 'wa-new', kind: 'whatsapp', settings: { mode: 'qr_local' } });
+    await vi.waitFor(() => expect(prepareInboundAudio).toHaveBeenCalledOnce());
+  });
+
   it('mirrors a primary-phone send once and publishes provider-backed outbound evidence', () => {
     const { connectionId, supervisor } = fixture();
     const capture = ctx.captureBus();

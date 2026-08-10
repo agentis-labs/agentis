@@ -688,6 +688,33 @@ export class ConversationStore {
     return row;
   }
 
+  /** Mark a queued message as consumed by a live task/companion lane. Idempotent. */
+  consumeQueuedMessage(args: { workspaceId: string; conversationId: string; queueId: string }) {
+    const conversation = this.#loadConversation(args.workspaceId, args.conversationId);
+    const existing = this.deps.db
+      .select()
+      .from(schema.conversationMessageQueue)
+      .where(and(
+        eq(schema.conversationMessageQueue.id, args.queueId),
+        eq(schema.conversationMessageQueue.conversationId, args.conversationId),
+        eq(schema.conversationMessageQueue.workspaceId, args.workspaceId),
+      ))
+      .get();
+    if (!existing) throw new AgentisError('RESOURCE_NOT_FOUND', `queued message ${args.queueId} not found`);
+    if (existing.status !== 'pending') return existing;
+    this.deps.db.update(schema.conversationMessageQueue)
+      .set({ status: 'sent' })
+      .where(eq(schema.conversationMessageQueue.id, args.queueId))
+      .run();
+    const row = { ...existing, status: 'sent' as const };
+    this.deps.bus.publish(
+      REALTIME_ROOMS.conversation(conversation.agentId),
+      REALTIME_EVENTS.CONVERSATION_QUEUE_UPDATED,
+      { conversationId: args.conversationId, agentId: conversation.agentId, item: row, action: 'dispatched' },
+    );
+    return row;
+  }
+
   /** Discard every pending composer message when the operator stops all work. */
   discardPendingQueue(args: { workspaceId: string; conversationId: string }) {
     const conversation = this.#loadConversation(args.workspaceId, args.conversationId);

@@ -23,9 +23,9 @@ and a live product surface they can operate with you.
 [![Node](https://img.shields.io/badge/node-%3E%3D20.10-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-9.12-orange.svg)](https://pnpm.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org)
-![Status](https://img.shields.io/badge/status-1.0.6%20stable-brightgreen.svg)
+![Status](https://img.shields.io/badge/status-1.0.8%20stable-brightgreen.svg)
 
-> **Status: 1.0.6 stable.** Agentis is now in public release, and the CLI,
+> **Status: 1.0.8 stable.** Agentis is now in public release, and the CLI,
 > dashboard, and core runtime are ready for production use across 1.x updates.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fagentis-labs%2Fagentis)
@@ -216,6 +216,10 @@ See [`.env.example`](./.env.example) for the complete set.
 | `AGENTIS_STORAGE_MAX_HOT_DB_MB` | `2048` | Hot SQLite budget; pressure mode shortens hot retention without deleting archives. |
 | `AGENTIS_STORAGE_MIN_FREE_MB` | `2048` | Free-space reserve that activates pressure mode. |
 | `AGENTIS_ASSETS_DIR` | `{DATA_DIR}/assets` | Content-addressed blob store, deduped by SHA-256. |
+| `AGENTIS_TRANSCRIPTION_CACHE_DIR` | `{DATA_DIR}/models/transcription` | Verified local speech-to-text cache, prepared only for media channels or explicit warmup. |
+| `AGENTIS_TRANSCRIPTION_MODEL_PATH` | unset | Pre-provisioned compatible local transcription model directory. |
+| `AGENTIS_TRANSCRIPTION_OFFLINE` | unset | Disable transcription model network acquisition and require a verified/pre-provisioned cache. |
+| `AGENTIS_TRANSCRIPTION_LANGUAGE` | host locale | Whisper language hint, such as `portuguese`, for multilingual or headless hosts. |
 | `AGENTIS_HTTP_PORT` | `3737` | API and dashboard port. |
 | `AGENTIS_HTTP_HOST` | `127.0.0.1` | Bind host. |
 | `AGENTIS_EXTENSION_REQUIRE_ISOLATE` | unset | Fail closed instead of using `node:vm` for untrusted extension code. |

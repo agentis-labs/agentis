@@ -11,12 +11,87 @@ export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
 /**
  * Per-conversation permission mode (Claude-Code style), sticky per thread.
- * - `ask`  — confirm before any mutating tool runs (default).
+ * - `ask`  — act autonomously below the conversation's approval-risk threshold
+ *            and ask before consequential actions (default).
  * - `plan` — propose a plan and block mutations this turn (maps to
  *            executionMode 'plan', enforced at the tool registry).
  * - `auto` — run everything without confirmation (bypass).
  */
 export type ChatPermissionMode = 'ask' | 'plan' | 'auto';
+
+/** How readily Ask mode escalates an action to the operator. */
+export type ApprovalSensitivity = 'cautious' | 'balanced' | 'autonomous';
+export type ToolRiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+/**
+ * Host-owned safety metadata. It is deliberately separate from `mutating`:
+ * creating a local screenshot and deleting production data both mutate state,
+ * but they should not have the same approval posture.
+ */
+export interface AgentisToolApprovalPolicy {
+  riskLevel: ToolRiskLevel;
+  reversible?: boolean;
+  externalSideEffects?: boolean;
+  destructive?: boolean;
+  /** Protected action: Ask mode always pauses, regardless of sensitivity. */
+  alwaysConfirm?: boolean;
+}
+
+/** Operator-facing quality/durability policy for a conversation turn. */
+export type ConversationExecutionMode = 'auto' | 'quick' | 'deep' | 'mission';
+export type EffectiveConversationExecutionMode = Exclude<ConversationExecutionMode, 'auto'>;
+export type ConversationTurnStatus =
+  | 'queued'
+  | 'running'
+  | 'awaiting_approval'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+export interface ChatAttachmentManifestEntry {
+  artifactId: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  status: 'ready' | 'unsupported' | 'failed';
+  extraction: 'text' | 'document' | 'spreadsheet' | 'vision' | 'transcription' | 'none';
+  extractedChars?: number;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface ChatContextManifest {
+  version: 1;
+  generatedAt: string;
+  historyMessages: number;
+  attachmentCount: number;
+  attachments: ChatAttachmentManifestEntry[];
+  sources: Array<{ id: string; label: string; status: 'included' | 'summarized' | 'unavailable'; chars?: number }>;
+  warnings: string[];
+}
+
+/** The non-secret, operator-visible facts that actually governed one turn. */
+export interface ChatExecutionEnvelope {
+  version: 1;
+  requestedMode: ConversationExecutionMode;
+  effectiveMode: EffectiveConversationExecutionMode;
+  classificationReason: string;
+  adapterType: string;
+  model: string | null;
+  configuredReasoningEffort: string | null;
+  effectiveReasoningEffort: string | null;
+  fastMode: boolean;
+  runtimeProfile?: string | null;
+  cwd?: string | null;
+  loadedSources: string[];
+  toolMode: 'none' | 'caller_loop' | 'adapter_native';
+  durable: boolean;
+  createdAt: string;
+  warnings: string[];
+}
 
 export interface ChatMessage {
   role: ChatRole;
@@ -98,11 +173,25 @@ export interface ChatTurnTrace {
 }
 
 /**
+ * Provider-designated, operator-safe commentary emitted while a turn is
+ * running. This is never raw chain-of-thought: adapters may only promote
+ * explicit reasoning summaries, assistant preambles, or host-authored progress.
+ */
+export interface ChatCommentary {
+  id: string;
+  text: string;
+  source: 'reasoning_summary' | 'assistant_preamble' | 'host';
+  createdAt: string;
+}
+
+/**
  * Discriminated union streamed by `AgentAdapter.chat()`.
  * Consumers accumulate `text` deltas, act on `tool_call` events,
  * and terminate on `done`.
  */
 export type ChatDelta =
+  | { type: 'execution'; envelope: ChatExecutionEnvelope; context: ChatContextManifest }
+  | ({ type: 'commentary' } & ChatCommentary)
   | {
       type: 'activity';
       id: string;
@@ -214,6 +303,10 @@ export interface ChatTurnContext {
    * Defaults to `ask` when unset.
    */
   permissionMode?: ChatPermissionMode;
+  /** Ask-mode threshold. Defaults to `balanced`; ignored by Plan and Auto. */
+  approvalSensitivity?: ApprovalSensitivity;
+  /** Effective quality class selected before the model is invoked. */
+  qualityMode?: EffectiveConversationExecutionMode;
   viewport?: ViewportContext | null;
   
   signal?: AbortSignal;
@@ -304,7 +397,8 @@ export interface AgentisToolDefinition {
   inputSchema: unknown;
   outputSchema?: unknown;
   mutating: boolean;
-  
+  /** Graduated Ask-mode policy. Unclassified mutations fail safe as high risk. */
+  approval?: AgentisToolApprovalPolicy;
   autoExecute?: boolean;
   mcpExposed?: boolean;
   requires?: string[];
@@ -323,6 +417,8 @@ export interface AgentisToolContext {
   runId?: string;
   conversationId?: string;
   executionMode?: 'chat' | 'plan' | 'ask';
+  /** Ask-mode threshold propagated across native MCP tool loops. */
+  approvalSensitivity?: ApprovalSensitivity;
   viewport?: ViewportContext | null;
   /**
    * Ambient Agentic App for this turn (Living Apps Phase 0). When set, App-scoped

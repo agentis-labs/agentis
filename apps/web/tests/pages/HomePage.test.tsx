@@ -277,8 +277,8 @@ describe('<WorkspaceEcosystemCanvas />', () => {
     };
     const agents: Parameters<typeof buildCanvasModel>[1] = [
       { id: 'orch-1', name: 'Orchy', role: 'orchestrator', status: 'online' },
-      { id: 'coder', name: 'Coder', role: 'manager', status: 'online', spaceId: 'space-coder', spaceName: 'Coder' },
-      { id: 'hermes', name: 'hermes', role: 'manager', status: 'online', spaceId: 'space-hermes', spaceName: 'Hermes' },
+      { id: 'coder', name: 'Coder', role: 'manager', status: 'online', spaceId: 'space-coder', spaceName: 'Coder', canvasPosition: { x: -180, y: 300 } },
+      { id: 'hermes', name: 'hermes', role: 'manager', status: 'online', spaceId: 'space-hermes', spaceName: 'Hermes', canvasPosition: { x: 180, y: 300 } },
     ];
     const width = 2400;
     const model = buildCanvasModel(data, agents, [], [], [], [], { width, height: 760 });

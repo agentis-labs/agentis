@@ -12,10 +12,18 @@ import type { ModelProfile } from '../../src/services/orchestrator/orchestratorM
 const profile: ModelProfile = { baseUrl: 'https://api.example.com/v1', model: 'whisper-1', apiKey: 'k' };
 
 describe('TranscriptionService', () => {
-  it('is disabled and returns null when no model is configured', async () => {
+  it('returns null only when neither a remote model nor the managed local fallback exists', async () => {
     const svc = new TranscriptionService({ profile: () => null });
     expect(svc.enabled).toBe(false);
     expect(await svc.transcribe({ bytes: Buffer.from('x'), mimeType: 'audio/ogg' })).toBeNull();
+  });
+
+  it('uses the managed local fallback when no remote profile is configured', async () => {
+    const localFallback = { transcribe: vi.fn(async () => 'mensagem em português') };
+    const svc = new TranscriptionService({ profile: () => null, localFallback });
+    expect(svc.enabled).toBe(true);
+    expect(await svc.transcribe({ bytes: Buffer.from('audio'), mimeType: 'audio/ogg' })).toBe('mensagem em português');
+    expect(localFallback.transcribe).toHaveBeenCalledOnce();
   });
 
   it('posts multipart audio and returns the transcript text', async () => {
@@ -45,6 +53,13 @@ describe('TranscriptionService', () => {
     const fetchImpl = (async () => new Response('nope', { status: 500 })) as unknown as typeof fetch;
     const svc = new TranscriptionService({ profile: () => profile, fetchImpl });
     expect(await svc.transcribe({ bytes: Buffer.from('x'), mimeType: 'audio/ogg' })).toBeNull();
+  });
+
+  it('falls back locally when the optional remote endpoint fails', async () => {
+    const fetchImpl = (async () => new Response('nope', { status: 500 })) as unknown as typeof fetch;
+    const localFallback = { transcribe: vi.fn(async () => 'local transcript') };
+    const svc = new TranscriptionService({ profile: () => profile, fetchImpl, localFallback });
+    expect(await svc.transcribe({ bytes: Buffer.from('x'), mimeType: 'audio/ogg' })).toBe('local transcript');
   });
 
   it('resolveTranscriptionsUrl appends the endpoint idempotently', () => {

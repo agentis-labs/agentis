@@ -1,17 +1,18 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import type { ChatPermissionMode } from '@agentis/core';
-import { Check, ChevronDown } from 'lucide-react';
+import { Check, ChevronDown, ShieldCheck } from 'lucide-react';
+import clsx from 'clsx';
 
 /**
  * Per-conversation permission mode selector, shown in the composer next to the
  * model + thinking-effort pickers (same RuntimeMenu dropdown pattern). Mirrors the
- * Claude-Code mental model: Ask confirms mutating actions, Plan proposes before
- * acting, Auto runs freely. Also reachable over channels via /ask /plan /auto.
+ * Ask uses risk-aware escalation, Plan proposes before acting, and Auto runs
+ * freely. Also reachable over channels via /ask /plan /auto.
  */
 const MODES: Array<{ value: ChatPermissionMode; label: string; hint: string }> = [
-  { value: 'ask', label: 'Ask', hint: 'Confirm runs and risky or irreversible actions' },
+  { value: 'ask', label: 'Ask', hint: 'Confirm consequential actions' },
   { value: 'plan', label: 'Plan', hint: 'Propose a plan and wait for approval before acting' },
-  { value: 'auto', label: 'Auto', hint: 'Act without stopping to confirm' },
+  { value: 'auto', label: 'Full access', hint: 'Act without stopping to confirm' },
 ];
 
 interface Props {
@@ -27,8 +28,12 @@ export function PermissionModePicker({ value, onChange }: Props) {
         <button
           type="button"
           aria-label="Permission mode"
-          className="inline-flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-text-secondary outline-none hover:bg-surface-3 hover:text-text-primary focus-visible:ring-1 focus-visible:ring-accent/50"
+          className={clsx(
+            'inline-flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] font-medium outline-none transition hover:bg-surface-3 focus-visible:ring-1 focus-visible:ring-accent/50',
+            value === 'auto' ? 'text-warn' : 'text-text-secondary hover:text-text-primary',
+          )}
         >
+          <ShieldCheck size={12} className="shrink-0" />
           <span className="min-w-0 truncate">{active.label}</span>
           <ChevronDown size={10} className="shrink-0 text-text-muted" />
         </button>

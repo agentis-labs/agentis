@@ -1,6 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { Composer } from '../../src/components/chat/Composer';
+import { Composer, LARGE_PASTE_FILE_THRESHOLD } from '../../src/components/chat/Composer';
 
 function stubComposerCatalogs() {
   vi.mocked(global.fetch).mockImplementation(async (input) => {
@@ -34,5 +34,40 @@ describe('Composer', () => {
 
     expect(onStop).toHaveBeenCalledOnce();
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('converts a large paste into an uploaded text attachment before sending', async () => {
+    vi.mocked(global.fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/v1/artifacts/upload')) {
+        return new Response(JSON.stringify({ artifact: { id: 'artifact-large-paste' } }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.includes('/v1/transcription/status')) {
+        return new Response(JSON.stringify({ available: false }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(url.includes('/v1/workflows') ? { workflows: [] } : { agents: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} draftKey="composer-large-paste-test" />);
+    const textarea = screen.getByRole('textbox');
+    const pasted = `Complete specification\n${'x'.repeat(LARGE_PASTE_FILE_THRESHOLD)}`;
+
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [], getData: (type: string) => type === 'text/plain' ? pasted : '' },
+    });
+
+    expect(textarea).toHaveValue('');
+    expect(await screen.findByText('Paste secured as file')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(onSend).toHaveBeenCalledWith('', expect.objectContaining({
+      attachments: [expect.objectContaining({ id: 'artifact-large-paste', name: expect.stringMatching(/^Pasted text .*\.txt$/) })],
+    }));
   });
 });

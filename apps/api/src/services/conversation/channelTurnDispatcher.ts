@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { type AgentAdapter, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext } from '@agentis/core';
+import { type AgentAdapter, type ApprovalSensitivity, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
 import type { AdapterManager } from '../../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from '../chat/chatSessionExecutor.js';
@@ -39,14 +39,14 @@ import type { ChatMemoryCaptureService } from '../chat/chatMemoryCapture.js';
 import type { Logger } from '../../logger.js';
 import type { EventBus } from '../../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from '../agent/agentWorkProgress.js';
-import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt } from '../../adapters/channels/types.js';
+import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type OutboundAttachmentRef } from '../../adapters/channels/types.js';
 import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
 
 /** Channel activity is never a chat message unless it is this verified-owner indicator. */
 export type ChannelDeliveryClass = 'internal' | 'owner_reasoning_indicator' | 'reply';
 
 export interface ChannelTurnDeliver {
-  (args: { connectionId: string; chatId: string; body: string; idempotencyKey?: string }): Promise<ChannelDeliveryReceipt | undefined>;
+  (args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string; pacing?: 'immediate' }): Promise<ChannelDeliveryReceipt | undefined>;
 }
 
 export interface ChannelTurnDispatcherDeps {
@@ -68,6 +68,8 @@ export interface ChannelTurnDispatcherDeps {
   setTyping?: (connectionId: string, chatId: string, on: boolean) => Promise<void>;
   /** Override the turn runner (tests). Defaults to ChatSessionExecutor.turn. */
   runTurn?: typeof ChatSessionExecutor.turn;
+  /** Separate runtime lane for messages received while a task remains active. */
+  runConcurrentTurn?: typeof ChatSessionExecutor.turn;
   /** Override the confirm runner (tests). Defaults to ChatSessionExecutor.confirm. */
   runConfirm?: typeof ChatSessionExecutor.confirm;
   /** Override the orchestrator-runtime fallback (tests). */
@@ -136,6 +138,16 @@ export interface ChannelTurnDispatcherDeps {
   debounceMs?: number;
   /** Test seam; production keeps the owner indicator deliberately unhurried. */
   ownerReasoningIndicatorDelayMs?: number;
+  /**
+   * Compile durable inbound channel artifacts into model-ready multimodal context.
+   * This is deliberately shared with platform chat so channels do not degrade a
+   * real attachment into a provider-specific placeholder string.
+   */
+  compileAttachments?: (args: {
+    workspaceId: string;
+    body: string;
+    attachmentIds: string[];
+  }) => Promise<{ prompt: string; runtimeInputAttachments?: RuntimeInputAttachment[] }>;
 }
 
 /** The durable-queue sink. `enqueue` returns the queue id, or null on failure. */
@@ -153,7 +165,21 @@ interface PendingBatch {
   latest: ChannelTurnInput;
   texts: string[];
   ids: Set<string>;
+  attachmentIds: Set<string>;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface ActiveChannelTurn {
+  generation: number;
+  controller: AbortController;
+  clientTurnId: string;
+  objective: string;
+  startedAt: number;
+  phase: 'thinking' | 'working' | 'waiting';
+  completedSteps: number;
+  mailbox: Array<{ input: ChannelTurnInput; queueId: string }>;
+  /** Companion replies are serialized so one runtime session is never driven concurrently. */
+  companionTail: Promise<void>;
 }
 
 const CONFIRM_TTL_MS = 5 * 60 * 1000;
@@ -181,6 +207,12 @@ export interface ChannelTurnInput {
   threadId?: string;
   /** The human's message text, already stripped of any `[from]` prefix. */
   text: string;
+  /** Durable inbound artifacts (images, audio, documents, video, etc.). */
+  attachmentIds?: string[];
+  /** Internal compiled form used when media arrives while another task is active. */
+  attachmentContextText?: string;
+  /** Materialized inputs forwarded natively to capable agent runtimes. */
+  runtimeInputAttachments?: RuntimeInputAttachment[];
   from?: string;
   /** Conversation message id of the inbound mirror, excluded from history. */
   inboundMessageId?: string;
@@ -191,6 +223,8 @@ export interface ChannelTurnInput {
    * absent, falls back to `inboundMessageId`.
    */
   excludeMessageIds?: string[];
+  /** Monotonic per-chat input version. Messages received before execution are ordered by generation. */
+  turnGeneration?: number;
 }
 
 const HISTORY_LIMIT = 20;
@@ -207,6 +241,10 @@ export class ChannelTurnDispatcher {
   readonly #pending = new Map<string, PendingChannelConfirmation>();
   // Per-(connection,chat) batches of rapid-fire messages awaiting a debounce flush.
   readonly #batches = new Map<string, PendingBatch>();
+  /** Latest generation accepted while no task is active. */
+  readonly #turnGenerations = new Map<string, number>();
+  /** One durable work lane per chat; later inbound joins its mailbox instead of cancelling it. */
+  readonly #activeTurns = new Map<string, ActiveChannelTurn>();
 
   #queue: ChannelTurnEnqueuer | undefined;
 
@@ -251,6 +289,19 @@ export class ChannelTurnDispatcher {
       description: `${channelLabel(input.kind)} message received`,
       detail: input.from ? `From ${input.from}` : `Chat ${input.chatId}`,
     });
+    const active = this.#activeTurns.get(this.#turnKey(input));
+    if (active) {
+      input = await this.#prepareAttachmentContext(input, input.text);
+      const queued = this.deps.conversations.enqueueMessage({
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        text: input.text,
+        ...(input.attachmentIds?.length ? { attachments: input.attachmentIds } : {}),
+      });
+      active.mailbox.push({ input, queueId: queued.id });
+      return this.#replyAlongsideActiveTurn(input, active, queued.id);
+    }
+    input = this.#acceptInbound(input);
     const windowMs = this.deps.debounceMs ?? 0;
     if (windowMs <= 0) {
       return this.#commitTurn(input, input.inboundMessageId ? [input.inboundMessageId] : []);
@@ -260,6 +311,7 @@ export class ChannelTurnDispatcher {
     if (existing) {
       existing.texts.push(input.text);
       if (input.inboundMessageId) existing.ids.add(input.inboundMessageId);
+      for (const artifactId of input.attachmentIds ?? []) existing.attachmentIds.add(artifactId);
       existing.latest = input;
       clearTimeout(existing.timer);
       existing.timer = setTimeout(() => this.#flushBatch(key), windowMs);
@@ -271,6 +323,7 @@ export class ChannelTurnDispatcher {
       latest: input,
       texts: [input.text],
       ids,
+      attachmentIds: new Set(input.attachmentIds ?? []),
       timer: setTimeout(() => this.#flushBatch(key), windowMs),
     });
     return { replied: false, reason: 'batched' };
@@ -280,7 +333,15 @@ export class ChannelTurnDispatcher {
     const batch = this.#batches.get(key);
     if (!batch) return;
     this.#batches.delete(key);
-    const combined: ChannelTurnInput = { ...batch.latest, text: batch.texts.join('\n') };
+    const combined: ChannelTurnInput = {
+      ...batch.latest,
+      text: batch.texts.join('\n'),
+      ...(
+        batch.attachmentIds.size
+          ? { attachmentIds: [...batch.attachmentIds], attachmentContextText: undefined, runtimeInputAttachments: undefined }
+          : {}
+      ),
+    };
     void Promise.resolve(this.#commitTurn(combined, [...batch.ids])).catch((err) => {
       this.deps.logger.error('channel.turn.batch_failed', { key, err: (err as Error).message });
     });
@@ -350,6 +411,8 @@ export class ChannelTurnDispatcher {
    */
   async #executeTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
     const clientTurnId = `channel-${randomUUID()}`;
+    const active = this.#beginTurn(input, clientTurnId);
+    if (!active) return { replied: false, reason: 'superseded' };
     try {
       // App relationship (Phase 3): record/refresh the contact for this inbound,
       // so the App's pipeline + lastTouch clock stay current with zero agent effort.
@@ -435,7 +498,12 @@ export class ChannelTurnDispatcher {
         }
       }
       const permissionMode = modeCommand?.mode ?? this.#permissionMode(input.conversationId);
-      const runtimeText = modeCommand ? (modeCommand.rest || defaultTaskForMode(permissionMode)) : input.text;
+      const approvalSensitivity = this.#approvalSensitivity(input.conversationId);
+      const rawRuntimeText = modeCommand ? (modeCommand.rest || defaultTaskForMode(permissionMode)) : input.text;
+      const preparedInput = await this.#prepareAttachmentContext(input, rawRuntimeText);
+      const runtimeText = preparedInput.attachmentContextText ?? rawRuntimeText;
+
+      if (!this.#isActive(input, active)) return { replied: false, reason: 'superseded' };
 
       // Show "typing…" while the (possibly slow) turn runs; cleared in finally.
       void this.deps.setTyping?.(input.connectionId, input.chatId, true).catch(() => {});
@@ -474,8 +542,13 @@ export class ChannelTurnDispatcher {
           clientTurnId,
           executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
           permissionMode,
+          approvalSensitivity,
           maxTurns: 8,
           viewport: null,
+          signal: active.controller.signal,
+          // A screenshot/media requested inside a channel must survive long
+          // enough to be uploaded to that channel after the tool returns.
+          artifactPolicy: { mode: 'intentional', saveScreenshots: true, saveGeneratedAssets: true },
         };
         const senderSummary = this.#recordIdentity(input);
         // §G4 — long-horizon memory: fold turns that scrolled out of the live
@@ -487,20 +560,26 @@ export class ChannelTurnDispatcher {
         const appAddendum = input.appId ? this.#appOperatingAddendum(input.appId) : null;
         // Non-owner senders carry the operator's per-recipient (or answer-anyone) rules.
         const accessAddendum = buildAccessAddendum(access);
-        const channelMediaAddendum = input.kind === 'whatsapp'
+        const channelMediaAddendum = input.kind === 'whatsapp' || input.kind === 'telegram'
           ? [
-              'WHATSAPP MEDIA DELIVERY',
+              `${input.kind.toUpperCase()} MEDIA DELIVERY`,
               'This conversation can receive native images, videos, audio, voice notes, stickers, and files.',
               `When the person explicitly asks you to create or send visual/media content, use the available Agentis media/artifact tool and then agentis.channel.send with connectionId "${input.connectionId}" and destination "${input.chatId}".`,
-              'Do not say that WhatsApp cannot send an image unless the required tool is genuinely unavailable or its call failed; if it fails, explain the concrete limitation plainly.',
+              'A media item is sent only after agentis.channel.send returns sent:true. Never claim that you sent or attached media based only on generating, viewing, or saving it.',
+              `Do not say that ${input.kind} cannot send an image unless the required tool is genuinely unavailable or its call failed; if it fails, explain the concrete limitation plainly.`,
             ].join('\n')
           : null;
         const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, accessAddendum, conversationSummary, appAddendum, channelMediaAddendum]
           .filter((s): s is string => Boolean(s))
           .join('\n\n');
+        if (!this.#isActive(input, active)) return { replied: false, reason: 'superseded' };
         stream = runTurn(adapter, this.#buildHistory(input, excludeMessageIds), runtimeText, ctx, {
           channelContext: { kind: input.kind, from: input.from ?? null, chatId: input.chatId, threadId: input.threadId ?? null, senderSummary },
           ...(systemAddendum ? { systemAddendum } : {}),
+          ...(preparedInput.runtimeInputAttachments?.length
+            ? { inputAttachments: preparedInput.runtimeInputAttachments }
+            : {}),
+          liveInput: () => this.#drainActiveMailbox(active),
         });
       }
 
@@ -511,18 +590,29 @@ export class ChannelTurnDispatcher {
       let finalText = '';
       let finishReason = 'stop';
       let runtimeError: string | null = null;
+      let deliveredByChannelTool = false;
+      const generatedAttachments: OutboundAttachmentRef[] = [];
       let confirmation: Extract<import('@agentis/core').ChatDelta, { type: 'confirmation_required' }> | null = null;
       try {
         for await (const delta of stream) {
+          this.#recordActiveProgress(active, delta);
           this.#publishDelta(input, clientTurnId, delta);
           if (delta.type === 'text') finalText += delta.delta;
           else if (delta.type === 'confirmation_required') confirmation = delta;
-          else if (delta.type === 'tool_result' && delta.error) runtimeError = delta.error;
+          else if (delta.type === 'tool_result') {
+            if (delta.error) runtimeError = delta.error;
+            if (delta.name === 'agentis.channel.send' && isSuccessfulChannelToolResult(delta.result, input.connectionId)) {
+              deliveredByChannelTool = true;
+            }
+            generatedAttachments.push(...toolResultAttachments(delta.name, delta.result));
+          }
           else if (delta.type === 'done') finishReason = delta.finishReason;
         }
       } finally {
         this.#cancelOwnerReasoningIndicator(ownerReasoning);
       }
+
+      if (!this.#isActive(input, active)) return { replied: false, reason: 'superseded' };
 
       // Backstop: a plan-mode turn that wrote a plan but skipped/malformed the
       // architecture_canvas on a design-shaped request gets one cheap repair
@@ -575,7 +665,11 @@ export class ChannelTurnDispatcher {
         return gate.result;
       }
 
-      await this.#persistAndDeliver(input, body);
+      if (!deliveredByChannelTool) {
+        await this.#persistAndDeliver(input, body, {
+          ...(generatedAttachments.length ? { attachments: dedupeAttachmentRefs(generatedAttachments) } : {}),
+        });
+      }
       // Record the agent-initiated outbound against the App's rolling window (G7).
       if (input.appId) this.deps.outboundPolicy?.record(input.appId, 'agent');
       // BRAIN-BLUEPRINT-10X — channel turns form memory exactly like web chat:
@@ -615,6 +709,13 @@ export class ChannelTurnDispatcher {
       });
       return { replied: true };
     } catch (err) {
+      if (!this.#isActive(input, active)) {
+        this.deps.logger.info('channel.turn.superseded', {
+          connectionId: input.connectionId,
+          conversationId: input.conversationId,
+        });
+        return { replied: false, reason: 'superseded' };
+      }
       this.deps.logger.error('channel.turn.failed', {
         connectionId: input.connectionId,
         conversationId: input.conversationId,
@@ -630,7 +731,9 @@ export class ChannelTurnDispatcher {
       await this.#persistAndDeliver(input, failure, { failureNotice: true });
       return { replied: true, reason: 'error_notified' };
     } finally {
-      void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
+      if (this.#finishTurn(input, active)) {
+        void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
+      }
       // Clear the App console's live "agent is thinking/typing…" indicator (G9).
       this.#publishAppActivity(input, 'idle');
     }
@@ -811,6 +914,16 @@ export class ChannelTurnDispatcher {
     return state;
   }
 
+  /** Read the Ask-mode escalation threshold (default balanced). */
+  #approvalSensitivity(conversationId: string): ApprovalSensitivity {
+    const row = this.deps.db
+      .select({ approvalSensitivity: schema.conversations.approvalSensitivity })
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, conversationId))
+      .get();
+    return (row?.approvalSensitivity as ApprovalSensitivity | undefined) ?? 'balanced';
+  }
+
   #cancelOwnerReasoningIndicator(state: OwnerReasoningIndicatorState | undefined): void {
     if (!state) return;
     state.cancelled = true;
@@ -861,7 +974,11 @@ export class ChannelTurnDispatcher {
   async #persistAndDeliver(
     input: ChannelTurnInput,
     body: string,
-    options: { failureNotice?: boolean; deliveryClass?: Exclude<ChannelDeliveryClass, 'internal'> } = {},
+    options: {
+      failureNotice?: boolean;
+      deliveryClass?: Exclude<ChannelDeliveryClass, 'internal'>;
+      attachments?: OutboundAttachmentRef[];
+    } = {},
   ): Promise<void> {
     const sessionMessageId = `channel_reply_${randomUUID()}`;
     const message = this.deps.conversations.appendMirrored({
@@ -879,9 +996,15 @@ export class ChannelTurnDispatcher {
         channelDeliveryClass: options.deliveryClass ?? 'reply',
         ...(input.threadId ? { threadId: input.threadId } : {}),
         ...(options.failureNotice ? { channelFailureNotice: true } : {}),
+        ...('attachments' in options && options.attachments ? { channelAttachments: options.attachments } : {}),
       },
     });
-    const receipt = await this.#safeDeliver(input, body, sessionMessageId);
+    const receipt = await this.#safeDeliver(
+      input,
+      body,
+      sessionMessageId,
+      'attachments' in options ? options.attachments : undefined,
+    );
     const deliveryStatus = !receipt
       ? 'failed'
       : isAcknowledgedChannelDelivery(receipt)
@@ -1083,9 +1206,23 @@ export class ChannelTurnDispatcher {
     }
   }
 
-  async #safeDeliver(input: ChannelTurnInput, body: string, idempotencyKey: string): Promise<ChannelDeliveryReceipt | null> {
+  async #safeDeliver(
+    input: ChannelTurnInput,
+    body: string,
+    idempotencyKey: string,
+    attachments?: OutboundAttachmentRef[],
+  ): Promise<ChannelDeliveryReceipt | null> {
     try {
-      return await this.deps.deliver({ connectionId: input.connectionId, chatId: input.chatId, body, idempotencyKey }) ?? null;
+      // Typing is already live while the model is working. Do not add a second,
+      // simulated typing delay after the answer is ready.
+      return await this.deps.deliver({
+        connectionId: input.connectionId,
+        chatId: input.chatId,
+        body,
+        ...(attachments?.length ? { attachments } : {}),
+        idempotencyKey,
+        pacing: 'immediate',
+      }) ?? null;
     } catch (err) {
       this.deps.logger.warn('channel.turn.deliver_failed', {
         connectionId: input.connectionId,
@@ -1094,6 +1231,227 @@ export class ChannelTurnDispatcher {
       return null;
     }
   }
+
+  /**
+   * Answer a message in a separate conversational lane while the work lane keeps
+   * running. The model receives structured task state, not an intent regex or a
+   * canned status prompt, so it can naturally understand a status question,
+   * clarification, or changed requirement. The same inbound also remains in the
+   * work lane mailbox and joins its next tool/model boundary.
+   */
+  async #replyAlongsideActiveTurn(
+    input: ChannelTurnInput,
+    active: ActiveChannelTurn,
+    queueId: string,
+  ): Promise<{ replied: boolean; reason?: string }> {
+    let settle!: (result: { replied: boolean; reason?: string }) => void;
+    const result = new Promise<{ replied: boolean; reason?: string }>((resolve) => { settle = resolve; });
+    active.companionTail = active.companionTail
+      .then(async () => { settle(await this.#runCompanionTurn(input, active, queueId)); })
+      .catch((err) => {
+        this.deps.logger.warn('channel.turn.companion_queue_failed', {
+          connectionId: input.connectionId,
+          conversationId: input.conversationId,
+          err: (err as Error).message,
+        });
+        settle({ replied: false, reason: 'joined_active_turn' });
+      });
+    return result;
+  }
+
+  async #runCompanionTurn(
+    input: ChannelTurnInput,
+    active: ActiveChannelTurn,
+    queueId: string,
+  ): Promise<{ replied: boolean; reason?: string }> {
+    const access = this.#resolveAccess(input);
+    if (!access.allow) return { replied: false, reason: 'not_authorized' };
+    const responderAgentId = this.#resolveResponder(input);
+    const adapter = this.#resolveAdapter(responderAgentId, input.workspaceId);
+    const runner = this.deps.runConcurrentTurn
+      ?? (this.deps.runTurn ? undefined : ChatSessionExecutor.turn.bind(ChatSessionExecutor));
+    if (!adapter || !runner) return { replied: false, reason: 'joined_active_turn' };
+
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - active.startedAt) / 1_000));
+    const taskSnapshot = {
+      taskId: active.clientTurnId,
+      status: 'running',
+      phase: active.phase,
+      elapsedSeconds,
+      completedSteps: active.completedSteps,
+      objective: active.objective,
+    };
+    const ctx: ChatTurnContext = {
+      workspaceId: input.workspaceId,
+      ambientId: input.ambientId,
+      agentId: responderAgentId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      ...(input.appId ? { appId: input.appId } : {}),
+      clientTurnId: `channel-companion-${randomUUID()}`,
+      executionMode: 'chat',
+      permissionMode: 'ask',
+      maxTurns: 2,
+      viewport: null,
+      artifactPolicy: { mode: 'intentional', saveScreenshots: true, saveGeneratedAssets: true },
+    };
+    let finalText = '';
+    try {
+      const preparedInput = await this.#prepareAttachmentContext(input, input.text);
+      const stream = runner(
+        adapter,
+        this.#buildHistory(input, input.inboundMessageId ? [input.inboundMessageId] : []),
+        preparedInput.attachmentContextText ?? input.text,
+        ctx,
+        {
+          tools: [],
+          qualityMode: 'quick',
+          sessionKey: `${input.conversationId}:companion`,
+          ...(preparedInput.runtimeInputAttachments?.length
+            ? { inputAttachments: preparedInput.runtimeInputAttachments }
+            : {}),
+          channelContext: { kind: input.kind, from: input.from ?? null, chatId: input.chatId, threadId: input.threadId ?? null },
+          systemAddendum: `ACTIVE_TASK_STATE ${JSON.stringify(taskSnapshot)}`,
+        },
+      );
+      for await (const delta of stream) {
+        this.#publishDelta(input, ctx.clientTurnId!, delta);
+        if (delta.type === 'text') finalText += delta.delta;
+      }
+      const body = finalText.trim();
+      if (body) await this.#persistAndDeliver(input, body);
+      this.deps.conversations.consumeQueuedMessage({
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        queueId,
+      });
+      return { replied: Boolean(body), reason: 'active_turn_companion' };
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.companion_failed', {
+        connectionId: input.connectionId,
+        conversationId: input.conversationId,
+        err: (err as Error).message,
+      });
+      return { replied: false, reason: 'joined_active_turn' };
+    }
+  }
+
+  #drainActiveMailbox(active: ActiveChannelTurn): ChatMessage[] {
+    const joined = active.mailbox.splice(0);
+    for (const item of joined) {
+      try {
+        this.deps.conversations.consumeQueuedMessage({
+          workspaceId: item.input.workspaceId,
+          conversationId: item.input.conversationId,
+          queueId: item.queueId,
+        });
+      } catch (err) {
+        this.deps.logger.warn('channel.turn.mailbox_consume_failed', { queueId: item.queueId, err: (err as Error).message });
+      }
+    }
+    return joined.map((item) => ({
+      role: 'user' as const,
+      content: item.input.attachmentContextText ?? item.input.text,
+    }));
+  }
+
+  async #prepareAttachmentContext(input: ChannelTurnInput, body: string): Promise<ChannelTurnInput> {
+    if (!input.attachmentIds?.length || !this.deps.compileAttachments) return input;
+    if (body === input.text && input.attachmentContextText) return input;
+    // Persistent sessions may have already enriched the binary while downloading
+    // it. Keep the durable ids, but do not pay for the same vision/STT/document
+    // call twice. The shared compiler is the retry/fallback path.
+    if (hasUsableInlineMediaContext(body)) return { ...input, attachmentContextText: body };
+    try {
+      const compiled = await this.deps.compileAttachments({
+        workspaceId: input.workspaceId,
+        body,
+        attachmentIds: input.attachmentIds,
+      });
+      return {
+        ...input,
+        attachmentContextText: compiled.prompt,
+        ...(compiled.runtimeInputAttachments?.length
+          ? { runtimeInputAttachments: compiled.runtimeInputAttachments }
+          : {}),
+      };
+    } catch (err) {
+      this.deps.logger.warn('channel.turn.attachment_context_failed', {
+        workspaceId: input.workspaceId,
+        connectionId: input.connectionId,
+        attachmentIds: input.attachmentIds,
+        err: (err as Error).message,
+      });
+      return input;
+    }
+  }
+
+  #recordActiveProgress(active: ActiveChannelTurn, delta: ChatDelta): void {
+    if (delta.type === 'thinking') active.phase = 'thinking';
+    if (delta.type === 'activity') {
+      active.phase = delta.phase === 'waiting' ? 'waiting' : delta.phase === 'runtime' ? 'thinking' : 'working';
+      if (delta.status === 'success') active.completedSteps += 1;
+    }
+    if (delta.type === 'tool_call') active.phase = 'working';
+    if (delta.type === 'tool_result' && !delta.error) active.completedSteps += 1;
+  }
+
+  #turnKey(input: Pick<ChannelTurnInput, 'connectionId' | 'chatId'>): string {
+    return `${input.connectionId}:${input.chatId}`;
+  }
+
+  /** Stamp a new work lane when this chat has no active task. */
+  #acceptInbound(input: ChannelTurnInput): ChannelTurnInput {
+    const key = this.#turnKey(input);
+    const generation = (this.#turnGenerations.get(key) ?? 0) + 1;
+    this.#turnGenerations.set(key, generation);
+    return { ...input, turnGeneration: generation };
+  }
+
+  /** Begin only if this still represents the latest message from the chat. */
+  #beginTurn(input: ChannelTurnInput, clientTurnId: string): ActiveChannelTurn | null {
+    const key = this.#turnKey(input);
+    const generation = input.turnGeneration ?? this.#turnGenerations.get(key) ?? 1;
+    if ((this.#turnGenerations.get(key) ?? generation) !== generation) return null;
+    const active: ActiveChannelTurn = {
+      generation,
+      controller: new AbortController(),
+      clientTurnId,
+      objective: input.text,
+      startedAt: Date.now(),
+      phase: 'thinking',
+      completedSteps: 0,
+      mailbox: [],
+      companionTail: Promise.resolve(),
+    };
+    this.#activeTurns.set(key, active);
+    return active;
+  }
+
+  #isActive(input: ChannelTurnInput, active: ActiveChannelTurn): boolean {
+    const key = this.#turnKey(input);
+    return this.#activeTurns.get(key) === active
+      && this.#turnGenerations.get(key) === active.generation
+      && !active.controller.signal.aborted;
+  }
+
+  /** Returns true only for the owner of the live typing presence. */
+  #finishTurn(input: ChannelTurnInput, active: ActiveChannelTurn): boolean {
+    const key = this.#turnKey(input);
+    if (this.#activeTurns.get(key) !== active) return false;
+    this.#activeTurns.delete(key);
+    return true;
+  }
+}
+
+function hasUsableInlineMediaContext(body: string): boolean {
+  const value = body.toLowerCase();
+  if (value.includes('[voice note transcript]')) return true;
+  if (value.includes('\ntranscript:\n') && !value.includes('transcription is unavailable')) return true;
+  if (value.includes('visual analysis:') && !value.includes('visual analysis is unavailable')) return true;
+  if (value.includes('preview-frame analysis:')) return true;
+  if (value.includes('[document received') && !value.includes('text extraction is unavailable')) return true;
+  return false;
 }
 
 /**
@@ -1135,6 +1493,57 @@ function isCreditOrQuotaError(message: string): boolean {
     || /out of credits?/i.test(message)
     || /billing|payment required|quota exceeded|exceeded your current quota/i.test(message)
     || /\bno credits?\b/i.test(message);
+}
+
+function isSuccessfulChannelToolResult(result: unknown, connectionId: string): boolean {
+  if (!result || typeof result !== 'object') return false;
+  const value = result as { sent?: unknown; verified?: unknown; connectionId?: unknown; deliveryRole?: unknown };
+  return value.sent === true
+    && value.verified === true
+    && value.connectionId === connectionId
+    && value.deliveryRole === 'final';
+}
+
+/** Turn saved screenshot/media tool outputs into deterministic channel attachments. */
+function toolResultAttachments(name: string, result: unknown): OutboundAttachmentRef[] {
+  if (name !== 'agentis.browser.screenshot' && name !== 'agentis.media.generate') return [];
+  if (!result || typeof result !== 'object') return [];
+  const value = result as {
+    saved?: unknown;
+    ref?: unknown;
+    mimeType?: unknown;
+    modality?: unknown;
+    assets?: Array<{ ref?: unknown; mimeType?: unknown; name?: unknown }>;
+  };
+  const entries = Array.isArray(value.assets) && value.assets.length > 0
+    ? value.assets
+    : [{ ref: value.ref, mimeType: value.mimeType }];
+  return entries.flatMap((entry, index) => {
+    if (typeof entry.ref !== 'string' || !entry.ref.trim()) return [];
+    const mimeType = typeof entry.mimeType === 'string' ? entry.mimeType : undefined;
+    const modality = typeof value.modality === 'string' ? value.modality : undefined;
+    const kind: OutboundAttachmentRef['kind'] = modality === 'audio' || modality === 'speech'
+      ? 'audio'
+      : modality === 'video' ? 'video'
+        : mimeType?.startsWith('audio/') ? 'audio'
+          : mimeType?.startsWith('video/') ? 'video'
+            : mimeType?.startsWith('image/') ? 'image'
+              : 'file';
+    const filename = typeof entry.name === 'string' && entry.name.trim()
+      ? entry.name.trim()
+      : name === 'agentis.browser.screenshot' ? 'screenshot.png' : `generated-${index + 1}`;
+    return [{ url: entry.ref.trim(), kind, filename, ...(mimeType ? { mimeType } : {}) }];
+  });
+}
+
+function dedupeAttachmentRefs(attachments: OutboundAttachmentRef[]): OutboundAttachmentRef[] {
+  const seen = new Set<string>();
+  return attachments.filter((attachment) => {
+    const key = `${attachment.url ?? attachment.artifactId ?? ''}:${attachment.kind ?? ''}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function channelLabel(kind: string): string {

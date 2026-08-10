@@ -157,6 +157,7 @@ function runEmbeddedMigrations(sqlite: Database.Database): void {
   addColumn('conversations', 'channel_connection_id', 'TEXT REFERENCES channel_connections(id) ON DELETE SET NULL');
   addColumn('conversations', 'channel_chat_id', 'TEXT');
   addColumn('conversations', 'permission_mode', "TEXT NOT NULL DEFAULT 'ask'");
+  addColumn('conversations', 'approval_sensitivity', "TEXT NOT NULL DEFAULT 'balanced'");
 
   // Living Apps Phase 0 (migration v95) — a channel/conversation can belong to an App.
   // Plain TEXT: this drift runs before the apps table exists, so no inline FK

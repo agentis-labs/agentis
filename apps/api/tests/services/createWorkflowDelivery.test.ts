@@ -107,7 +107,7 @@ describe('createWorkflowFromDescription — model-assisted creation', () => {
     expect((res.graph as WorkflowGraph).nodes.length).toBeGreaterThan(0);
   });
 
-  it('requires a draft instead of recursively calling a slow CLI harness', async () => {
+  it('creates a deterministic draft instead of recursively calling a slow CLI harness', async () => {
     let chatCalls = 0;
     const adapterDeps = {
       db: ctx.db, logger: ctx.logger, bus: ctx.bus,
@@ -124,13 +124,15 @@ describe('createWorkflowFromDescription — model-assisted creation', () => {
       },
     } as unknown as ToolHandlerDeps;
 
-    await expect(createWorkflowFromDescription(adapterDeps, {
+    const result = await createWorkflowFromDescription(adapterDeps, {
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id, agentId: 'orchy',
       description: 'Take a deep look into ~/stores and build an Agentis workflow with a rendered dashboard output.',
       stream: false,
-    })).rejects.toMatchObject({ code: 'WORKFLOW_DRAFT_REQUIRED' });
+    });
 
     expect(chatCalls, 'the build tool must never recursively invoke the calling harness').toBe(0);
+    expect((result as { trace: { synthesis: string } }).trace.synthesis).toBe('plan');
+    expect((result.graph as WorkflowGraph).nodes.length).toBeGreaterThan(0);
   });
 
   it('fails honestly instead of fabricating a graph when model synthesis fails', async () => {

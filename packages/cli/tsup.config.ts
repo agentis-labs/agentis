@@ -43,6 +43,9 @@ export default defineConfig({
     'better-sqlite3',
     'onnxruntime-node',
     '@huggingface/transformers',
+    // Portable WASM/JS channel-audio decoding. Keep the package external so its
+    // dynamically loaded codec modules and .wasm assets survive npm packing.
+    '@audio/decode',
     // `sharp` (pulled in by baileys for WhatsApp media) is a native addon too.
     // Inlining its glue left 43 bare `require("@img/sharp-*")` calls in the bundle
     // for platform packages npm never installs → MODULE_NOT_FOUND the first time a

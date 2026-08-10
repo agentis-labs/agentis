@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type {
   AgentAdapter,
   AdapterCapabilities,
@@ -24,6 +25,7 @@ import type {
   RuntimeContext,
   RuntimeDescriptor,
   RuntimeProfile,
+  RuntimeInputAttachment,
   RuntimeSessionInfo,
   ToolDefinition,
 } from '@agentis/core';
@@ -446,12 +448,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       ...(this.opts.allowedTools?.length ? [`--allowedTools=${this.opts.allowedTools.join(',')}`] : []),
       ...(storedSession ? ['--resume', storedSession] : []),
       ...(this.opts.runtimeProfile?.mode === 'hermetic' ? ['--strict-mcp-config'] : []),
+      ...(options?.inputAttachments?.length
+        ? [...new Set(options.inputAttachments.map((attachment) => path.dirname(attachment.path)))]
+            .flatMap((directory) => ['--add-dir', directory])
+        : []),
       // Mount Agentis tools over MCP so Claude Code calls them natively in its loop.
       // `executionMode` tags the descriptor so Plan mode is registry-enforced, not
       // just prompt-level, for Claude's own tool loop.
       ...harnessMcpArgs('claude_code', this.opts.mcpServers ?? [], options?.executionMode ?? 'chat', {
         conversationId: options?.conversationId,
         turnLease: options?.turnLease,
+        approvalSensitivity: options?.approvalSensitivity,
       }),
       ...(this.opts.extraArgs ?? []),
     ];
@@ -491,7 +498,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       args,
       cwd: this.opts.cwd,
       env: this.opts.env,
-      stdin: buildClaudeCodeChatPrompt(messagesForRuntimeSession(messages, Boolean(storedSession)), tools, this.#mcpNative()),
+      stdin: appendRuntimeInputAttachments(
+        buildClaudeCodeChatPrompt(messagesForRuntimeSession(messages, Boolean(storedSession)), tools, this.#mcpNative()),
+        options?.inputAttachments,
+      ),
       displayName: 'Claude Code',
       logTag: 'claude_code.chat',
       logger: this.opts.logger,
@@ -865,6 +875,18 @@ function buildClaudeCodeChatPrompt(messages: ChatMessage[], tools: ToolDefinitio
     '',
     'Conversation:',
     formatMessagesForClaude(messages),
+  ].join('\n');
+}
+
+function appendRuntimeInputAttachments(prompt: string, attachments?: RuntimeInputAttachment[]): string {
+  if (!attachments?.length) return prompt;
+  return [
+    prompt,
+    '',
+    '<runtime_input_attachments>',
+    'These are files attached by the user to this turn. Inspect them directly with the runtime Read capability before answering; do not infer their contents from filenames.',
+    ...attachments.map((attachment) => `- ${attachment.name} (${attachment.mimeType}): ${attachment.path}`),
+    '</runtime_input_attachments>',
   ].join('\n');
 }
 

@@ -26,6 +26,7 @@ import { and, eq } from 'drizzle-orm';
 import {
   AgentisError,
   type AgentisToolContext,
+  type ApprovalSensitivity,
   type WorkflowGraph,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -38,7 +39,8 @@ import { runPublishedWorkflow, inputSchemaFor } from '../engine/runPublishedWork
 import { requireAuth } from '../middleware/auth.js';
 import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 import type { ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
-import { CONVERSATION_ID_HEADER, TURN_LEASE_HEADER } from '../services/mcp/mcpHarnessSession.js';
+import { APPROVAL_SENSITIVITY_HEADER, CONVERSATION_ID_HEADER, TURN_LEASE_HEADER } from '../services/mcp/mcpHarnessSession.js';
+import { decideToolApproval, resolveToolApprovalPolicy } from '../services/chat/chatApprovalPolicy.js';
 
 interface McpSettings { published?: boolean; slug?: string }
 
@@ -150,6 +152,10 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
     // `ask` blocks-and-instructs (operator approves), anything else = Auto (allow).
     const headerMode = c.req.header('x-agentis-execution-mode');
     const executionMode: 'chat' | 'plan' | 'ask' = headerMode === 'plan' ? 'plan' : headerMode === 'ask' ? 'ask' : 'chat';
+    const headerSensitivity = c.req.header(APPROVAL_SENSITIVITY_HEADER);
+    const approvalSensitivity: ApprovalSensitivity = headerSensitivity === 'cautious'
+      ? 'cautious'
+      : headerSensitivity === 'autonomous' ? 'autonomous' : 'balanced';
     const body = (await c.req.json().catch(() => null)) as JsonRpcRequest | null;
     if (!body || body.jsonrpc !== '2.0' || typeof body.method !== 'string') {
       return c.json(rpcError(body?.id ?? null, -32600, 'Invalid Request'));
@@ -201,7 +207,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
           const startedAt = Date.now();
           const result = await callMcpTool(
             deps,
-            { ...ws, agentId, executionMode, ...(conversationId ? { conversationId } : {}), ...(turnSignal ? { turnSignal } : {}) },
+            { ...ws, agentId, executionMode, approvalSensitivity, ...(conversationId ? { conversationId } : {}), ...(turnSignal ? { turnSignal } : {}) },
             params.name,
             params.arguments ?? {},
           );
@@ -275,6 +281,11 @@ interface McpTool {
   kind: 'workflow' | 'registry';
   /** workflow slug or registry tool id. */
   ref: string;
+  annotations?: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    openWorldHint: boolean;
+  };
 }
 
 function collectMcpTools(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
@@ -326,6 +337,7 @@ function allMcpOperations(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
     inputSchema: t.inputSchema,
     kind: 'workflow' as const,
     ref: t.slug,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   }));
   if (deps.toolRegistry) {
     for (const def of deps.toolRegistry.catalog({ mcpOnly: true }).tools) {
@@ -335,8 +347,13 @@ function allMcpOperations(deps: McpRoutesDeps, workspaceId: string): McpTool[] {
         inputSchema: (def.inputSchema && typeof def.inputSchema === 'object'
           ? def.inputSchema
           : { type: 'object' }) as Record<string, unknown>,
-        kind: 'registry',
-        ref: def.id,
+      kind: 'registry',
+      ref: def.id,
+      annotations: {
+        readOnlyHint: !def.mutating,
+        destructiveHint: Boolean(def.approval?.destructive),
+        openWorldHint: Boolean(def.approval?.externalSideEffects),
+      },
       });
     }
   }
@@ -374,13 +391,18 @@ function resolveMcpAgentId(db: AgentisSqliteDb, workspaceId: string, agentId?: s
 }
 
 function toMcpDescriptor(t: McpTool) {
-  return { name: t.name, description: t.description, inputSchema: t.inputSchema };
+  return {
+    name: t.name,
+    description: t.description,
+    inputSchema: t.inputSchema,
+    ...(t.annotations ? { annotations: t.annotations } : {}),
+  };
 }
 
 /** Execute an MCP tool call → MCP `content` result shape. */
 async function callMcpTool(
   deps: McpRoutesDeps,
-  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask'; conversationId?: string; turnSignal?: AbortSignal },
+  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask'; approvalSensitivity?: ApprovalSensitivity; conversationId?: string; turnSignal?: AbortSignal },
   name: string,
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
@@ -405,7 +427,14 @@ async function callMcpTool(
     const target = typeof args.name === 'string' ? args.name.trim() : '';
     const tool = allMcpOperations(deps, ws.workspaceId).find((candidate) => candidate.name === target);
     if (!tool) return textResult(JSON.stringify({ error: `Unknown operation '${target}'`, remediation: 'Use agentis.tools.search first.' }), true);
-    return textResult(JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, mutating: tool.kind === 'workflow' || Boolean(deps.toolRegistry?.get(tool.ref)?.mutating) }));
+    const definition = tool.kind === 'registry' ? deps.toolRegistry?.get(tool.ref) : undefined;
+    return textResult(JSON.stringify({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      mutating: tool.kind === 'workflow' || Boolean(definition?.mutating),
+      approval: resolveToolApprovalPolicy(tool.kind === 'workflow' ? 'workflow.published' : tool.name, definition),
+    }));
   }
   if (name === 'agentis.tools.call') {
     const target = typeof args.name === 'string' ? args.name.trim() : '';
@@ -420,6 +449,14 @@ async function callMcpTool(
   }
   // Workflow tool?
   if (name.startsWith(WORKFLOW_TOOL_PREFIX)) {
+    if (ws.executionMode === 'plan') {
+      return textResult(JSON.stringify({
+        error: `tool '${name}' cannot mutate workspace state while the conversation is in Plan mode`,
+        code: 'PLAN_MODE_MUTATION_BLOCKED',
+      }), true);
+    }
+    const approval = decidePublishedWorkflowApproval(name, ws);
+    if (approval) return approval;
     const slug = name.slice(WORKFLOW_TOOL_PREFIX.length);
     const wf = findPublishedBySlug(deps.db, ws.workspaceId, slug);
     if (!wf) return textResult(`No published MCP workflow tool '${name}'`, true);
@@ -452,6 +489,7 @@ async function callMcpTool(
       ambientId: ws.ambientId,
       ...(ws.agentId ? { agentId: ws.agentId } : {}),
       ...(ws.executionMode ? { executionMode: ws.executionMode } : {}),
+      ...(ws.approvalSensitivity ? { approvalSensitivity: ws.approvalSensitivity } : {}),
       ...(ws.conversationId ? { conversationId: ws.conversationId } : {}),
       ...(ws.turnSignal ? { signal: ws.turnSignal } : {}),
       caller: 'mcp',
@@ -469,6 +507,23 @@ async function callMcpTool(
   }
 
   return textResult(`Unknown tool '${name}'`, true);
+}
+
+function decidePublishedWorkflowApproval(
+  name: string,
+  ws: { executionMode?: 'chat' | 'plan' | 'ask'; approvalSensitivity?: ApprovalSensitivity },
+): { content: Array<{ type: 'text'; text: string }>; isError?: boolean } | null {
+  if (ws.executionMode !== 'ask') return null;
+  const decision = decideToolApproval({
+    name: 'workflow.published',
+    permissionMode: 'ask',
+    sensitivity: ws.approvalSensitivity,
+  });
+  if (!decision.requiresApproval) return null;
+  return textResult(JSON.stringify({
+    error: `tool '${name}' is ${decision.riskLevel} risk and meets this conversation's Ask threshold — it was NOT executed. Do not retry. Ask the operator to approve the workflow run.`,
+    code: 'ASK_MODE_CONFIRMATION_REQUIRED',
+  }), true);
 }
 
 // Roughly 3k tokens: enough for a useful structured observation without making

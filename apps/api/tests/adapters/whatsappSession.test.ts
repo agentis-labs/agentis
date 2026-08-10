@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent } from '../../src/adapters/channels/whatsappSession.js';
+import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, resolveWhatsAppNativeBody, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent, whatsappNativeContent } from '../../src/adapters/channels/whatsappSession.js';
 import type { OutboundAttachment } from '../../src/adapters/channels/types.js';
 
 describe('whatsappMediaContent', () => {
@@ -55,6 +55,17 @@ describe('whatsappMediaContent', () => {
   });
 });
 
+describe('whatsappNativeContent', () => {
+  it('builds provider-native location, contact, and poll messages', () => {
+    expect(whatsappNativeContent({ kind: 'location', latitude: -19.9, longitude: -43.9, name: 'Talki' }))
+      .toMatchObject({ location: { degreesLatitude: -19.9, degreesLongitude: -43.9, name: 'Talki' } });
+    expect(whatsappNativeContent({ kind: 'contact', displayName: 'Bia', phone: '+5531999999999' }).contacts.contacts[0].vcard)
+      .toContain('TEL;TYPE=CELL:+5531999999999');
+    expect(whatsappNativeContent({ kind: 'poll', question: 'Choose', options: ['A', 'B'] }))
+      .toEqual({ poll: { name: 'Choose', values: ['A', 'B'], selectableCount: 1 } });
+  });
+});
+
 describe('resolveWhatsAppInboundBody', () => {
   it('describes an image even when it already has a caption', async () => {
     const body = await resolveWhatsAppInboundBody(
@@ -83,6 +94,59 @@ describe('resolveWhatsAppInboundBody', () => {
       },
     );
     expect(body).toBe('[Voice note transcript]\nvoice:audio/ogg; codecs=opus');
+  });
+
+  it('downloads media once, persists the original, and analyzes the same image', async () => {
+    let downloads = 0;
+    const body = await resolveWhatsAppInboundBody(
+      { message: { imageMessage: { mimetype: 'image/png', caption: 'inspect' } } },
+      {
+        downloadMedia: async () => { downloads += 1; return Buffer.from('pixels'); },
+        persistMedia: async (media) => `artifact:${media.bytes.toString()}-${media.filename}`,
+        describeImage: async (bytes) => `saw ${bytes.toString()}`,
+      },
+    );
+    expect(downloads).toBe(1);
+    expect(body).toContain('Attachment: artifact:pixels-image.png');
+    expect(body).toContain('Visual analysis: saw pixels');
+  });
+
+  it('preserves videos, GIF playback and stickers as reusable attachments', async () => {
+    const persistMedia = async (media: { kind: string }) => `artifact:${media.kind}`;
+    await expect(resolveWhatsAppInboundBody(
+      { message: { videoMessage: { mimetype: 'video/mp4', gifPlayback: true } } },
+      { downloadMedia: async () => Buffer.from('gif'), persistMedia },
+    )).resolves.toContain('[Animated GIF received]');
+    await expect(resolveWhatsAppInboundBody(
+      { message: { stickerMessage: { mimetype: 'image/webp' } } },
+      { downloadMedia: async () => Buffer.from('sticker'), persistMedia },
+    )).resolves.toContain('Attachment: artifact:sticker');
+  });
+
+  it('understands a received video through its provider thumbnail while preserving the full clip', async () => {
+    const body = await resolveWhatsAppInboundBody(
+      { message: { videoMessage: { mimetype: 'video/mp4', jpegThumbnail: Buffer.from('frame') } } },
+      {
+        downloadMedia: async () => Buffer.from('full-video'),
+        persistMedia: async () => 'artifact:video',
+        describeImage: async (bytes) => `preview ${bytes.toString()}`,
+      },
+    );
+    expect(body).toContain('Attachment: artifact:video');
+    expect(body).toContain('Preview-frame analysis: preview frame');
+  });
+});
+
+describe('resolveWhatsAppNativeBody', () => {
+  it('normalizes location, contact, poll, and reaction payloads', () => {
+    expect(resolveWhatsAppNativeBody({ locationMessage: { degreesLatitude: -19.9, degreesLongitude: -43.9, name: 'Talki' } }))
+      .toContain('https://maps.google.com/?q=-19.9,-43.9');
+    expect(resolveWhatsAppNativeBody({ contactMessage: { displayName: 'Bia', vcard: 'TEL:+5531999999999' } }))
+      .toContain('TEL:+5531999999999');
+    expect(resolveWhatsAppNativeBody({ pollCreationMessage: { name: 'Choose', options: [{ optionName: 'A' }, { optionName: 'B' }] } }))
+      .toContain('2. B');
+    expect(resolveWhatsAppNativeBody({ reactionMessage: { text: '👍', key: { id: 'm1' } } }))
+      .toContain('message m1');
   });
 });
 

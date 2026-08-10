@@ -15,7 +15,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { AgentisError } from '@agentis/core';
-import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, OutboundMediaKind, ParsedInboundMessage } from './types.js';
+import type { ChannelAdapter, ChannelDeliveryReceipt, ChannelHealthCheck, OutboundAttachment, OutboundMediaKind, OutboundNativeContent, ParsedInboundMessage } from './types.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
 
@@ -162,7 +162,8 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     };
   }
 
-  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[] }): Promise<ChannelDeliveryReceipt> {
+  async send(args: { token: string; chatId: string; body: string; attachments?: OutboundAttachment[]; native?: OutboundNativeContent }): Promise<ChannelDeliveryReceipt> {
+    if (args.native) return this.#sendNative(args.token, args.chatId, args.native, args.body);
     const attachments = args.attachments ?? [];
     if (attachments.length === 0) {
       return this.#sendMessage(args.token, args.chatId, args.body);
@@ -175,6 +176,34 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     }
     const first = receipts[0]!;
     return { ...first, providerMessageIds: receipts.map((receipt) => receipt.providerMessageId) };
+  }
+
+  async #sendNative(token: string, chatId: string, native: OutboundNativeContent, body: string): Promise<ChannelDeliveryReceipt> {
+    const method = native.kind === 'location' ? 'sendLocation' : native.kind === 'contact' ? 'sendContact' : 'sendPoll';
+    const nativePayload = native.kind === 'location'
+      ? { latitude: native.latitude, longitude: native.longitude }
+      : native.kind === 'contact'
+        ? {
+            phone_number: native.phone,
+            first_name: native.displayName.split(/\s+/, 1)[0] || native.displayName,
+            ...(native.displayName.includes(' ') ? { last_name: native.displayName.split(/\s+/).slice(1).join(' ') } : {}),
+            ...(native.vcard ? { vcard: native.vcard } : {}),
+          }
+        : {
+            question: native.question,
+            options: native.options,
+            allows_multiple_answers: (native.selectableCount ?? 1) > 1,
+          };
+    const res = await this.fetchImpl(`${TELEGRAM_API}/bot${encodeURIComponent(token)}/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, ...nativePayload }),
+    });
+    if (!res.ok) await this.#throwSendError(res, chatId, method);
+    const receipt = await this.#receipt(res, chatId, method);
+    if (!body.trim()) return receipt;
+    const textReceipt = await this.#sendMessage(token, chatId, body.trim());
+    return { ...receipt, providerMessageIds: [receipt.providerMessageId, textReceipt.providerMessageId] };
   }
 
   async #sendMessage(token: string, chatId: string, body: string): Promise<ChannelDeliveryReceipt> {
@@ -261,9 +290,7 @@ export class TelegramChannelAdapter implements ChannelAdapter {
     const update = payload as TelegramUpdate;
     const updateId = update?.update_id;
     const msg = update?.message ?? update?.edited_message ?? null;
-    if (!msg || typeof msg.text !== 'string' || msg.text.length === 0) {
-      return null; // ignore non-text updates (stickers, photos, status, …)
-    }
+    if (!msg) return null;
     if (typeof updateId !== 'number' || !msg.chat?.id) {
       throw new AgentisError('VALIDATION_FAILED', 'telegram webhook missing update_id or chat.id');
     }
@@ -272,12 +299,16 @@ export class TelegramChannelAdapter implements ChannelAdapter {
         msg.from.username ||
         String(msg.from.id)
       : undefined;
+    const media = telegramWebhookMedia(msg);
+    const body = telegramWebhookBody(msg, media);
+    if (!body) return null;
     const result: ParsedInboundMessage = {
       externalId: `telegram:${updateId}`,
       chatId: String(msg.chat.id),
-      body: msg.text,
+      body,
     };
     if (fromName) result.from = fromName;
+    if (media) result.media = media;
     return result;
   }
 }
@@ -289,6 +320,78 @@ interface TelegramUpdate {
 }
 interface TelegramMessage {
   text?: string;
+  caption?: string;
   chat?: { id?: number | string };
   from?: { id: number; username?: string; first_name?: string; last_name?: string };
+  photo?: Array<{ file_id?: string }>;
+  voice?: { file_id?: string; mime_type?: string };
+  audio?: { file_id?: string; mime_type?: string; file_name?: string };
+  video?: { file_id?: string; mime_type?: string; file_name?: string };
+  animation?: { file_id?: string; mime_type?: string; file_name?: string };
+  video_note?: { file_id?: string; mime_type?: string; file_name?: string };
+  sticker?: { file_id?: string; is_animated?: boolean; is_video?: boolean };
+  document?: { file_id?: string; mime_type?: string; file_name?: string };
+  location?: { latitude?: number; longitude?: number };
+  venue?: { title?: string; address?: string; location?: { latitude?: number; longitude?: number } };
+  contact?: { first_name?: string; last_name?: string; phone_number?: string; vcard?: string };
+  poll?: { question?: string; options?: Array<{ text?: string }> };
+}
+
+function telegramWebhookMedia(msg: TelegramMessage): ParsedInboundMessage['media'] | null {
+  const photo = msg.photo?.at(-1);
+  if (photo?.file_id) return { providerFileId: photo.file_id, kind: 'image', mimeType: 'image/jpeg', filename: 'photo.jpg', ...(msg.caption ? { caption: msg.caption } : {}) };
+  if (msg.voice?.file_id) return { providerFileId: msg.voice.file_id, kind: 'voice', mimeType: msg.voice.mime_type ?? 'audio/ogg', filename: 'voice-note.ogg' };
+  if (msg.audio?.file_id) return { providerFileId: msg.audio.file_id, kind: 'audio', mimeType: msg.audio.mime_type ?? 'audio/mpeg', filename: msg.audio.file_name ?? 'audio.mp3' };
+  const video = msg.animation ?? msg.video ?? msg.video_note;
+  if (video?.file_id) return {
+    providerFileId: video.file_id, kind: 'video', mimeType: video.mime_type ?? 'video/mp4',
+    filename: video.file_name ?? (msg.animation ? 'animation.mp4' : 'video.mp4'),
+    ...(msg.caption ? { caption: msg.caption } : {}),
+  };
+  if (msg.sticker?.file_id) return {
+    providerFileId: msg.sticker.file_id, kind: 'sticker',
+    mimeType: msg.sticker.is_animated ? 'application/x-tgsticker' : msg.sticker.is_video ? 'video/webm' : 'image/webp',
+    filename: msg.sticker.is_animated ? 'sticker.tgs' : msg.sticker.is_video ? 'sticker.webm' : 'sticker.webp',
+  };
+  if (msg.document?.file_id) {
+    const mimeType = msg.document.mime_type ?? 'application/octet-stream';
+    return {
+      providerFileId: msg.document.file_id,
+      kind: mimeType.startsWith('image/') ? 'image' : 'file',
+      mimeType,
+      filename: msg.document.file_name ?? 'document.bin',
+      ...(msg.caption ? { caption: msg.caption } : {}),
+    };
+  }
+  return null;
+}
+
+function telegramWebhookBody(msg: TelegramMessage, media: ParsedInboundMessage['media'] | null): string | null {
+  if (typeof msg.text === 'string' && msg.text.trim()) return msg.text.trim();
+  const location = msg.location ?? msg.venue?.location;
+  if (location && Number.isFinite(location.latitude) && Number.isFinite(location.longitude)) {
+    return [
+      msg.venue ? '[Venue received]' : '[Location received]',
+      ...(msg.venue?.title ? [`Name: ${msg.venue.title}`] : []),
+      ...(msg.venue?.address ? [`Address: ${msg.venue.address}`] : []),
+      `Coordinates: ${location.latitude}, ${location.longitude}`,
+      `Map: https://maps.google.com/?q=${location.latitude},${location.longitude}`,
+    ].join('\n');
+  }
+  if (msg.contact) return [
+    '[Contact card received]',
+    `Name: ${[msg.contact.first_name, msg.contact.last_name].filter(Boolean).join(' ')}`,
+    `Phone: ${msg.contact.phone_number ?? ''}`,
+    ...(msg.contact.vcard ? [`vCard:\n${msg.contact.vcard}`] : []),
+  ].join('\n');
+  if (msg.poll) return [
+    '[Poll received]',
+    `Question: ${msg.poll.question ?? ''}`,
+    ...(msg.poll.options ?? []).map((option, index) => `${index + 1}. ${option.text ?? ''}`),
+  ].join('\n');
+  if (media) return [
+    `[${media.kind === 'voice' ? 'Voice note' : media.kind === 'file' ? 'Document' : media.kind} received]`,
+    ...(media.caption ? [`Caption: ${media.caption}`] : []),
+  ].join('\n');
+  return typeof msg.caption === 'string' && msg.caption.trim() ? msg.caption.trim() : null;
 }

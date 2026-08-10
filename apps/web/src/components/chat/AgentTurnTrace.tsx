@@ -1,363 +1,247 @@
-/**
- * AgentTurnTrace — the single, calm record of an agent's work inside one chat
- * turn. It replaces the old split between LiveActivityTrace (narration) and
- * ExecutionFeed (tool list) with one cohesive surface:
- *
- *  • While the turn is streaming, sanitized operator events are written out as
- *    small messages. Hidden reasoning and generic runtime narration are excluded.
- *    The trace grows tall enough to read several steps back and scrolls instead
- *    of hiding history behind a "+N earlier" summary.
- *  • When the turn finishes, the whole thing collapses to a single minimal pill
- *    — "Used 3 tools · 4.2s ›" — that expands on click into the full timeline
- *    (every operator event + each tool's sanitized input/result/error).
- *
- * Fed by normalized operator `activity` deltas and `toolCalls` the turn streams,
- * plus the finalized
- * `turn` trace for duration. Trivial replies (a plain answer, no real work)
- * render nothing.
- */
-
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Check,
-  ChevronRight,
-  CircleSlash,
-  Loader2,
-} from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, Check, ChevronRight, CircleSlash, FileCheck2, Loader2, TerminalSquare } from 'lucide-react';
 import clsx from 'clsx';
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { compactActivityLabel, type ChatDelta, type ChatTurnTrace } from '@agentis/core';
+import {
+  compactActivityLabel,
+  type ChatCommentary,
+  type ChatContextManifest,
+  type ChatDelta,
+  type ChatExecutionEnvelope,
+  type ChatTurnTrace,
+} from '@agentis/core';
 import type { ToolCallData } from './toolCalls';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 
 type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
-/** 'recovered' = this step errored, but the agent produced more work after it —
- * a self-corrected retry, not the run's final outcome. Only the LAST step, if
- * it errored, keeps the alarming 'error' treatment. */
-type ThoughtState = 'active' | 'done' | 'error' | 'recovered';
-
-interface Thought {
-  id: string;
-  text: string;
-  state: ThoughtState;
-}
-
-/** Keep the live trace bounded without hiding the useful recent history. */
-const MAX_VISIBLE_THOUGHTS = 48;
-
-/**
- * Framework-setup narration (boot, context load, reply streaming) — real, worth
- * showing live, but not "work" on its own. A turn that only did these is a plain
- * conversational reply and should leave no collapsed pill behind.
- */
-function isSetupThought(text: string): boolean {
-  return /^(starting|reading context|writing the reply|thinking)\b/i.test(text);
-}
-
-function buildThoughts(activities: ChatActivity[], streaming: boolean): Thought[] {
-  const meaningful = activities
-    .filter((activity) => activity.phase !== 'runtime')
-    .map((activity) => ({ activity, label: compactActivityLabel(activity) }))
-    .filter((entry): entry is { activity: ChatActivity; label: string } => Boolean(entry.label))
-    // Collapse immediate repeats so a re-emitted phase doesn't double a line.
-    .filter((entry, index, entries) => index === 0 || entries[index - 1]?.label !== entry.label);
-
-  return meaningful.map(({ activity, label }, index, entries) => {
-    const isLast = index === entries.length - 1;
-    // A step after this one exists, so the agent already moved past whatever
-    // went wrong here — a mid-turn retry, not the turn's unresolved outcome.
-    const recovered = activity.status === 'error' && !isLast;
-    return {
-      id: activity.id,
-      text: label,
-      state: recovered
-        ? 'recovered'
-        : activity.status === 'error'
-          ? 'error'
-          : streaming && isLast && activity.status !== 'success'
-            ? 'active'
-            : 'done',
-    } satisfies Thought;
-  });
-}
-
-function resolveDurationMs(turn: ChatTurnTrace | undefined, activities: ChatActivity[]): number | null {
-  if (turn?.durationMs && turn.durationMs > 0) return turn.durationMs;
-  const startedAt = turn?.startedAt ? Date.parse(turn.startedAt) : NaN;
-  const completedAt = turn?.completedAt ? Date.parse(turn.completedAt) : NaN;
-  if (Number.isFinite(startedAt) && Number.isFinite(completedAt) && completedAt > startedAt) {
-    return completedAt - startedAt;
-  }
-  // Fallback: span the activity timestamps.
-  const stamps = activities
-    .flatMap((a) => [a.startedAt, a.completedAt])
-    .map((value) => (value ? Date.parse(value) : NaN))
-    .filter((value) => Number.isFinite(value)) as number[];
-  if (stamps.length >= 2) {
-    const min = Math.min(...stamps);
-    const max = Math.max(...stamps);
-    if (max > min) return max - min;
-  }
-  return null;
-}
+type TimelineEntry =
+  | { id: string; kind: 'commentary'; text: string; at: string; order: number }
+  | { id: string; kind: 'activity'; text: string; detail?: string; status: ChatActivity['status']; at: string; order: number };
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.max(1, Math.round(ms / 100) / 10).toFixed(1)}s`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const totalSeconds = Math.round(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  const seconds = Math.round(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder.toString().padStart(2, '0')}s`;
+}
+
+function resolvedDuration(turn: ChatTurnTrace | undefined, now: number): number | null {
+  if (turn?.durationMs != null && turn.durationMs >= 0) return turn.durationMs;
+  if (!turn?.startedAt) return null;
+  const started = Date.parse(turn.startedAt);
+  if (!Number.isFinite(started)) return null;
+  const completed = turn.completedAt ? Date.parse(turn.completedAt) : now;
+  return Number.isFinite(completed) ? Math.max(0, completed - started) : null;
+}
+
+function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): TimelineEntry[] {
+  const comments: TimelineEntry[] = commentary
+    .filter((entry) => entry.text.trim())
+    .map((entry, index) => ({
+      id: entry.id,
+      kind: 'commentary',
+      text: entry.text.trim(),
+      at: entry.createdAt,
+      order: index * 2,
+    }));
+  const actions: TimelineEntry[] = activities
+    .map((activity, index) => ({ activity, label: compactActivityLabel(activity), index }))
+    .filter((entry): entry is { activity: ChatActivity; label: string; index: number } => Boolean(entry.label))
+    .filter((entry, index, entries) => index === 0 || entries[index - 1]?.label !== entry.label)
+    .map(({ activity, label, index }) => ({
+      id: activity.id,
+      kind: 'activity',
+      text: label,
+      detail: activity.detail,
+      status: activity.status,
+      at: activity.startedAt ?? activity.completedAt ?? '',
+      order: index * 2 + 1,
+    }));
+  return [...comments, ...actions].sort((a, b) => {
+    const left = Date.parse(a.at);
+    const right = Date.parse(b.at);
+    if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return left - right;
+    return a.order - b.order;
+  });
 }
 
 export function AgentTurnTrace({
   activities = [],
+  commentary = [],
   toolCalls = [],
   turn,
+  envelope,
+  context,
   streaming,
   failed = false,
 }: {
   activities?: ChatActivity[];
+  commentary?: ChatCommentary[];
   toolCalls?: ToolCallData[];
   turn?: ChatTurnTrace;
+  envelope?: ChatExecutionEnvelope;
+  context?: ChatContextManifest;
   streaming: boolean;
   failed?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const entries = useMemo(() => timeline(commentary, activities), [commentary, activities]);
+  const turnFailed = failed || turn?.status === 'failed';
+  const stopped = turn?.status === 'stopped' || turn?.status === 'interrupted';
+  const duration = resolvedDuration(turn, now);
+  const durationLabel = duration == null ? null : formatDuration(duration);
+  const meaningful = entries.some((entry) => entry.kind === 'commentary' || !/^(reading context|starting up|writing the reply|thinking)$/i.test(entry.text));
+  const worthShowing = streaming || turnFailed || stopped || meaningful || toolCalls.length > 0;
 
-  const thoughts = useMemo(() => buildThoughts(activities, streaming), [activities, streaming]);
-  const turnFailed = failed || turn?.status === 'failed' || toolCalls.some((c) => c.status === 'error');
-  const turnStopped = turn?.status === 'stopped' || turn?.status === 'interrupted';
-  const toolCount = toolCalls.length;
-  const durationMs = resolveDurationMs(turn, activities);
-  const liveScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!streaming) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [streaming]);
 
-  // Once the turn settles, never leave the timeline pinned open from a previous
-  // streaming session.
   useEffect(() => {
     if (streaming) setOpen(false);
   }, [streaming]);
 
-  useEffect(() => {
-    if (!streaming) return;
-    const el = liveScrollRef.current;
-    if (!el) return;
-    if (typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-    else el.scrollTop = el.scrollHeight;
-  }, [streaming, thoughts.length]);
+  if (!worthShowing) return null;
 
-  // ── Streaming: write the thoughts out, latest alive, older settling. ──────
   if (streaming) {
-    const live = thoughts.length > 0
-      ? thoughts
-      : [{ id: 'preparing', text: 'Thinking', state: 'active' as const }];
-    const visible = live.slice(-MAX_VISIBLE_THOUGHTS);
     return (
-      <div
-        ref={liveScrollRef}
-        className="mb-2 flex max-h-56 w-full min-w-0 flex-col gap-1 overflow-y-auto border-l border-line/40 pl-3 sm:max-h-72"
-        data-testid="agent-turn-trace"
-      >
-        {visible.map((thought, index) => {
-          const isLast = index === visible.length - 1;
-          return (
-            <div
-              key={thought.id}
-              className={clsx(
-                'flex min-w-0 items-start gap-2 transition-opacity duration-300',
-                isLast ? 'opacity-100' : 'opacity-45',
-              )}
-            >
-              {isLast && thought.state !== 'error' ? (
-                <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin text-accent" />
-              ) : thought.state === 'error' ? (
-                <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />
-              ) : thought.state === 'recovered' ? (
-                <Check size={12} className="mt-0.5 shrink-0 text-warn/70" />
-              ) : (
-                <Check size={12} className="mt-0.5 shrink-0 text-text-muted/70" />
-              )}
-              <span
-                className={clsx(
-                  'min-w-0 flex-1 break-words text-[12px] leading-5 [overflow-wrap:anywhere]',
-                  isLast ? 'text-text-secondary' : 'text-text-muted',
-                  thought.state === 'error' && 'text-danger',
-                  thought.state === 'recovered' && 'text-warn',
-                )}
-              >
-                {thought.text}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+      <section className="chat-work-transcript mb-4 min-w-0" aria-label="Agent work in progress" data-testid="agent-turn-trace">
+        <div className="chat-work-heading">
+          <span>{durationLabel ? `Working for ${durationLabel}` : 'Working'}</span>
+          <span className="chat-work-rule" />
+        </div>
+        <Timeline entries={entries} live />
+      </section>
     );
   }
 
-  // ── Settled: keep the visible timeline, unless the turn was trivial. ──────
-  const substantiveThoughts = thoughts.filter((thought) => !isSetupThought(thought.text)).length;
-  const worthShowing = turnFailed || turnStopped || toolCount > 0 || substantiveThoughts >= 1;
-  if (!worthShowing) return null;
-
-  const summary = turnFailed
-    ? 'Failed'
-    : turnStopped
-      ? 'Stopped'
-      : toolCount > 0
-        ? `Used ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`
-        : 'Done';
-  const meta = durationMs != null ? formatDuration(durationMs) : null;
-
-  const detailTools = toolCalls.filter(
-    (call) => call.args !== undefined || call.result !== undefined || call.error,
-  );
-
+  const summary = turnFailed ? 'Work failed' : stopped ? 'Work stopped' : 'Worked';
   return (
-    <Collapsible.Root open={open} onOpenChange={setOpen} className="mb-2 w-full min-w-0" data-testid="agent-turn-trace">
+    <Collapsible.Root open={open} onOpenChange={setOpen} className="chat-work-transcript mb-3 min-w-0" data-testid="agent-turn-trace">
       <Collapsible.Trigger asChild>
-        <button
-          type="button"
-          className="group flex w-full min-w-0 items-center gap-1.5 text-left text-[11px] text-text-muted transition-colors duration-150 hover:text-text-secondary"
-          aria-label={open ? 'Hide work' : 'Show work'}
-        >
-          <ChevronRight
-            size={12}
-            className={clsx('shrink-0 transition-transform duration-200', open && 'rotate-90')}
-          />
-          {turnFailed ? (
-            <AlertTriangle size={12} className="shrink-0 text-danger" />
-          ) : turnStopped ? (
-            <CircleSlash size={12} className="shrink-0 text-warn" />
-          ) : (
-            <Check size={12} className="shrink-0 text-accent/60" />
-          )}
-          <span className={clsx('shrink-0 font-medium', turnFailed && 'text-danger')}>{summary}</span>
-          {meta && (
-            <>
-              <span className="shrink-0 text-text-muted/40">·</span>
-              <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted/80">{meta}</span>
-            </>
-          )}
+        <button type="button" className="chat-work-heading group w-full text-left" aria-label={open ? 'Hide work' : 'Show work'}>
+          <span className={clsx(turnFailed && 'text-danger', stopped && 'text-warn')}>
+            {summary}{durationLabel ? ` for ${durationLabel}` : ''}
+          </span>
+          <ChevronRight size={12} className={clsx('shrink-0 transition-transform duration-200', open && 'rotate-90')} />
+          <span className="chat-work-rule" />
         </button>
       </Collapsible.Trigger>
-
-      <Collapsible.Content className="overflow-hidden animate-in fade-in duration-200">
-        <div className="ml-1.5 mt-2 border-l border-line/55 pl-3">
-          {thoughts.map((thought) => (
-            <div key={thought.id} className="relative pb-2.5 last:pb-0">
-              <span
-                className={clsx(
-                  'absolute -left-[17px] top-1.5 h-1.5 w-1.5 rounded-full border bg-surface',
-                  thought.state === 'error'
-                    ? 'border-danger bg-danger'
-                    : thought.state === 'recovered'
-                      ? 'border-warn bg-warn'
-                      : 'border-line',
-                )}
-              />
-              <div className={clsx(
-                'text-[12px] leading-5',
-                thought.state === 'error' ? 'text-danger' : thought.state === 'recovered' ? 'text-warn' : 'text-text-secondary',
-              )}>
-                {thought.text}
-              </div>
-            </div>
-          ))}
-
-          {detailTools.length > 0 && (
-            <div className="mt-1 space-y-1 border-t border-line/40 pt-2">
-              {detailTools.map((call) => (
-                <ToolDetailRow key={call.id} data={call} />
-              ))}
-            </div>
-          )}
-        </div>
+      <Collapsible.Content className="overflow-hidden animate-in fade-in slide-in-from-top-1 duration-200">
+        <Timeline entries={entries} />
+        <WorkDetails toolCalls={toolCalls} envelope={envelope} context={context} />
       </Collapsible.Content>
     </Collapsible.Root>
   );
 }
 
-function ToolDetailRow({ data }: { data: ToolCallData }) {
-  const [detailOpen, setDetailOpen] = useState(data.status === 'error');
-  const isError = data.status === 'error';
+function Timeline({ entries, live = false }: { entries: TimelineEntry[]; live?: boolean }) {
+  if (entries.length === 0) {
+    return (
+      <div className="flex items-center gap-2 py-2 text-[12px] text-text-muted">
+        <Loader2 size={12} className="animate-spin" />
+        <span>Thinking…</span>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3 py-3">
+      {entries.map((entry, index) => {
+        const latest = live && index === entries.length - 1;
+        if (entry.kind === 'commentary') {
+          return (
+            <p key={entry.id} className={clsx('max-w-[760px] whitespace-pre-wrap text-[13px] leading-6 text-text-secondary', !latest && live && 'text-text-secondary/80')}>
+              {entry.text}
+            </p>
+          );
+        }
+        const recovered = entry.status === 'error' && entries.slice(index + 1).some((next) => next.kind === 'activity' && next.status === 'success');
+        return (
+          <div key={entry.id} className="group flex min-w-0 items-start gap-2 text-[11.5px] leading-5 text-text-muted">
+            {latest && entry.status === 'running' ? (
+              <Loader2 size={12} className="mt-1 shrink-0 animate-spin text-text-muted" />
+            ) : entry.status === 'error' ? (
+              <AlertTriangle size={12} className={clsx('mt-1 shrink-0', recovered ? 'text-warn' : 'text-danger')} />
+            ) : (
+              <Check size={12} className="mt-1 shrink-0 text-text-muted/65" />
+            )}
+            <div className="min-w-0">
+              <div className={entry.status === 'error' ? (recovered ? 'text-warn' : 'text-danger') : undefined}>{entry.text}</div>
+              {entry.detail && <div className="line-clamp-2 text-[10.5px] text-text-muted/65">{entry.detail}</div>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
+function WorkDetails({
+  toolCalls,
+  envelope,
+  context,
+}: {
+  toolCalls: ToolCallData[];
+  envelope?: ChatExecutionEnvelope;
+  context?: ChatContextManifest;
+}) {
+  const detailed = toolCalls.filter((call) => call.args !== undefined || call.result !== undefined || call.error);
+  const readyFiles = context?.attachments.filter((file) => file.status === 'ready').length ?? 0;
+  if (detailed.length === 0 && !envelope && !context) return null;
+  return (
+    <div className="mt-1 border-t border-line/45 py-3">
+      {(envelope || context) && (
+        <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[10.5px] text-text-muted">
+          {envelope && <span>{envelope.model ?? envelope.adapterType}{envelope.effectiveReasoningEffort ? ` · ${envelope.effectiveReasoningEffort}` : ''}</span>}
+          {envelope?.durable && <span>Background work</span>}
+          {readyFiles > 0 && <span><FileCheck2 size={11} className="mr-1 inline" />{readyFiles} file{readyFiles === 1 ? '' : 's'}</span>}
+        </div>
+      )}
+      <div className="space-y-1">
+        {detailed.map((call) => <ToolDetail key={call.id} data={call} />)}
+      </div>
+    </div>
+  );
+}
+
+function ToolDetail({ data }: { data: ToolCallData }) {
+  const [open, setOpen] = useState(data.status === 'error');
   const artifactIds = useMemo(() => {
     const ids = new Set<string>();
     collectArtifactIds(data.result, ids);
     return [...ids];
   }, [data.result]);
-
   return (
-    <Collapsible.Root open={detailOpen} onOpenChange={setDetailOpen} className="min-w-0">
+    <Collapsible.Root open={open} onOpenChange={setOpen}>
       <Collapsible.Trigger asChild>
-        <button
-          type="button"
-          className="flex w-full min-w-0 items-center gap-1.5 rounded-md py-0.5 text-left transition-colors duration-150 hover:bg-surface-2/50"
-        >
-          <ChevronRight
-            size={11}
-            className={clsx('shrink-0 text-text-muted/60 transition-transform duration-150', detailOpen && 'rotate-90')}
-          />
-          <code
-            className={clsx(
-              'min-w-0 truncate rounded border px-1.5 py-0.5 font-mono text-[10px]',
-              isError ? 'border-danger/25 bg-danger-soft text-danger' : 'border-line bg-surface-3 text-text-muted',
-            )}
-          >
-            {data.name}
-          </code>
-          {data.durationMs != null && (
-            <span className="ml-auto shrink-0 font-mono text-[9px] tabular-nums text-text-muted/60">
-              {formatDuration(data.durationMs)}
-            </span>
-          )}
+        <button type="button" className="flex w-full min-w-0 items-center gap-2 rounded-md py-1 text-left text-[11px] text-text-muted hover:text-text-secondary">
+          {data.status === 'error' ? <AlertTriangle size={11} className="text-danger" /> : data.status === 'stopped' ? <CircleSlash size={11} /> : <TerminalSquare size={11} />}
+          <span className="min-w-0 truncate font-mono">{data.name}</span>
+          <ChevronRight size={11} className={clsx('ml-auto transition-transform', open && 'rotate-90')} />
         </button>
       </Collapsible.Trigger>
-      <Collapsible.Content className="overflow-hidden animate-in fade-in duration-200">
-        <div className="ml-4 mt-1.5 max-w-full overflow-hidden rounded-lg border border-line bg-canvas/80 p-2 shadow-sm">
+      <Collapsible.Content>
+        <div className="ml-5 mt-1 rounded-lg border border-line/60 bg-canvas/55 p-2">
           {data.args !== undefined && <JsonBlock label="Input" value={data.args} />}
-          {isError ? (
-            <JsonBlock label="Error" value={data.error ?? 'Unknown error'} tone="error" />
-          ) : (
-            data.result !== undefined && <JsonBlock label="Result" value={data.result} />
-          )}
-          {artifactIds.length > 0 && (
-            <div className="mt-2 last:mb-0">
-              <div className="mb-2 font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-text-muted">Generated Assets</div>
-              <ChatArtifactAttachments artifactIds={artifactIds} />
-            </div>
-          )}
+          {data.error ? <JsonBlock label="Error" value={data.error} error /> : data.result !== undefined && <JsonBlock label="Result" value={data.result} />}
+          {artifactIds.length > 0 && <ChatArtifactAttachments artifactIds={artifactIds} />}
         </div>
       </Collapsible.Content>
     </Collapsible.Root>
   );
 }
 
-function JsonBlock({ label, value, tone }: { label: string; value: unknown; tone?: 'error' }) {
+function JsonBlock({ label, value, error = false }: { label: string; value: unknown; error?: boolean }) {
+  let text: string;
+  try { text = typeof value === 'string' ? value : JSON.stringify(value, null, 2); } catch { text = String(value); }
   return (
     <div className="mb-2 last:mb-0">
-      <div className={clsx('mb-1 font-mono text-[9px] font-semibold uppercase tracking-[0.16em]', tone === 'error' ? 'text-danger' : 'text-text-muted')}>
-        {label}
-      </div>
-      <pre className={clsx(
-        'max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg border p-2 font-mono text-[10.5px] leading-relaxed [overflow-wrap:anywhere]',
-        tone === 'error'
-          ? 'border-danger/25 bg-danger-soft/30 text-danger shadow-inner'
-          : 'border-line/65 bg-canvas/90 text-text-secondary shadow-inner',
-      )}>
-        {formatJson(value)}
-      </pre>
+      <div className={clsx('mb-1 text-[9px] font-semibold uppercase tracking-[0.14em]', error ? 'text-danger' : 'text-text-muted')}>{label}</div>
+      <pre className={clsx('max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed', error ? 'text-danger' : 'text-text-secondary')}>{text}</pre>
     </div>
   );
-}
-
-function formatJson(value: unknown): string {
-  if (value === undefined || value === null) return '(empty)';
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }

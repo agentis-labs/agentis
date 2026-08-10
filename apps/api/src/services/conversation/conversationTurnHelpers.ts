@@ -5,7 +5,7 @@
  * plus the turn value-types. Framework-free (no HTTP/request state), so they
  * live in the conversation domain and the route stays a thin transport shell.
  */
-import { normalizeToolInvocation, type ChatDelta, type ChatFinishReason, type ChatPlan, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
+import { normalizeToolInvocation, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatFinishReason, type ChatPlan, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { randomUUID } from 'node:crypto';
 
@@ -24,6 +24,7 @@ export interface PersistedToolCallData {
 export interface StreamedChatMetadata {
   turn: ChatTurnTrace;
   activity: Array<Extract<ChatDelta, { type: 'activity' }>>;
+  commentary: ChatCommentary[];
   toolCalls: PersistedToolCallData[];
   toolStartedAt: Map<string, number>;
   workflowId: string | null;
@@ -31,6 +32,8 @@ export interface StreamedChatMetadata {
   runTitle: string | null;
   confirmation: (Omit<Extract<ChatDelta, { type: 'confirmation_required' }>, 'type'> & { status: 'pending' }) | null;
   plan: ChatPlan | null;
+  executionEnvelope: ChatExecutionEnvelope | null;
+  contextManifest: ChatContextManifest | null;
 }
 
 export function serializeConversationMessage(message: ConversationMessageRow) {
@@ -100,6 +103,7 @@ export function createStreamedChatMetadata(
       status: 'running',
     },
     activity: [],
+    commentary: [],
     toolCalls: [],
     toolStartedAt: new Map(),
     workflowId: null,
@@ -107,6 +111,8 @@ export function createStreamedChatMetadata(
     runTitle: null,
     confirmation: null,
     plan: null,
+    executionEnvelope: null,
+    contextManifest: null,
   };
 }
 
@@ -143,8 +149,13 @@ export function relevantTurnError(state: StreamedChatMetadata, adapterError: str
 }
 
 export function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta): void {
+  if (delta.type === 'execution') {
+    state.executionEnvelope = delta.envelope;
+    state.contextManifest = delta.context;
+    return;
+  }
   if (delta.type === 'activity') {
-    state.activity = [...state.activity.filter((entry) => entry.id !== delta.id), delta].slice(-80);
+    state.activity = upsertStable(state.activity, delta, 80);
     if (delta.workflowId) state.workflowId = delta.workflowId;
     if (delta.runId) state.runId = delta.runId;
     return;
@@ -152,6 +163,10 @@ export function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: Cha
   if (delta.type === 'thinking') return;
   if (delta.type === 'plan') {
     state.plan = delta.plan;
+    return;
+  }
+  if (delta.type === 'commentary') {
+    state.commentary = upsertStable(state.commentary, delta, 80);
     return;
   }
   if (delta.type === 'tool_call') {
@@ -217,13 +232,24 @@ export function buildPersistedChatMetadata(
     ...(clientTurnId ? { clientTurnId } : {}),
     turn: state.turn,
     ...(state.activity.length > 0 ? { activity: state.activity } : {}),
+    ...(state.commentary.length > 0 ? { commentary: state.commentary } : {}),
     ...(state.toolCalls.length > 0 ? { toolCalls: state.toolCalls } : {}),
     ...(state.workflowId ? { workflowId: state.workflowId } : {}),
     ...(state.runId ? { runId: state.runId } : {}),
     ...(state.runTitle ? { runTitle: state.runTitle } : {}),
     ...(state.confirmation ? { confirmation: state.confirmation } : {}),
     ...(state.plan ? { plan: state.plan } : {}),
+    ...(state.executionEnvelope ? { executionEnvelope: state.executionEnvelope } : {}),
+    ...(state.contextManifest ? { contextManifest: state.contextManifest } : {}),
   };
+}
+
+function upsertStable<T extends { id: string }>(items: T[], next: T, limit: number): T[] {
+  const index = items.findIndex((item) => item.id === next.id);
+  if (index < 0) return [...items, next].slice(-limit);
+  const copy = [...items];
+  copy[index] = next;
+  return copy.slice(-limit);
 }
 
 export function workflowBuildMetadataFromResult(result: unknown): { workflowId: string; runId: string; title?: string } | null {

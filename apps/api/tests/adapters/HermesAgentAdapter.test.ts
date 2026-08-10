@@ -338,7 +338,7 @@ describe('HermesAgentAdapter', () => {
       type: 'activity',
       phase: 'runtime',
       status: 'running',
-      label: 'considering',
+      label: 'Hermes is reasoning',
     }));
     expect(deltas.some((delta) => delta.type === 'thinking')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'Hello operator' });
@@ -670,7 +670,7 @@ describe('HermesAgentAdapter', () => {
     await vi.waitFor(() => expect(events.some((event) => event.eventType === 'task.completed')).toBe(true));
 
     expect(spawnMock.mock.calls[0]![1]).toEqual(['acp']);
-    expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Planning the task' }));
+    expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Hermes is reasoning' }));
     expect(events).toContainEqual(expect.objectContaining({ eventType: 'task.progress', message: 'Using Build interface' }));
     expect(events).toContainEqual(expect.objectContaining({
       eventType: 'task.completed',

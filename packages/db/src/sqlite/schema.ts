@@ -1180,6 +1180,8 @@ export const conversations = sqliteTable('conversations', {
   executionMode: text('execution_mode').notNull().default('chat'),
   /** Per-conversation permission mode: ask | plan | auto (see migration v93). */
   permissionMode: text('permission_mode').notNull().default('ask'),
+  /** Ask-mode escalation threshold: cautious | balanced | autonomous (v129). */
+  approvalSensitivity: text('approval_sensitivity').notNull().default('balanced'),
   archivedAt: text('archived_at'),
   unreadCount: integer('unread_count').notNull().default(0),
   lastMessageAt: text('last_message_at'),
@@ -1237,6 +1239,60 @@ export const conversationMessages = sqliteTable('conversation_messages', {
   deliveryStatus: text('delivery_status').notNull().default('sent'),
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
+
+/** Durable, request-independent operator turns (Chat V2). */
+export const conversationTurns = sqliteTable(
+  'conversation_turns',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    conversationId: text('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+    agentId: text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    messageId: text('message_id').references(() => conversationMessages.id, { onDelete: 'set null' }),
+    planId: text('plan_id'),
+    clientTurnId: text('client_turn_id').notNull(),
+    prompt: text('prompt').notNull(),
+    requestedMode: text('requested_mode').notNull().default('auto'),
+    effectiveMode: text('effective_mode').notNull().default('deep'),
+    permissionMode: text('permission_mode').notNull().default('ask'),
+    status: text('status').notNull().default('queued'),
+    attachments: text('attachments', { mode: 'json' }).notNull().default(sql`'[]'`),
+    viewport: text('viewport', { mode: 'json' }),
+    executionEnvelope: text('execution_envelope', { mode: 'json' }),
+    contextManifest: text('context_manifest', { mode: 'json' }),
+    lastEventSeq: integer('last_event_seq').notNull().default(0),
+    leaseOwner: text('lease_owner'),
+    leaseExpiresAt: text('lease_expires_at'),
+    error: text('error'),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    conversationStatus: index('idx_conversation_turns_conversation_status').on(table.workspaceId, table.conversationId, table.status, table.createdAt),
+    agentStatus: index('idx_conversation_turns_agent_status').on(table.workspaceId, table.agentId, table.status, table.createdAt),
+    clientTurn: uniqueIndex('uq_conversation_turns_client').on(table.workspaceId, table.conversationId, table.clientTurnId),
+  }),
+);
+
+/** Ordered replay log. SSE/WebSocket clients are subscribers, never turn owners. */
+export const conversationTurnEvents = sqliteTable(
+  'conversation_turn_events',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    turnId: text('turn_id').notNull().references(() => conversationTurns.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    event: text('event').notNull(),
+    data: text('data', { mode: 'json' }).notNull(),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    turnSequence: uniqueIndex('uq_conversation_turn_events_sequence').on(table.turnId, table.seq),
+    workspaceTurn: index('idx_conversation_turn_events_turn').on(table.workspaceId, table.turnId, table.seq),
+  }),
+);
 
 export const plans = sqliteTable('plans', {
   id: text('id').primaryKey(),

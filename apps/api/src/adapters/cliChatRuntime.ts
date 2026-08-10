@@ -108,6 +108,8 @@ export type CliChatPart =
   | { kind: 'final'; text: string }
   /** Reasoning signal. Its raw contents are never exposed or persisted. */
   | { kind: 'thinking'; text: string }
+  /** Provider-designated reasoning summary or assistant preamble safe to show. */
+  | { kind: 'commentary'; id: string; text: string; source?: 'reasoning_summary' | 'assistant_preamble' }
   /** The harness's OWN tool/shell action — surfaced live, never re-executed. */
   | { kind: 'activity'; delta: Extract<ChatDelta, { type: 'activity' }> }
   /** A native tool call the harness asked Agentis to execute. */
@@ -371,6 +373,18 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
                 text: part.text,
                 reasoning: true,
               }));
+            }
+            break;
+          case 'commentary':
+            if (part.text.trim()) {
+              latestAssistantText = '';
+              queue.push({
+                type: 'commentary',
+                id: part.id,
+                text: part.text.replace(/\s+/g, ' ').trim().slice(0, 1_200),
+                source: part.source ?? 'reasoning_summary',
+                createdAt: new Date().toISOString(),
+              });
             }
             break;
           case 'activity':

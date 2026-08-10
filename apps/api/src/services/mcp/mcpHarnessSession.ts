@@ -34,7 +34,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
-import type { AdapterType } from '@agentis/core';
+import type { AdapterType, ApprovalSensitivity } from '@agentis/core';
 import type { Logger } from '../../logger.js';
 import { createApiKeySecret, hashApiKey } from '../apiKeys.js';
 
@@ -194,7 +194,7 @@ export function harnessMcpArgs(
   adapterType: AdapterType,
   servers: McpHarnessServer[],
   executionMode: 'chat' | 'plan' | 'ask' = 'chat',
-  turn?: { conversationId?: string; turnLease?: string },
+  turn?: { conversationId?: string; turnLease?: string; approvalSensitivity?: ApprovalSensitivity },
 ): string[] {
   if (servers.length === 0) return [];
   const tagged = withHarnessTurnHeaders(servers, executionMode, turn);
@@ -216,22 +216,25 @@ export function harnessMcpArgs(
  * Auto turn's descriptor is byte-identical to before (no behavior change).
  */
 export const EXECUTION_MODE_HEADER = 'x-agentis-execution-mode';
+export const APPROVAL_SENSITIVITY_HEADER = 'x-agentis-approval-sensitivity';
 export const CONVERSATION_ID_HEADER = 'x-agentis-conversation';
 export const TURN_LEASE_HEADER = 'x-agentis-turn-lease';
 
 export function withHarnessTurnHeaders(
   servers: McpHarnessServer[],
   executionMode: 'chat' | 'plan' | 'ask',
-  turn?: { conversationId?: string; turnLease?: string },
+  turn?: { conversationId?: string; turnLease?: string; approvalSensitivity?: ApprovalSensitivity },
 ): McpHarnessServer[] {
   const conversationId = turn?.conversationId?.trim();
   const turnLease = turn?.turnLease?.trim();
-  if (executionMode === 'chat' && !conversationId && !turnLease) return servers;
+  const approvalSensitivity = turn?.approvalSensitivity;
+  if (executionMode === 'chat' && !conversationId && !turnLease && !approvalSensitivity) return servers;
   return servers.map((s) => ({
     ...s,
     headers: {
       ...s.headers,
       ...(executionMode === 'chat' ? {} : { [EXECUTION_MODE_HEADER]: executionMode }),
+      ...(approvalSensitivity ? { [APPROVAL_SENSITIVITY_HEADER]: approvalSensitivity } : {}),
       ...(conversationId ? { [CONVERSATION_ID_HEADER]: conversationId } : {}),
       ...(turnLease ? { [TURN_LEASE_HEADER]: turnLease } : {}),
     },

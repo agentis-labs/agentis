@@ -85,7 +85,10 @@ Runtime inspection and installation are exposed through `GET /v1/extensions/runt
   (OpenAI-compatible default, no vendor lock-in); supports generation and reference-image edit;
   outputs persist to the asset store.
 - `services/visionService.ts` — image understanding; `services/transcriptionService.ts` —
-  audio→text; `services/documentExtractionService.ts` — PDF/doc structure extraction.
+  audio→text; `services/documentExtractionService.ts` — resilient task-input extraction for
+  UTF-8/UTF-16 and Windows-1252 text, Markdown/structured text/source files, PDF, DOCX, and XLSX.
+  Chat attachment context carries content plus provenance; large documents are bounded with an
+  explicit truncation record rather than silently becoming filename-only input.
 - `services/assetStore.ts` — content-addressed, deduped by SHA-256; tracks origin (agent / app
   / workflow / channel / manual). Agents persist via `agentis.assets.save` rather than writing
   to disk.

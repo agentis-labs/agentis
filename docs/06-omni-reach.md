@@ -15,6 +15,7 @@ projections share one registry so there is no protocol drift between channels, M
 | Slack | bidirectional | threads, file upload via external-upload flow |
 | Telegram | bidirectional | webhook or polling; full inbound |
 | WhatsApp | bidirectional | Baileys (QR link); media transcription |
+| Voice | webhook ingress | transcription in, TTS reply buffer out |
 
 Channel health checks are read-only: pressing **Test connection** validates credentials,
 transport, routing, inbound readiness, and runtime availability without sending a message.
@@ -26,11 +27,43 @@ or advance workflow state until a WhatsApp server acknowledgement arrives. Later
 delivery, and read receipts promote the durable journal to `accepted`, `delivered`, and
 `read`. Requested, provider-resolved, and provider-echoed recipients remain separate in
 the receipt so canonical number resolution is visible without being mistaken for proof.
-| Voice | webhook ingress | transcription in, TTS reply buffer out |
-
 Rich attachments and per-channel access control are supported; peer identity is resolved
 across channels. Inbound messages are durably queued (`channel_turn_queue`) and dispatched to
 the responsible agent/subject.
+
+Inbound voice notes are understood by default. Agentis first uses a workspace transcription
+provider when configured, then a pinned Apache-2.0 local Whisper q8 fallback. The fallback is
+channel-scoped: `agentis up` does not globally acquire it. WhatsApp/Telegram startup prepares
+its immutable revision and SHA-256-verified artifacts without loading ONNX into memory; the
+pipeline loads on first audio. `agentis setup --channels` or `agentis warmup --transcription`
+prepares it explicitly, `--repair` preserves the previous cache, and
+`AGENTIS_TRANSCRIPTION_OFFLINE=true` forbids network acquisition. OGG/Opus and common channel
+audio containers use the packaged portable decoder; system FFmpeg is only a compatibility
+fallback for containers outside that decoder set.
+
+### Audio decoder contract and transcript admission
+
+`@audio/decode` v3 returns an `AudioData`-shaped object (`sampleRate` plus
+`channelData: Float32Array[]`), not a Web Audio `AudioBuffer`. Channel code must derive the
+sample count from `channelData[0].length`, validate equal channel lengths, then mix and resample
+from those real samples. It must not infer sample count from an optional `length` property or
+cast an external decoder result unchecked: doing so can turn a valid OGG/Opus voice note into a
+near-zero silent buffer and make speech recognition hallucinate text.
+
+Transcript admission is part of the input trust boundary. Empty, impossible-for-duration, or
+pathologically repetitive output is rejected before it becomes a channel message, conversation
+context, or memory input. Preserve the original attachment and emit structured diagnostics, but
+never replace an uncertain transcript with invented content.
+
+### OSS release invariant for channel media
+
+The dependency contract must be tested against the version shipped in the npm tarball, not only a
+hand-written mock. The media release gate is: decode a real OGG/Opus fixture through the packaged
+dependency, confirm non-zero PCM duration and resampling, execute a local Whisper transcription,
+then `npm pack` and install the tarball into a clean directory before exercising the same decoder.
+Do not commit private customer voice notes as fixtures; generate or license a small public fixture
+for CI. The bundle guard must keep the decoder as an exact runtime dependency so a global npm
+install has its codec assets as well as the JavaScript import.
 
 ## Email
 

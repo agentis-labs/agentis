@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AdapterHealthStatus, AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, ToolDefinition, ViewportContext } from '@agentis/core';
+import type { AdapterHealthStatus, AgentAdapter, ChatDelta, ChatInvocationOptions, ChatMessage, ChatToolCall, ChatTurnContext, RuntimeInputAttachment, ToolDefinition, ViewportContext } from '@agentis/core';
 import { REALTIME_EVENTS, CONSTANTS } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
@@ -7,6 +7,7 @@ import { and, desc, eq, like, or, sql } from 'drizzle-orm';
 import { CHAT_TOOL_CATALOG, buildWorkspaceToolCatalog } from './chatToolCatalog.js';
 import { composeOperatingManual, getWorkspaceManual } from '../agent/agentOperatingManual.js';
 import { ChatToolExecutor } from './chatToolExecutor.js';
+import { resolveToolApprovalPolicy } from './chatApprovalPolicy.js';
 import { ChatProgressMonitor, hashValue, stopReasonMessage, type RoundObservation } from './chatProgressMonitor.js';
 import { scanForInjection, wrapUntrusted } from '../security/promptInjection.js';
 import { buildOrchestratorSystemPrompt, responseProfileForChannel } from '../orchestrator/orchestratorPrompt.js';
@@ -112,6 +113,18 @@ export interface ChatTurnOptions {
   systemAddendum?: string;
   /** Set when the turn originates from a messaging channel (OMNICHANNEL §4). */
   channelContext?: ChannelTurnContext | null;
+  /** Preflight-selected quality class. Deep and Mission retain the native
+   * runtime's configured reasoning profile instead of forcing a fast preset. */
+  qualityMode?: 'quick' | 'deep' | 'mission';
+  /** Override the runtime-native session lane (used by non-blocking companion turns). */
+  sessionKey?: string;
+  /**
+   * Drain messages that arrived while this turn was executing. They join the
+   * next model round after a tool boundary without cancelling completed work.
+   */
+  liveInput?: () => ChatMessage[] | Promise<ChatMessage[]>;
+  /** Native inbound files (for example WhatsApp images) already materialized by the host. */
+  inputAttachments?: RuntimeInputAttachment[];
 }
 
 interface PendingChatConfirmation {
@@ -887,7 +900,10 @@ export class ChatSessionExecutor {
       fastPath: adapter !== agentAdapter,
       adapterType: adapter.adapterType ?? 'unknown',
       lightweightConversation,
-      sessionKey: cliSessionKey(ctx.conversationId, capabilities?.toolForwarding, identityChecksum),
+      qualityMode: options.qualityMode ?? ctx.qualityMode ?? (lightweightConversation ? 'quick' : 'deep'),
+      sessionKey: options.sessionKey ?? cliSessionKey(ctx.conversationId, capabilities?.toolForwarding, identityChecksum),
+      liveInput: options.liveInput,
+      inputAttachments: options.inputAttachments,
       // The agent's own harness should answer on the model the operator picked in
       // the UI — not whatever default the harness happens to boot with.
       preferredModel: adapter === agentAdapter && 'agentRuntimeModel' in promptCtx ? promptCtx.agentRuntimeModel : null,
@@ -987,6 +1003,9 @@ export class ChatSessionExecutor {
       sessionKey?: string | null;
       /** The agent's UI-selected runtime model, forwarded to the adapter per call. */
       preferredModel?: string | null;
+      qualityMode?: 'quick' | 'deep' | 'mission';
+      liveInput?: () => ChatMessage[] | Promise<ChatMessage[]>;
+      inputAttachments?: RuntimeInputAttachment[];
     },
   ): AsyncIterable<ChatDelta> {
     let toolCallCount = options.toolCallCount;
@@ -1037,6 +1056,7 @@ export class ChatSessionExecutor {
     // Per-conversation permission mode (default ask). `auto` runs mutating tools
     // freely; `ask` confirms them; `plan` blocks them upstream (executionMode).
     const permissionMode = ctx.permissionMode ?? 'ask';
+    const approvalSensitivity = ctx.approvalSensitivity ?? 'balanced';
     // Intelligent, time-free stop. The turn runs until the model is done, the
     // operator cancels, or the monitor detects a loop / oscillation / error storm
     // / no-progress — NOT on a wall clock. `absoluteMaxRounds()` is only a
@@ -1058,6 +1078,10 @@ export class ChatSessionExecutor {
         yield { type: 'done', finishReason: 'interrupted' };
         return;
       }
+      if (turn > 0 && options.liveInput) {
+        const joined = await options.liveInput();
+        if (joined.length > 0) messages.push(...joined);
+      }
       const toolCalls: ChatToolCall[] = [];
       let assistantText = '';
       let reasoningSeg = '';
@@ -1071,8 +1095,14 @@ export class ChatSessionExecutor {
         yield this.#activity(ctx, 'runtime', 'Waiting for model output', `Runtime pass ${turn + 1} is in progress.`, `runtime-${turn + 1}`);
         timings.rounds += 1;
         const roundStart = Date.now();
+        const qualityMode = options.qualityMode ?? ctx.qualityMode ?? 'deep';
+        const configuredEffort = qualityMode === 'mission' && adapter.getRuntimeContext
+          ? await adapter.getRuntimeContext().then((runtime) => runtime.currentEffort).catch(() => undefined)
+          : undefined;
+        const missionEffort = qualityMode === 'mission' ? reasoningFloor(configuredEffort, 'high') : undefined;
         const chatOptions: ChatInvocationOptions = {
-          latencyClass: 'interactive',
+          latencyClass: qualityMode === 'quick' ? 'interactive' : 'deliberate',
+          ...(missionEffort ? { reasoningEffort: missionEffort, fastMode: false } : {}),
           timeoutMs: modelRoundTimeoutMs,
           sessionKey: options.sessionKey ?? ctx.conversationId,
           ...(ctx.turnLease ? { conversationId: ctx.conversationId, turnLease: ctx.turnLease } : {}),
@@ -1086,6 +1116,7 @@ export class ChatSessionExecutor {
                 // → chat (allow). This is what makes Ask/Plan real on mcp_native,
                 // where there is no interceptable per-tool confirmation dialog.
                 executionMode: permissionMode === 'plan' ? 'plan' : permissionMode === 'ask' ? 'ask' : 'chat',
+                approvalSensitivity,
               }
             : {}),
           // A recovery adapter has its own model catalogue. Never forward the
@@ -1093,6 +1124,7 @@ export class ChatSessionExecutor {
           ...(options.preferredModel && adapter.adapterType === options.adapterType
             ? { preferredModel: options.preferredModel }
             : {}),
+          ...(options.inputAttachments?.length ? { inputAttachments: options.inputAttachments } : {}),
         };
         if (ctx.signal) chatOptions.signal = ctx.signal;
         if (retryMaxTokens) chatOptions.maxTokens = retryMaxTokens;
@@ -1115,7 +1147,7 @@ export class ChatSessionExecutor {
           // tool-round narration cannot leak into the final answer, but stream
           // factual activity immediately so the operator never stares at a dead
           // "Waiting for runtime" card while the harness is actively working.
-          if (delta.type === 'activity') {
+          if (delta.type === 'activity' || delta.type === 'commentary') {
             yield delta;
           } else if (delta.type === 'thinking') {
             // Surface harness reasoning as a streaming, replace-in-place reasoning
@@ -1250,7 +1282,7 @@ export class ChatSessionExecutor {
       }
 
       const confirmationCall = batch.find((call) =>
-        ChatToolExecutor.requiresConfirmation(call.name, permissionMode) ||
+        ChatToolExecutor.requiresConfirmation(call.name, permissionMode, approvalSensitivity) ||
         // IPI escalation: a tainted turn cannot run a high-impact tool without
         // an explicit operator OK, regardless of permission mode.
         (turnTainted && ChatToolExecutor.isHighImpact(call.name)),
@@ -1526,6 +1558,10 @@ export class ChatSessionExecutor {
     const title = confirmationTitle(call.name);
     const definition = ChatToolExecutor.definition(call.name);
     const impact = confirmationImpact(call.name, call.arguments, definition?.description, this.#deps.db);
+    const approval = resolveToolApprovalPolicy(call.name, definition);
+    impact.riskLevel = approval.riskLevel === 'critical' ? 'danger' : approval.riskLevel;
+    impact.reversible = approval.reversible ?? impact.reversible;
+    impact.externalSideEffects = approval.externalSideEffects ?? impact.externalSideEffects;
     const args = safeJson(call.arguments);
     const clippedArgs = args.length > 900 ? `${args.slice(0, 900)}...` : args;
     return {
@@ -1841,6 +1877,15 @@ function absoluteMaxRounds(): number {
   const fromEnv = Number(process.env.AGENTIS_CHAT_MAX_ROUNDS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
   return 2000;
+}
+
+const REASONING_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+function reasoningFloor(current: string | undefined, floor: string): string {
+  const currentIndex = current ? REASONING_ORDER.indexOf(current as (typeof REASONING_ORDER)[number]) : -1;
+  const floorIndex = REASONING_ORDER.indexOf(floor as (typeof REASONING_ORDER)[number]);
+  if (currentIndex >= floorIndex) return current!;
+  return floor;
 }
 
 /**

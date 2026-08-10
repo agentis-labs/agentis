@@ -13,11 +13,10 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { ArrowUp, Mic, Paperclip, File as FileIcon, X, Eye, Loader2, Square } from 'lucide-react';
+import { ArrowUp, Mic, Plus, File as FileIcon, X, Eye, Loader2, Square } from 'lucide-react';
 import clsx from 'clsx';
-import { api } from '../../lib/api';
+import { api, apiErrorMessage, workspace } from '../../lib/api';
 import { ComposerStatusBar } from './ComposerStatusBar';
-import { workspace } from '../../lib/api';
 
 interface SpeechRecognitionEvent {
   resultIndex: number;
@@ -47,6 +46,9 @@ interface SpeechRecognition {
 const _draftCache = new Map<string, string>();
 const DRAFT_STORAGE_PREFIX = 'agentis.chatDraft';
 const LEGACY_DRAFT_STORAGE_PREFIX = 'agentis.chatDraft.v2';
+export const LARGE_PASTE_FILE_THRESHOLD = 16_000;
+export const MAX_INLINE_COMPOSER_CHARS = 28_000;
+const MAX_COMPOSER_ATTACHMENTS = 10;
 
 function persistedDraftKey(key: string): string {
   return `${DRAFT_STORAGE_PREFIX}:${workspace.get() ?? 'workspace'}:${key}`;
@@ -137,6 +139,9 @@ interface Attachment {
   /** Set once the upload to `/v1/artifacts/upload` succeeds — this is what gets sent with the message. */
   artifactId?: string;
   error?: boolean;
+  errorMessage?: string;
+  file?: File;
+  generatedFromPaste?: boolean;
 }
 
 /** A file attachment that finished uploading and is ready to send with a message. */
@@ -171,38 +176,83 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
   // File Attachment State
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
+  const [autoConverting, setAutoConverting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFiles = useCallback((files: FileList) => {
-    const pairs = Array.from(files).map((file) => {
+  const handleFiles = useCallback((files: FileList | readonly File[], options: { generatedFromPaste?: boolean } = {}) => {
+    const incoming = Array.from(files);
+    const available = Math.max(0, MAX_COMPOSER_ATTACHMENTS - attachments.length);
+    if (incoming.length > available) {
+      setAttachmentNotice(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} files to one message.`);
+    }
+    const pairs = incoming.slice(0, available).map((file) => {
       const id = `att-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       const isImage = file.type.startsWith('image/');
       const url = isImage ? URL.createObjectURL(file) : undefined;
-      const attachment: Attachment = { id, name: file.name, type: file.type, url, loading: true };
+      const attachment: Attachment = {
+        id,
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        url,
+        loading: true,
+        file,
+        generatedFromPaste: options.generatedFromPaste,
+      };
       return { file, attachment };
     });
 
+    if (pairs.length === 0) return;
+
     setAttachments((prev) => [...prev, ...pairs.map((p) => p.attachment)]);
+    if (options.generatedFromPaste) {
+      const chars = pairs[0]?.file.size ?? 0;
+      setAttachmentNotice(`Large paste preserved as a text file (${chars.toLocaleString()} bytes) so it can be uploaded and analyzed safely.`);
+    }
 
     pairs.forEach(({ file, attachment }) => {
-      const form = new FormData();
-      form.set('file', file);
-      form.set('name', file.name);
-      api<{ artifact: { id: string } }>('/v1/artifacts/upload', { method: 'POST', body: form })
-        .then((res) => {
+      uploadComposerFile(file)
+        .then((artifactId) => {
           setAttachments((prev) =>
             prev.map((att) =>
-              att.id === attachment.id ? { ...att, loading: false, artifactId: res.artifact.id } : att,
+              att.id === attachment.id ? { ...att, loading: false, artifactId, error: false, errorMessage: undefined } : att,
             ),
           );
         })
-        .catch(() => {
+        .catch((error) => {
           setAttachments((prev) =>
-            prev.map((att) => (att.id === attachment.id ? { ...att, loading: false, error: true } : att)),
+            prev.map((att) => (att.id === attachment.id
+              ? { ...att, loading: false, error: true, errorMessage: apiErrorMessage(error) }
+              : att)),
           );
+          setAttachmentNotice(`Could not upload ${file.name}. The content is still here—retry or remove it.`);
         });
     });
+  }, [attachments.length]);
+
+  const retryAttachment = useCallback((attachment: Attachment) => {
+    if (!attachment.file) return;
+    setAttachments((prev) => prev.map((item) => item.id === attachment.id
+      ? { ...item, loading: true, error: false, errorMessage: undefined }
+      : item));
+    uploadComposerFile(attachment.file)
+      .then((artifactId) => {
+        setAttachments((prev) => prev.map((item) => item.id === attachment.id
+          ? { ...item, loading: false, artifactId, error: false, errorMessage: undefined }
+          : item));
+        setAttachmentNotice(`${attachment.name} is ready for analysis.`);
+      })
+      .catch((error) => {
+        setAttachments((prev) => prev.map((item) => item.id === attachment.id
+          ? { ...item, loading: false, error: true, errorMessage: apiErrorMessage(error) }
+          : item));
+      });
   }, []);
+
+  const convertPastedText = useCallback((pastedText: string) => {
+    const file = new File([pastedText], pastedTextFileName(), { type: 'text/plain;charset=utf-8' });
+    handleFiles([file], { generatedFromPaste: true });
+  }, [handleFiles]);
 
   const triggerFileSelect = useCallback(() => {
     fileInputRef.current?.click();
@@ -234,6 +284,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     );
 
   const hasComposedInput = text.trim().length > 0 || attachments.length > 0;
+  const hasBlockingAttachment = attachments.some((attachment) => attachment.loading || attachment.error);
 
   useEffect(() => {
     void api<{ available: boolean }>('/v1/transcription/status')
@@ -466,9 +517,36 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
     if (transcribing) return;
     const value = text.trim();
     if (!value && attachments.length === 0) return;
-    if (attachments.some((att) => att.loading)) return; // still uploading — the send button/Enter both route through here
-    const uploaded = attachments.filter((att) => att.artifactId);
+    if (hasBlockingAttachment) {
+      setAttachmentNotice(attachments.some((attachment) => attachment.error)
+        ? 'Retry or remove failed files before sending. Your content has not been discarded.'
+        : 'Wait for the file upload to finish before sending.');
+      return;
+    }
+    const uploaded = attachments.filter((att) => att.artifactId).map((attachment) => ({
+      id: attachment.artifactId!,
+      name: attachment.name,
+    }));
     if (!value && uploaded.length === 0) return; // every upload failed and there's no text — nothing to send
+    let outgoingText = value;
+    if (value.length > MAX_INLINE_COMPOSER_CHARS) {
+      if (uploaded.length >= MAX_COMPOSER_ATTACHMENTS) {
+        setAttachmentNotice('This message is too large to send inline and all attachment slots are already used. Remove one file so Agentis can attach the text safely.');
+        return;
+      }
+      setAutoConverting(true);
+      const generatedName = pastedTextFileName();
+      try {
+        const artifactId = await uploadComposerFile(new File([value], generatedName, { type: 'text/plain;charset=utf-8' }));
+        uploaded.push({ id: artifactId, name: generatedName });
+        outgoingText = `Treat the attached file “${generatedName}” as the operator's request. It was preserved automatically because it was too large for an inline message.`;
+      } catch (error) {
+        setAttachmentNotice(`The large message could not be converted to a file: ${apiErrorMessage(error)}. The original text is still in the composer.`);
+        setAutoConverting(false);
+        return;
+      }
+      setAutoConverting(false);
+    }
     if (value.startsWith('/')) {
       const m = value.match(/^\/(\w+)\s*(.*)$/);
       if (m && m[1]) {
@@ -476,17 +554,23 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
       }
     }
     lastSent.current = value;
+    const previousAttachments = attachments;
     setText('');
     setAttachments([]);
+    setAttachmentNotice(null);
     if (draftKey) clearDraft(draftKey);
     try {
-      await onSend(value, {
+      await onSend(outgoingText, {
         useViewportContext,
-        attachments: uploaded.map((att) => ({ id: att.artifactId!, name: att.name })),
+        attachments: uploaded,
       });
       setUseViewportContext(true);
+      for (const attachment of attachments) {
+        if (attachment.url) URL.revokeObjectURL(attachment.url);
+      }
     } catch (error) {
       setText(value);
+      setAttachments(previousAttachments);
       if (draftKey) writeDraft(draftKey, value);
       throw error;
     }
@@ -550,14 +634,13 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       className={clsx(
-        "relative min-w-0 shrink-0 overflow-visible border-t border-line px-3 py-2.5",
+        "relative min-w-0 shrink-0 overflow-visible px-3 pb-3 pt-2",
         "bg-surface/98",
-        isFocused ? "border-accent/30" : "",
         dragOver && "border-accent/40 bg-accent/5 ring-1 ring-accent/20"
       )}
     >
       {active && suggestions.length > 0 && (
-        <div className="absolute bottom-full left-0 right-0 z-50 mx-3 mb-2 max-h-60 max-w-[calc(100%-1.5rem)] overflow-y-auto rounded-lg border border-line bg-canvas shadow-modal">
+        <div className="absolute bottom-full left-0 right-0 z-50 mx-auto mb-2 max-h-60 w-[calc(100%-1.5rem)] max-w-[920px] overflow-y-auto rounded-lg border border-line bg-canvas shadow-modal">
           <ul className="p-1.5 space-y-0.5">
             {suggestions.map((s, i) => (
               <li key={s.id}>
@@ -588,7 +671,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
         </div>
       )}
       {awareness?.active && useViewportContext && (
-        <div className="mb-3 flex min-w-0 items-center gap-1.5 text-[11px] text-text-muted animate-in fade-in duration-200">
+        <div className="mx-auto mb-3 flex max-w-[920px] min-w-0 items-center gap-1.5 text-[11px] text-text-muted animate-in fade-in duration-200">
           <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 truncate rounded-full border border-glass-border bg-glass-panel px-3 py-1 text-text-secondary shadow-sm font-medium">
             <Eye size={12} className="text-accent" />
             Viewing: <span className="min-w-0 truncate text-text-primary font-semibold">{awareness.label}</span>
@@ -606,7 +689,7 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
       
       {/* File Attachment Previews */}
       {attachments.length > 0 && (
-        <div className="mb-2 flex min-w-0 flex-wrap gap-2">
+        <div className="mx-auto mb-2 flex max-w-[920px] min-w-0 flex-wrap gap-2">
           {attachments.map((att) => {
             const isImage = att.type.startsWith('image/');
             return (
@@ -633,18 +716,24 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                   {att.loading ? (
                     <span className="text-[9px] text-text-muted">Uploading…</span>
                   ) : att.error ? (
-                    <span className="text-[9px] text-danger">Upload failed</span>
+                    <button
+                      type="button"
+                      onClick={() => retryAttachment(att)}
+                      title={att.errorMessage}
+                      className="w-fit text-[9px] font-semibold text-danger underline decoration-danger/40 underline-offset-2 hover:text-danger/80"
+                    >Retry upload</button>
                   ) : (
-                    <span className="text-[9px] text-text-muted">
-                      {(att.type.split('/')[1] || 'file').toUpperCase()}
-                    </span>
+                    <span className="text-[9px] text-accent/80">{att.generatedFromPaste ? 'Paste secured as file' : 'Ready for analysis'}</span>
                   )}
                 </div>
                 
                 <button
                   type="button"
-                  onClick={() => setAttachments((prev) => prev.filter((a) => a.id !== att.id))}
-                  aria-label="Remove file"
+                  onClick={() => {
+                    if (att.url) URL.revokeObjectURL(att.url);
+                    setAttachments((prev) => prev.filter((a) => a.id !== att.id));
+                  }}
+                  aria-label={`Remove ${att.name}`}
                   className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 place-items-center rounded-full bg-surface-3 text-text-muted shadow hover:text-danger hover:scale-105 group-hover:grid"
                 >
                   <X size={10} />
@@ -655,7 +744,18 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
         </div>
       )}
 
-      <div className="min-w-0 overflow-hidden rounded-xl border border-line bg-canvas/45 focus-within:border-accent/40">
+      {attachmentNotice && (
+        <div role="status" className="mx-auto mb-2 flex max-w-[920px] items-start gap-2 rounded-lg border border-accent/20 bg-accent/[0.055] px-3 py-2 text-[11px] leading-relaxed text-text-secondary">
+          <FileIcon size={13} className="mt-0.5 shrink-0 text-accent" />
+          <span className="min-w-0 flex-1">{attachmentNotice}</span>
+          <button type="button" onClick={() => setAttachmentNotice(null)} aria-label="Dismiss attachment notice" className="shrink-0 text-text-muted hover:text-text-primary"><X size={12} /></button>
+        </div>
+      )}
+
+      <div className={clsx(
+        'mx-auto min-w-0 max-w-[920px] overflow-hidden rounded-2xl border bg-surface-2/65 shadow-[0_16px_38px_-28px_rgba(0,0,0,0.75)] transition-colors',
+        isFocused ? 'border-text-muted/45' : 'border-line/75',
+      )}>
         <textarea
           ref={taRef}
           value={text}
@@ -665,32 +765,35 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
             if (e.clipboardData.files && e.clipboardData.files.length > 0) {
               e.preventDefault();
               handleFiles(e.clipboardData.files);
+              return;
+            }
+            const pastedText = e.clipboardData.getData('text/plain');
+            const target = e.currentTarget;
+            const selectionLength = Math.max(0, (target.selectionEnd ?? text.length) - (target.selectionStart ?? text.length));
+            const projectedLength = text.length - selectionLength + pastedText.length;
+            if (pastedText && (pastedText.length >= LARGE_PASTE_FILE_THRESHOLD || projectedLength > MAX_INLINE_COMPOSER_CHARS)) {
+              if (attachments.length < MAX_COMPOSER_ATTACHMENTS) {
+                e.preventDefault();
+                convertPastedText(pastedText);
+              } else {
+                setAttachmentNotice('The large paste was kept in the composer because all attachment slots are used. Remove one file before sending.');
+              }
             }
           }}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           rows={1}
-          placeholder={placeholder ?? 'Message · / commands · @ agents · # refs'}
-          className="block w-full resize-none border-0 bg-transparent px-3 pt-3 text-sm text-text-primary outline-none"
-          style={{ minHeight: '46px', maxHeight: '140px', overflowY: 'auto' }}
+          placeholder={placeholder ?? 'Ask anything…'}
+          className="block w-full resize-none border-0 bg-transparent px-4 pt-3.5 text-sm leading-6 text-text-primary outline-none placeholder:text-text-muted/75"
+          style={{ minHeight: '52px', maxHeight: '180px', overflowY: 'auto' }}
         />
-        <div className="flex min-h-10 min-w-0 items-center justify-between gap-2 px-2 py-1.5">
-          <div className="min-w-0 flex-1 flex items-center gap-1">
-            {agentId && <ComposerStatusBar agentId={agentId} />}
-            {footer}
-            {text.length > 500 && (
-              <span className="text-[10px] text-text-muted font-mono bg-surface-3 px-1.5 py-0.5 rounded border border-line">
-                {text.length.toLocaleString()}
-              </span>
-            )}
-          </div>
-          
-          <div className="flex items-center gap-1">
+        <div className="flex min-h-11 min-w-0 items-center justify-between gap-2 px-2.5 pb-2 pt-1">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
             <input
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/*,application/pdf,text/*"
+              accept="image/*,audio/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/*,.md,.mdx,.json,.yaml,.yml,.toml,.xml,.csv,.tsv,.docx,.xlsx"
               className="hidden"
               onChange={(e) => {
                 if (e.target.files) handleFiles(e.target.files);
@@ -700,17 +803,30 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
               type="button"
               onClick={triggerFileSelect}
               aria-label="Attach files"
-              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-text-muted hover:bg-surface-2 hover:text-text-primary active:scale-[0.97]"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-text-muted transition hover:bg-surface-3 hover:text-text-primary active:scale-[0.97]"
             >
-              <Paperclip size={14} />
+              <Plus size={17} />
             </button>
+            {footer}
+            {text.length > 500 && (
+              <span className={clsx(
+                'rounded border px-1.5 py-0.5 font-mono text-[10px]',
+                text.length > MAX_INLINE_COMPOSER_CHARS ? 'border-accent/30 bg-accent/10 text-accent' : 'border-line bg-surface-3 text-text-muted',
+              )}>
+                {text.length.toLocaleString()}{text.length > MAX_INLINE_COMPOSER_CHARS ? ' · will attach' : ''}
+              </span>
+            )}
+          </div>
+
+          <div className="flex min-w-0 items-center gap-1">
+            {agentId && <ComposerStatusBar agentId={agentId} />}
             {speechSupported && (
               <button
                 type="button"
                 onClick={toggleRecording}
                 aria-label={recording ? 'Stop recording' : 'Start voice dictation'}
                 className={clsx(
-                  "relative grid h-7 w-7 shrink-0 place-items-center rounded-md border-0 outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0",
+                  "relative grid h-8 w-8 shrink-0 place-items-center rounded-lg border-0 outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0",
                   recording
                     ? "text-blue-400 animate-pulse"
                     : "text-text-muted hover:text-text-primary hover:bg-surface-3/60",
@@ -731,27 +847,40 @@ export function Composer({ onSend, awareness, initialText, placeholder, footer, 
                 }
                 void send();
               }}
-              disabled={transcribing || (isRunning && !hasComposedInput ? !onStop : (!hasComposedInput || attachments.some(a => a.loading)))}
-              aria-label={isRunning && !hasComposedInput ? 'Stop agent response' : isRunning ? 'Queue message' : 'Send message'}
+              disabled={transcribing || autoConverting || (isRunning && !hasComposedInput ? !onStop : (!hasComposedInput || hasBlockingAttachment))}
+              aria-label={autoConverting ? 'Converting large message to file' : isRunning && !hasComposedInput ? 'Stop agent response' : isRunning ? 'Queue message' : 'Send message'}
               title={isRunning && hasComposedInput ? 'Queue this message — it will send once the current reply finishes' : undefined}
               className={clsx(
-                "grid h-7 w-7 shrink-0 place-items-center rounded-md",
-                transcribing
+                "grid h-8 w-8 shrink-0 place-items-center rounded-full",
+                transcribing || autoConverting
                   ? "bg-surface-3 text-text-muted opacity-60 cursor-wait"
                   : isRunning && !hasComposedInput
                   ? "bg-danger/12 text-danger ring-1 ring-danger/25 hover:bg-danger/18 active:scale-[0.97]"
-                  : !hasComposedInput || attachments.some(a => a.loading)
+                  : !hasComposedInput || hasBlockingAttachment
                   ? "bg-surface-3 text-text-muted opacity-40 cursor-not-allowed"
                   : "bg-accent text-canvas active:scale-[0.97]"
               )}
             >
-              {transcribing ? <Loader2 size={13} className="animate-spin" /> : isRunning && !hasComposedInput ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
+              {transcribing || autoConverting ? <Loader2 size={13} className="animate-spin" /> : isRunning && !hasComposedInput ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} className="font-bold" />}
             </button>
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+async function uploadComposerFile(file: File): Promise<string> {
+  const form = new FormData();
+  form.set('file', file);
+  form.set('name', file.name);
+  const result = await api<{ artifact: { id: string } }>('/v1/artifacts/upload', { method: 'POST', body: form });
+  return result.artifact.id;
+}
+
+function pastedTextFileName(): string {
+  const stamp = new Date().toISOString().replace('T', '-').replace(/:/g, '-').slice(0, 19);
+  return `Pasted text ${stamp}.txt`;
 }
 
 /** Merge browser recognition chunks while removing repeated overlap. */

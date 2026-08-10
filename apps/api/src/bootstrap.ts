@@ -15,7 +15,7 @@ import { Hono } from 'hono';
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type WorkflowGraph, type WorkflowGraphPatch } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, type NormalizedAgentEvent, type AgentAdapter, type RuntimeInputAttachment, type WorkflowGraph, type WorkflowGraphPatch } from '@agentis/core';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AgentisRuntimeHandle, AgentisRuntimeStartResult } from '@agentis/runtime';
 import { loadEnv, type AgentisEnv } from './env.js';
@@ -77,9 +77,12 @@ import { CapabilityIndex } from './services/capability/capabilityIndex.js';
 import { CommandModelService } from './services/command/commandModel.js';
 import { CommandHeartbeat, isWorkspaceAutonomyEnabled } from './services/command/commandHeartbeat.js';
 import { TranscriptionService } from './services/transcriptionService.js';
+import { LocalTranscriptionService } from './services/localTranscriptionService.js';
 import { SpeechService } from './services/speechService.js';
 import { VisionService } from './services/visionService.js';
 import { DocumentExtractionService } from './services/documentExtractionService.js';
+import { ConversationAttachmentContextService } from './services/conversation/conversationAttachmentContext.js';
+import { RuntimeInputAttachmentStore } from './services/conversation/runtimeInputAttachmentStore.js';
 import { ChannelIdentityService } from './services/conversation/channelIdentityService.js';
 import { WorkspaceModelConfigService } from './services/workspace/workspaceModelConfigService.js';
 import { WorkspaceMediaConfigService } from './services/workspace/workspaceMediaConfigService.js';
@@ -1568,6 +1571,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     }
   });
 
+  let compileChannelAttachments: ((args: {
+    workspaceId: string;
+    body: string;
+    attachmentIds: string[];
+  }) => Promise<{ prompt: string; runtimeInputAttachments?: RuntimeInputAttachment[] }>) | undefined;
+
   // Close the channel loop: inbound channel messages now run a real orchestrator
   // turn and the reply is delivered back to the origin chat.
   const channelTurnDispatcher = new ChannelTurnDispatcher({
@@ -1598,8 +1607,12 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     conversation: conversationService,
     // BRAIN-BLUEPRINT-10X — channel turns form memory like web chat does.
     memoryCapture: chatMemoryCapture,
-    // Coalesce rapid-fire messages from the same chat into one turn.
-    debounceMs: 900,
+    // Coalesce consecutive WhatsApp-style bubbles without making a real person
+    // wait a full second before the agent may begin thinking.
+    debounceMs: 350,
+    compileAttachments: (args) => compileChannelAttachments
+      ? compileChannelAttachments(args)
+      : Promise.resolve({ prompt: args.body }),
   });
   channelBridge.setTurnDispatcher(channelTurnDispatcher);
 
@@ -1785,10 +1798,15 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     channelTurnDispatcher.setQueue(channelTurnQueue);
   }
 
-  // Voice-note transcription (WhatsApp) — uses the model router's transcription
-  // role. No-op when no transcription model is configured.
+  // Inbound voice understanding is available by default through managed local
+  // Whisper. A workspace transcription profile is only an optional accelerator.
+  const localTranscription = new LocalTranscriptionService({
+    dataDir: env.AGENTIS_DATA_DIR,
+    logger,
+  });
   const transcription = new TranscriptionService({
     profile: () => orchestratorModelRouter.profile('transcription'),
+    localFallback: localTranscription,
     logger,
   });
   // Image understanding for inbound channel images — uses the vision role.
@@ -1807,6 +1825,40 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   specialistVision = vision;
   // Document (PDF / text) extraction for inbound channel attachments.
   const documentExtraction = new DocumentExtractionService({ logger });
+  const runtimeInputAttachments = new RuntimeInputAttachmentStore(
+    path.join(env.AGENTIS_DATA_DIR, 'runtime-inputs'),
+  );
+  compileChannelAttachments = async (args) => new ConversationAttachmentContextService({
+    artifacts: artifactService,
+    documents: documentExtraction,
+    logger,
+    vision: new VisionService({
+      profile: () => orchestratorModelRouter.profile('vision', args.workspaceId),
+      logger,
+    }),
+    transcription: new TranscriptionService({
+      profile: () => orchestratorModelRouter.profile('transcription', args.workspaceId),
+      localFallback: localTranscription,
+      logger,
+    }),
+    materialize: (input) => runtimeInputAttachments.materialize(input),
+    materializeVideoFrames: (input) => runtimeInputAttachments.materializeVideoFrames(input),
+  }).compile({
+    ...args,
+    strict: false,
+  });
+  channelBridge.setInboundMediaResolvers({
+    transcribeAudio: (bytes, mime, workspaceId) => new TranscriptionService({
+      profile: () => orchestratorModelRouter.profile('transcription', workspaceId), logger,
+      localFallback: localTranscription,
+    }).transcribe({ bytes, mimeType: mime }),
+    describeImage: (bytes, mime, workspaceId, caption) => new VisionService({
+      profile: () => orchestratorModelRouter.profile('vision', workspaceId), logger,
+    }).describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }),
+    extractDocument: (bytes, mime, _workspaceId, fileName) => documentExtraction.extract({
+      bytes, mimeType: mime, ...(fileName ? { fileName } : {}),
+    }),
+  });
 
   // Persistent-transport supervisor: live WhatsApp (baileys) sockets. Routes
   // inbound through the same dispatcher and outbound back over the live socket.
@@ -1819,13 +1871,23 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     dataDir: env.AGENTIS_DATA_DIR,
     hasPublicWebhookUrl: () => Boolean(env.AGENTIS_PUBLIC_URL),
     dispatcher: channelTurnDispatcher,
-    // Always wired — these services return null when no model is configured, so
-    // inbound voice/image understanding activates the moment a capable model is
-    // set (Settings → Runtimes → transcription/vision role), with no toggle and
-    // no restart. Zero cost when unconfigured (no network call).
-    transcribeAudio: (bytes, mime) => transcription.transcribe({ bytes, mimeType: mime }),
-    describeImage: (bytes, mime, caption) => vision.describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }),
-    extractDocument: (bytes, mime, fileName) => documentExtraction.extract({ bytes, mimeType: mime, ...(fileName ? { fileName } : {}) }),
+    artifacts: artifactService,
+    prepareInboundAudio: (workspaceId) => workspaceId && orchestratorModelRouter.profile('transcription', workspaceId)
+      ? Promise.resolve()
+      : localTranscription.prepare(),
+    // Always wired. Audio uses managed local Whisper; image/video artifacts are
+    // persisted and forwarded natively by the shared attachment compiler.
+    // Provider profiles remain optional accelerators, not input prerequisites.
+    transcribeAudio: (bytes, mime, workspaceId) => new TranscriptionService({
+      profile: () => orchestratorModelRouter.profile('transcription', workspaceId),
+      localFallback: localTranscription,
+      logger,
+    }).transcribe({ bytes, mimeType: mime }),
+    describeImage: (bytes, mime, workspaceId, caption) => new VisionService({
+      profile: () => orchestratorModelRouter.profile('vision', workspaceId),
+      logger,
+    }).describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }),
+    extractDocument: (bytes, mime, _workspaceId, fileName) => documentExtraction.extract({ bytes, mimeType: mime, ...(fileName ? { fileName } : {}) }),
   });
   channelBridge.setPersistentTransport(channelSupervisor);
   // §PERF-BOOT (GAP B) — startAll() is NOT called here any more. Despite the
@@ -1932,6 +1994,10 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     Reflection,
     SessionMoments,
     SharedIntelligence,
+    documentExtraction,
+    vision,
+    transcription,
+    runtimeProfiles,
     appContacts,
     appLearning,
     appOrchestrator,

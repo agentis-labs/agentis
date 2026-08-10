@@ -2,7 +2,7 @@
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { normalizeToolInvocation, REALTIME_EVENTS, type AppBlueprint, type BuildSession, type ChatDelta, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS, type AppBlueprint, type BuildSession, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
 import { PermissionModePicker } from './PermissionModePicker';
 import { readPlanStepTrack } from '../../lib/workSteps';
 import { StepTrack } from '../shared/StepTrack';
@@ -25,6 +25,7 @@ import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
 import { DurablePlanCard } from '../shared/DurablePlanCard';
 import { BuildSessionCard } from '../shared/BuildSessionCard';
+import type { DurableConversationTurn } from './durableTurn';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -39,6 +40,7 @@ interface ThreadViewProps {
   emptyBody?: string;
   onInitialDraftUsed?: () => void;
   onConversationReset?: (conversationId: string) => void;
+  immersive?: boolean;
 }
 
 type AgentMsg = {
@@ -84,6 +86,7 @@ interface MessageMeta {
   clientTurnId?: string;
   card?: ProactiveCardData;
   activity?: Array<Extract<ChatDelta, { type: 'activity' }>>;
+  commentary?: ChatCommentary[];
   turn?: ChatTurnTrace;
   toolCalls?: ToolCallPillData[];
   confirmation?: ConfirmationCardData;
@@ -95,6 +98,9 @@ interface MessageMeta {
   /** Composer file/photo uploads carried with this message — artifact ids. */
   artifactIds?: string[];
   plan?: ChatPlan;
+  executionEnvelope?: ChatExecutionEnvelope;
+  contextManifest?: ChatContextManifest;
+  durableTurnId?: string;
 }
 
 type ConfirmationStatus = 'pending' | 'approving' | 'approved' | 'cancelled' | 'failed';
@@ -401,6 +407,7 @@ export function ThreadView({
   emptyBody,
   onInitialDraftUsed,
   onConversationReset,
+  immersive = false,
 }: ThreadViewProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Queue-then-auto-continue composer: messages sent while a turn was already
@@ -440,6 +447,9 @@ export function ThreadView({
   // server-side so channels and the next turn agree (default ask).
   const permissionModeKey = `agentis:permission-mode:${id}:${conversationId ?? 'active'}`;
   const [permissionMode, setPermissionModeState] = useState<ChatPermissionMode>('ask');
+  const [activeDurableTurn, setActiveDurableTurn] = useState<DurableConversationTurn | null>(null);
+  const activeDurableTurnIdRef = useRef<string | null>(null);
+  const resumedTurnIdsRef = useRef(new Set<string>());
   useEffect(() => {
     if (kind !== 'agent') return;
     const stored = readStoredPermissionMode(permissionModeKey);
@@ -482,6 +492,7 @@ export function ThreadView({
   const querySuffix = conversationId ? `?conversationId=${conversationId}` : '';
   const endpoint = kind === 'agent' ? `/v1/conversations/${id}` : `/v1/rooms/${id}/messages`;
   const sendEndpoint = kind === 'agent' ? `/v1/conversations/${id}/send${querySuffix}` : `/v1/rooms/${id}/messages`;
+  const turnsEndpoint = kind === 'agent' ? `/v1/conversations/${id}/turns${querySuffix}` : null;
   const confirmEndpoint = kind === 'agent' ? `/v1/conversations/${id}/confirm${querySuffix}` : null;
   const stopEndpoint = kind === 'agent' ? `/v1/conversations/${id}/stop${querySuffix}` : null;
   const readOnly = kind === 'agent' && Boolean(archivedAt);
@@ -579,6 +590,25 @@ export function ThreadView({
     return () => { cancelled = true; };
   }, [conversationId, kind, loadedConversationId]);
 
+  useEffect(() => {
+    const targetConversationId = loadedConversationId ?? conversationId;
+    setActiveDurableTurn(null);
+    activeDurableTurnIdRef.current = null;
+    if (kind !== 'agent' || readOnly || !targetConversationId) return;
+    let cancelled = false;
+    void api<{ turns: DurableConversationTurn[] }>(`/v1/conversations/${id}/turns/active?conversationId=${encodeURIComponent(targetConversationId)}`)
+      .then(({ turns }) => {
+        if (cancelled || turns.length === 0) return;
+        const active = turns.find((turn) => turn.status === 'running')
+          ?? turns.find((turn) => turn.status === 'awaiting_approval' || turn.status === 'paused')
+          ?? turns[0]!;
+        setActiveDurableTurn(active);
+        subscribeRecoveredTurn(active);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [conversationId, id, kind, loadedConversationId, readOnly]);
+
   async function loadOlder() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     suppressNextScroll();
@@ -655,6 +685,10 @@ export function ThreadView({
                     }
                   : message
               )));
+            } else if (delta.type === 'activity' || delta.type === 'commentary') {
+              setMessages((current) => current.map((message) => (
+                message.id === streamId ? withTurnProgress(message, delta) : message
+              )));
             } else if (delta.type === 'tool_call') {
               toolStartedAt.set(delta.id, performance.now());
               applyToolCallDelta(streamId, delta);
@@ -708,6 +742,7 @@ export function ThreadView({
                   clientTurnId: persisted.metadata?.clientTurnId ?? clientTurnId,
                   toolCalls: streamMessage?.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
                   activity: persisted.metadata?.activity ?? streamMessage?.metadata?.activity,
+                  commentary: persisted.metadata?.commentary ?? streamMessage?.metadata?.commentary,
                   turn: persisted.metadata?.turn ?? streamMessage?.metadata?.turn,
                 },
               });
@@ -1225,15 +1260,9 @@ export function ThreadView({
     // rendered attachment card.
     const bodyText = value || defaultAttachmentCaption(attachments);
     const artifactIds = attachments.map((a) => a.id);
-    // ChatGPT/Gemini-style queue-then-auto-continue: a turn is already
-    // streaming in this thread, so don't race a second live turn — queue this
-    // send. `streamConversationTurnReply` auto-dispatches it, oldest first,
-    // once the in-flight turn ends (see the CONVERSATION_QUEUE_UPDATED
-    // realtime subscription above).
-    if (kind === 'agent' && streamingAgentActive) {
-      await enqueueMessage(bodyText, attachments);
-      return;
-    }
+    // Chat V2 persists every operator turn immediately. If another turn is
+    // active, the durable worker queues this one by conversation order; the
+    // browser never owns that queue or the lifetime of either mission.
     if (kind === 'room') {
       try {
         const responders = resolveMentionedAgentIds(value, agentMap);
@@ -1323,9 +1352,9 @@ export function ThreadView({
       activeChatAbortRef.current?.abort();
       activeChatAbortRef.current = controller;
       const viewportOverride = pendingViewportOverrideRef.current;
-      await streamSse(sendEndpoint, {
+      if (!turnsEndpoint) throw new Error('Durable turn endpoint is unavailable.');
+      const created = await api<{ turn: DurableConversationTurn; conversationId: string; message?: AgentMsg }>(turnsEndpoint, {
         method: 'POST',
-        signal: controller.signal,
         body: JSON.stringify({
           body: bodyText,
           clientTurnId,
@@ -1333,7 +1362,19 @@ export function ThreadView({
           attachments: artifactIds.length ? artifactIds : undefined,
           viewportOverride,
           permissionMode,
+          executionMode: 'auto',
         }),
+      });
+      activeDurableTurnIdRef.current = created.turn.id;
+      resumedTurnIdsRef.current.add(created.turn.id);
+      setActiveDurableTurn(created.turn);
+      setLoadedConversationId(created.conversationId);
+      if (created.message) {
+        setMessages((current) => mergeMessage(current, normalizeAgentMessage(created.message!)));
+      }
+      await streamSse(`/v1/conversations/${id}/turns/${created.turn.id}/events?after=0`, {
+        method: 'GET',
+        signal: controller.signal,
       }, {
         onEvent(event, data) {
           if (event === 'delta') {
@@ -1345,20 +1386,11 @@ export function ThreadView({
                   ? { ...message, text: streamedBody, deliveryStatus: 'sending' }
                   : message
               )));
-            } else if (delta.type === 'activity') {
-              updateActiveTask({ label: delta.label });
-              setMessages((current) => current.map((message) => {
-                if (message.id !== streamId) return message;
-                const activity = message.metadata?.activity ?? [];
-                return {
-                  ...message,
-                  metadata: {
-                    ...(message.metadata ?? {}),
-                    source: message.metadata?.source ?? 'chat_loop',
-                    activity: [...activity.filter((entry) => entry.id !== delta.id), delta].slice(-80),
-                  },
-                };
-              }));
+            } else if (delta.type === 'activity' || delta.type === 'commentary') {
+              if (delta.type === 'activity') updateActiveTask({ label: delta.label });
+              setMessages((current) => current.map((message) => (
+                message.id === streamId ? withTurnProgress(message, delta) : message
+              )));
             } else if (delta.type === 'tool_call') {
               toolStartedAt.set(delta.id, performance.now());
               toolTotal += 1;
@@ -1375,9 +1407,22 @@ export function ThreadView({
               setMessages((current) => current.map((message) => message.id === streamId
                 ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
                 : message));
+            } else if (delta.type === 'execution') {
+              setActiveDurableTurn((current) => current ? {
+                ...current,
+                executionEnvelope: delta.envelope,
+                contextManifest: delta.context,
+                effectiveMode: delta.envelope.effectiveMode,
+              } : current);
+              setMessages((current) => current.map((message) => message.id === streamId
+                ? { ...message, metadata: { ...(message.metadata ?? {}), durableTurnId: created.turn.id, executionEnvelope: delta.envelope, contextManifest: delta.context } }
+                : message));
             } else if (delta.type === 'done') {
               setAgentTyping(false);
               setActiveTask(null);
+              void api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${created.turn.id}`)
+                .then(({ turn }) => setActiveDurableTurn(turn.status === 'completed' || turn.status === 'failed' || turn.status === 'cancelled' ? null : turn))
+                .catch(() => setActiveDurableTurn(null));
               setMessages((current) => current.map((message) => (
                 message.id === streamId
                   ? { ...message, deliveryStatus: delta.finishReason === 'error' ? 'failed' : 'delivered' }
@@ -1395,6 +1440,7 @@ export function ThreadView({
                   clientTurnId: persisted.metadata?.clientTurnId ?? clientTurnId,
                   toolCalls: streamMessage?.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
                   activity: persisted.metadata?.activity ?? streamMessage?.metadata?.activity,
+                  commentary: persisted.metadata?.commentary ?? streamMessage?.metadata?.commentary,
                   turn: persisted.metadata?.turn ?? streamMessage?.metadata?.turn,
                 },
               };
@@ -1455,11 +1501,23 @@ export function ThreadView({
       if (!stopped) toast.error('Failed to send', apiErrorMessage(error));
     } finally {
       activeChatAbortRef.current = null;
+      activeDurableTurnIdRef.current = null;
     }
   }
 
   function stopActiveTurn() {
     activeChatAbortRef.current?.abort();
+    const durableTurnId = activeDurableTurnIdRef.current ?? activeDurableTurn?.id;
+    if (durableTurnId && kind === 'agent') {
+      void api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${durableTurnId}/cancel`, { method: 'POST' })
+        .then(() => {
+          setActiveDurableTurn(null);
+          setAgentTyping(false);
+          setActiveTask(null);
+        })
+        .catch((error) => toast.error('Could not stop mission', apiErrorMessage(error)));
+      return;
+    }
     if (!stopEndpoint) return;
     // The browser abort only closes this SSE request. The server endpoint is the
     // durable stop: it aborts the model loop, clears queued follow-ups, and
@@ -1472,6 +1530,103 @@ export function ThreadView({
         }
       })
       .catch((error) => toast.error('Could not stop all work', apiErrorMessage(error)));
+  }
+
+  /** Reattach to a server-owned turn after reload, fullscreen/dock remount, or resume. */
+  function subscribeRecoveredTurn(turn: DurableConversationTurn) {
+    if (resumedTurnIdsRef.current.has(turn.id)) return;
+    resumedTurnIdsRef.current.add(turn.id);
+    const streamId = `stream-${turn.clientTurnId}`;
+    const createdAt = turn.startedAt ?? turn.createdAt;
+    setMessages((current) => {
+      if (current.some((message) => message.metadata?.clientTurnId === turn.clientTurnId && message.authorKind === 'agent')) return current;
+      return dedupeMessages([...current, {
+        id: streamId,
+        authorId: id,
+        authorKind: 'agent',
+        text: '',
+        createdAt,
+        deliveryStatus: 'sending',
+        metadata: {
+          source: 'chat_loop',
+          clientTurnId: turn.clientTurnId,
+          durableTurnId: turn.id,
+          executionEnvelope: turn.executionEnvelope ?? undefined,
+          contextManifest: turn.contextManifest ?? undefined,
+          turn: { clientTurnId: turn.clientTurnId, startedAt: createdAt, status: 'running' },
+          activity: [{
+            type: 'activity',
+            id: `activity-${turn.clientTurnId}-reattached`,
+            phase: 'waiting',
+            status: 'running',
+            label: 'Reattached to background work',
+            detail: 'Replaying persisted progress from the server.',
+            agentId: id,
+            clientTurnId: turn.clientTurnId,
+            startedAt: new Date().toISOString(),
+          }],
+        },
+      }]);
+    });
+    setActiveDurableTurn(turn);
+    activeDurableTurnIdRef.current = turn.id;
+    setAgentTyping(turn.status === 'running' || turn.status === 'queued');
+    const controller = new AbortController();
+    activeChatAbortRef.current?.abort();
+    activeChatAbortRef.current = controller;
+    const toolStartedAt = new Map<string, number>();
+    let streamedBody = '';
+    void streamSse(`/v1/conversations/${id}/turns/${turn.id}/events?after=0`, { method: 'GET', signal: controller.signal }, {
+      onEvent(event, data) {
+        if (event === 'delta') {
+          const delta = data as ChatDelta;
+          if (delta.type === 'text') {
+            streamedBody += delta.delta;
+            setMessages((current) => current.map((message) => message.id === streamId ? { ...message, text: streamedBody } : message));
+          } else if (delta.type === 'activity' || delta.type === 'commentary') {
+            if (delta.type === 'activity') updateActiveTask({ label: delta.label });
+            setMessages((current) => current.map((message) => (
+              message.id === streamId ? withTurnProgress(message, delta) : message
+            )));
+          } else if (delta.type === 'tool_call') {
+            toolStartedAt.set(delta.id, performance.now());
+            applyToolCallDelta(streamId, delta);
+          } else if (delta.type === 'tool_result') {
+            applyToolResultDelta(streamId, delta, toolStartedAt);
+          } else if (delta.type === 'confirmation_required') {
+            applyConfirmationDelta(streamId, delta);
+          } else if (delta.type === 'plan') {
+            setLatestPlan(delta.plan);
+            setMessages((current) => current.map((message) => message.id === streamId
+              ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
+              : message));
+          } else if (delta.type === 'execution') {
+            setActiveDurableTurn((current) => current ? { ...current, executionEnvelope: delta.envelope, contextManifest: delta.context, effectiveMode: delta.envelope.effectiveMode } : current);
+          } else if (delta.type === 'done') {
+            setAgentTyping(false);
+            setMessages((current) => current.map((message) => message.id === streamId
+              ? { ...message, deliveryStatus: delta.finishReason === 'error' ? 'failed' : 'delivered' }
+              : message));
+          }
+        } else if (event === 'message') {
+          const persisted = normalizeAgentMessage(data as AgentMsg);
+          setMessages((current) => mergeMessage(current, persisted));
+        } else if (event === 'error') {
+          setAgentTyping(false);
+          setMessages((current) => current.map((message) => message.id === streamId
+            ? { ...message, text: message.text || streamErrorMessage(data), deliveryStatus: 'failed' }
+            : message));
+        }
+      },
+    }).then(() => api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${turn.id}`))
+      .then(({ turn: latest }) => {
+        const terminal = latest.status === 'completed' || latest.status === 'failed' || latest.status === 'cancelled';
+        setActiveDurableTurn(terminal ? null : latest);
+        if (terminal) activeDurableTurnIdRef.current = null;
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) toast.error('Could not reconnect to mission', apiErrorMessage(error));
+      });
   }
 
   async function startNewConversation() {
@@ -1598,20 +1753,11 @@ export function ThreadView({
                   ? { ...item, text: streamedBody, deliveryStatus: 'sending' }
                   : item
               )));
-            } else if (delta.type === 'activity') {
-              updateActiveTask({ label: delta.label });
-              setMessages((current) => current.map((item) => {
-                if (item.id !== streamId) return item;
-                const activity = item.metadata?.activity ?? [];
-                return {
-                  ...item,
-                  metadata: {
-                    ...(item.metadata ?? {}),
-                    source: item.metadata?.source ?? 'chat_loop',
-                    activity: [...activity.filter((entry) => entry.id !== delta.id), delta].slice(-80),
-                  },
-                };
-              }));
+            } else if (delta.type === 'activity' || delta.type === 'commentary') {
+              if (delta.type === 'activity') updateActiveTask({ label: delta.label });
+              setMessages((current) => current.map((item) => (
+                item.id === streamId ? withTurnProgress(item, delta) : item
+              )));
             } else if (delta.type === 'tool_call') {
               toolStartedAt.set(delta.id, performance.now());
               toolTotal += 1;
@@ -1648,6 +1794,7 @@ export function ThreadView({
                   clientTurnId: persisted.metadata?.clientTurnId ?? clientTurnId,
                   toolCalls: streamMessage?.metadata?.toolCalls ?? persisted.metadata?.toolCalls,
                   activity: persisted.metadata?.activity ?? streamMessage?.metadata?.activity,
+                  commentary: persisted.metadata?.commentary ?? streamMessage?.metadata?.commentary,
                   turn: persisted.metadata?.turn ?? streamMessage?.metadata?.turn,
                 },
               });
@@ -1751,8 +1898,8 @@ export function ThreadView({
   );
 
   return (
-    <div className="flex h-full min-w-0 flex-col overflow-hidden">
-      <div ref={scrollRef} className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3">
+    <div className={clsx('flex h-full min-w-0 flex-col overflow-hidden', immersive && 'agentis-chat-immersive')}>
+      <div ref={scrollRef} className={clsx('min-w-0 flex-1 overflow-x-hidden overflow-y-auto', immersive ? 'px-5 py-6 md:px-10' : 'px-3 py-3')}>
         {id === '__broadcast__' && (
           <div className="mb-4 mt-2 flex items-center justify-center text-center">
             <span className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-text-muted border border-line shadow-sm">
@@ -1767,11 +1914,11 @@ export function ThreadView({
             <Skeleton height={36} />
           </div>
         ) : messages.length === 0 && pendingQueue.length === 0 ? (
-          <div className="px-2 py-8 text-center text-[13px] text-text-muted">
-            {emptyBody ?? `Send a message to start a conversation with ${name}.`}
-          </div>
+          immersive && kind === 'agent'
+            ? <ImmersiveEmptyState name={name} body={emptyBody} />
+            : <div className="px-2 py-8 text-center text-[13px] text-text-muted">{emptyBody ?? `Send a message to start a conversation with ${name}.`}</div>
         ) : (
-          <ul className="flex min-w-0 flex-col gap-2.5">
+          <ul className={clsx('mx-auto flex min-w-0 flex-col gap-2.5', immersive && 'max-w-[860px] gap-5')}>
             {latestBuild && <li className="w-full"><BuildSessionCard session={latestBuild.session} blueprint={latestBuild.blueprint} /></li>}
             {latestPlan && !messages.some((message) => message.metadata?.plan?.id === latestPlan.id) && (
               <li className="w-full"><DurablePlanCard plan={latestPlan} recovered /></li>
@@ -1797,6 +1944,7 @@ export function ThreadView({
                 key={message.id}
                 msg={message}
                 agentData={agentMap[message.authorId]}
+                showAuthor={kind === 'room'}
                 onCopy={() => void handleCopy(message)}
                 isEditing={editingId === message.id}
                 readOnly={readOnly}
@@ -1895,28 +2043,54 @@ export function ThreadView({
           agentId={kind === 'agent' ? id : undefined}
           isRunning={streamingAgentActive}
           onStop={stopActiveTurn}
-          footer={kind === 'agent' ? (
-            <PermissionModePicker value={permissionMode} onChange={(mode) => void setPermissionMode(mode)} />
-          ) : undefined}
+          footer={kind === 'agent' ? <PermissionModePicker value={permissionMode} onChange={(mode) => void setPermissionMode(mode)} /> : undefined}
         />
       )}
     </div>
   );
 }
 
-/** Queue-then-auto-continue composer: a message sent while the turn was
- * already streaming, rendered like a real outbound bubble but dimmed with a
- * "Queued" label — and cancelable before it dispatches. */
+function upsertStable<T extends { id: string }>(items: T[], next: T, limit = 80): T[] {
+  const index = items.findIndex((item) => item.id === next.id);
+  if (index < 0) return [...items, next].slice(-limit);
+  const copy = [...items];
+  copy[index] = next;
+  return copy.slice(-limit);
+}
+
+function withTurnProgress(message: ChatMessage, delta: Extract<ChatDelta, { type: 'activity' | 'commentary' }>): ChatMessage {
+  const metadata = { ...(message.metadata ?? {}), source: message.metadata?.source ?? 'chat_loop' as const };
+  if (delta.type === 'commentary') {
+    metadata.commentary = upsertStable(message.metadata?.commentary ?? [], delta);
+  } else {
+    metadata.activity = upsertStable(message.metadata?.activity ?? [], delta);
+  }
+  return { ...message, metadata };
+}
+
+function ImmersiveEmptyState({ name, body }: { name: string; body?: string }) {
+  return (
+    <div className="mx-auto flex min-h-[52vh] max-w-[680px] flex-col items-center justify-center px-6 py-16 text-center">
+      <div className="mb-3 text-[15px] font-medium text-text-primary">{name}</div>
+      <p className="max-w-[520px] text-[13px] leading-6 text-text-muted">
+        {body ?? 'Ask a question, share a file, or describe the work you want completed.'}
+      </p>
+    </div>
+  );
+}
+
+/** A queued follow-up stays in the conversation flow and differs from a sent
+ * operator message only through its quiet delivery status. */
 function QueuedMessageBubble({ item, onCancel }: { item: QueuedItem; onCancel?: () => void }) {
   return (
     <li className="group flex min-w-0 max-w-full flex-col items-end gap-0.5">
       <div className="flex min-w-0 max-w-full items-start gap-1.5">
-        <div className="min-w-0 max-w-[85%] overflow-hidden rounded-card border border-dashed border-line bg-accent-soft/40 px-3 py-2 text-[13px] leading-relaxed text-text-primary opacity-60">
-          <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-text-muted">
+        <div className="min-w-0 max-w-[85%] overflow-hidden rounded-[18px] border border-line/45 bg-surface-3/50 px-3.5 py-2.5 text-[13px] leading-relaxed text-text-primary opacity-75">
+          <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{item.text}</div>
+          <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-text-muted">
             <Clock3 size={10} />
             <span>Queued</span>
           </div>
-          <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{item.text}</div>
         </div>
         {onCancel && (
           <button
@@ -1945,6 +2119,7 @@ function MessageBubble({
   onCancelEdit,
   onConfirmAction,
   onCancelRun,
+  showAuthor,
 }: {
   msg: ChatMessage;
   onCopy: () => void;
@@ -1955,6 +2130,7 @@ function MessageBubble({
   onCancelEdit: () => void;
   onConfirmAction: (confirmation: ConfirmationCardData, approved: boolean) => void;
   onCancelRun?: (runId: string) => void;
+  showAuthor?: boolean;
   agentData?: { name: string; role?: string | null; colorHex?: string | null };
 }) {
   const isOperator = msg.authorKind === 'operator';
@@ -1977,7 +2153,7 @@ function MessageBubble({
 
   return (
     <li className={clsx('group flex min-w-0 max-w-full flex-col gap-0.5', isOperator ? 'items-end' : 'items-start')}>
-      {!isOperator && msg.authorKind !== 'system' && (
+      {!isOperator && showAuthor && msg.authorKind !== 'system' && (
         <span
           className="px-1 text-[11px] font-medium"
           style={{ color: agentData?.colorHex || 'var(--text-muted)' }}
@@ -1992,26 +2168,25 @@ function MessageBubble({
         )}
         <div
           className={clsx(
-            'min-w-0 overflow-hidden rounded-card px-3 py-2 text-[13px] leading-relaxed',
+            'chat-message-surface min-w-0 text-[13px] leading-relaxed',
                   isOperator
-                    ? 'max-w-[85%]'
-                    : streaming
-                      ? 'w-full max-w-full'
-                    : parsedAgentPlan
-                        ? 'w-full max-w-full'
-                        : 'max-w-[85%]',
+                    ? 'max-w-[85%] overflow-hidden rounded-[18px] px-3.5 py-2.5'
+                    : 'w-full max-w-full overflow-visible px-0 py-0',
             isOperator
-              ? 'bg-accent-soft text-text-primary'
+              ? 'border border-line/55 bg-surface-3/75 text-text-primary shadow-sm'
               : msg.authorKind === 'system'
-                ? 'border border-dashed border-line bg-surface-2 text-text-muted'
-                : 'bg-surface-2 text-text-primary shadow-[0_18px_35px_-30px_rgba(0,0,0,0.7)]',
+                ? 'rounded-lg border border-dashed border-line bg-surface-2 px-3 py-2 text-text-muted'
+                : 'bg-transparent text-text-primary',
           )}
         >
-          {!isOperator && (streaming || activities.length > 0 || toolCalls.length > 0) && (
+          {!isOperator && (streaming || activities.length > 0 || (msg.metadata?.commentary?.length ?? 0) > 0 || toolCalls.length > 0) && (
             <AgentTurnTrace
               activities={activities}
+              commentary={msg.metadata?.commentary}
               toolCalls={toolCalls}
               turn={msg.metadata?.turn}
+              envelope={msg.metadata?.executionEnvelope}
+              context={msg.metadata?.contextManifest}
               streaming={streaming}
               failed={msg.deliveryStatus === 'failed'}
             />
@@ -2108,7 +2283,7 @@ function MessageBubble({
             <div className="mt-2 break-words [overflow-wrap:anywhere]">
               <ChatMarkdown text={bodyAfterPlan} />
             </div>
-          ) : (msg.metadata?.card || msg.metadata?.confirmation || parsedAgentPlan || toolCalls.length > 0 || activities.length > 0 || bodyBeforePlan || artifactIds.length > 0) ? null : streaming && !isOperator ? (
+          ) : (msg.metadata?.card || msg.metadata?.confirmation || parsedAgentPlan || toolCalls.length > 0 || activities.length > 0 || (msg.metadata?.commentary?.length ?? 0) > 0 || bodyBeforePlan || artifactIds.length > 0) ? null : streaming && !isOperator ? (
             <TypingDots />
           ) : !isOperator ? null : (
             <div className="text-[12px] italic text-text-muted">No text content</div>

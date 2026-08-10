@@ -25,18 +25,19 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
+import { REALTIME_EVENTS, REALTIME_ROOMS, artifactTypeFromMime } from '@agentis/core';
 import type { EventBus } from '../../event-bus.js';
 import type { Logger } from '../../logger.js';
 import type { CredentialVault } from '../credentialVault.js';
+import type { ArtifactService } from '../artifactService.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
-import { WhatsAppSession, type WhatsAppObservedOutbound, type WhatsAppRecoveryState } from '../../adapters/channels/whatsappSession.js';
+import { WhatsAppSession, type InboundChannelMedia, type WhatsAppObservedOutbound, type WhatsAppRecoveryState } from '../../adapters/channels/whatsappSession.js';
 import { TelegramSession } from '../../adapters/channels/telegramSession.js';
 import { resolveTelegramTransport } from '../../adapters/channels/telegram.js';
 import { DiscordSession } from '../../adapters/channels/discordSession.js';
 import { useVaultAuthState, clearVaultAuthState } from '../../adapters/channels/whatsappVaultAuthState.js';
-import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, ChannelStatus, OutboundAttachment } from '../../adapters/channels/types.js';
+import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, ChannelStatus, OutboundAttachment, OutboundNativeContent } from '../../adapters/channels/types.js';
 import { chunkText, sleep, typingDelayMs, type HumanizeConfig } from './humanize.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
@@ -60,6 +61,7 @@ function aggregateReceipts(receipts: ChannelDeliveryReceipt[]): ChannelDeliveryR
 interface PersistentRef {
   id: string;
   kind: string;
+  workspaceId?: string;
   settings?: unknown;
 }
 
@@ -74,12 +76,16 @@ export interface ChannelConnectionSupervisorDeps {
   /** Is a public webhook URL configured? Telegram defaults to long polling when not. */
   hasPublicWebhookUrl?: () => boolean;
   dispatcher?: ChannelTurnDispatcher;
+  /** Durable storage for original inbound media, shared by every channel. */
+  artifacts?: Pick<ArtifactService, 'persist'>;
   /** Optional voice-note transcription for inbound audio (WhatsApp). */
-  transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
+  transcribeAudio?: (bytes: Buffer, mimeType: string, workspaceId: string) => Promise<string | null>;
+  /** Prepare the default STT runtime only when persistent media channels exist. */
+  prepareInboundAudio?: (workspaceId?: string) => Promise<unknown>;
   /** Optional image understanding for inbound images (WhatsApp). */
-  describeImage?: (bytes: Buffer, mimeType: string, caption?: string) => Promise<string | null>;
+  describeImage?: (bytes: Buffer, mimeType: string, workspaceId: string, caption?: string) => Promise<string | null>;
   /** Optional document text extraction for inbound documents (WhatsApp). */
-  extractDocument?: (bytes: Buffer, mimeType: string, fileName?: string) => Promise<string | null>;
+  extractDocument?: (bytes: Buffer, mimeType: string, workspaceId: string, fileName?: string) => Promise<string | null>;
 }
 
 export interface LoginState {
@@ -155,6 +161,7 @@ export class ChannelConnectionSupervisor {
 
   /** Post-create hook: start polling sessions immediately (no-op for QR kinds). */
   onCreated(conn: PersistentRef): void {
+    if (conn.kind === 'whatsapp' || conn.kind === 'telegram') this.#prepareInboundAudio(conn.workspaceId);
     // Token-authenticated live sessions (Telegram polling, Discord gateway) can
     // start immediately. WhatsApp starts via explicit QR login (startLogin).
     const startsOnCreate = (conn.kind === 'telegram' && this.#telegramIsPolling(conn.settings))
@@ -172,6 +179,10 @@ export class ChannelConnectionSupervisor {
    */
   async startAll(): Promise<void> {
     const rows = this.deps.db.select().from(schema.channelConnections).all();
+    const mediaWorkspaces = new Set(rows
+      .filter((row) => row.status !== 'paused' && (row.kind === 'whatsapp' || row.kind === 'telegram'))
+      .map((row) => row.workspaceId));
+    for (const workspaceId of mediaWorkspaces) this.#prepareInboundAudio(workspaceId);
     for (const row of rows) {
       if (row.status === 'paused') continue;
       if (!this.handles({ id: row.id, kind: row.kind, settings: row.settings })) continue;
@@ -185,6 +196,12 @@ export class ChannelConnectionSupervisor {
 
   /** Start (or reuse) a WhatsApp login and return the current QR/status. */
   async startLogin(connectionId: string): Promise<LoginState> {
+    const connection = this.deps.db
+      .select({ workspaceId: schema.channelConnections.workspaceId })
+      .from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId))
+      .get();
+    this.#prepareInboundAudio(connection?.workspaceId);
     const session = this.ensureSession(connectionId);
     // A definitive logged_out/error means the previously registered creds are
     // dead (device unlinked phone-side, or the session errored out). Reusing
@@ -234,6 +251,7 @@ export class ChannelConnectionSupervisor {
     body: string,
     attachments?: OutboundAttachment[],
     humanize?: HumanizeConfig,
+    native?: OutboundNativeContent,
   ): Promise<ChannelDeliveryReceipt> {
     const session = this.#sessions.get(connectionId);
     if (!session) throw new Error(`no live session for connection ${connectionId}`);
@@ -247,6 +265,17 @@ export class ChannelConnectionSupervisor {
     const assertFresh = () => {
       if (isStale()) throw new ChannelPacingCancelledError(connectionId, chatId);
     };
+
+    if (native) {
+      const nativeSession = session as { sendNative?: (chatId: string, content: OutboundNativeContent) => Promise<ChannelDeliveryReceipt> };
+      if (typeof nativeSession.sendNative !== 'function') {
+        throw new Error(`${session.constructor.name} does not support native ${native.kind} messages`);
+      }
+      assertFresh();
+      const receipts = [await nativeSession.sendNative(chatId, native)];
+      if (body.trim()) receipts.push(await session.sendText(chatId, body.trim()));
+      return aggregateReceipts(receipts);
+    }
 
     // Text-only: optionally chunk into a burst, typing before each piece.
     if (media.length === 0) {
@@ -314,6 +343,16 @@ export class ChannelConnectionSupervisor {
       await this.#waitForPacing(step, isStale);
       waited += step;
     }
+  }
+
+  #prepareInboundAudio(workspaceId?: string): void {
+    if (!this.deps.prepareInboundAudio) return;
+    void this.deps.prepareInboundAudio(workspaceId).catch((error) => {
+      this.deps.logger.warn('channel.transcription_prepare_failed', {
+        ...(workspaceId ? { workspaceId } : {}),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   async #waitForPacing(delayMs: number, isStale: () => boolean): Promise<void> {
@@ -385,6 +424,18 @@ export class ChannelConnectionSupervisor {
         logger: this.deps.logger,
         onInbound: (msg) => this.#onInbound(connectionId, msg),
         onStateChange: (state) => this.#onStateChange(connectionId, state),
+        ...(this.deps.transcribeAudio ? {
+          transcribeAudio: (bytes: Buffer, mimeType: string) => this.deps.transcribeAudio!(bytes, mimeType, row.workspaceId),
+        } : {}),
+        ...(this.deps.describeImage ? {
+          describeImage: (bytes: Buffer, mimeType: string, caption?: string) => this.deps.describeImage!(bytes, mimeType, row.workspaceId, caption),
+        } : {}),
+        ...(this.deps.extractDocument ? {
+          extractDocument: (bytes: Buffer, mimeType: string, fileName?: string) => this.deps.extractDocument!(bytes, mimeType, row.workspaceId, fileName),
+        } : {}),
+        ...(this.deps.artifacts ? {
+          persistMedia: (media: InboundChannelMedia) => this.#persistInboundMedia(row, media),
+        } : {}),
       });
     } else if (row.kind === 'discord') {
       const token = this.deps.vault.decrypt(row.tokenEncrypted);
@@ -407,16 +458,58 @@ export class ChannelConnectionSupervisor {
         onDeliveryUpdate: (update) => this.#onDeliveryUpdate(connectionId, update),
         // Persist creds/keys vault-encrypted in the DB, not plaintext on disk.
         loadAuthState: () => useVaultAuthState({ db: this.deps.db, vault: this.deps.vault, connectionId }),
-        ...(this.deps.transcribeAudio ? { transcribeAudio: this.deps.transcribeAudio } : {}),
-        ...(this.deps.describeImage ? { describeImage: this.deps.describeImage } : {}),
-        ...(this.deps.extractDocument ? { extractDocument: this.deps.extractDocument } : {}),
+        ...(this.deps.transcribeAudio ? {
+          transcribeAudio: (bytes: Buffer, mimeType: string) => this.deps.transcribeAudio!(bytes, mimeType, row.workspaceId),
+        } : {}),
+        ...(this.deps.describeImage ? {
+          describeImage: (bytes: Buffer, mimeType: string, caption?: string) => this.deps.describeImage!(bytes, mimeType, row.workspaceId, caption),
+        } : {}),
+        ...(this.deps.extractDocument ? {
+          extractDocument: (bytes: Buffer, mimeType: string, fileName?: string) => this.deps.extractDocument!(bytes, mimeType, row.workspaceId, fileName),
+        } : {}),
+        ...(this.deps.artifacts ? {
+          persistMedia: (media: InboundChannelMedia) => this.#persistInboundMedia(row, media),
+        } : {}),
       });
     }
     this.#sessions.set(connectionId, session);
     return session;
   }
 
-  #onInbound(connectionId: string, msg: { externalId: string; chatId: string; body: string; from?: string; threadId?: string }): void {
+  async #persistInboundMedia(
+    row: { id: string; workspaceId: string },
+    media: InboundChannelMedia,
+  ): Promise<string | null> {
+    if (!this.deps.artifacts) return null;
+    const artifact = this.deps.artifacts.persist({
+      workspaceId: row.workspaceId,
+      agentId: this.#resolveInboundAgentId(row.workspaceId),
+      origin: 'channel',
+      type: artifactTypeFromMime(media.mimeType, media.filename),
+      title: `Inbound ${media.kind}: ${media.filename}`,
+      name: media.filename,
+      content: `data:${media.mimeType};base64,${media.bytes.toString('base64')}`,
+      savedBy: 'channel',
+      metadataExtra: {
+        mime: media.mimeType,
+        size: media.bytes.byteLength,
+        channelConnectionId: row.id,
+        channelMediaKind: media.kind,
+        ...(media.caption ? { caption: media.caption } : {}),
+        ...(media.gifPlayback ? { gifPlayback: true } : {}),
+      },
+    });
+    return artifact.ref;
+  }
+
+  #onInbound(connectionId: string, msg: {
+    externalId: string;
+    chatId: string;
+    body: string;
+    from?: string;
+    threadId?: string;
+    attachmentIds?: string[];
+  }): void {
     const pacingKey = `${connectionId}:${msg.chatId}`;
     this.#pacingEpoch.set(pacingKey, (this.#pacingEpoch.get(pacingKey) ?? 0) + 1);
     const row = this.deps.db
@@ -471,6 +564,7 @@ export class ChannelConnectionSupervisor {
         channel: row.kind,
         channelConnectionId: row.id,
         channelInbound: true,
+        ...(msg.attachmentIds?.length ? { artifactIds: msg.attachmentIds } : {}),
         ...(msg.threadId ? { threadId: msg.threadId } : {}),
         ...(msg.from ? { from: msg.from } : {}),
       },
@@ -505,6 +599,7 @@ export class ChannelConnectionSupervisor {
       kind: row.kind,
       chatId: msg.chatId,
       text: msg.body,
+      ...(msg.attachmentIds?.length ? { attachmentIds: msg.attachmentIds } : {}),
       ...(msg.threadId ? { threadId: msg.threadId } : {}),
       ...(msg.from ? { from: msg.from } : {}),
       inboundMessageId: message.id,

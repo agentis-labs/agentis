@@ -721,7 +721,90 @@ body.agentis-canvas-fullscreen .agentis-workspace-canvas--fullscreen {
 
 /* Inter font: ensure proper rendering for our weights */
 @supports (font-variation-settings: normal) {
-  body { font-family: 'Inter', 'Aptos', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; }
+body { font-family: 'Inter', 'Aptos', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; }
+}
+
+/* Chat V2 — an editorial workroom inside Agentis' industrial dark shell. */
+.agentis-chat-shell-fullscreen {
+  background:
+    radial-gradient(circle at 72% -20%, rgba(45, 212, 191, 0.08), transparent 38%),
+    radial-gradient(circle at 8% 110%, rgba(105, 139, 122, 0.08), transparent 36%),
+    var(--surface);
+  box-shadow: 0 44px 120px -36px rgba(0, 0, 0, 0.92), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.agentis-chat-shell-fullscreen > header {
+  height: 58px;
+  padding-inline: clamp(1rem, 3vw, 2.25rem);
+  background: rgba(14, 18, 20, 0.82);
+  backdrop-filter: blur(18px);
+}
+
+.agentis-chat-immersive {
+  position: relative;
+  font-family: 'Manrope', 'Avenir Next', 'Century Gothic', 'Segoe UI Variable', sans-serif;
+  background-color: #0d1112;
+  background-image:
+    radial-gradient(circle at 50% -16%, rgba(45,212,191,0.035), transparent 46%);
+}
+
+.agentis-chat-immersive .chat-message-surface {
+  font-size: 15px;
+  line-height: 1.72;
+  letter-spacing: -0.006em;
+}
+
+.agentis-chat-immersive .chat-message-surface pre,
+.agentis-chat-immersive .chat-message-surface code {
+  font-family: 'IBM Plex Mono', 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+}
+
+.agentis-chat-immersive textarea {
+  min-height: 68px !important;
+  max-height: 260px !important;
+  padding: 1rem 1rem 0.55rem;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.agentis-chat-immersive > :last-child {
+  background: linear-gradient(180deg, rgba(13,17,18,0.76), rgba(13,17,18,0.98) 28%);
+  backdrop-filter: blur(18px);
+}
+
+.chat-work-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+}
+
+.chat-work-heading:hover {
+  color: var(--text-secondary);
+}
+
+.chat-work-rule {
+  height: 1px;
+  min-width: 2rem;
+  flex: 1 1 auto;
+  background: color-mix(in srgb, var(--color-line) 55%, transparent);
+}
+
+.chat-work-transcript {
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agentis-chat-immersive *,
+  .agentis-chat-shell-fullscreen * {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @layer base {

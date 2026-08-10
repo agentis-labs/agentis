@@ -13,11 +13,24 @@ interface EvalTask {
   id: string;
   prompt: string;
   timeoutMs?: number;
-  assertions?: { require?: string[]; forbid?: string[]; minChars?: number };
+  mode?: 'quick' | 'deep' | 'mission';
+  assertions?: { require?: string[]; forbid?: string[]; minChars?: number; minToolCalls?: number; requireDurable?: boolean; requireEvidence?: boolean };
 }
 
 interface NativeConfig { command: string; args?: string[]; cwd?: string; env?: Record<string, string>; promptVia?: 'stdin' | 'arg' }
-interface Observation { surface: 'native' | 'agentis'; taskId: string; ok: boolean; durationMs: number; text: string; toolCalls: string[]; error?: string }
+interface Observation {
+  surface: 'native' | 'agentis';
+  taskId: string;
+  ok: boolean;
+  durationMs: number;
+  text: string;
+  toolCalls: string[];
+  turnStatus?: string;
+  executionEnvelope?: Record<string, unknown>;
+  contextManifest?: Record<string, unknown>;
+  plan?: Record<string, unknown>;
+  error?: string;
+}
 
 const args = new Map(process.argv.slice(2).map((value, index, all) => value.startsWith('--') ? [value.slice(2), all[index + 1] && !all[index + 1]!.startsWith('--') ? all[index + 1]! : 'true'] : ['', '']));
 const root = process.cwd();
@@ -115,11 +128,16 @@ async function runAgentis(task: EvalTask, config: { baseUrl: string; apiKey: str
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), task.timeoutMs ?? 180_000);
   try {
-    const response = await fetch(`${config.baseUrl}/v1/conversations/${config.agentId}/send`, {
+    const createResponse = await fetch(`${config.baseUrl}/v1/conversations/${config.agentId}/turns`, {
       method: 'POST',
+      headers: { authorization: `Bearer ${config.apiKey}`, 'x-agentis-workspace': config.workspaceId, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: task.prompt, permissionMode: 'auto', executionMode: task.mode ?? 'auto', useViewportContext: false }),
+    });
+    if (!createResponse.ok) throw new Error(`Agentis HTTP ${createResponse.status}: ${await createResponse.text()}`);
+    const created = await createResponse.json() as { turn: { id: string }; conversationId: string };
+    const response = await fetch(`${config.baseUrl}/v1/conversations/${config.agentId}/turns/${created.turn.id}/events?after=0`, {
       signal: controller.signal,
-      headers: { authorization: `Bearer ${config.apiKey}`, 'x-agentis-workspace': config.workspaceId, accept: 'text/event-stream', 'content-type': 'application/json' },
-      body: JSON.stringify({ body: task.prompt, permissionMode: 'auto', useViewportContext: false }),
+      headers: { authorization: `Bearer ${config.apiKey}`, 'x-agentis-workspace': config.workspaceId, accept: 'text/event-stream' },
     });
     if (!response.ok || !response.body) throw new Error(`Agentis HTTP ${response.status}: ${await response.text()}`);
     const reader = response.body.getReader();
@@ -129,6 +147,9 @@ async function runAgentis(task: EvalTask, config: { baseUrl: string; apiKey: str
     let finishReason: string | null = null;
     let streamError: string | null = null;
     const toolCalls: string[] = [];
+    let executionEnvelope: Record<string, unknown> | undefined;
+    let contextManifest: Record<string, unknown> | undefined;
+    let plan: Record<string, unknown> | undefined;
     while (true) {
       const chunk = await reader.read();
       if (chunk.done) break;
@@ -140,6 +161,11 @@ async function runAgentis(task: EvalTask, config: { baseUrl: string; apiKey: str
         try {
           const event = JSON.parse(line.slice(5).trim()) as Record<string, unknown>;
           text += extractEventText(event);
+          if (event.type === 'execution') {
+            executionEnvelope = objectOf(event.envelope);
+            contextManifest = objectOf(event.context);
+          }
+          if (event.type === 'plan') plan = objectOf(event.plan);
           if (event.type === 'done' && typeof event.finishReason === 'string') finishReason = event.finishReason;
           if (event.type === 'error') streamError = typeof event.error === 'string' ? event.error : 'Agentis stream error';
           const call = extractToolName(event);
@@ -148,7 +174,14 @@ async function runAgentis(task: EvalTask, config: { baseUrl: string; apiKey: str
       }
     }
     const finalText = text.trim();
-    const ok = !streamError && finishReason !== 'error' && finalText.length > 0;
+    const snapshotResponse = await fetch(`${config.baseUrl}/v1/conversations/${config.agentId}/turns/${created.turn.id}`, {
+      headers: { authorization: `Bearer ${config.apiKey}`, 'x-agentis-workspace': config.workspaceId },
+    });
+    const snapshot = snapshotResponse.ok ? await snapshotResponse.json() as { turn?: { status?: string; executionEnvelope?: Record<string, unknown>; contextManifest?: Record<string, unknown> } } : {};
+    executionEnvelope ??= snapshot.turn?.executionEnvelope;
+    contextManifest ??= snapshot.turn?.contextManifest;
+    const turnStatus = snapshot.turn?.status;
+    const ok = !streamError && finishReason !== 'error' && turnStatus === 'completed' && finalText.length > 0;
     return {
       surface: 'agentis',
       taskId: task.id,
@@ -156,6 +189,10 @@ async function runAgentis(task: EvalTask, config: { baseUrl: string; apiKey: str
       durationMs: Date.now() - started,
       text: finalText,
       toolCalls,
+      turnStatus,
+      executionEnvelope,
+      contextManifest,
+      plan,
       ...(!ok ? { error: streamError ?? (finishReason === 'error' ? 'Agentis turn finished with error' : 'Agentis turn returned no answer') } : {}),
     };
   } catch (error) {
@@ -193,9 +230,18 @@ function score(task: EvalTask, observation: Observation): number {
     ...((task.assertions?.require ?? []).map((pattern) => new RegExp(pattern, 'iu').test(observation.text))),
     ...((task.assertions?.forbid ?? []).map((pattern) => !new RegExp(pattern, 'iu').test(observation.text))),
     observation.text.length >= (task.assertions?.minChars ?? 1),
+    ...(task.assertions?.minToolCalls !== undefined ? [observation.toolCalls.length >= task.assertions.minToolCalls] : []),
+    ...(task.assertions?.requireDurable ? [observation.surface === 'native' || observation.executionEnvelope?.durable === true] : []),
+    ...(task.assertions?.requireEvidence ? [observation.surface === 'native' || hasMissionEvidence(observation)] : []),
   ];
   return checks.filter(Boolean).length / Math.max(1, checks.length);
 }
-function summarize(observation: Observation & { score: number }) { return { ok: observation.ok, score: observation.score, durationMs: observation.durationMs, toolCalls: observation.toolCalls.length, error: observation.error }; }
+function summarize(observation: Observation & { score: number }) { return { ok: observation.ok, score: observation.score, durationMs: observation.durationMs, toolCalls: observation.toolCalls.length, turnStatus: observation.turnStatus, mode: observation.executionEnvelope?.effectiveMode, error: observation.error }; }
+function hasMissionEvidence(observation: Observation): boolean {
+  const plan = observation.plan ?? {};
+  const verification = objectOf(plan.verification);
+  const nodes = Array.isArray(plan.nodes) ? plan.nodes : [];
+  return verification.status === 'passed' || nodes.some((node) => Array.isArray(objectOf(node).evidence) && (objectOf(node).evidence as unknown[]).length > 0);
+}
 function objectOf(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function parseJsonEnv<T>(name: string): T | null { const raw = process.env[name]; return raw ? JSON.parse(raw) as T : null; }

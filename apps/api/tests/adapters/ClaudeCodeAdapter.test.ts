@@ -122,7 +122,7 @@ describe('ClaudeCodeAdapter chat', () => {
     expect(stdin).toContain('name: Researcher');
   });
 
-  it('streams REAL reasoning text + the tool with its input as live activity (Codex-level legibility)', async () => {
+  it('streams safe reasoning and tool activity without leaking private runtime text or arguments', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const adapter = new ClaudeCodeAdapter({ agentId: 'agent-1', logger, binaryPath: 'claude-test' });
@@ -140,9 +140,10 @@ describe('ClaudeCodeAdapter chat', () => {
     // Reasoning is surfaced as a runtime activity carrying the ACTUAL thought (not a
     // canned phase), never as raw answer text or an executable tool_call.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
-    expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && /check the files/i.test(d.label))).toBe(true);
+    expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && d.label === 'Claude Code is reasoning')).toBe(true);
+    expect(deltas.some((d) => d.type === 'activity' && /check the files/i.test(d.label))).toBe(false);
     // The harness's own Bash → a live activity step showing the real command.
-    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'tool', status: 'running', label: 'Using Bash: ls' }));
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'tool', status: 'running', label: 'Using Bash' }));
     expect(deltas.some((d) => d.type === 'tool_call')).toBe(false);
     expect(deltas).toContainEqual({ type: 'text', delta: 'It is a TypeScript repo.' });
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'stop' });
@@ -258,11 +259,12 @@ describe('ClaudeCodeAdapter chat', () => {
 
     // Reasoning shows the REAL thought (operator-facing), and the tool card shows
     // the real input (the file being read) — Codex-level legibility.
-    expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && /inspect the workspace files/i.test(d.label))).toBe(true);
+    expect(deltas.some((d) => d.type === 'activity' && d.phase === 'runtime' && d.label === 'Claude Code is reasoning')).toBe(true);
+    expect(deltas.some((d) => d.type === 'activity' && /inspect the workspace files/i.test(d.label))).toBe(false);
     expect(deltas).toContainEqual(expect.objectContaining({
       type: 'activity',
       phase: 'tool',
-      label: 'Using Read: README.md',
+      label: 'Using Read',
     }));
     expect(deltas).toContainEqual({ type: 'text', delta: 'I found the answer.' });
   });

@@ -1229,7 +1229,7 @@ export function buildCanvasModel(
   }
 
   roles.managers.forEach((agent, index) => {
-    const pos = homeAgentPosition(agent, { x: managerSlots[index]?.centerX ?? canvasSize.width / 2, y: 350 }, canvasSize);
+    const pos = { ...homeAgentPosition(agent, { x: canvasSize.width / 2, y: 350 }, canvasSize), x: managerSlots[index]?.centerX ?? canvasSize.width / 2 };
     const node = agentNode(agent, 'manager', pos, workingAgentIds, approvals);
     node.specialistCount = specialistCountByManager.get(node.id) ?? 0;
     nodes.push(node);

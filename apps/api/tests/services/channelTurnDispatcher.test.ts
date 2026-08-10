@@ -99,6 +99,53 @@ describe('ChannelTurnDispatcher', () => {
     expect((agentMsg?.metadata as { channelReply?: boolean })?.channelReply).toBe(true);
   });
 
+  it('keeps inbound channel artifacts typed and compiles them into the agent turn', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    let seenPrompt = '';
+    let compiledIds: string[] = [];
+    let seenInputAttachments: unknown;
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async (args) => ackReceipt(args.chatId),
+      fallbackAdapter: () => chatStub('unused'),
+      compileAttachments: async ({ body, attachmentIds }) => {
+        compiledIds = attachmentIds;
+        return {
+          prompt: `${body}\n<attachment>horse visible</attachment>`,
+          runtimeInputAttachments: [{
+            path: 'C:/agentis/runtime/image-1.jpg',
+            name: 'image-1.jpg',
+            mimeType: 'image/jpeg',
+            kind: 'image' as const,
+          }],
+        };
+      },
+      runTurn: async function* (_adapter, _history, userMessage, _ctx, options) {
+        seenPrompt = userMessage;
+        seenInputAttachments = options?.inputAttachments;
+        yield { type: 'text', delta: 'I can see a horse.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511',
+      text: '[Image received]\nAttachment: artifact:image-1', attachmentIds: ['image-1'],
+    });
+
+    expect(compiledIds).toEqual(['image-1']);
+    expect(seenPrompt).toContain('<attachment>horse visible</attachment>');
+    expect(seenInputAttachments).toEqual([expect.objectContaining({ path: 'C:/agentis/runtime/image-1.jpg', kind: 'image' })]);
+  });
+
   it('keeps an agent reply pending when the channel has no provider acknowledgement', async () => {
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
     const agentId = seedAgent(ctx);
@@ -125,6 +172,110 @@ describe('ChannelTurnDispatcher', () => {
     const agentMsg = conversations.messages(conv.id, 50).find((message) => message.authorType === 'agent');
     expect(agentMsg?.deliveryStatus).toBe('sending');
     expect((agentMsg?.metadata as { channelDeliveryReceipt?: { providerAcknowledged?: boolean } })?.channelDeliveryReceipt?.providerAcknowledged).toBe(false);
+  });
+
+  it('auto-delivers a saved screenshot artifact with the final channel reply', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: Array<{ body: string; attachments?: Array<{ url?: string; kind?: string }> }> = [];
+    let artifactPolicy: unknown;
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* (_a, _h, _t, turnContext) {
+        artifactPolicy = turnContext.artifactPolicy;
+        yield {
+          type: 'tool_result', id: 'shot', name: 'agentis.browser.screenshot',
+          result: { saved: true, ref: 'artifact:shot-1', mimeType: 'image/png' },
+        } as ChatDelta;
+        yield { type: 'text', delta: 'Here is the requested screenshot.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511', text: 'send a screenshot',
+    });
+
+    expect(artifactPolicy).toMatchObject({ saveScreenshots: true, saveGeneratedAssets: true });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      body: 'Here is the requested screenshot.',
+      attachments: [{ url: 'artifact:shot-1', kind: 'image' }],
+    });
+  });
+
+  it('does not duplicate a reply after agentis.channel.send already verified delivery', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: unknown[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        yield {
+          type: 'tool_result', id: 'send', name: 'agentis.channel.send',
+          result: { sent: true, verified: true, connectionId: 'wa-1', to: '5511', deliveryRole: 'final' },
+        } as ChatDelta;
+        yield { type: 'text', delta: 'Sent.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    const result = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511', text: 'send it',
+    });
+
+    expect(result.replied).toBe(true);
+    expect(delivered).toEqual([]);
+  });
+
+  it('keeps a progress delivery non-terminal so an optional intro never suppresses the final reply', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: Array<{ body: string }> = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db,
+      adapters: new AdapterManager(ctx.logger),
+      conversations,
+      logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        yield {
+          type: 'tool_result', id: 'intro', name: 'agentis.channel.send',
+          result: { sent: true, verified: true, connectionId: 'wa-1', deliveryRole: 'progress' },
+        } as ChatDelta;
+        yield { type: 'text', delta: 'The long task is complete.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511', text: 'do a long task',
+    });
+
+    expect(delivered).toEqual([expect.objectContaining({ body: 'The long task is complete.' })]);
   });
 
   it('silently drops an inbound turn from a BLOCKED sender (no reply, no agent turn)', async () => {
@@ -872,6 +1023,68 @@ describe('ChannelTurnDispatcher', () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]!.text).toBe('first\nsecond');
     expect(turns[0]!.history).toEqual([]);
+  });
+
+  it('keeps the work lane alive and answers a new message through the companion lane', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const firstInbound = conversations.appendMirrored({
+      workspaceId: ctx.workspace.id, conversationId: conv.id, sessionMessageId: 'rapid-1',
+      authorType: 'system', body: 'first detail', metadata: { channelInbound: true },
+    });
+    const secondInbound = conversations.appendMirrored({
+      workspaceId: ctx.workspace.id, conversationId: conv.id, sessionMessageId: 'rapid-2',
+      authorType: 'system', body: 'second question', metadata: { channelInbound: true },
+    });
+    let releaseWork: (() => void) | undefined;
+    let mainSignal: AbortSignal | undefined;
+    let joinedInput: ChatMessage[] = [];
+    let companionState = '';
+    const delivered: Array<{ body: string; pacing?: string }> = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* (_adapter, _history, _userMessage, turnContext, options) {
+        mainSignal = turnContext.signal;
+        await new Promise<void>((resolve) => { releaseWork = resolve; });
+        joinedInput = await options?.liveInput?.() ?? [];
+        yield { type: 'text', delta: 'original task completed' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+      runConcurrentTurn: async function* (_adapter, _history, userMessage, _turnContext, options) {
+        companionState = options?.systemAddendum ?? '';
+        expect(userMessage).toBe('second question');
+        expect(options?.sessionKey).toBe(`${conv.id}:companion`);
+        yield { type: 'text', delta: 'The original task is still running.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+    const base = {
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'rapid-connection', kind: 'whatsapp', chatId: '5511999999999',
+    };
+
+    const first = dispatcher.dispatch({ ...base, text: 'first detail', inboundMessageId: firstInbound.id });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(releaseWork).toBeTypeOf('function');
+    const companion = await dispatcher.dispatch({ ...base, text: 'second question', inboundMessageId: secondInbound.id });
+    expect(companion).toEqual({ replied: true, reason: 'active_turn_companion' });
+    expect(mainSignal?.aborted).toBe(false);
+    releaseWork!();
+    await first;
+
+    expect(joinedInput).toEqual([{ role: 'user', content: 'second question' }]);
+    expect(companionState).toContain('ACTIVE_TASK_STATE');
+    expect(companionState).toContain('"objective":"first detail"');
+    expect(delivered).toEqual([
+      expect.objectContaining({ body: 'The original task is still running.', pacing: 'immediate' }),
+      expect.objectContaining({ body: 'original task completed', pacing: 'immediate' }),
+    ]);
+    expect(conversations.listQueue(ctx.workspace.id, conv.id)).toEqual([]);
   });
 
   it('interpretConfirmation maps affirmatives/negatives, null otherwise', () => {

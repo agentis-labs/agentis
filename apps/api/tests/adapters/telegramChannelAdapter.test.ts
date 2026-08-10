@@ -106,6 +106,44 @@ describe('TelegramChannelAdapter', () => {
       });
     });
 
+    it('preserves webhook media handles and normalizes native message context', () => {
+      const a = new TelegramChannelAdapter();
+      expect(a.parseInbound({
+        rawBody: JSON.stringify({
+          update_id: 2,
+          message: { chat: { id: 999 }, caption: 'inspect', photo: [{ file_id: 'small' }, { file_id: 'large' }] },
+        }),
+        headers: {},
+      })).toMatchObject({
+        body: '[image received]\nCaption: inspect',
+        media: { providerFileId: 'large', kind: 'image', mimeType: 'image/jpeg' },
+      });
+      expect(a.parseInbound({
+        rawBody: JSON.stringify({ update_id: 3, message: { chat: { id: 999 }, location: { latitude: -19.9, longitude: -43.9 } } }),
+        headers: {},
+      })?.body).toContain('https://maps.google.com/?q=-19.9,-43.9');
+      expect(a.parseInbound({
+        rawBody: JSON.stringify({ update_id: 4, message: { chat: { id: 999 }, contact: { first_name: 'Bia', phone_number: '+5531' } } }),
+        headers: {},
+      })?.body).toContain('Phone: +5531');
+    });
+
+    it('sends locations, contacts, and polls through native Bot API methods', async () => {
+      const a = new TelegramChannelAdapter();
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      a.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> });
+        return new Response('{"ok":true,"result":{"message_id":42}}', { status: 200 });
+      }) as typeof fetch;
+      await a.send({ token: 'x', chatId: '1', body: '', native: { kind: 'location', latitude: 1, longitude: 2 } });
+      await a.send({ token: 'x', chatId: '1', body: '', native: { kind: 'contact', displayName: 'Bia Talki', phone: '+5531' } });
+      await a.send({ token: 'x', chatId: '1', body: '', native: { kind: 'poll', question: 'Choose', options: ['A', 'B'] } });
+      expect(calls.map((call) => call.url.split('/').at(-1))).toEqual(['sendLocation', 'sendContact', 'sendPoll']);
+      expect(calls[0]!.body).toMatchObject({ chat_id: '1', latitude: 1, longitude: 2 });
+      expect(calls[1]!.body).toMatchObject({ phone_number: '+5531', first_name: 'Bia', last_name: 'Talki' });
+      expect(calls[2]!.body).toMatchObject({ question: 'Choose', options: ['A', 'B'] });
+    });
+
     it('turns Telegram "chat not found" into an actionable message', async () => {
       const a = new TelegramChannelAdapter();
       a.fetchImpl = (async () =>

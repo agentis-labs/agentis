@@ -12,7 +12,7 @@
  */
 import type { ChannelBridge } from './channelBridge.js';
 import type { ConnectionGrantService } from '../connectionGrants.js';
-import { ChannelDeliveryRejectedError, isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type ChannelKind, type OutboundAttachmentRef } from '../../adapters/channels/types.js';
+import { ChannelDeliveryRejectedError, isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type ChannelKind, type OutboundAttachmentRef, type OutboundNativeContent } from '../../adapters/channels/types.js';
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
 
@@ -20,6 +20,7 @@ const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'wha
 export interface ChannelSendMessage {
   body?: string;
   attachments?: OutboundAttachmentRef[];
+  native?: OutboundNativeContent;
 }
 
 export interface ChannelSendArgs {
@@ -33,7 +34,11 @@ export interface ChannelSendArgs {
   to?: string | null;
   /** Calling agent — gates §3.3 authority. Null/undefined = deterministic/system caller (allowed). */
   agentId?: string | null;
+  /** Lifecycle semantics for conversational callers; transport behavior is unchanged. */
+  deliveryRole?: 'progress' | 'final';
   attachments?: OutboundAttachmentRef[];
+  /** A provider-native location, contact card, or poll. */
+  native?: OutboundNativeContent;
   /**
    * Send a natural BURST of messages in order to the same destination (§3). When
    * present, `body`/`attachments` are ignored. Each message is delivered as its
@@ -47,22 +52,23 @@ export interface ChannelSendArgs {
 }
 
 export type ChannelSendResult =
-  | { sent: true; verified: true; connectionId: string; kind: string; to: string; targetSource: string; status: string; attachments: number; messages: number; providerMessageId: string; providerMessageIds?: string[]; deliveryStatus: ChannelDeliveryReceipt['status']; acceptedAt: string; receipt: ChannelDeliveryReceipt }
+  | { sent: true; verified: true; connectionId: string; kind: string; to: string; targetSource: string; status: string; attachments: number; messages: number; providerMessageId: string; providerMessageIds?: string[]; deliveryStatus: ChannelDeliveryReceipt['status']; acceptedAt: string; receipt: ChannelDeliveryReceipt; deliveryRole: 'progress' | 'final' | 'unspecified' }
   | { sent: false; verified?: false; errorCode: string; error: string; remediation?: string; candidates?: unknown[]; connection?: unknown; receipt?: ChannelDeliveryReceipt };
 
 /** Flatten the request into an ordered list of messages to deliver. */
-function normalizeDeliveries(args: ChannelSendArgs): Array<{ body: string; attachments: OutboundAttachmentRef[] }> {
+function normalizeDeliveries(args: ChannelSendArgs): Array<{ body: string; attachments: OutboundAttachmentRef[]; native?: OutboundNativeContent }> {
   if (Array.isArray(args.messages) && args.messages.length > 0) {
     return args.messages
       .map((m) => ({
         body: typeof m.body === 'string' ? m.body.trim() : '',
         attachments: Array.isArray(m.attachments) ? m.attachments : [],
+        ...(m.native ? { native: m.native } : {}),
       }))
-      .filter((d) => d.body || d.attachments.length > 0);
+      .filter((d) => d.body || d.attachments.length > 0 || d.native);
   }
   const body = typeof args.body === 'string' ? args.body.trim() : '';
   const attachments = args.attachments ?? [];
-  return body || attachments.length > 0 ? [{ body, attachments }] : [];
+  return body || attachments.length > 0 || args.native ? [{ body, attachments, ...(args.native ? { native: args.native } : {}) }] : [];
 }
 
 /** What the flow needs from the bridge — structural so tests can fake it. */
@@ -91,7 +97,7 @@ function resolveCandidate(
 export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArgs): Promise<ChannelSendResult> {
   const deliveries = normalizeDeliveries(args);
   if (deliveries.length === 0) {
-    return { sent: false, errorCode: 'VALIDATION_FAILED', error: 'provide a body, at least one attachment, or a non-empty messages[] burst' };
+    return { sent: false, errorCode: 'VALIDATION_FAILED', error: 'provide a body, attachment, native payload, or a non-empty messages[] burst' };
   }
   const kind = typeof args.kind === 'string' && CHANNEL_KINDS.has(args.kind as ChannelKind) ? (args.kind as ChannelKind) : null;
   const connectionId = typeof args.connectionId === 'string' && args.connectionId.trim() ? args.connectionId.trim() : null;
@@ -175,6 +181,7 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
         chatId,
         body: d.body,
         ...(d.attachments.length ? { attachments: d.attachments } : {}),
+        ...(d.native ? { native: d.native } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
         ...(args.bypassGuards ? { bypassGuards: true } : {}),
       });
@@ -240,6 +247,7 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
     deliveryStatus: primary.status,
     acceptedAt: primary.acceptedAt,
     receipt: primary,
+    deliveryRole: args.deliveryRole ?? 'unspecified',
   };
 }
 

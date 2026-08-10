@@ -74,6 +74,7 @@ describe('MediaService.registerConfigurable — per-workspace "bring your own mo
       });
       const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
       svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1' /* no apiKey */ }, build: openAiImageProvider });
+      expect(svc.modalities('ws1')).toEqual(['image']);
 
       const out = await svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'a cat' });
       expect(out.assets).toHaveLength(1);
@@ -106,6 +107,7 @@ describe('MediaService.registerConfigurable — per-workspace "bring your own mo
     const workspaceMediaConfig = fakeConfigService({ 'ws1:image': { model: 'my-model' } });
     const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
     svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1' }, build: openAiImageProvider });
+    expect(svc.modalities('ws1')).toEqual([]);
     await expect(svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'x' })).rejects.toThrow(/my-model/);
   });
 

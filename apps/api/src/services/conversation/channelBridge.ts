@@ -19,7 +19,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core';
+import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, artifactTypeFromMime } from '@agentis/core';
 import type { CredentialVault } from '../credentialVault.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { EventBus } from '../../event-bus.js';
@@ -36,6 +36,7 @@ import {
   type OutboundAttachment,
   type OutboundAttachmentRef,
   type OutboundMediaKind,
+  type OutboundNativeContent,
   type ParsedInboundMessage,
 } from '../../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
@@ -96,6 +97,12 @@ export interface UpdateConnectionTargetsInput {
   targetAliases?: Record<string, string | null>;
   /** Who the agent replies to, and the per-recipient/anyone rules (CHANNEL-ACCESS-10x). */
   access?: ChannelAccess | null;
+}
+
+export interface ChannelInboundMediaResolvers {
+  transcribeAudio?: (bytes: Buffer, mimeType: string, workspaceId: string) => Promise<string | null>;
+  describeImage?: (bytes: Buffer, mimeType: string, workspaceId: string, caption?: string) => Promise<string | null>;
+  extractDocument?: (bytes: Buffer, mimeType: string, workspaceId: string, fileName?: string) => Promise<string | null>;
 }
 
 /** The only external execution signal WhatsApp may expose. Never raw reasoning. */
@@ -206,6 +213,7 @@ export interface PublicConnection {
 export interface PersistentChannelRef {
   id: string;
   kind: string;
+  workspaceId?: string;
   settings?: unknown;
 }
 
@@ -218,7 +226,7 @@ export interface PersistentChannelTransport {
   onCreated?(conn: PersistentChannelRef): void;
   /** Current live-session state, if this transport owns the connection. */
   status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
-  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[], humanize?: HumanizeConfig): Promise<ChannelDeliveryReceipt>;
+  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[], humanize?: HumanizeConfig, native?: OutboundNativeContent): Promise<ChannelDeliveryReceipt>;
   /** Provider account/quota diagnostics; read-only and never sends a message. */
   outboundHealth?(connectionId: string): Promise<ChannelHealthCheck | null>;
   /** Show/clear the typing indicator (best-effort). */
@@ -294,6 +302,7 @@ export class ChannelBridge {
   readonly #adapters: Map<ChannelKind, ChannelAdapter>;
   #turnDispatcher: ChannelTurnDispatcher | null = null;
   #persistent: PersistentChannelTransport | null = null;
+  #inboundMediaResolvers: ChannelInboundMediaResolvers = {};
   /** Anti-ban rails (§7). Opt-in via connection settings; default allows all. */
   readonly #guard = new ChannelSendGuard();
 
@@ -326,6 +335,11 @@ export class ChannelBridge {
   /** Late-bind the voice model (constructed after the model router). */
   setSpeech(speech: ChannelBridgeDeps['speech']) {
     this.deps.speech = speech;
+  }
+
+  /** Late-bind webhook media understanding after workspace model routing exists. */
+  setInboundMediaResolvers(resolvers: ChannelInboundMediaResolvers) {
+    this.#inboundMediaResolvers = resolvers;
   }
 
   /**
@@ -384,7 +398,7 @@ export class ChannelBridge {
    * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
    * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
    */
-  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string; bypassGuards?: boolean }): Promise<ChannelDeliveryReceipt> {
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent; idempotencyKey?: string; bypassGuards?: boolean; pacing?: 'immediate' }): Promise<ChannelDeliveryReceipt> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
@@ -402,6 +416,9 @@ export class ChannelBridge {
         throw new AgentisError(decision.code ?? 'CHANNEL_SEND_BLOCKED', `${decision.reason ?? 'send blocked'}${decision.remediation ? ` ${decision.remediation}` : ''}`);
       }
     }
+    if (args.native && args.attachments?.length) {
+      throw new AgentisError('VALIDATION_FAILED', 'send native content and file attachments as separate burst messages');
+    }
     const attachments = await this.#resolveAttachments(row.workspaceId, args.attachments);
     const idempotencyKey = args.idempotencyKey?.trim() || null;
     const bodyHash = createHash('sha256')
@@ -415,6 +432,8 @@ export class ChannelBridge {
         mimeType: attachment.mimeType,
         digest: createHash('sha256').update(attachment.data).digest('hex'),
       }))))
+      .update('\0')
+      .update(JSON.stringify(args.native ?? null))
       .digest('hex');
     const journalId = randomUUID();
     if (idempotencyKey) {
@@ -453,7 +472,7 @@ export class ChannelBridge {
       status: 'sending',
     }).run();
     try {
-      const receipt = await this.#sendRow(row, args.chatId, args.body, attachments);
+      const receipt = await this.#sendRow(row, args.chatId, args.body, attachments, args.pacing, args.native);
       if (!receipt.providerMessageId?.trim()) {
         throw new AgentisError('CHANNEL_SEND_FAILED', `${row.kind} returned no provider message id; delivery is unverified`);
       }
@@ -617,7 +636,7 @@ export class ChannelBridge {
     if (input.appSecret) settings.appSecretEncrypted = this.deps.vault.encrypt(input.appSecret);
     if (input.verifyToken) settings.verifyTokenEncrypted = this.deps.vault.encrypt(input.verifyToken);
     settings.health = this.#initialHealth(input.kind, settings);
-    const ref = { id, kind: input.kind, settings };
+    const ref = { id, kind: input.kind, workspaceId: input.workspaceId, settings };
     // Voice (G6) authenticates inbound webhooks with its auto-generated per-
     // connection webhookSecret — there is no external bot token to require.
     const noToken = input.kind === 'voice' || (this.#persistent?.requiresNoToken(input.kind, settings) ?? false);
@@ -961,6 +980,17 @@ export class ChannelBridge {
       return result;
     }
 
+    if (parsed.media) {
+      parsed.body = await this.#enrichWebhookMedia(row, parsed).catch((err) => {
+        this.deps.logger.warn('channel.webhook_media_enrichment_failed', {
+          connectionId: row.id,
+          kind: row.kind,
+          err: (err as Error).message,
+        });
+        return parsed.body;
+      });
+    }
+
     this.#rememberDefaultChat(row, parsed.chatId);
 
     // A workspace-owned (null-agent) connection routes inbound to the orchestrator
@@ -1276,7 +1306,7 @@ export class ChannelBridge {
       : this.#check('runtime', false, 'agent_missing', 'The connected agent no longer exists.', 'Reconnect the channel to an existing agent.');
   }
 
-  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = []): Promise<ChannelDeliveryReceipt> {
+  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = [], pacing?: 'immediate', native?: OutboundNativeContent): Promise<ChannelDeliveryReceipt> {
     const settings = this.#settings(row);
     const normalizedChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
     const selfCheck = await this.#telegramSelfTargetCheck(row, normalizedChatId);
@@ -1284,9 +1314,17 @@ export class ChannelBridge {
       throw new AgentisError('CHANNEL_SEND_FAILED', `${selfCheck.message} ${selfCheck.remediation ?? ''}`.trim());
     }
     if (this.#persistent?.handles({ id: row.id, kind: row.kind, settings })) {
-      return this.#persistent.send(row.id, normalizedChatId, body, attachments.length ? attachments : undefined, resolveHumanize(settings.persona));
+      return this.#persistent.send(
+        row.id,
+        normalizedChatId,
+        body,
+        attachments.length ? attachments : undefined,
+        pacing === 'immediate' ? undefined : resolveHumanize(settings.persona),
+        native,
+      );
     }
     if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
+      if (native) return this.#sendWhatsAppCloudNative(row, settings, normalizedChatId, native, body);
       return this.#sendWhatsAppCloud(row, settings, normalizedChatId, body, attachments);
     }
     const adapter = this.#requireAdapter(row.kind as ChannelKind);
@@ -1297,6 +1335,7 @@ export class ChannelBridge {
       body,
       settings: settings as Record<string, unknown>,
       ...(attachments.length ? { attachments } : {}),
+      ...(native ? { native } : {}),
     });
   }
 
@@ -1402,6 +1441,51 @@ export class ChannelBridge {
       throw new AgentisError('CHANNEL_SEND_FAILED', 'whatsapp cloud accepted no provider message id; delivery is unverified');
     }
     return { provider: 'whatsapp', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
+  }
+
+  async #sendWhatsAppCloudNative(
+    row: ChannelConnectionRow,
+    settings: ChannelSettings,
+    chatId: string,
+    native: OutboundNativeContent,
+    body: string,
+  ): Promise<ChannelDeliveryReceipt> {
+    if (native.kind === 'poll') {
+      throw new AgentisError('VALIDATION_FAILED', 'WhatsApp Cloud does not support outbound polls through this adapter; use a linked-device WhatsApp connection');
+    }
+    const phoneNumberId = settings.phoneNumberId;
+    if (!phoneNumberId) throw new AgentisError('VALIDATION_FAILED', 'WhatsApp Cloud phone number ID is missing');
+    const token = this.deps.vault.decrypt(row.tokenEncrypted);
+    const type = native.kind === 'location' ? 'location' : 'contacts';
+    const payload = native.kind === 'location'
+      ? {
+          longitude: native.longitude,
+          latitude: native.latitude,
+          ...(native.name ? { name: native.name } : {}),
+          ...(native.address ? { address: native.address } : {}),
+        }
+      : [{
+          name: { formatted_name: native.displayName, first_name: native.displayName.split(/\s+/, 1)[0] || native.displayName },
+          phones: [{ phone: native.phone, type: 'CELL' }],
+        }];
+    const res = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/messages`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to: chatId, type, [type]: payload }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new AgentisError('CHANNEL_SEND_FAILED', `whatsapp cloud ${type} send failed (${res.status}): ${text.slice(0, 240) || res.statusText}`);
+    }
+    const json = await res.json().catch(() => ({})) as { messages?: Array<{ id?: string }> };
+    const providerMessageId = json.messages?.[0]?.id?.trim() ?? '';
+    if (!providerMessageId) throw new AgentisError('CHANNEL_SEND_FAILED', `whatsapp cloud accepted no provider message id for ${type}`);
+    const nativeReceipt: ChannelDeliveryReceipt = {
+      provider: 'whatsapp', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId,
+    };
+    if (!body.trim()) return nativeReceipt;
+    const textReceipt = await this.#sendWhatsAppCloud(row, settings, chatId, body.trim());
+    return { ...nativeReceipt, providerMessageIds: [nativeReceipt.providerMessageId, textReceipt.providerMessageId] };
   }
 
   /** Upload media to the WhatsApp Cloud media endpoint, then send a message referencing it. */
@@ -1695,21 +1779,133 @@ export class ChannelBridge {
             text?: { body?: string };
             button?: { text?: string };
             interactive?: { button_reply?: { title?: string }; list_reply?: { title?: string } };
+            image?: { id?: string; mime_type?: string; caption?: string };
+            audio?: { id?: string; mime_type?: string };
+            video?: { id?: string; mime_type?: string; caption?: string };
+            document?: { id?: string; mime_type?: string; filename?: string; caption?: string };
+            sticker?: { id?: string; mime_type?: string };
+            location?: { latitude?: number; longitude?: number; name?: string; address?: string };
+            contacts?: Array<{ name?: { formatted_name?: string }; phones?: Array<{ phone?: string; wa_id?: string }> }>;
+            reaction?: { message_id?: string; emoji?: string };
           };
-          const body = msg.type === 'text'
+          let body = msg.type === 'text'
             ? msg.text?.body
             : msg.button?.text ?? msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title;
+          let media: ParsedInboundMessage['media'] | undefined;
+          const mediaValue = msg.image ?? msg.audio ?? msg.video ?? msg.document ?? msg.sticker;
+          if (mediaValue?.id && msg.type && ['image', 'audio', 'video', 'document', 'sticker'].includes(msg.type)) {
+            const kind: OutboundMediaKind = msg.type === 'document' ? 'file' : msg.type as OutboundMediaKind;
+            const mediaCaption = msg.image?.caption ?? msg.video?.caption ?? msg.document?.caption;
+            media = {
+              providerFileId: mediaValue.id,
+              kind,
+              mimeType: mediaValue.mime_type,
+              filename: msg.document?.filename ?? `whatsapp-${msg.type}`,
+              ...(mediaCaption ? { caption: mediaCaption } : {}),
+            };
+            body = [
+              `[${msg.type === 'audio' ? 'Audio' : msg.type === 'document' ? 'Document' : msg.type} received]`,
+              ...(mediaCaption ? [`Caption: ${mediaCaption}`] : []),
+            ].join('\n');
+          } else if (msg.location && Number.isFinite(msg.location.latitude) && Number.isFinite(msg.location.longitude)) {
+            body = [
+              '[Location received]',
+              ...(msg.location.name ? [`Name: ${msg.location.name}`] : []),
+              ...(msg.location.address ? [`Address: ${msg.location.address}`] : []),
+              `Coordinates: ${msg.location.latitude}, ${msg.location.longitude}`,
+              `Map: https://maps.google.com/?q=${msg.location.latitude},${msg.location.longitude}`,
+            ].join('\n');
+          } else if (msg.contacts?.length) {
+            body = ['[Contact card received]', ...msg.contacts.flatMap((contact) => [
+              ...(contact.name?.formatted_name ? [`Name: ${contact.name.formatted_name}`] : []),
+              ...((contact.phones ?? []).map((phone) => `Phone: ${phone.phone ?? phone.wa_id ?? ''}`)),
+            ])].join('\n');
+          } else if (msg.reaction?.emoji) {
+            body = `[Reaction received: ${msg.reaction.emoji}${msg.reaction.message_id ? ` to message ${msg.reaction.message_id}` : ''}]`;
+          }
           if (!msg.id || !msg.from || !body) continue;
-          return {
+          const parsed: ParsedInboundMessage = {
             externalId: `whatsapp:${msg.id}`,
             chatId: msg.from,
             body,
             from: msg.from,
           };
+          if (media) parsed.media = media;
+          return parsed;
         }
       }
     }
     return null;
+  }
+
+  async #enrichWebhookMedia(row: ChannelConnectionRow, parsed: ParsedInboundMessage): Promise<string> {
+    const media = parsed.media;
+    if (!media) return parsed.body;
+    const downloaded = await this.#downloadWebhookMedia(row, media.providerFileId, media.mimeType, media.filename);
+    const mimeType = downloaded.mimeType || media.mimeType || 'application/octet-stream';
+    const filename = downloaded.filename || media.filename || `channel-${media.kind}`;
+    const details: string[] = [parsed.body];
+    if (this.deps.artifacts) {
+      const artifact = this.deps.artifacts.persist({
+        workspaceId: row.workspaceId,
+        agentId: row.agentId ?? this.#resolveInboundAgentId(row.workspaceId),
+        origin: 'channel',
+        type: artifactTypeFromMime(mimeType, filename),
+        title: `Inbound ${media.kind}: ${filename}`,
+        name: filename,
+        content: `data:${mimeType.split(';', 1)[0]};base64,${downloaded.bytes.toString('base64')}`,
+        savedBy: 'channel.webhook',
+        metadataExtra: { mime: mimeType, size: downloaded.bytes.byteLength, channelConnectionId: row.id, channelMediaKind: media.kind },
+      });
+      details.push(`Attachment: ${artifact.ref}`);
+    }
+    if ((media.kind === 'voice' || media.kind === 'audio') && this.#inboundMediaResolvers.transcribeAudio) {
+      const transcript = await this.#inboundMediaResolvers.transcribeAudio(downloaded.bytes, mimeType, row.workspaceId);
+      details.push(transcript?.trim() ? `Transcript:\n${transcript.trim()}` : 'Transcription is unavailable.');
+    } else if ((media.kind === 'image' || (media.kind === 'sticker' && mimeType.startsWith('image/'))) && this.#inboundMediaResolvers.describeImage) {
+      const description = await this.#inboundMediaResolvers.describeImage(downloaded.bytes, mimeType, row.workspaceId, media.caption);
+      details.push(description?.trim() ? `Visual analysis: ${description.trim()}` : 'Visual analysis is unavailable.');
+    } else if (media.kind === 'file' && this.#inboundMediaResolvers.extractDocument) {
+      const extracted = await this.#inboundMediaResolvers.extractDocument(downloaded.bytes, mimeType, row.workspaceId, filename);
+      details.push(extracted?.trim() || 'Text extraction is unavailable. Do not claim to have read the document.');
+    }
+    return details.join('\n');
+  }
+
+  async #downloadWebhookMedia(
+    row: ChannelConnectionRow,
+    providerFileId: string,
+    mimeHint?: string,
+    filenameHint?: string,
+  ): Promise<{ bytes: Buffer; mimeType: string; filename: string }> {
+    const token = this.deps.vault.decrypt(row.tokenEncrypted);
+    let url: string;
+    let mimeType = mimeHint ?? 'application/octet-stream';
+    let filename = filenameHint ?? 'channel-media.bin';
+    const headers: Record<string, string> = {};
+    if (row.kind === 'telegram') {
+      const meta = await fetch(`${TELEGRAM_API}/bot${encodeURIComponent(token)}/getFile?file_id=${encodeURIComponent(providerFileId)}`);
+      const json = await meta.json().catch(() => ({})) as { ok?: boolean; result?: { file_path?: string } };
+      if (!meta.ok || !json.result?.file_path) throw new Error(`telegram getFile failed (${meta.status})`);
+      url = `${TELEGRAM_API}/file/bot${token}/${json.result.file_path}`;
+      if (!filenameHint) filename = json.result.file_path.split('/').at(-1) ?? filename;
+    } else if (row.kind === 'whatsapp') {
+      headers.authorization = `Bearer ${token}`;
+      const meta = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(providerFileId)}`, { headers });
+      const json = await meta.json().catch(() => ({})) as { url?: string; mime_type?: string };
+      if (!meta.ok || !json.url) throw new Error(`whatsapp cloud media lookup failed (${meta.status})`);
+      url = json.url;
+      mimeType = json.mime_type ?? mimeType;
+    } else {
+      throw new Error(`${row.kind} webhook media download is not implemented`);
+    }
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`${row.kind} media download failed (${response.status})`);
+    const declared = Number(response.headers.get('content-length') ?? 0);
+    if (declared > 20 * 1024 * 1024) throw new Error('inbound media exceeds the 20 MB safety limit');
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > 20 * 1024 * 1024) throw new Error('inbound media exceeds the 20 MB safety limit');
+    return { bytes, mimeType: response.headers.get('content-type') ?? mimeType, filename };
   }
 
   #rememberDefaultChat(row: ChannelConnectionRow, chatId: string): void {

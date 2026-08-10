@@ -225,6 +225,86 @@ export const openApiDocument = {
         responses: { '201': { description: 'Sent' } },
       },
     },
+    '/v1/conversations/{agentId}/turns': {
+      post: {
+        tags: ['conversations'],
+        summary: 'Persist and enqueue a durable conversation turn',
+        parameters: [{ name: 'agentId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: {
+            type: 'object', required: ['body'], properties: {
+              body: { type: 'string' },
+              executionMode: { type: 'string', enum: ['auto', 'quick', 'deep', 'mission'], default: 'auto' },
+              permissionMode: { type: 'string', enum: ['ask', 'plan', 'auto'] },
+              attachments: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+            },
+          } } },
+        },
+        responses: { '202': { description: 'Turn persisted and queued' } },
+      },
+    },
+    '/v1/conversations/{agentId}/turns/{turnId}': {
+      get: {
+        tags: ['conversations'], summary: 'Read the current durable turn snapshot',
+        parameters: [
+          { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'turnId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: { '200': { description: 'Durable turn snapshot' } },
+      },
+    },
+    '/v1/conversations/{agentId}/turns/{turnId}/events': {
+      get: {
+        tags: ['conversations'], summary: 'Replay and follow ordered durable turn events over SSE',
+        parameters: [
+          { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'turnId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'after', in: 'query', schema: { type: 'integer', minimum: 0 } },
+        ],
+        responses: { '200': { description: 'Replayable text/event-stream' } },
+      },
+    },
+    '/v1/conversations/{agentId}/turns/active': {
+      get: {
+        tags: ['conversations'], summary: 'List resumable turns for a conversation',
+        parameters: [
+          { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'conversationId', in: 'query', required: true, schema: { type: 'string' } },
+        ],
+        responses: { '200': { description: 'Queued, running, paused, interrupted, or approval-waiting turns' } },
+      },
+    },
+    '/v1/conversations/{agentId}/turns/{turnId}/pause': {
+      post: {
+        tags: ['conversations'], summary: 'Pause a durable conversation turn',
+        parameters: [
+          { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'turnId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: { '200': { description: 'Paused turn snapshot' } },
+      },
+    },
+    '/v1/conversations/{agentId}/turns/{turnId}/resume': {
+      post: {
+        tags: ['conversations'], summary: 'Resume a paused or interrupted durable turn',
+        parameters: [
+          { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'turnId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: { '200': { description: 'Queued turn snapshot' } },
+      },
+    },
+    '/v1/conversations/{agentId}/turns/{turnId}/cancel': {
+      post: {
+        tags: ['conversations'], summary: 'Cancel a durable turn and its conversation-owned runs',
+        parameters: [
+          { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'turnId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: { '200': { description: 'Cancelled turn snapshot' } },
+      },
+    },
     '/v1/approvals': {
       get: { tags: ['approvals'], responses: { '200': { description: 'OK' } } },
     },

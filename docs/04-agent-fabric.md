@@ -135,8 +135,11 @@ explicitly for harness smoke testing.
 - **Specialists** (`services/specialist/`, `/v1/specialists`) — an open role registry
   (platform/custom/generated/community) with demand routing + scoring; a specialist runs a full
   agent session by default.
-- **Chat** exposes sticky **Ask / Plan / Auto** permission modes shared across web and every
-  channel.
+- **Chat** exposes sticky **Ask / Plan / Full access** permission modes shared across web and
+  every channel (`auto` remains the API and slash-command identifier for Full access). The web
+  always requests automatic task routing; explicit Quick/Deep/Mission overrides remain API
+  compatibility inputs rather than permanent composer controls. Model, reasoning effort, and
+  speed live in one runtime menu.
 
 ### Execution truth and operator progress
 
@@ -145,10 +148,13 @@ revokes its execution lease, aborts the adapter and child runs, and fences late 
 recorded as **Response interrupted**, never as a provider failure. CLI adapters share this rule,
 including non-zero child-process exits produced while their process tree is being cancelled.
 
-The live trace contains durable, operator-safe progress events: lifecycle state, normalized tool
-operation, safe result summary, resource, duration, and failure category. It intentionally does
-not store or display private model reasoning. Events survive a chat or panel reload and are also
-used by the workspace canvas.
+The conversation renders safe commentary and factual activity in chronological order while a
+turn runs. Commentary is restricted to provider-designated reasoning summaries, assistant
+preambles, and host-authored progress; raw chain-of-thought remains private. Stable event ids
+update an existing row in place, and both commentary and tool activity are persisted in message
+metadata so reconnecting or reopening the chat reconstructs the same timeline. Completed work is
+collapsed to a quiet duration row by default; expanding it reveals the timeline and tool detail.
+Operator messages retain bubbles while direct agent replies render as flat document-like content.
 
 Codex model-catalogue parse failures (including a missing `base_instructions` field) are treated
 as recoverable runtime state. Agentis only quarantines an identified `models-cache.json` or

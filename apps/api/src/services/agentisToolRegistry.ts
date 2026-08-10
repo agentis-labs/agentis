@@ -25,6 +25,7 @@ import {
   type AgentisToolDefinition,
 } from '@agentis/core';
 import type { Logger } from '../logger.js';
+import { decideToolApproval } from './chat/chatApprovalPolicy.js';
 
 export interface AgentisToolHandler<TIn = Record<string, unknown>, TOut = unknown> {
   (args: TIn, ctx: AgentisToolContext): Promise<TOut> | TOut;
@@ -158,7 +159,14 @@ export class AgentisToolRegistry {
       };
     }
 
-    if ((ctx.executionMode === 'plan' || ctx.executionMode === 'ask') && tool.definition.mutating) {
+    const planBlocked = ctx.executionMode === 'plan' && tool.definition.mutating;
+    const askDecision = decideToolApproval({
+      name: req.toolId,
+      definition: tool.definition,
+      permissionMode: ctx.executionMode === 'ask' ? 'ask' : 'auto',
+      sensitivity: ctx.approvalSensitivity,
+    });
+    if (planBlocked || (ctx.executionMode === 'ask' && askDecision.requiresApproval)) {
       const ask = ctx.executionMode === 'ask';
       return {
         id: callId,
@@ -166,10 +174,7 @@ export class AgentisToolRegistry {
         ok: false,
         errorCode: ask ? 'ASK_MODE_CONFIRMATION_REQUIRED' : 'PLAN_MODE_MUTATION_BLOCKED',
         errorMessage: ask
-          // Ask mode: the operator must approve a state change. Do NOT retry — it
-          // will keep failing until they switch to Auto (or approve). Tell the model
-          // to surface the intent and stop, not to loop on the block.
-          ? `tool '${req.toolId}' changes workspace state and the conversation is in Ask mode — it was NOT executed. Do not retry. Summarize exactly what you were about to do and ask the operator to approve; they can switch to Auto to let it run.`
+          ? `tool '${req.toolId}' is ${askDecision.riskLevel} risk and meets this conversation's Ask threshold — it was NOT executed. Do not retry. Briefly explain the consequential effect and ask the operator to approve it. Routine lower-risk work remains autonomous.`
           : `tool '${req.toolId}' cannot mutate workspace state while the conversation is in Plan mode`,
         durationMs: Date.now() - startedAt,
       };

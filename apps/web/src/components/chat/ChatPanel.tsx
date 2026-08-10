@@ -196,7 +196,7 @@ export function ChatPanel() {
         className={clsx(
           'flex min-w-0 flex-col overflow-hidden bg-surface transition-[width,opacity,transform] duration-150',
           isFullscreen
-            ? 'fixed inset-2 z-50 rounded-2xl border border-line shadow-modal md:inset-4'
+            ? 'agentis-chat-shell-fullscreen fixed inset-2 z-50 rounded-2xl border border-line shadow-modal md:inset-4'
             : 'relative z-30 shrink-0',
           state === 'hidden'
             ? 'pointer-events-none overflow-hidden border-l-0 opacity-0'
@@ -503,6 +503,7 @@ export function ChatPanel() {
               kind={currentThread.kind}
               id={currentThread.id}
               name={currentThread.name}
+              immersive={isFullscreen}
               conversationId={currentThread.kind === 'agent' ? currentThread.conversationId ?? null : null}
               archivedAt={currentThread.kind === 'agent' ? currentThread.archivedAt ?? null : null}
               initialDraft={launchContext?.initialDraft}

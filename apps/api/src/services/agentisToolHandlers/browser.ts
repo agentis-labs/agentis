@@ -40,6 +40,7 @@ export function registerBrowserTools(registry: AgentisToolRegistry, deps: ToolHa
           },
         },
         mutating: true,
+        approval: { riskLevel: 'low', reversible: true, externalSideEffects: false },
         mcpExposed: true,
       },
       handler: async (args, ctx) => {

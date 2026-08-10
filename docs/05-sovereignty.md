@@ -15,6 +15,10 @@ is local-first, model-neutral, self-hosted, and portable, and the supervision la
 - The **Brain** runs on a pinned local embedding model. Its q8 artifacts are downloaded and
   cryptographically verified once, then work offline with no external API, so institutional
   knowledge never leaves the host (see [The Brain](./01-the-brain.md)).
+- Inbound channel audio has an optional pinned local transcription fallback with the same
+  immutable-revision, artifact-size, SHA-256, atomic-activation, offline, and repair controls.
+  It is acquired only for configured media channels or explicit channel setup, never merely
+  because `agentis up` was run.
 
 ## Model & runtime neutrality
 
@@ -47,7 +51,7 @@ workspace (`workspace_model_config`) or via `AGENTIS_ORCHESTRATOR_*` env vars.
   all packages, and the built SPA in one Node process.
 - **Railway** — one-click template (`railway.toml`) with a stateful volume for SQLite.
 - **CLI** (`@agentis-labs/cli`) — `npm install -g @agentis-labs/cli` then `agentis up`;
-  also `warmup [--repair]`, `doctor [--json]`, `bootstrap`, `backup`, `restore`, `create`,
+  also `warmup [--repair|--transcription]`, `setup [--channels]`, `doctor [--json]`, `bootstrap`, `backup`, `restore`, `create`,
   `app {pack,validate,install,test,export}`.
 - **SDK** (`@agentis/sdk`) — programmatic validate/build/test in an isolated transaction.
 

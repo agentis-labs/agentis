@@ -1,20 +1,37 @@
 [
   {
     "id": "repository-orientation",
+    "mode": "deep",
     "prompt": "Inspect this repository without changing it. Explain its package structure, runtime entry points, test commands, and the three highest-risk architectural boundaries. Ground the answer in specific files.",
     "timeoutMs": 180000,
     "assertions": { "require": ["packages", "apps", "test"], "forbid": ["I cannot access"], "minChars": 500 }
   },
   {
     "id": "implementation-plan",
+    "mode": "deep",
     "prompt": "Design a concrete implementation plan for adding a new versioned workflow node end to end. Cover shared types and schemas, graph validation, engine dispatch, persistence/migrations, API, UI, packaging/rebinding, tests, rollout, and failure semantics. Do not claim to have changed files.",
     "timeoutMs": 180000,
     "assertions": { "require": ["schema", "validation", "test", "migration", "failure"], "forbid": ["implemented successfully", "changes are complete"], "minChars": 800 }
   },
   {
     "id": "truthful-delivery-review",
+    "mode": "deep",
     "prompt": "Review the system conceptually for places where process completion could be confused with verified business accomplishment. Give a prioritized audit checklist with evidence requirements and regression tests. Be explicit about unknowns.",
     "timeoutMs": 180000,
     "assertions": { "require": ["evidence", "verified", "regression", "unknown"], "forbid": ["always guaranteed"], "minChars": 700 }
+  },
+  {
+    "id": "talki-sales-golden-mission",
+    "mode": "mission",
+    "prompt": "Build and deliver a production-grade Agentic App named Talki Sales. It must operate a WhatsApp sales funnel with durable per-lead Subject state, explicit state-machine transitions, idempotent inbound event handling, bounded follow-up scheduling, specialist escalation, collections for leads/messages/events/metrics, an operator dashboard, structured audit evidence, and App Doctor verification. Create the real persisted App, workflows, surfaces, event rules, and test fixtures—do not substitute a design document. Use the task spine throughout, verify every acceptance criterion, repair failures, and only claim completion when the persisted App passes verification and delivery checks.",
+    "timeoutMs": 1800000,
+    "assertions": {
+      "require": ["Talki Sales", "verification", "evidence"],
+      "forbid": ["I would implement", "could be built"],
+      "minChars": 700,
+      "minToolCalls": 5,
+      "requireDurable": true,
+      "requireEvidence": true
+    }
   }
 ]

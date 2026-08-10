@@ -135,6 +135,14 @@ describe('harnessMcpArgs', () => {
     expect(codex).toContain('x-agentis-execution-mode: ask');
   });
 
+  it('propagates the Ask sensitivity to native Claude and Codex tool loops', () => {
+    const turn = { approvalSensitivity: 'autonomous' as const };
+    const claude = harnessMcpArgs('claude_code', [server], 'ask', turn);
+    expect(JSON.parse(claude[2]!).mcpServers.agentis.headers['x-agentis-approval-sensitivity']).toBe('autonomous');
+    const codex = harnessMcpArgs('codex', [server], 'ask', turn).find((a) => a.startsWith('mcp_servers.agentis.args='));
+    expect(codex).toContain('x-agentis-approval-sensitivity: autonomous');
+  });
+
   it('tags each native harness invocation with its revocable conversation turn capability', () => {
     const turn = { conversationId: 'conv_1', turnLease: 'lease_1' };
     const claude = harnessMcpArgs('claude_code', [server], 'chat', turn);
