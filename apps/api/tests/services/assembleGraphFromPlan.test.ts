@@ -30,7 +30,8 @@ describe('assembleGraphFromPlan — real gate/rollback branches', () => {
   it('emits a validate gate with a rollback → terminal on the FAIL branch', () => {
     const rollback = graph.nodes.find((n) => n.id.startsWith('rollback_'));
     expect(rollback).toBeTruthy();
-    expect((rollback!.config as { kind: string }).kind).toBe('integration');
+    expect((rollback!.config as { kind: string; expression?: string }).kind).toBe('transform');
+    expect((rollback!.config as { expression?: string }).expression).toContain('rollbackRequested');
     const rolled = graph.nodes.find((n) => n.id.startsWith('rolled_back_'));
     expect(rolled).toBeTruthy();
     // rollback flows into its own terminal
@@ -49,8 +50,7 @@ describe('assembleGraphFromPlan — real gate/rollback branches', () => {
   });
 
   it('is still an acyclic, valid workflow graph (same non-strict contract the build uses)', () => {
-    // The build validates with { strict: false } — pending-config integration nodes
-    // are warnings, but a cycle would still throw. The branches must not introduce one.
+    // The build validates with { strict: false }; a cycle would still throw.
     expect(() => validateWorkflowGraph(graph, { strict: false })).not.toThrow();
   });
 });
