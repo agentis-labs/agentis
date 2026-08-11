@@ -305,6 +305,13 @@ export interface ChatTurnContext {
   permissionMode?: ChatPermissionMode;
   /** Ask-mode threshold. Defaults to `balanced`; ignored by Plan and Auto. */
   approvalSensitivity?: ApprovalSensitivity;
+  /**
+   * Verified transport origin for a turn that began on a messaging channel.
+   * This is runtime authority context, not prompt prose: tool handlers use it
+   * to prevent an external peer from inheriting the connection owner's account
+   * privileges or silently redirecting a reply to another recipient.
+   */
+  channelOrigin?: ChannelToolOrigin;
   /** Effective quality class selected before the model is invoked. */
   qualityMode?: EffectiveConversationExecutionMode;
   viewport?: ViewportContext | null;
@@ -419,6 +426,8 @@ export interface AgentisToolContext {
   executionMode?: 'chat' | 'plan' | 'ask';
   /** Ask-mode threshold propagated across native MCP tool loops. */
   approvalSensitivity?: ApprovalSensitivity;
+  /** Channel-side authority boundary propagated through caller and MCP loops. */
+  channelOrigin?: ChannelToolOrigin;
   viewport?: ViewportContext | null;
   /**
    * Ambient Agentic App for this turn (Living Apps Phase 0). When set, App-scoped
@@ -442,6 +451,17 @@ export interface AgentisToolContext {
    * spending instead of running to completion in the background.
    */
   signal?: AbortSignal;
+}
+
+/** Trusted facts about the channel request that initiated a tool-capable turn. */
+export interface ChannelToolOrigin {
+  kind: string;
+  connectionId: string;
+  chatId: string;
+  /** True only when this exact channel identity is explicitly linked to the owner. */
+  ownerVerified: boolean;
+  /** Explicit recipient addresses present in the initiating request, normalized by the channel host. */
+  explicitRecipients?: string[];
 }
 
 export interface AgentisToolCatalog {

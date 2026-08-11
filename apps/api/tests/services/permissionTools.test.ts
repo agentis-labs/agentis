@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
@@ -93,5 +94,98 @@ describe('agentis.permissions.configure', () => {
       sensitivity: 'balanced',
     }).requiresApproval).toBe(false);
   });
+
+  it('keeps an unverified channel peer inside the originating conversation', async () => {
+    const deliverToConnection = vi.fn(async ({ chatId }: { chatId: string }) => ({
+      provider: 'whatsapp' as const,
+      providerMessageId: 'wamid-1',
+      status: 'accepted' as const,
+      acceptedAt: new Date().toISOString(),
+      recipient: chatId,
+      providerAcknowledged: true,
+    }));
+    const channels = {
+      list: () => [{
+        id: 'wa-1', kind: 'whatsapp', name: 'WA', status: 'active', agentId: null,
+        defaultChatId: '5599@s.whatsapp.net', targetAliases: {}, isDefault: true,
+        health: { status: 'ok' },
+      }],
+      defaultConnectionFor: () => 'wa-1',
+      resolveDestination: ({ to }: { to?: string | null }) => ({
+        chatId: to?.includes('@') ? to : `${String(to).replace(/\D/g, '')}@s.whatsapp.net`,
+        source: 'explicit' as const,
+      }),
+      deliverToConnection,
+    };
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerChannelTools(registry, { db: ctx.db, channels } as unknown as ToolHandlerDeps);
+    const baseContext = {
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      executionMode: 'chat' as const,
+      caller: 'chat' as const,
+      channelOrigin: {
+        kind: 'whatsapp', connectionId: 'wa-1', chatId: '5511@s.whatsapp.net', ownerVerified: false,
+      },
+    };
+
+    const blocked = await registry.execute({
+      id: randomUUID(), toolId: 'agentis.channel.send', arguments: { to: '+5522', body: 'Oi' },
+    }, baseContext);
+    expect(blocked).toMatchObject({ ok: false, errorCode: 'CONNECTION_SCOPE_MISSING' });
+    expect(deliverToConnection).not.toHaveBeenCalled();
+
+    const current = await registry.execute({
+      id: randomUUID(), toolId: 'agentis.channel.send', arguments: { body: 'Reply' },
+    }, baseContext);
+    expect(current.ok).toBe(true);
+    expect(deliverToConnection).toHaveBeenCalledWith(expect.objectContaining({ chatId: '5511@s.whatsapp.net' }));
+  });
+
+  it('lets an explicitly linked owner use an explicit third-party recipient', async () => {
+    const deliverToConnection = vi.fn(async ({ chatId }: { chatId: string }) => ({
+      provider: 'whatsapp' as const,
+      providerMessageId: 'wamid-owner',
+      status: 'accepted' as const,
+      acceptedAt: new Date().toISOString(),
+      recipient: chatId,
+      providerAcknowledged: true,
+    }));
+    const channels = {
+      list: () => [{
+        id: 'wa-1', kind: 'whatsapp', name: 'WA', status: 'active', agentId: null,
+        defaultChatId: '5511@s.whatsapp.net', targetAliases: {}, isDefault: true,
+        health: { status: 'ok' },
+      }],
+      defaultConnectionFor: () => 'wa-1',
+      resolveDestination: ({ to }: { to?: string | null }) => ({
+        chatId: `${String(to).replace(/\D/g, '')}@s.whatsapp.net`, source: 'explicit' as const,
+      }),
+      deliverToConnection,
+    };
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerChannelTools(registry, { db: ctx.db, channels } as unknown as ToolHandlerDeps);
+    const ownerContext = {
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      executionMode: 'chat' as const,
+      caller: 'chat' as const,
+      channelOrigin: {
+        kind: 'whatsapp', connectionId: 'wa-1', chatId: '5511@s.whatsapp.net', ownerVerified: true,
+        explicitRecipients: ['5522@s.whatsapp.net'],
+      },
+    };
+    const missingRecipient = await registry.execute({
+      id: randomUUID(), toolId: 'agentis.channel.send', arguments: { body: 'Oi' },
+    }, ownerContext);
+    expect(missingRecipient).toMatchObject({ ok: false, errorCode: 'VALIDATION_FAILED' });
+    expect(deliverToConnection).not.toHaveBeenCalled();
+
+    const result = await registry.execute({
+      id: randomUUID(), toolId: 'agentis.channel.send', arguments: { to: '+5522', body: 'Oi' },
+    }, ownerContext);
+
+    expect(result.ok).toBe(true);
+    expect(deliverToConnection).toHaveBeenCalledWith(expect.objectContaining({ chatId: '5522@s.whatsapp.net' }));
+  });
 });
-import { randomUUID } from 'node:crypto';

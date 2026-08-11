@@ -1,30 +1,24 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { normalizeToolInvocation, REALTIME_EVENTS, type AppBlueprint, type BuildSession, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext, type WorkStepTrack } from '@agentis/core';
+import { normalizeToolInvocation, REALTIME_EVENTS, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { PermissionModePicker } from './PermissionModePicker';
-import { readPlanStepTrack } from '../../lib/workSteps';
-import { StepTrack } from '../shared/StepTrack';
 import { api, apiErrorMessage, streamSse } from '../../lib/api';
 import { useViewportAwareness } from '../../lib/viewportContext';
-import { openRunModal } from '../../lib/runModal';
 import { listInteractions, type InteractionEvent } from '../../lib/connections';
 import { useToast } from '../shared/Toast';
 import { Skeleton } from '../shared/Skeleton';
 import { rtSubscribe, useRealtime } from '../../lib/realtime';
 import { Composer, type SendAttachment } from './Composer';
 import type { ToolCallData as ToolCallPillData } from './toolCalls';
-import { ProactiveCard, type ProactiveCardData } from './ProactiveCard';
+import type { ProactiveCardData } from './ProactiveCard';
 import { ChatMarkdown } from './ChatMarkdown';
 import { useChatPanelStore } from './ChatPanelStore';
 import { AgentTurnTrace } from './AgentTurnTrace';
 import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessage } from './messageModel';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
-import { ChatPlanCanvas, extractAgentPlan } from './ChatPlanCanvas';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
-import { DurablePlanCard } from '../shared/DurablePlanCard';
-import { BuildSessionCard } from '../shared/BuildSessionCard';
 import type { DurableConversationTurn } from './durableTurn';
 
 interface ThreadViewProps {
@@ -433,8 +427,6 @@ export function ThreadView({
   const [agentNoAdapter, setAgentNoAdapter] = useState(false);
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeInfo | null>(null);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(conversationId ?? null);
-  const [latestPlan, setLatestPlan] = useState<ChatPlan | null>(null);
-  const [latestBuild, setLatestBuild] = useState<{ session: BuildSession; blueprint: AppBlueprint } | null>(null);
   const [agentTyping, setAgentTyping] = useState(false);
   // Room loading state: which @mentioned agents we're still waiting on for
   // reply (posted after the mention) shows up. A safety timer caps the wait.
@@ -575,23 +567,6 @@ export function ThreadView({
 
   useEffect(() => {
     const targetConversationId = loadedConversationId ?? conversationId;
-    if (kind !== 'agent' || !targetConversationId) { setLatestPlan(null); setLatestBuild(null); return; }
-    let cancelled = false;
-    void Promise.all([
-      api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?conversationId=${encodeURIComponent(targetConversationId)}`),
-      api<{ session: BuildSession | null; blueprint: AppBlueprint | null }>(`/v1/build-sessions/latest?conversationId=${encodeURIComponent(targetConversationId)}`),
-    ]).then(([planResult, buildResult]) => {
-      if (cancelled) return;
-      setLatestPlan(planResult.task ?? null);
-      setLatestBuild(buildResult.session && buildResult.blueprint ? { session: buildResult.session, blueprint: buildResult.blueprint } : null);
-    }).catch(() => {
-      if (!cancelled) { setLatestPlan(null); setLatestBuild(null); }
-    });
-    return () => { cancelled = true; };
-  }, [conversationId, kind, loadedConversationId]);
-
-  useEffect(() => {
-    const targetConversationId = loadedConversationId ?? conversationId;
     setActiveDurableTurn(null);
     activeDurableTurnIdRef.current = null;
     if (kind !== 'agent' || readOnly || !targetConversationId) return;
@@ -697,7 +672,6 @@ export function ThreadView({
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
             } else if (delta.type === 'plan') {
-              setLatestPlan(delta.plan);
               setMessages((current) => current.map((message) => message.id === streamId
                 ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
                 : message));
@@ -906,47 +880,6 @@ export function ThreadView({
       : rtSubscribe('conversation', { agentId: id });
   }, [kind, id]);
 
-  // Live task-spine steps for this conversation — the same StepTrack the Live
-  // Workspace shows, so progress is visible right in the chat. Task spine events
-  // are published to the workspace room, so we subscribe to it explicitly.
-  const [stepTrack, setStepTrack] = useState<WorkStepTrack | null>(null);
-  useEffect(() => { setStepTrack(null); }, [kind, id, conversationId]);
-  useEffect(() => rtSubscribe('workspace', {}), []);
-  useRealtime([
-    REALTIME_EVENTS.TASK_SPINE_ACCEPTED,
-    REALTIME_EVENTS.TASK_SPINE_UPDATED,
-    REALTIME_EVENTS.TASK_SPINE_COMPLETED,
-    REALTIME_EVENTS.TASK_SPINE_VERIFIED,
-    REALTIME_EVENTS.TASK_SPINE_BLOCKED,
-    REALTIME_EVENTS.TASK_SPINE_FAILED,
-  ], (env) => {
-    const payload = env.payload as { conversationId?: string | null };
-    const expected = loadedConversationId ?? conversationId ?? null;
-    if (!payload.conversationId || !expected || payload.conversationId !== expected) return;
-    const track = readPlanStepTrack(env.payload as Record<string, unknown>);
-    if (track) setStepTrack(track);
-    void api<{ task: ChatPlan | null }>(`/v1/tasks/spines/latest?conversationId=${encodeURIComponent(expected)}`)
-      .then(({ task }) => {
-        if (!task) return;
-        setLatestPlan(task);
-        setMessages((previous) => previous.map((message) => (
-          message.metadata?.plan?.id === task.id
-            ? { ...message, metadata: { ...message.metadata, plan: task } }
-            : message
-        )));
-      })
-      .catch(() => undefined);
-  });
-
-  useRealtime([REALTIME_EVENTS.BUILD_SESSION_UPDATED, REALTIME_EVENTS.APP_BLUEPRINT_UPDATED], (env) => {
-    const expected = loadedConversationId ?? conversationId ?? null;
-    const payload = env.payload as { conversationId?: string | null };
-    if (!expected || (payload.conversationId && payload.conversationId !== expected)) return;
-    void api<{ session: BuildSession | null; blueprint: AppBlueprint | null }>(`/v1/build-sessions/latest?conversationId=${encodeURIComponent(expected)}`)
-      .then((result) => setLatestBuild(result.session && result.blueprint ? { session: result.session, blueprint: result.blueprint } : null))
-      .catch(() => undefined);
-  });
-
   useRealtime([
     REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
     REALTIME_EVENTS.CONVERSATION_MESSAGE_SENT,
@@ -1090,23 +1023,6 @@ export function ThreadView({
       const deduped = current.filter((entry) => entry.id !== activity.id);
       return { ...prev, [activity.agentId!]: [...deduped, activity].slice(-40) };
     });
-  });
-
-  useRealtime([REALTIME_EVENTS.AGENT_PROACTIVE_PUSH], (env) => {
-    if (kind !== 'agent') return;
-    const payload = env.payload as { id?: string; agentId?: string | null; card?: ProactiveCardData };
-    if (payload.agentId && payload.agentId !== id) return;
-    if (!payload.card) return;
-    const message: ChatMessage = {
-      id: payload.id ?? `proactive-${env.emittedAt}`,
-      authorId: payload.agentId ?? id,
-      authorKind: 'agent',
-      text: '',
-      createdAt: env.emittedAt,
-      metadata: { source: 'proactive', card: payload.card },
-      deliveryStatus: 'delivered',
-    };
-    setMessages((current) => mergeMessage(current, message));
   });
 
   useEffect(() => () => {
@@ -1339,7 +1255,6 @@ export function ThreadView({
 
     setMessages((current) => dedupeMessages([...current, operatorMessage, streamingMessage]));
     setAgentTyping(true);
-    setStepTrack(null);
     setActiveTask({ agentId: id, agentName: name, label: taskLabel(bodyText), done: 0, total: 0, startedAt: Date.now() });
 
     const toolStartedAt = new Map<string, number>();
@@ -1403,7 +1318,6 @@ export function ThreadView({
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
             } else if (delta.type === 'plan') {
-              setLatestPlan(delta.plan);
               setMessages((current) => current.map((message) => message.id === streamId
                 ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
                 : message));
@@ -1596,7 +1510,6 @@ export function ThreadView({
           } else if (delta.type === 'confirmation_required') {
             applyConfirmationDelta(streamId, delta);
           } else if (delta.type === 'plan') {
-            setLatestPlan(delta.plan);
             setMessages((current) => current.map((message) => message.id === streamId
               ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
               : message));
@@ -1720,7 +1633,6 @@ export function ThreadView({
       return dedupeMessages([...kept, editedMessage, streamingMessage]);
     });
     setAgentTyping(true);
-    setStepTrack(null);
     setActiveTask({ agentId: id, agentName: name, label: taskLabel(value), done: 0, total: 0, startedAt: Date.now() });
 
     const toolStartedAt = new Map<string, number>();
@@ -1770,7 +1682,6 @@ export function ThreadView({
             } else if (delta.type === 'confirmation_required') {
               applyConfirmationDelta(streamId, delta);
             } else if (delta.type === 'plan') {
-              setLatestPlan(delta.plan);
               setMessages((current) => current.map((message) => message.id === streamId
                 ? { ...message, metadata: { ...(message.metadata ?? {}), plan: delta.plan } }
                 : message));
@@ -1874,17 +1785,6 @@ export function ThreadView({
     }
   }
 
-  async function handleCancelRun(runId: string) {
-    try {
-      await api(`/v1/runs/${runId}/cancel`, { method: 'POST' });
-      toast.success('Run cancellation request sent');
-      const store = useChatPanelStore.getState();
-      if (store.activeTask?.agentId === id) store.setActiveTask(null);
-    } catch (error) {
-      toast.error('Failed to cancel run', apiErrorMessage(error));
-    }
-  }
-
   const awarenessActive = kind === 'agent'
     && awareness.context.surface !== 'chat'
     && awareness.context.surface !== 'unknown';
@@ -1919,10 +1819,6 @@ export function ThreadView({
             : <div className="px-2 py-8 text-center text-[13px] text-text-muted">{emptyBody ?? `Send a message to start a conversation with ${name}.`}</div>
         ) : (
           <ul className={clsx('mx-auto flex min-w-0 flex-col gap-2.5', immersive && 'max-w-[860px] gap-5')}>
-            {latestBuild && <li className="w-full"><BuildSessionCard session={latestBuild.session} blueprint={latestBuild.blueprint} /></li>}
-            {latestPlan && !messages.some((message) => message.metadata?.plan?.id === latestPlan.id) && (
-              <li className="w-full"><DurablePlanCard plan={latestPlan} recovered /></li>
-            )}
             {hasMore && (
               <li className="flex justify-center">
                 <button
@@ -1935,11 +1831,7 @@ export function ThreadView({
                 </button>
               </li>
             )}
-            {messages.filter((msg) => {
-              const cardTitle = msg.metadata?.card?.title;
-              if (cardTitle === 'Run failed' || cardTitle === 'Approval needed' || cardTitle?.startsWith('Run completed')) return false;
-              return true;
-            }).map((message) => (
+            {messages.filter((message) => message.metadata?.source !== 'proactive' && !(message.metadata?.card && !message.text.trim())).map((message) => (
               <MessageBubble
                 key={message.id}
                 msg={message}
@@ -1952,7 +1844,6 @@ export function ThreadView({
                 onSaveEdit={(text) => void handleEditSave(message, text)}
                 onCancelEdit={() => setEditingId(null)}
                 onConfirmAction={(confirmation, approved) => void handleConfirmationAction(message.id, confirmation, approved)}
-                onCancelRun={handleCancelRun}
               />
             ))}
             {kind === 'agent' && pendingQueue.map((item) => (
@@ -1987,11 +1878,6 @@ export function ThreadView({
                 </div>
               );
             })}
-          </div>
-        )}
-        {stepTrack && stepTrack.steps.length > 0 && (streamingAgentActive || agentTyping) && (
-          <div className="mt-2 rounded-xl border border-line/60 bg-surface-2/40 px-3 py-2 shadow-sm transition-colors duration-150 hover:border-line">
-            <StepTrack track={stepTrack} />
           </div>
         )}
         {!isAtBottom && (
@@ -2118,7 +2004,6 @@ function MessageBubble({
   onSaveEdit,
   onCancelEdit,
   onConfirmAction,
-  onCancelRun,
   showAuthor,
 }: {
   msg: ChatMessage;
@@ -2129,16 +2014,13 @@ function MessageBubble({
   onSaveEdit: (text: string) => void;
   onCancelEdit: () => void;
   onConfirmAction: (confirmation: ConfirmationCardData, approved: boolean) => void;
-  onCancelRun?: (runId: string) => void;
   showAuthor?: boolean;
   agentData?: { name: string; role?: string | null; colorHex?: string | null };
 }) {
   const isOperator = msg.authorKind === 'operator';
   const [editDraft, setEditDraft] = useState(msg.text);
   const streaming = msg.deliveryStatus === 'sending';
-  const parsedAgentPlan = !isOperator && !isEditing ? extractAgentPlan(msg.text) : null;
-  const bodyBeforePlan = parsedAgentPlan ? parsedAgentPlan.before : msg.text;
-  const bodyAfterPlan = parsedAgentPlan?.after ?? '';
+  const body = msg.text;
   const toolCalls = msg.metadata?.toolCalls ?? [];
   const activities = msg.metadata?.activity ?? [];
   const artifactIds = useMemo(() => {
@@ -2192,12 +2074,12 @@ function MessageBubble({
             />
           )}
           <ChatArtifactAttachments artifactIds={artifactIds} />
-          {!isEditing && bodyBeforePlan && (
+          {!isEditing && body && (
             isOperator ? (
-              <div className="mb-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{bodyBeforePlan}</div>
+              <div className="mb-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{body}</div>
             ) : (
               <div className="mb-2 break-words [overflow-wrap:anywhere]">
-                <ChatMarkdown text={bodyBeforePlan} />
+                <ChatMarkdown text={body} />
                 {streaming ? <StreamingCursor /> : null}
               </div>
             )
@@ -2208,41 +2090,6 @@ function MessageBubble({
               onApprove={() => onConfirmAction(msg.metadata!.confirmation!, true)}
               onCancel={() => onConfirmAction(msg.metadata!.confirmation!, false)}
             />
-          )}
-          {msg.metadata?.plan && <DurablePlanCard plan={msg.metadata.plan} />}
-          {parsedAgentPlan && <ChatPlanCanvas planText={parsedAgentPlan.planText} architecture={parsedAgentPlan.architecture} />}
-          {msg.metadata?.card && <ProactiveCard data={msg.metadata.card} />}
-          {msg.metadata?.runId && (
-            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/60 px-2 py-1.5 text-[11px] text-text-secondary">
-              <Plug size={12} className="text-text-muted" />
-              <span className="font-medium text-text-primary">
-                {msg.metadata.runTitle ?? (msg.metadata.isEphemeral ? 'Ephemeral run' : 'Workflow run')}
-              </span>
-              {msg.metadata.runStatus && <span className="uppercase tracking-wide text-text-muted">{msg.metadata.runStatus}</span>}
-              <button
-                type="button"
-                onClick={() => openRunModal({
-                  runId: msg.metadata!.runId!,
-                  workflowId: msg.metadata!.workflowId,
-                  source: 'chat-message',
-                })}
-                className="font-medium text-accent hover:underline"
-              >
-                Inspect run
-              </button>
-              {msg.metadata.workflowId && (
-                <Link to={`/apps/workflows/${msg.metadata.workflowId}`} className="font-medium text-accent hover:underline">Logic</Link>
-              )}
-              {onCancelRun && msg.metadata.runId && (!msg.metadata.runStatus || ['running', 'pending'].includes(msg.metadata.runStatus)) && (
-                <button
-                  type="button"
-                  onClick={() => onCancelRun(msg.metadata!.runId!)}
-                  className="font-medium text-danger hover:underline ml-auto"
-                >
-                  Stop run
-                </button>
-              )}
-            </div>
           )}
           {isEditing ? (
             <div className="flex flex-col gap-1.5">
@@ -2279,11 +2126,7 @@ function MessageBubble({
                 </button>
               </div>
             </div>
-          ) : bodyAfterPlan ? (
-            <div className="mt-2 break-words [overflow-wrap:anywhere]">
-              <ChatMarkdown text={bodyAfterPlan} />
-            </div>
-          ) : (msg.metadata?.card || msg.metadata?.confirmation || parsedAgentPlan || toolCalls.length > 0 || activities.length > 0 || (msg.metadata?.commentary?.length ?? 0) > 0 || bodyBeforePlan || artifactIds.length > 0) ? null : streaming && !isOperator ? (
+          ) : (msg.metadata?.confirmation || toolCalls.length > 0 || activities.length > 0 || (msg.metadata?.commentary?.length ?? 0) > 0 || body || artifactIds.length > 0) ? null : streaming && !isOperator ? (
             <TypingDots />
           ) : !isOperator ? null : (
             <div className="text-[12px] italic text-text-muted">No text content</div>

@@ -465,6 +465,29 @@ describe('<WorkspaceEcosystemCanvas />', () => {
     expect(resourceNodes.some((n) => n.title === 'Standalone')).toBe(true);
   });
 
+  it('keeps two managers left and right when an App supplies the workflow domain', () => {
+    const data: Parameters<typeof buildCanvasModel>[0] = {
+      loading: false,
+      knowledgeBases: [],
+      spaces: [{ id: 'space-a', name: 'Alpha' }, { id: 'space-b', name: 'Beta' }],
+      apps: [{ id: 'app-1', name: 'Alpha App', domainId: 'space-a', ownerAgentId: null }],
+      workflows: [{ id: 'wf-1', title: 'Alpha Flow', status: 'idle', appId: 'app-1' }],
+    };
+    const agents: Parameters<typeof buildCanvasModel>[1] = [
+      { id: 'orch', name: 'Orchy', role: 'orchestrator', status: 'online' },
+      { id: 'mgr-a', name: 'Alpha Lead', role: 'manager', status: 'online', spaceId: 'space-a' },
+      { id: 'mgr-b', name: 'Beta Lead', role: 'manager', status: 'online', spaceId: 'space-b' },
+    ];
+    const model = buildCanvasModel(data, agents, [], [], [], [], { width: 1600, height: 760 });
+    const orchestrator = model.nodes.find((node) => node.id === 'agent-orch')!;
+    const managers = model.nodes.filter((node) => node.role === 'manager').sort((a, b) => a.x - b.x);
+
+    expect(managers).toHaveLength(2);
+    expect(managers[0]!.x).toBeLessThan(orchestrator.x);
+    expect(managers[1]!.x).toBeGreaterThan(orchestrator.x);
+    expect((managers[0]!.x + managers[1]!.x) / 2).toBeCloseTo(orchestrator.x, 3);
+  });
+
   it('fans a focused manager\'s workflows into a multi-column pyramid (not a vertical line)', () => {
     const data: Parameters<typeof buildCanvasModel>[0] = {
       loading: false,

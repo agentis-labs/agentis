@@ -148,13 +148,17 @@ revokes its execution lease, aborts the adapter and child runs, and fences late 
 recorded as **Response interrupted**, never as a provider failure. CLI adapters share this rule,
 including non-zero child-process exits produced while their process tree is being cancelled.
 
-The conversation renders safe commentary and factual activity in chronological order while a
-turn runs. Commentary is restricted to provider-designated reasoning summaries, assistant
-preambles, and host-authored progress; raw chain-of-thought remains private. Stable event ids
-update an existing row in place, and both commentary and tool activity are persisted in message
-metadata so reconnecting or reopening the chat reconstructs the same timeline. Completed work is
-collapsed to a quiet duration row by default; expanding it reveals the timeline and tool detail.
-Operator messages retain bubbles while direct agent replies render as flat document-like content.
+The conversation renders safe commentary and a small factual activity set in chronological order
+while a turn runs. Commentary accepts provider-designated reasoning summaries in both nested
+`item.completed` and flat `item.reasoning` Codex envelopes, plus assistant preambles and
+host-authored progress; raw chain-of-thought remains private. Stable event ids update an existing
+row in place, internal discovery calls are suppressed, and recovered retries collapse to their
+latest successful state. Both commentary and tool activity persist in message metadata so a
+reconnect reconstructs the same timeline. Completed work collapses to a quiet duration row by
+default. The transcript intentionally does not mount build-session, durable-plan, architecture,
+proactive-status, or run-control cards: plans remain readable reply text, while operational state
+belongs to its dedicated App/Run surface. Confirmation actions and requested file artifacts remain
+inline because they are part of the conversation itself.
 
 Codex model-catalogue parse failures (including a missing `base_instructions` field) are treated
 as recoverable runtime state. Agentis only quarantines an identified `models-cache.json` or

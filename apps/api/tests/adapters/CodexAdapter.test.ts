@@ -546,6 +546,7 @@ describe('CodexAdapter', () => {
     // The exact shape codex-cli 0.138.0-alpha.7 emits for `exec --json`.
     child.stdout.write('{"type":"thread.started","thread_id":"t1"}\n');
     child.stdout.write('{"type":"turn.started"}\n');
+    child.stdout.write('{"type":"item.reasoning","id":"r-flat","text":"I am mapping the relevant files first."}\n');
     child.stdout.write('{"type":"item.completed","item":{"id":"r0","type":"reasoning","text":"I should list the files first."}}\n');
     child.stdout.write('{"type":"item.started","item":{"id":"c0","type":"command_execution","command":"\\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\\" -Command \'Get-ChildItem -Force\'","status":"in_progress"}}\n');
     child.stdout.write('{"type":"item.completed","item":{"id":"c0","type":"command_execution","command":"powershell -Command \'Get-ChildItem -Force\'","aggregated_output":"abort.ts\\nCodexAdapter.ts","exit_code":0,"status":"completed"}}\n');
@@ -564,6 +565,7 @@ describe('CodexAdapter', () => {
     // The provider's completed summary becomes commentary; agent_message remains
     // the only final answer text.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'commentary', id: 'codex-commentary-r-flat', text: 'I am mapping the relevant files first.' }));
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'commentary', id: 'codex-commentary-r0', text: 'I should list the files first.' }));
     expect(deltas).toContainEqual({ type: 'text', delta: 'This is the adapters folder.' });
     expect(deltas.at(-1)).toEqual({

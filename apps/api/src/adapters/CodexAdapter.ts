@@ -699,6 +699,7 @@ type CodexJsonEvent = {
   /** Modern `codex exec --json` envelope: `{ id, msg: { type, ... } }`. */
   msg?: unknown;
   text?: unknown;
+  summary?: unknown;
   content?: unknown;
   message?: unknown;
   delta?: unknown;
@@ -787,7 +788,18 @@ function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation
   const topType = String(event.type ?? '').toLowerCase();
   if (topType.startsWith('item.') || topType.startsWith('turn.') || topType.startsWith('thread.')) {
     const item = objectOf(event.item);
-    if (!item) return { kind: 'ignore' }; // turn.started / turn.completed / thread.started
+    if (!item) {
+      // Some Codex builds emit the completed reasoning summary directly as
+      // `{ type: "item.reasoning", text: "..." }` instead of nesting it in an
+      // `item.completed` envelope. It is still provider-designated commentary,
+      // not raw token-level chain-of-thought.
+      if ((topType.includes('reason') || topType.includes('think')) && !topType.includes('delta')) {
+        const text = firstString(event.summary, event.text, event.content) ?? '';
+        const id = firstString((event as unknown as Record<string, unknown>).id) ?? randomUUID();
+        return text ? { kind: 'commentary', id: `codex-commentary-${id}`, text } : { kind: 'ignore' };
+      }
+      return { kind: 'ignore' }; // turn.started / turn.completed / thread.started
+    }
     const itemType = String(item.type ?? '').toLowerCase();
     const completed = topType.endsWith('.completed');
     const started = topType.endsWith('.started');

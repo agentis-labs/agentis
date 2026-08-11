@@ -120,6 +120,19 @@ describe('ChannelBridge', () => {
     expect(bridge.list(ctx.workspace.id).find((c) => c.id === connection.id)?.agentId).toBeNull();
   });
 
+  it('never replaces an explicit recipient with the connection default', () => {
+    const { bridge } = buildBridge(ctx, new StubTelegramAdapter());
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      kind: 'telegram', name: 'Routing', token: 'fixture-route', defaultChatId: '111',
+    });
+
+    expect(bridge.resolveDestination({ connectionId: connection.id, to: '222' }))
+      .toEqual({ chatId: '222', source: 'explicit' });
+    expect(bridge.resolveDestination({ connectionId: connection.id, to: 'default' }))
+      .toEqual({ chatId: '111', source: 'default' });
+  });
+
   it('setDefault designates one connection per kind (single-default invariant) and defaultConnectionFor resolves it', () => {
     const { bridge } = buildBridge(ctx, new StubTelegramAdapter());
     const agentId = seedAgent(ctx);

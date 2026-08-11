@@ -2,8 +2,10 @@
  * channelAccess — who an agent replies to over a channel, and how it should
  * treat them (CHANNEL-ACCESS-10x).
  *
- * Anchored on the existing "Default recipient": that handle is the OWNER
- * (recipient #1, full trust, no rules). Operators add more recipients, each with
+ * Anchored on the existing "Default recipient": that handle is the primary
+ * allowed recipient for routing and behavior rules. It is only an owner
+ * CANDIDATE here; runtime owner authority additionally requires an explicit
+ * channel_peer_identities link to the workspace/connection owner. Operators add more recipients, each with
  * free-text `rules` the agent reads as guidance for that person, and an
  * `answerAnyone` switch with `anyoneRules` for everyone else. No tiers, no labels.
  *
@@ -23,7 +25,7 @@ export interface ChannelRecipient {
 }
 
 export interface ChannelAccess {
-  /** Extra recipients beyond the Default recipient (the owner). */
+  /** Extra recipients beyond the Default recipient (the primary routing peer). */
   recipients?: ChannelRecipient[];
   /** Reply to senders who aren't the owner or a listed recipient. */
   answerAnyone?: boolean;
@@ -64,9 +66,11 @@ export function normalizeHandle(handle: string): string {
 }
 
 /**
- * Decide whether to answer this sender and with what guidance. Owner (the default
- * recipient) → full trust, no rules. A listed recipient → their rules. Anyone else
- * → answerAnyone ? anyoneRules : blocked. No `access` configured → open.
+ * Decide whether to answer this sender and with what guidance. The default
+ * recipient is marked as an owner candidate; the dispatcher must still verify
+ * its explicit peer link before granting owner trust. A listed recipient gets
+ * its rules. Anyone else → answerAnyone ? anyoneRules : blocked. No `access`
+ * configured → open.
  */
 export function resolveChannelAccess(args: {
   access?: ChannelAccess | null;
@@ -82,7 +86,7 @@ export function resolveChannelAccess(args: {
 
   const sender = normalizeHandle(senderHandle);
 
-  // Owner = the default recipient: full trust, no rules.
+  // Owner candidate = the default recipient. Runtime authority is verified later.
   if (defaultChatId && sender && normalizeHandle(defaultChatId) === sender) {
     return { allow: true, who: (senderName && senderName.trim()) || 'the owner', isOwner: true };
   }

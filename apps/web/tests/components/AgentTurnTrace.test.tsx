@@ -42,6 +42,29 @@ describe('AgentTurnTrace', () => {
     expect(screen.getByText(commentary[0]!.text)).toBeInTheDocument();
   });
 
+  it('hides internal discovery noise and collapses a recovered retry to its latest state', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        commentary={[{
+          id: 'commentary-1',
+          text: 'The first blueprint was incomplete, so I corrected its acceptance criteria.',
+          source: 'assistant_preamble',
+          createdAt: new Date().toISOString(),
+        }]}
+        activities={[
+          activity(1, { status: 'success', label: 'Used agentis tools search' }),
+          activity(2, { status: 'error', label: 'Failed agentis app plan' }),
+          activity(3, { status: 'success', label: 'Used agentis app plan' }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText('Used agentis tools search')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed agentis app plan')).not.toBeInTheDocument();
+    expect(screen.getByText('Used agentis app plan')).toBeInTheDocument();
+  });
+
   it('collapses a finished turn into one pill and expands the timeline on click', () => {
     const toolCalls: ToolCallData[] = [
       { id: 't1', name: 'agentis.list_agents', status: 'success', result: { agents: [] } },

@@ -207,6 +207,11 @@ function normalizeWhatsAppJid(jid: string): string {
   return jid.trim().toLowerCase().replace(/:\d+@/u, '@');
 }
 
+/** Decide which Baileys upserts may enter live conversation state. */
+export function shouldProcessWhatsAppUpsert(type: string, fromMe: boolean): boolean {
+  return type === 'notify' || fromMe;
+}
+
 /** Stable recovery classes persisted as diagnostics; provider codes stay in logs. */
 export function classifyWhatsAppReconnect(statusCode: number | undefined): WhatsAppReconnectClass {
   switch (statusCode) {
@@ -663,8 +668,13 @@ export class WhatsAppSession {
     });
 
     sock.ev.on('messages.upsert', (event) => {
-      if (event.type !== 'notify') return;
       for (const msg of event.messages) {
+        // A message authored in the primary phone/another companion can arrive
+        // as `append`, while genuinely new inbound messages arrive as `notify`.
+        // Keep append inbound silent (history must never trigger replies), but
+        // mirror fromMe append events so the next agent turn has the human's
+        // actual WhatsApp-side context.
+        if (!shouldProcessWhatsAppUpsert(event.type, msg?.key?.fromMe === true)) continue;
         void this.#handleMessage(msg).catch((err) => {
           this.opts.logger.warn('whatsapp.inbound_handler_threw', { err: (err as Error).message });
         });

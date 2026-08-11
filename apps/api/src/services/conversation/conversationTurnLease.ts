@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { AgentisError } from '@agentis/core';
+import { AgentisError, type ChannelToolOrigin } from '@agentis/core';
+
+export interface ConversationTurnLeaseContext {
+  channelOrigin?: ChannelToolOrigin;
+}
 
 export interface TurnToolObservation {
   index: number;
@@ -39,6 +43,7 @@ interface ActiveTurnLease {
   argumentCharsObserved: number;
   resultCharsObserved: number;
   repeatedResultChars: number;
+  context?: ConversationTurnLeaseContext;
 }
 
 /**
@@ -52,7 +57,7 @@ interface ActiveTurnLease {
 export class ConversationTurnLeaseRegistry {
   readonly #active = new Map<string, ActiveTurnLease>();
 
-  issue(workspaceId: string, conversationId: string): string {
+  issue(workspaceId: string, conversationId: string, context?: ConversationTurnLeaseContext): string {
     this.#active.get(conversationId)?.controller.abort(new Error('turn_superseded'));
     const token = randomUUID();
     this.#active.set(conversationId, {
@@ -68,6 +73,7 @@ export class ConversationTurnLeaseRegistry {
       argumentCharsObserved: 0,
       resultCharsObserved: 0,
       repeatedResultChars: 0,
+      ...(context ? { context } : {}),
     });
     return token;
   }
@@ -101,6 +107,12 @@ export class ConversationTurnLeaseRegistry {
         details: { conversationId },
       },
     );
+  }
+
+  /** Return server-authored turn context after validating the opaque lease. */
+  context(workspaceId: string, conversationId: string, token: string): ConversationTurnLeaseContext | undefined {
+    this.assertActive(workspaceId, conversationId, token);
+    return this.#active.get(conversationId)?.context;
   }
 
   /**

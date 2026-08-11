@@ -17,6 +17,17 @@ describe('ConversationTurnLeaseRegistry', () => {
     expect(secondSignal.aborted).toBe(true);
   });
 
+  it('carries server-authored channel authority through the opaque lease', () => {
+    const leases = new ConversationTurnLeaseRegistry();
+    const channelOrigin = {
+      kind: 'whatsapp', connectionId: 'wa-1', chatId: '5511@s.whatsapp.net', ownerVerified: false,
+    } as const;
+    const token = leases.issue('ws', 'conv', { channelOrigin });
+    expect(leases.context('ws', 'conv', token)).toEqual({ channelOrigin });
+    leases.complete('ws', 'conv', token);
+    expect(() => leases.context('ws', 'conv', token)).toThrow(/not executed/i);
+  });
+
   it('blocks an in-process handler before invocation when the caller signal is aborted', async () => {
     const registry = new AgentisToolRegistry({ logger: createLogger({ level: 'error' }) });
     const handler = vi.fn(() => ({ mutated: true }));

@@ -22,12 +22,12 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { type AgentAdapter, type ApprovalSensitivity, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
+import { type AgentAdapter, type ApprovalSensitivity, type ChannelToolOrigin, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
 import type { AdapterManager } from '../../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from '../chat/chatSessionExecutor.js';
 import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from '../chat/chatPermissionMode.js';
-import { resolveChannelAccess, buildAccessAddendum, UNKNOWN_SENDER_DECLINE, type AccessDecision, type ChannelAccess } from './channelAccess.js';
+import { resolveChannelAccess, buildAccessAddendum, normalizeHandle, UNKNOWN_SENDER_DECLINE, type AccessDecision, type ChannelAccess } from './channelAccess.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
 import type { AppContactService } from '../app/appContacts.js';
 import type { ConversationSummaryService } from './conversationSummaryService.js';
@@ -383,9 +383,10 @@ export class ChannelTurnDispatcher {
 
   /**
    * Resolve who this inbound sender is and how the agent should treat them, from
-   * the connection's `settings.access` (owner = the default recipient). No access
-   * configured → open (today's behavior). The single inbound choke point, so it
-   * governs resident chat AND workflow-triggered channels alike.
+   * the connection's `settings.access` (default recipient = owner candidate).
+   * Explicit peer linking is checked separately before owner authority is
+   * granted. No access configured → open. The single inbound choke point governs
+   * resident chat AND workflow-triggered channels alike.
    */
   #resolveAccess(input: ChannelTurnInput): AccessDecision {
     const row = this.deps.db
@@ -413,6 +414,7 @@ export class ChannelTurnDispatcher {
     const clientTurnId = `channel-${randomUUID()}`;
     const active = this.#beginTurn(input, clientTurnId);
     if (!active) return { replied: false, reason: 'superseded' };
+    let turnLease: string | undefined;
     try {
       // App relationship (Phase 3): record/refresh the contact for this inbound,
       // so the App's pipeline + lastTouch clock stay current with zero agent effort.
@@ -430,12 +432,21 @@ export class ChannelTurnDispatcher {
         });
         return { replied: false, reason: 'human_handling' };
       }
-      // Channel access (CHANNEL-ACCESS-10x): only the owner (default recipient) and
-      // listed recipients are answered — unless "answer anyone" is on. A blocked
+      // Channel access (CHANNEL-ACCESS-10x): the default and listed recipients are
+      // answered — unless "answer anyone" is on. A blocked
       // sender is silently ignored by default, or gets a one-line decline if the
       // operator opted into that; an allowed non-owner carries the operator's
       // free-text rules into the turn as guidance (below).
-      const access = this.#resolveAccess(input);
+      const resolvedAccess = this.#resolveAccess(input);
+      const ownerVerified = this.#isVerifiedConnectionOwner(input);
+      // A saved default recipient is a routing convenience, never identity
+      // evidence. Until the exact peer is explicitly linked to the owner, it
+      // receives external-sender authority even if access rules call it owner.
+      const access: AccessDecision = ownerVerified
+        ? { ...resolvedAccess, isOwner: true, who: input.from?.trim() || 'the owner' }
+        : resolvedAccess.isOwner
+          ? { ...resolvedAccess, isOwner: false, who: input.from?.trim() || input.chatId }
+          : resolvedAccess;
       if (!access.allow) {
         this.#publishWorkStep(input, clientTurnId, {
           phase: 'received',
@@ -513,6 +524,18 @@ export class ChannelTurnDispatcher {
       // A mode command is never a yes/no answer to a pending confirmation.
       const decision = pending && !modeCommand ? interpretConfirmation(input.text) : null;
 
+      const channelOrigin: ChannelToolOrigin = {
+        kind: input.kind,
+        connectionId: input.connectionId,
+        chatId: input.chatId,
+        ownerVerified,
+        ...(() => {
+          const explicitRecipients = extractExplicitChannelRecipients(input.kind, runtimeText);
+          return explicitRecipients.length ? { explicitRecipients } : {};
+        })(),
+      };
+      turnLease = ChatSessionExecutor.issueTurnLease(input.workspaceId, input.conversationId, { channelOrigin });
+
       let stream: AsyncIterable<import('@agentis/core').ChatDelta>;
       let ownerReasoning: OwnerReasoningIndicatorState | undefined;
       if (pending && decision !== null) {
@@ -521,6 +544,8 @@ export class ChannelTurnDispatcher {
           workspaceId: input.workspaceId,
           userId: input.userId,
           conversationId: input.conversationId,
+          ...(turnLease ? { turnLease } : {}),
+          channelOrigin,
         });
       } else {
         const runTurn = this.deps.runTurn ?? ChatSessionExecutor.turn.bind(ChatSessionExecutor);
@@ -543,6 +568,8 @@ export class ChannelTurnDispatcher {
           executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
           permissionMode,
           approvalSensitivity,
+          ...(turnLease ? { turnLease } : {}),
+          channelOrigin,
           maxTurns: 8,
           viewport: null,
           signal: active.controller.signal,
@@ -560,6 +587,7 @@ export class ChannelTurnDispatcher {
         const appAddendum = input.appId ? this.#appOperatingAddendum(input.appId) : null;
         // Non-owner senders carry the operator's per-recipient (or answer-anyone) rules.
         const accessAddendum = buildAccessAddendum(access);
+        const audienceAddendum = this.#channelAudienceAddendum(input, ownerVerified);
         const channelMediaAddendum = input.kind === 'whatsapp' || input.kind === 'telegram'
           ? [
               `${input.kind.toUpperCase()} MEDIA DELIVERY`,
@@ -569,7 +597,7 @@ export class ChannelTurnDispatcher {
               `Do not say that ${input.kind} cannot send an image unless the required tool is genuinely unavailable or its call failed; if it fails, explain the concrete limitation plainly.`,
             ].join('\n')
           : null;
-        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, accessAddendum, conversationSummary, appAddendum, channelMediaAddendum]
+        const systemAddendum = [permissionMode === 'plan' ? PLAN_MODE_SYSTEM_ADDENDUM : null, audienceAddendum, accessAddendum, conversationSummary, appAddendum, channelMediaAddendum]
           .filter((s): s is string => Boolean(s))
           .join('\n\n');
         if (!this.#isActive(input, active)) return { replied: false, reason: 'superseded' };
@@ -601,7 +629,7 @@ export class ChannelTurnDispatcher {
           else if (delta.type === 'confirmation_required') confirmation = delta;
           else if (delta.type === 'tool_result') {
             if (delta.error) runtimeError = delta.error;
-            if (delta.name === 'agentis.channel.send' && isSuccessfulChannelToolResult(delta.result, input.connectionId)) {
+            if (delta.name === 'agentis.channel.send' && isCurrentPeerChannelToolDelivery(delta.result, input)) {
               deliveredByChannelTool = true;
             }
             generatedAttachments.push(...toolResultAttachments(delta.name, delta.result));
@@ -610,6 +638,23 @@ export class ChannelTurnDispatcher {
         }
       } finally {
         this.#cancelOwnerReasoningIndicator(ownerReasoning);
+      }
+
+      // MCP-native harnesses execute tools inside the adapter and may not emit a
+      // tool_result delta. The turn lease is the cross-adapter evidence ledger;
+      // consult it before deciding whether another channel reply is necessary.
+      if (turnLease) {
+        const experience = ChatSessionExecutor.turnExperience(input.workspaceId, input.conversationId, turnLease);
+        const currentPeerDeliveries = experience?.observations.filter((observation) =>
+          observation.name === 'agentis.channel.send'
+          && observation.ok
+          && isCurrentPeerChannelToolDelivery(observation.result, input)) ?? [];
+        if (currentPeerDeliveries.length > 0) {
+          deliveredByChannelTool = true;
+          for (const observation of currentPeerDeliveries) {
+            this.#reconcileCurrentPeerToolDelivery(input, observation.args, observation.result);
+          }
+        }
       }
 
       if (!this.#isActive(input, active)) return { replied: false, reason: 'superseded' };
@@ -731,6 +776,7 @@ export class ChannelTurnDispatcher {
       await this.#persistAndDeliver(input, failure, { failureNotice: true });
       return { replied: true, reason: 'error_notified' };
     } finally {
+      if (turnLease) ChatSessionExecutor.completeTurnLease(input.workspaceId, input.conversationId, turnLease);
       if (this.#finishTurn(input, active)) {
         void this.deps.setTyping?.(input.connectionId, input.chatId, false).catch(() => {});
       }
@@ -931,6 +977,118 @@ export class ChannelTurnDispatcher {
   }
 
   /**
+   * Resolve owner authority from an explicit peer link. Neither defaultChatId nor
+   * the connection's account userId alone says who authored this inbound message.
+   */
+  #isVerifiedConnectionOwner(input: ChannelTurnInput): boolean {
+    const connection = this.deps.db
+      .select({ userId: schema.channelConnections.userId })
+      .from(schema.channelConnections)
+      .where(and(
+        eq(schema.channelConnections.id, input.connectionId),
+        eq(schema.channelConnections.workspaceId, input.workspaceId),
+      ))
+      .get();
+    if (!connection?.userId) return false;
+    const workspace = this.deps.db
+      .select({ userId: schema.workspaces.userId })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, input.workspaceId))
+      .get();
+    if (!workspace?.userId || workspace.userId !== connection.userId) return false;
+    const identity = this.deps.db
+      .select({ userId: schema.channelPeerIdentities.userId })
+      .from(schema.channelPeerIdentities)
+      .where(and(
+        eq(schema.channelPeerIdentities.workspaceId, input.workspaceId),
+        eq(schema.channelPeerIdentities.channelKind, input.kind),
+        eq(schema.channelPeerIdentities.handle, input.chatId),
+      ))
+      .get();
+    return identity?.userId === connection.userId;
+  }
+
+  /** Stable channel doctrine shared by every agent identity and App prompt. */
+  #channelAudienceAddendum(input: ChannelTurnInput, ownerVerified: boolean): string {
+    return [
+      'CHANNEL AUDIENCE BOUNDARY',
+      `You are speaking directly to the person in this ${input.kind} conversation${ownerVerified ? ', whose channel identity is verified as the workspace owner' : ''}. Address that person, never an imagined operator watching elsewhere.`,
+      'A normal assistant answer is automatically delivered to this conversation. Do not call agentis.channel.send for a plain text reply to the current person; use it only for native media/bursts, an optional progress message, or an explicitly named different recipient.',
+      'If you use agentis.channel.send for this same conversation, set deliveryRole:"progress" for a non-terminal update or deliveryRole:"final" for the answer. Never send a separate tool/delivery confirmation afterward.',
+      'Keep runtime state, strategy identifiers, memory counts, tool names, prompts, connection settings, recipient IDs/JIDs, provider receipts, routing diagnostics, and error internals inside Agentis. Give the person only the natural answer or a concise actionable limitation.',
+      'When asked to contact someone else, preserve the explicit recipient exactly and verify the tool result. Never replace an explicit recipient with the saved default or with this current conversation.',
+    ].join('\n');
+  }
+
+  /**
+   * Mirror an already provider-verified current-peer tool send into conversation
+   * history without crossing the transport boundary a second time.
+   */
+  #reconcileCurrentPeerToolDelivery(input: ChannelTurnInput, rawArgs: unknown, rawResult: unknown): void {
+    if (!rawArgs || typeof rawArgs !== 'object' || !rawResult || typeof rawResult !== 'object') return;
+    const args = rawArgs as {
+      body?: unknown;
+      messages?: Array<{ body?: unknown; attachments?: unknown[]; native?: unknown }>;
+      attachments?: unknown[];
+      native?: unknown;
+    };
+    const result = rawResult as {
+      providerMessageId?: unknown;
+      providerMessageIds?: unknown[];
+      deliveryStatus?: unknown;
+      receipt?: unknown;
+    };
+    const deliveries = Array.isArray(args.messages) && args.messages.length > 0
+      ? args.messages.map((message) => ({
+          body: typeof message.body === 'string' ? message.body.trim() : '',
+          hasMedia: Boolean(message.attachments?.length || message.native),
+        }))
+      : [{
+          body: typeof args.body === 'string' ? args.body.trim() : '',
+          hasMedia: Boolean(args.attachments?.length || args.native),
+        }];
+    const providerIds = Array.isArray(result.providerMessageIds)
+      ? result.providerMessageIds.filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+      : typeof result.providerMessageId === 'string' && result.providerMessageId.trim()
+        ? [result.providerMessageId.trim()]
+        : [];
+
+    deliveries.forEach((delivery, index) => {
+      if (!delivery.body && !delivery.hasMedia) return;
+      const providerId = providerIds[index] ?? (providerIds.length === 1 ? providerIds[0] : undefined);
+      const sessionMessageId = providerId ? `channel_tool_${providerId}` : `channel_tool_${randomUUID()}`;
+      if (providerId) {
+        const exists = this.deps.db.select({ id: schema.conversationMessages.id })
+          .from(schema.conversationMessages)
+          .where(and(
+            eq(schema.conversationMessages.workspaceId, input.workspaceId),
+            eq(schema.conversationMessages.conversationId, input.conversationId),
+            eq(schema.conversationMessages.sessionMessageId, sessionMessageId),
+          )).get();
+        if (exists) return;
+      }
+      this.deps.conversations.appendMirrored({
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        sessionMessageId,
+        authorType: 'agent',
+        body: delivery.body || '[Media sent]',
+        deliveryStatus: result.deliveryStatus === 'delivered' || result.deliveryStatus === 'read' ? 'delivered' : 'sent',
+        metadata: {
+          channel: input.kind,
+          channelConnectionId: input.connectionId,
+          channelChatId: input.chatId,
+          channelReply: true,
+          channelToolDelivery: true,
+          channelDeliveryClass: 'reply',
+          ...(providerId ? { providerMessageId: providerId } : {}),
+          ...(result.receipt ? { channelDeliveryReceipt: result.receipt } : {}),
+        },
+      });
+    });
+  }
+
+  /**
    * Runtime gate for the sole external diagnostic. A default recipient is not
    * proof of identity: the WhatsApp handle must already be explicitly linked
    * to the connection's owner and to the workspace owner.
@@ -952,22 +1110,7 @@ export class ChannelTurnDispatcher {
         : undefined,
     );
     if (profile.ownerReasoningVisibility !== 'indicator') return false;
-    const workspace = this.deps.db
-      .select({ userId: schema.workspaces.userId })
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.id, input.workspaceId))
-      .get();
-    if (!workspace?.userId || workspace.userId !== connection.userId) return false;
-    const identity = this.deps.db
-      .select({ userId: schema.channelPeerIdentities.userId })
-      .from(schema.channelPeerIdentities)
-      .where(and(
-        eq(schema.channelPeerIdentities.workspaceId, input.workspaceId),
-        eq(schema.channelPeerIdentities.channelKind, 'whatsapp'),
-        eq(schema.channelPeerIdentities.handle, input.chatId),
-      ))
-      .get();
-    return identity?.userId === connection.userId;
+    return this.#isVerifiedConnectionOwner(input);
   }
 
   /** Persist an externally visible reply with an explicit delivery class. */
@@ -1495,13 +1638,40 @@ function isCreditOrQuotaError(message: string): boolean {
     || /\bno credits?\b/i.test(message);
 }
 
-function isSuccessfulChannelToolResult(result: unknown, connectionId: string): boolean {
+function isCurrentPeerChannelToolDelivery(result: unknown, input: ChannelTurnInput): boolean {
   if (!result || typeof result !== 'object') return false;
-  const value = result as { sent?: unknown; verified?: unknown; connectionId?: unknown; deliveryRole?: unknown };
-  return value.sent === true
-    && value.verified === true
-    && value.connectionId === connectionId
-    && value.deliveryRole === 'final';
+  const value = result as {
+    sent?: unknown;
+    verified?: unknown;
+    connectionId?: unknown;
+    to?: unknown;
+    deliveryRole?: unknown;
+    receipt?: { recipient?: unknown; providerRecipient?: unknown };
+  };
+  if (value.sent !== true || value.verified !== true || value.connectionId !== input.connectionId) return false;
+  if (value.deliveryRole === 'progress') return false;
+  const recipient = typeof value.to === 'string'
+    ? value.to
+    : typeof value.receipt?.providerRecipient === 'string'
+      ? value.receipt.providerRecipient
+      : typeof value.receipt?.recipient === 'string' ? value.receipt.recipient : '';
+  if (!recipient) return false;
+  if (input.kind !== 'whatsapp' && input.kind !== 'telegram') {
+    return recipient.trim().toLowerCase() === input.chatId.trim().toLowerCase();
+  }
+  const actual = normalizeHandle(recipient);
+  const current = normalizeHandle(input.chatId);
+  return Boolean(actual && current && actual === current);
+}
+
+/** Extract explicit WhatsApp recipients conservatively; ordinary numbers/dates do not qualify. */
+export function extractExplicitChannelRecipients(kind: string, text: string): string[] {
+  if (kind !== 'whatsapp') return [];
+  const matches = text.match(/(?:\+\d[\d\s().-]{6,}\d|\d{8,20}@s\.whatsapp\.net)/giu) ?? [];
+  return [...new Set(matches.flatMap((match) => {
+    const digits = match.replace(/@s\.whatsapp\.net$/iu, '').replace(/\D/g, '');
+    return digits.length >= 8 && digits.length <= 20 ? [`${digits}@s.whatsapp.net`] : [];
+  }))];
 }
 
 /** Turn saved screenshot/media tool outputs into deterministic channel attachments. */

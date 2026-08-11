@@ -38,6 +38,7 @@ function resolvedDuration(turn: ChatTurnTrace | undefined, now: number): number 
 function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): TimelineEntry[] {
   const comments: TimelineEntry[] = commentary
     .filter((entry) => entry.text.trim())
+    .filter((entry, index, entries) => entries.findIndex((candidate) => normalizeText(candidate.text) === normalizeText(entry.text)) === index)
     .map((entry, index) => ({
       id: entry.id,
       kind: 'commentary',
@@ -45,10 +46,17 @@ function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): Tim
       at: entry.createdAt,
       order: index * 2,
     }));
-  const actions: TimelineEntry[] = activities
+  const prepared = activities
     .map((activity, index) => ({ activity, label: compactActivityLabel(activity), index }))
     .filter((entry): entry is { activity: ChatActivity; label: string; index: number } => Boolean(entry.label))
-    .filter((entry, index, entries) => index === 0 || entries[index - 1]?.label !== entry.label)
+    .filter((entry) => !isInternalActivity(entry.label))
+    .filter((entry) => commentary.length === 0 || !isGenericRuntimeActivity(entry.label));
+  const latestByMeaning = new Map<string, number>();
+  prepared.forEach((entry, index) => latestByMeaning.set(activityMeaning(entry.label), index));
+  const actions: TimelineEntry[] = prepared
+    // Retries are an implementation detail. Keep only the latest state for the
+    // same semantic operation, so a recovered failure becomes one successful row.
+    .filter((entry, index) => latestByMeaning.get(activityMeaning(entry.label)) === index)
     .map(({ activity, label, index }) => ({
       id: activity.id,
       kind: 'activity',
@@ -64,6 +72,24 @@ function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): Tim
     if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return left - right;
     return a.order - b.order;
   });
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function activityMeaning(label: string): string {
+  return normalizeText(label)
+    .replace(/^(?:using|used|failed|running|ran|executing)\s+/, '')
+    .replace(/\s+[—-]\s+\d+.*elapsed.*$/, '');
+}
+
+function isInternalActivity(label: string): boolean {
+  return /agentis\s+(?:tools\s+(?:search|describe)|task\s+set\s+steps|canvas\s+context|app\s+goal)/i.test(label);
+}
+
+function isGenericRuntimeActivity(label: string): boolean {
+  return /(?:is working|is reasoning|waiting for model output|reading context|starting up|writing the reply)/i.test(label);
 }
 
 export function AgentTurnTrace({

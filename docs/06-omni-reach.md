@@ -31,6 +31,33 @@ Rich attachments and per-channel access control are supported; peer identity is 
 across channels. Inbound messages are durably queued (`channel_turn_queue`) and dispatched to
 the responsible agent/subject.
 
+### Channel conversation and authority invariants
+
+- `defaultChatId` is a routing fallback only. An explicit `to` always wins, and an omitted
+  destination inside an inbound channel turn means that current conversation—not the
+  connection-wide default.
+- Owner authority requires the exact `channel_peer_identities` handle to be explicitly linked
+  to the connection/workspace owner. Matching the default recipient alone never grants owner
+  tools, private diagnostics, or owner-grade memory authority.
+- The verified channel origin travels with the turn's revocable capability lease, including
+  through an adapter-owned MCP loop. An unverified peer can reply only in its originating
+  connection/conversation; it cannot initiate a cross-recipient or cross-connection send.
+- When the inbound request explicitly names another recipient, the server records that intent
+  on the turn. A channel tool call that omits `to`, falls back to the requester, or substitutes
+  a different recipient is rejected instead of silently misrouting the message.
+- Plain agent text is delivered automatically to the current conversation. A verified
+  `agentis.channel.send` to that same peer is reconciled as the final delivery unless it is
+  explicitly marked `deliveryRole:"progress"`; this prevents tool delivery plus final-text
+  duplication across caller-loop and MCP-native adapters. The provider-backed delivery is
+  mirrored into conversation history without being sent again. A send to a different recipient
+  does not suppress the natural acknowledgement to the requester.
+- Internal strategy state, tool/runtime events, JIDs, connection settings, routing diagnostics,
+  and provider receipts remain Agentis telemetry. Channel users receive the natural response;
+  the only optional external status is the generic, identity-verified owner reasoning indicator.
+- WhatsApp `fromMe` events from the primary phone or another companion are mirrored into the
+  channel conversation even when Baileys reports them as `append`. Historical inbound `append`
+  events remain silent and never activate an agent turn.
+
 Inbound voice notes are understood by default. Agentis first uses a workspace transcription
 provider when configured, then a pinned Apache-2.0 local Whisper q8 fallback. The fallback is
 channel-scoped: `agentis up` does not globally acquire it. WhatsApp/Telegram startup prepares

@@ -68,7 +68,7 @@ beforeEach(async () => {
   );
   registry.register(
     { id: 'agentis.ctx', family: 'inspect', description: 'Return MCP call context', inputSchema: { type: 'object' }, mutating: false, mcpExposed: true },
-    (_args, toolCtx) => ({ agentId: toolCtx.agentId ?? null }),
+    (_args, toolCtx) => ({ agentId: toolCtx.agentId ?? null, ...(toolCtx.channelOrigin ? { channelOrigin: toolCtx.channelOrigin } : {}) }),
   );
   registry.register(
     { id: 'agentis.mutate', family: 'build', description: 'A high-risk mutating tool', inputSchema: { type: 'object' }, mutating: true, mcpExposed: true, approval: { riskLevel: 'high' } },
@@ -303,6 +303,22 @@ describe('/v1/mcp/rpc', () => {
     });
     const body = await late.json() as { error?: { data?: { code?: string } } };
     expect(body.error?.data?.code).toBe('TURN_CANCELLED');
+  });
+
+  it('propagates server-authored channel authority through an MCP-native tool call', async () => {
+    const conversationId = randomUUID();
+    const channelOrigin = {
+      kind: 'whatsapp', connectionId: 'wa-1', chatId: '5511@s.whatsapp.net', ownerVerified: false,
+      explicitRecipients: ['5522@s.whatsapp.net'],
+    };
+    const token = turnLeases.issue(ctx.workspace.id, conversationId, { channelOrigin });
+    const res = await rpc(app(), 'tools/call', { name: 'agentis.ctx', arguments: {} }, 1, {
+      'x-agentis-conversation': conversationId,
+      'x-agentis-turn-lease': token,
+    });
+    const body = await res.json() as { result: { content: Array<{ text: string }>; isError?: boolean } };
+    expect(body.result.isError).toBeFalsy();
+    expect(JSON.parse(body.result.content[0]!.text)).toEqual({ agentId: null, channelOrigin });
   });
 
   it('coalesces an unchanged read result without restricting further tool use', async () => {

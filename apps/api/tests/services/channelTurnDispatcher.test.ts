@@ -14,7 +14,9 @@ import { REALTIME_EVENTS, REALTIME_ROOMS, type AgentAdapter, type ChatDelta, typ
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ChannelBridge, DEFAULT_WHATSAPP_CONNECTION_PROFILE } from '../../src/services/conversation/channelBridge.js';
-import { ChannelTurnDispatcher, interpretConfirmation } from '../../src/services/conversation/channelTurnDispatcher.js';
+import { ChannelTurnDispatcher, extractExplicitChannelRecipients, interpretConfirmation } from '../../src/services/conversation/channelTurnDispatcher.js';
+import { ConversationTurnLeaseRegistry } from '../../src/services/conversation/conversationTurnLease.js';
+import { ChatSessionExecutor } from '../../src/services/chat/chatSessionExecutor.js';
 import { ChannelIdentityService } from '../../src/services/conversation/channelIdentityService.js';
 import { ConversationSummaryService } from '../../src/services/conversation/conversationSummaryService.js';
 import { AppContactService } from '../../src/services/app/appContacts.js';
@@ -246,6 +248,104 @@ describe('ChannelTurnDispatcher', () => {
     expect(delivered).toEqual([]);
   });
 
+  it('treats an unspecified successful send to the current peer as terminal', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: unknown[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        yield {
+          type: 'tool_result', id: 'send', name: 'agentis.channel.send',
+          result: { sent: true, verified: true, connectionId: 'wa-1', to: '5511@s.whatsapp.net', deliveryRole: 'unspecified' },
+        } as ChatDelta;
+        yield { type: 'text', delta: 'Same message again.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511', text: 'reply here',
+    });
+
+    expect(delivered).toEqual([]);
+  });
+
+  it('still replies to the requester after a verified send to a different recipient', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: Array<{ chatId: string; body: string }> = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        yield {
+          type: 'tool_result', id: 'send', name: 'agentis.channel.send',
+          result: { sent: true, verified: true, connectionId: 'wa-1', to: '5522@s.whatsapp.net', deliveryRole: 'final' },
+        } as ChatDelta;
+        yield { type: 'text', delta: 'Done.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511', text: 'message 5522',
+    });
+
+    expect(delivered).toEqual([expect.objectContaining({ chatId: '5511', body: 'Done.' })]);
+  });
+
+  it('deduplicates a current-peer send recorded only by an MCP-native turn lease', async () => {
+    const leases = new ConversationTurnLeaseRegistry();
+    ChatSessionExecutor.setTurnLeaseRegistry(leases);
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: unknown[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async (args) => { delivered.push(args); return ackReceipt(args.chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* (_adapter, _history, _text, turnContext) {
+        leases.recordToolResult({
+          workspaceId: turnContext.workspaceId,
+          conversationId: turnContext.conversationId,
+          token: turnContext.turnLease!,
+          name: 'agentis.channel.send',
+          toolArgs: { to: '5511', body: 'Actually delivered.' },
+          result: { sent: true, verified: true, connectionId: 'wa-1', to: '5511@s.whatsapp.net', providerMessageId: 'wamid-current', deliveryStatus: 'accepted', deliveryRole: 'unspecified' },
+          ok: true,
+          mutating: true,
+          durationMs: 1,
+        });
+        yield { type: 'text', delta: 'Duplicate wrap-up.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa-1', kind: 'whatsapp', chatId: '5511', text: 'send it',
+    });
+
+    expect(delivered).toEqual([]);
+    expect(conversations.messages(conv.id, 50).filter((message) => message.authorType === 'agent'))
+      .toEqual([expect.objectContaining({ body: 'Actually delivered.', sessionMessageId: 'channel_tool_wamid-current' })]);
+  });
+
   it('keeps a progress delivery non-terminal so an optional intro never suppresses the final reply', async () => {
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
     const agentId = seedAgent(ctx);
@@ -276,6 +376,51 @@ describe('ChannelTurnDispatcher', () => {
     });
 
     expect(delivered).toEqual([expect.objectContaining({ body: 'The long task is complete.' })]);
+  });
+
+  it('grants owner channel authority only to an explicitly linked peer identity', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const identity = new ChannelIdentityService({ db: ctx.db, logger: ctx.logger });
+    const agentId = seedAgent(ctx);
+    const handle = '5511888888888@s.whatsapp.net';
+    const connectionId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connectionId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'Owner boundary', tokenEncrypted: 'x',
+      settings: { defaultChatId: handle },
+    }).run();
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connectionId, channelChatId: handle,
+    });
+    let ownerVerified: boolean | undefined;
+    let addendum = '';
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, identity, logger: ctx.logger,
+      deliver: async (args) => ackReceipt(args.chatId), fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* (_adapter, _history, _text, turnContext, options) {
+        ownerVerified = turnContext.channelOrigin?.ownerVerified;
+        addendum = options?.systemAddendum ?? '';
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof ChatSessionExecutor.turn,
+    });
+
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId, kind: 'whatsapp', chatId: handle, text: 'before link',
+    });
+    expect(ownerVerified).toBe(false);
+    expect(addendum).toContain('Address that person, never an imagined operator');
+    expect(addendum).toContain('Keep runtime state');
+
+    identity.record({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle });
+    identity.link({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle, userId: ctx.user.id });
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId, kind: 'whatsapp', chatId: handle, text: 'after link',
+    });
+    expect(ownerVerified).toBe(true);
   });
 
   it('silently drops an inbound turn from a BLOCKED sender (no reply, no agent turn)', async () => {
@@ -1091,6 +1236,13 @@ describe('ChannelTurnDispatcher', () => {
     for (const yes of ['yes', 'Y', 'approve', 'ok', 'do it', '👍', 'sim']) expect(interpretConfirmation(yes)).toBe(true);
     for (const no of ['no', 'cancel', 'stop', 'reject', '👎', 'não']) expect(interpretConfirmation(no)).toBe(false);
     for (const other of ['build me a workflow', 'maybe later', 'what runs are active?']) expect(interpretConfirmation(other)).toBeNull();
+  });
+
+  it('extracts only explicit WhatsApp recipient addresses from a request', () => {
+    expect(extractExplicitChannelRecipients('whatsapp', 'Envie Oi para +55 31 97050-8700. Dia 10/08.'))
+      .toEqual(['5531970508700@s.whatsapp.net']);
+    expect(extractExplicitChannelRecipients('whatsapp', 'envie 10 itens amanhã')).toEqual([]);
+    expect(extractExplicitChannelRecipients('telegram', 'fale com +5531970508700')).toEqual([]);
   });
 
   it('end-to-end: ChannelBridge.handleInbound fires the turn and the reply is sent', async () => {

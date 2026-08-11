@@ -142,6 +142,7 @@ export class ChatToolExecutor {
         conversationId: ctx.conversationId,
         executionMode: ctx.executionMode,
         approvalSensitivity: ctx.approvalSensitivity,
+        ...(ctx.channelOrigin ? { channelOrigin: ctx.channelOrigin } : {}),
         viewport: ctx.viewport ?? null,
         appId: ctx.appId ?? null,
         artifactPolicy: ctx.artifactPolicy ?? null,

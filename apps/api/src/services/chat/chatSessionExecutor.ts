@@ -34,6 +34,7 @@ import type { WorkspaceHarnessRuntimeResolver } from '../workspace/workspaceHarn
 import type { CapabilityIndex } from '../capability/capabilityIndex.js';
 import type { CommandModelService } from '../command/commandModel.js';
 import type { ConversationTurnLeaseRegistry } from '../conversation/conversationTurnLease.js';
+import type { ConversationTurnExperience } from '../conversation/conversationTurnLease.js';
 import type { RuntimeProfileService } from '../runtime/runtimeProfileService.js';
 
 export interface ChatSessionExecutorDeps {
@@ -158,6 +159,32 @@ export class ChatSessionExecutor {
 
   static setTurnLeaseRegistry(turnLeases: ConversationTurnLeaseRegistry): void {
     this.#deps.turnLeases = turnLeases;
+  }
+
+  /** Issue a revocable capability for adapters whose own MCP loop runs tools. */
+  static issueTurnLease(
+    workspaceId: string,
+    conversationId: string,
+    context?: Parameters<ConversationTurnLeaseRegistry['issue']>[2],
+  ): string | undefined {
+    return this.#deps.turnLeases?.issue(workspaceId, conversationId, context);
+  }
+
+  /** Read the evidence ledger before completing a channel-originated turn. */
+  static turnExperience(
+    workspaceId: string,
+    conversationId: string,
+    token: string,
+  ): ConversationTurnExperience | null {
+    try {
+      return this.#deps.turnLeases?.experience(workspaceId, conversationId, token) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  static completeTurnLease(workspaceId: string, conversationId: string, token: string): void {
+    this.#deps.turnLeases?.complete(workspaceId, conversationId, token);
   }
 
   /**
@@ -914,7 +941,14 @@ export class ChatSessionExecutor {
     adapter: AgentAdapter,
     turnId: string,
     confirmed: boolean,
-    guard: { workspaceId: string; userId: string; conversationId: string; signal?: AbortSignal },
+    guard: {
+      workspaceId: string;
+      userId: string;
+      conversationId: string;
+      signal?: AbortSignal;
+      turnLease?: string;
+      channelOrigin?: ChatTurnContext['channelOrigin'];
+    },
   ): AsyncIterable<ChatDelta> {
     adapter = this.#resolveChatAdapter(adapter, guard.workspaceId);
     this.#cleanupPendingConfirmations();
@@ -952,7 +986,12 @@ export class ChatSessionExecutor {
     // Resume under THIS request's lifetime, not the original turn's: the stored
     // context's signal belongs to a request that has already ended (it would read
     // as aborted and instantly bail). Override with the confirm request's signal.
-    const resumeCtx: ChatTurnContext = { ...pending.context, signal: guard.signal };
+    const resumeCtx: ChatTurnContext = {
+      ...pending.context,
+      signal: guard.signal,
+      ...(guard.turnLease ? { turnLease: guard.turnLease } : { turnLease: undefined }),
+      ...(guard.channelOrigin ? { channelOrigin: guard.channelOrigin } : {}),
+    };
 
     yield { type: 'tool_call', id: pending.call.id, name: pending.call.name, args: pending.call.arguments };
     const executed = await this.#executeToolCall(pending.call, resumeCtx);
@@ -1260,6 +1299,20 @@ export class ChatSessionExecutor {
         const terminal = finishReason === 'length' ? 'max_turns' : finishReason;
         yield { type: 'done', finishReason: terminal };
         return;
+      }
+
+      // Text emitted alongside a tool-call finish is an assistant preamble, not
+      // the final answer. Preserve it as safe live commentary instead of silently
+      // dropping the exact "I found X; now I am checking Y" narration users rely on.
+      const assistantPreamble = assistantText.replace(/\s+/g, ' ').trim();
+      if (assistantPreamble) {
+        yield {
+          type: 'commentary',
+          id: `assistant-preamble-${ctx.clientTurnId ?? ctx.conversationId}-${turn + 1}`,
+          text: assistantPreamble.slice(0, 1_200),
+          source: 'assistant_preamble',
+          createdAt: new Date().toISOString(),
+        };
       }
 
       // Preserve the tool-call protocol for the executor, but deliberately drop

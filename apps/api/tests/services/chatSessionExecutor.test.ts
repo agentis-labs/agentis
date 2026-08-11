@@ -1357,6 +1357,7 @@ describe('ChatSessionExecutor', () => {
     expect(text).toBe('The repository is ready.');
     expect(deltas.some((delta) => delta.type === 'thinking')).toBe(false);
     expect(deltas.some((delta) => delta.type === 'commentary' && delta.text === 'I will inspect the available agents first.')).toBe(true);
+    expect(deltas.some((delta) => delta.type === 'commentary' && delta.source === 'assistant_preamble' && delta.text === 'I will inspect the repository first.')).toBe(true);
     expect(deltas.some((delta) => delta.type === 'tool_call' && delta.id === 'inspect-1')).toBe(true);
   });
 

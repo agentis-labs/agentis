@@ -27,6 +27,7 @@ import {
   AgentisError,
   type AgentisToolContext,
   type ApprovalSensitivity,
+  type ChannelToolOrigin,
   type WorkflowGraph,
 } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
@@ -200,14 +201,16 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
             throw new AgentisError('TURN_CANCELLED', 'Incomplete conversation turn capability. The tool was not executed.');
           }
           let turnSignal: AbortSignal | undefined;
+          let channelOrigin: ChannelToolOrigin | undefined;
           if (conversationId && turnLease) {
             if (!deps.turnLeases) throw new AgentisError('TURN_CANCELLED', 'Conversation turn capability enforcement is unavailable. The tool was not executed.');
             turnSignal = deps.turnLeases.assertActive(ws.workspaceId, conversationId, turnLease);
+            channelOrigin = deps.turnLeases.context(ws.workspaceId, conversationId, turnLease)?.channelOrigin;
           }
           const startedAt = Date.now();
           const result = await callMcpTool(
             deps,
-            { ...ws, agentId, executionMode, approvalSensitivity, ...(conversationId ? { conversationId } : {}), ...(turnSignal ? { turnSignal } : {}) },
+            { ...ws, agentId, executionMode, approvalSensitivity, ...(conversationId ? { conversationId } : {}), ...(turnSignal ? { turnSignal } : {}), ...(channelOrigin ? { channelOrigin } : {}) },
             params.name,
             params.arguments ?? {},
           );
@@ -402,7 +405,7 @@ function toMcpDescriptor(t: McpTool) {
 /** Execute an MCP tool call → MCP `content` result shape. */
 async function callMcpTool(
   deps: McpRoutesDeps,
-  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask'; approvalSensitivity?: ApprovalSensitivity; conversationId?: string; turnSignal?: AbortSignal },
+  ws: { workspaceId: string; ambientId: string | null; user: { id: string }; agentId?: string; executionMode?: 'chat' | 'plan' | 'ask'; approvalSensitivity?: ApprovalSensitivity; conversationId?: string; turnSignal?: AbortSignal; channelOrigin?: ChannelToolOrigin },
   name: string,
   args: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
@@ -491,6 +494,7 @@ async function callMcpTool(
       ...(ws.executionMode ? { executionMode: ws.executionMode } : {}),
       ...(ws.approvalSensitivity ? { approvalSensitivity: ws.approvalSensitivity } : {}),
       ...(ws.conversationId ? { conversationId: ws.conversationId } : {}),
+      ...(ws.channelOrigin ? { channelOrigin: ws.channelOrigin } : {}),
       ...(ws.turnSignal ? { signal: ws.turnSignal } : {}),
       caller: 'mcp',
     };

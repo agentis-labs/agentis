@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, resolveWhatsAppNativeBody, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent, whatsappNativeContent } from '../../src/adapters/channels/whatsappSession.js';
+import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, resolveWhatsAppNativeBody, shouldProcessWhatsAppUpsert, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent, whatsappNativeContent } from '../../src/adapters/channels/whatsappSession.js';
 import type { OutboundAttachment } from '../../src/adapters/channels/types.js';
 
 describe('whatsappMediaContent', () => {
@@ -157,6 +157,14 @@ describe('classifyWhatsAppReconnect', () => {
     expect(classifyWhatsAppReconnect(503)).toBe('service_unavailable');
     expect(classifyWhatsAppReconnect(515)).toBe('restart_required');
     expect(classifyWhatsAppReconnect(undefined)).toBe('connection_closed');
+  });
+});
+
+describe('shouldProcessWhatsAppUpsert', () => {
+  it('mirrors companion-authored append events without activating append history inbound', () => {
+    expect(shouldProcessWhatsAppUpsert('notify', false)).toBe(true);
+    expect(shouldProcessWhatsAppUpsert('append', true)).toBe(true);
+    expect(shouldProcessWhatsAppUpsert('append', false)).toBe(false);
   });
 });
 

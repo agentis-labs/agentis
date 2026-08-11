@@ -5,8 +5,18 @@ import type { ChannelKind, OutboundAttachmentRef, OutboundNativeContent } from '
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 import { resolveAndSend } from '../conversation/channelSend.js';
+import { normalizeHandle } from '../conversation/channelAccess.js';
 
 const CHANNEL_KINDS = new Set<ChannelKind>(['telegram', 'discord', 'slack', 'whatsapp', 'voice']);
+
+function sameChannelRecipient(kind: string, left: string, right: string): boolean {
+  if (kind === 'whatsapp' || kind === 'telegram') {
+    const a = normalizeHandle(left);
+    const b = normalizeHandle(right);
+    return Boolean(a && b && a === b);
+  }
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
 
 /** One attachment item — shared by the top-level `attachments` and each `messages[]` entry. */
 const ATTACHMENT_ITEM_SCHEMA = {
@@ -140,7 +150,7 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       definition: {
         id: 'agentis.channel.send',
         family: 'run',
-        description: 'Send a message — optionally with media attachments, or a natural burst of several messages — through a native Agentis channel connection. Media kinds: image, video, audio, voice note, sticker, file. WhatsApp accepts explicit phone numbers with country code (for example +12345678901) or WhatsApp JIDs; "default" uses the saved default target. To send a screenshot, first call agentis.browser.screenshot and pass its `ref` (e.g. "artifact:<id>") as an attachment url. Use `messages[]` to send several messages in sequence (e.g. a photo, then a follow-up line).',
+        description: 'Send a message — optionally with media attachments, or a natural burst of several messages — through a native Agentis channel connection. In a turn that already came from a channel, omit `to` only to address that same conversation; always pass the explicit address when the person asks you to contact someone else. Media kinds: image, video, audio, voice note, sticker, file. WhatsApp accepts explicit phone numbers with country code (for example +12345678901) or WhatsApp JIDs. To send a screenshot, first call agentis.browser.screenshot and pass its `ref` (e.g. "artifact:<id>") as an attachment url. Use `messages[]` to send several messages in sequence (e.g. a photo, then a follow-up line).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -179,6 +189,57 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
       },
       handler: async (args, ctx) => {
         if (!deps.channels) throw new AgentisError('CHANNEL_BRIDGE_UNAVAILABLE', 'channel bridge not configured');
+        let connectionId = typeof args.connectionId === 'string' ? args.connectionId : null;
+        let kind = typeof args.kind === 'string' ? args.kind : null;
+        let to = typeof args.to === 'string' ? args.to : null;
+        const origin = ctx.channelOrigin;
+        if (origin) {
+          const explicitlyNamedThirdParties = (origin.explicitRecipients ?? [])
+            .filter((recipient) => !sameChannelRecipient(origin.kind, recipient, origin.chatId));
+          if (explicitlyNamedThirdParties.length > 0) {
+            const matchesNamedRecipient = Boolean(to?.trim())
+              && !/^(?:me|default)$/i.test(to!.trim())
+              && explicitlyNamedThirdParties.some((recipient) => sameChannelRecipient(origin.kind, recipient, to!));
+            if (!matchesNamedRecipient) {
+              throw new AgentisError(
+                'VALIDATION_FAILED',
+                'The request names an explicit recipient, but the channel send omitted it or selected a different destination.',
+                { remediation: `Pass the explicit recipient in "to": ${explicitlyNamedThirdParties.join(', ')}. The current chat/default will not be substituted.` },
+              );
+            }
+          }
+          const switchesConnection = Boolean(connectionId && connectionId !== origin.connectionId);
+          const switchesKind = Boolean(kind && kind !== origin.kind);
+          if (!origin.ownerVerified && switchesConnection) {
+            throw new AgentisError(
+              'CONNECTION_SCOPE_MISSING',
+              'A channel-originated turn cannot switch to a different connection implicitly.',
+              { remediation: 'Continue on the originating connection, or have a verified owner start the cross-connection action from an owner-linked identity.' },
+            );
+          }
+          if (!origin.ownerVerified && switchesKind) {
+            throw new AgentisError('CONNECTION_SCOPE_MISSING', 'A channel-originated turn cannot switch channel kinds implicitly.');
+          }
+          if (!switchesConnection && !switchesKind) {
+            connectionId = origin.connectionId;
+            kind = origin.kind;
+
+            // Within an inbound channel turn, an omitted/default destination means
+            // the current peer. It must never jump to the connection-wide default.
+            if (!to?.trim() || /^(?:me|default)$/i.test(to.trim())) {
+              to = origin.chatId;
+            } else if (!origin.ownerVerified) {
+              const resolved = deps.channels.resolveDestination({ connectionId, to });
+              if (!resolved.chatId || !sameChannelRecipient(origin.kind, resolved.chatId, origin.chatId)) {
+                throw new AgentisError(
+                  'CONNECTION_SCOPE_MISSING',
+                  'This channel sender is not a verified owner and cannot initiate a message to another recipient.',
+                  { remediation: 'Reply only in the current conversation, or ask the explicitly linked owner to initiate the cross-recipient send.' },
+                );
+              }
+            }
+          }
+        }
         // Shared resolve→authorize→deliver flow (same one the deterministic
         // `channel` workflow node uses) so tool and node behave identically.
         return resolveAndSend(
@@ -186,9 +247,9 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
           {
             workspaceId: ctx.workspaceId,
             body: typeof args.body === 'string' ? args.body : '',
-            kind: typeof args.kind === 'string' ? args.kind : null,
-            connectionId: typeof args.connectionId === 'string' ? args.connectionId : null,
-            to: typeof args.to === 'string' ? args.to : null,
+            kind,
+            connectionId,
+            to,
             agentId: ctx.agentId ?? null,
             ...(args.deliveryRole === 'progress' || args.deliveryRole === 'final' ? { deliveryRole: args.deliveryRole } : {}),
             attachments: parseAttachments(args.attachments),

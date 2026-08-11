@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Loader2, Sparkles, X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
+import { OrchestratorGlyph } from '../agents/AgentRoleGlyphs';
 
 /**
  * CanvasBuildComposer — describe a workflow in plain English and let the
@@ -77,7 +78,7 @@ export function CanvasBuildComposer({
         </button>
       )}
       <div className="mb-2 flex items-center gap-2 text-text-primary">
-        <Sparkles size={16} className="text-accent" />
+        <OrchestratorGlyph size={16} />
         <span className="text-sm font-semibold">Describe this workflow</span>
       </div>
       <p className="mb-3 text-[12px] leading-relaxed text-text-muted">
@@ -108,7 +109,7 @@ export function CanvasBuildComposer({
             'inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-semibold text-canvas hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40',
           )}
         >
-          {sending ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+          {sending ? <Loader2 size={13} className="animate-spin" /> : <OrchestratorGlyph size={13} />}
           {sending ? 'Building…' : 'Build it'}
         </button>
       </div>

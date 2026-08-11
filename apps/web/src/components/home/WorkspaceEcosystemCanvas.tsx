@@ -4276,8 +4276,15 @@ function deriveTopBranchLayout(
   }
   // The orchestrator's direct-workflows group is a branch too (a workflow with
   // no space, or whose space has no manager).
+  const appById = new Map((data.apps ?? []).map((app) => [app.id, app]));
   const hasDirectBranch = data.workflows.some(
-    (workflow) => !(workflow.spaceId && spaceSourceIds.has(workflow.spaceId)),
+    (workflow) => {
+      const app = workflow.appId ? appById.get(workflow.appId) : undefined;
+      const spaceId = workflow.spaceId ?? app?.domainId ?? null;
+      const ownerAgentId = workflow.ownerAgentId ?? app?.ownerAgentId ?? null;
+      return !(spaceId && spaceSourceIds.has(spaceId))
+        && !roles.managers.some((manager) => manager.id === ownerAgentId);
+    },
   );
   const branchCount = managerNodeIds.length + (hasDirectBranch ? 1 : 0);
   return { managerNodeIds, spaceSourceIds, hasDirectBranch, branchCount };
