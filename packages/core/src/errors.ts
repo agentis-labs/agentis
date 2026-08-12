@@ -75,6 +75,7 @@ export type AgentisErrorCode =
   | 'CHANNEL_RATE_LIMITED'
   | 'CHANNEL_OPT_IN_REQUIRED'
   | 'CHANNEL_SEND_BLOCKED'
+  | 'CHANNEL_HUMAN_TAKEOVER_ACTIVE'
   // Connection authority (Agent-Native Platform Plan §3.3)
   | 'CONNECTION_GRANTS_UNAVAILABLE'
   | 'CONNECTION_SCOPE_MISSING'
@@ -172,6 +173,7 @@ function defaultStatusFor(code: AgentisErrorCode): number {
     case 'TURN_CANCELLED':
     case 'GRAPH_REVISION_CONFLICT':
     case 'PACKAGE_SLUG_CONFLICT':
+    case 'CHANNEL_HUMAN_TAKEOVER_ACTIVE':
       return 409;
     case 'VALIDATION_FAILED':
     case 'ADAPTER_CAPABILITY_MISMATCH':

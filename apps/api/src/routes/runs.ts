@@ -25,6 +25,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { failedNodeCount, firstFailedNodeId, isFailedNodeId } from '../services/run/runStateFailures.js';
 import type { ColdArchiveStore } from '../services/storage/coldArchiveStore.js';
+import { normalizeRunOutcomeStatus } from '../services/workflow/runOutcome.js';
 
 export function buildRunRoutes(deps: {
   db: AgentisSqliteDb;
@@ -395,7 +396,7 @@ function presentRunSummary(
     workflowName: workflow?.title ?? run.ephemeralTitle ?? undefined,
     status: mapRunSummaryStatus(run, state),
     executionStatus: run.executionStatus,
-    outcomeStatus: run.outcomeStatus,
+    outcomeStatus: normalizeRunOutcomeStatus(run.outcomeStatus),
     settlement: run.settlement,
     revisionId: run.workflowRevisionId,
     createdAt: run.createdAt,
@@ -446,7 +447,7 @@ function presentRunDetail(
     workflowName: workflow?.title ?? run.ephemeralTitle ?? 'Run',
     status,
     executionStatus: run.executionStatus,
-    outcomeStatus: run.outcomeStatus,
+    outcomeStatus: normalizeRunOutcomeStatus(run.outcomeStatus),
     settlement: run.settlement,
     revisionId: run.workflowRevisionId,
     ...(blockedNode?.blockedReason ? { blockedReason: blockedNode.blockedReason } : {}),

@@ -1304,7 +1304,7 @@ function activityKey(activity: RealtimeActivity): string {
 }
 
 function statusLabel(status: MonitorStatus, workflowTitle: string, terminalKind: 'run' | 'build' | null): string {
-  if (status === 'completed') return terminalKind === 'build' ? 'Workflow ready' : 'Run completed';
+  if (status === 'completed') return terminalKind === 'build' ? 'Build execution finished' : 'Execution finished';
   if (status === 'failed') return 'Run failed';
   if (status === 'paused') return 'Run paused';
   if (status === 'waiting') return 'Waiting for approval';

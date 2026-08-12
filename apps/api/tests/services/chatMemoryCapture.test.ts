@@ -8,7 +8,7 @@ import { ConversationStore } from '../../src/services/conversation/conversationS
 import { EpisodicMemoryStore } from '../../src/services/episodicMemoryStore.js';
 import { StubEmbeddingProvider } from '../_helpers/stubEmbeddingProvider.js';
 import { MemoryStore } from '../../src/services/memory/memoryStore.js';
-import { PeerProfileService } from '../../src/services/peerProfileService.js';
+import { memoryEligiblePeerMessages, PeerProfileService } from '../../src/services/peerProfileService.js';
 import { SessionMomentService } from '../../src/services/sessionMomentService.js';
 import { SharedIntelligenceService } from '../../src/services/sharedIntelligence.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -64,6 +64,23 @@ function buildCaptureStack() {
 }
 
 describe('ChatMemoryCaptureService', () => {
+  it('never promotes reconciled provider history or business-side channel messages into customer memory', async () => {
+    const eligible = memoryEligiblePeerMessages([
+      {
+        authorType: 'system', participantSide: 'customer', body: 'I prefer COBOL.',
+        metadata: { channelHistoryReconciled: true, channelInbound: true },
+      },
+      { authorType: 'operator', participantSide: 'business', body: 'I prefer React.' },
+      { authorType: 'system', participantSide: 'customer', body: 'I prefer Rust.', metadata: { channelInbound: true } },
+    ], true);
+
+    expect(eligible).toEqual([
+      { role: 'assistant', text: 'I prefer React.' },
+      { role: 'user', text: 'I prefer Rust.' },
+    ]);
+    expect(eligible.some((message) => message.text.includes('COBOL'))).toBe(false);
+  });
+
   it('captures stable instructions once into workspace memory, session moments, and peer updates', async () => {
     const agentId = seedAgent();
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });

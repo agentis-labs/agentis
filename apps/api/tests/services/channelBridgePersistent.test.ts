@@ -14,6 +14,7 @@ import { createTestContext, type TestContext } from '../_helpers/createTestConte
 import { ChannelBridge, DEFAULT_WHATSAPP_CONNECTION_PROFILE, type PersistentChannelTransport } from '../../src/services/conversation/channelBridge.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { SlackChannelAdapter } from '../../src/adapters/channels/slack.js';
+import { ConversationHandoffService } from '../../src/services/conversation/conversationHandoffService.js';
 
 function seedAgent(ctx: TestContext) {
   const id = randomUUID();
@@ -50,11 +51,13 @@ function fakeTransport(initialStatus = 'idle') {
 
 function buildBridge(ctx: TestContext) {
   const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+  const handoffs = new ConversationHandoffService({ db: ctx.db, bus: ctx.bus });
   const bridge = new ChannelBridge({
     db: ctx.db, vault: ctx.vault, conversations, bus: ctx.bus, logger: ctx.logger,
     adapters: { slack: new SlackChannelAdapter() },
+    handoffs,
   });
-  return { bridge, conversations };
+  return { bridge, conversations, handoffs };
 }
 
 describe('ChannelBridge persistent transport (WhatsApp)', () => {
@@ -92,16 +95,21 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
       workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
       agentId, kind: 'whatsapp', name: 'WA',
     });
-    // Simulate a connection saved before the v1 profile existed.
+    // Simulate a connection saved before the versioned profile existed.
     ctx.db.update(schema.channelConnections).set({ settings: { mode: 'qr_local' } })
       .where(eq(schema.channelConnections.id, connection.id)).run();
     expect(bridge.get(ctx.workspace.id, connection.id).whatsappProfile?.ownerReasoningVisibility).toBe('off');
 
     const updated = bridge.updateBehavior(ctx.workspace.id, connection.id, { ownerReasoningVisibility: 'indicator' });
-    expect(updated.whatsappProfile).toMatchObject({ version: 1, ownerReasoningVisibility: 'indicator' });
+    expect(updated.whatsappProfile).toMatchObject({
+      version: 2,
+      ownerReasoningVisibility: 'indicator',
+      manualOutboundTakeover: 'until_handback',
+      historyReconciliation: 'recent',
+    });
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect((row.settings as { whatsappProfile?: { version?: number; ownerReasoningVisibility?: string } }).whatsappProfile)
-      .toMatchObject({ version: 1, ownerReasoningVisibility: 'indicator' });
+      .toMatchObject({ version: 2, ownerReasoningVisibility: 'indicator' });
   });
 
   it('rejects a non-persistent kind without a token', () => {
@@ -134,6 +142,36 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
     const journal = ctx.db.select().from(schema.channelOutboundDeliveries).all();
     expect(journal).toHaveLength(1);
     expect(journal[0]?.status).toBe('accepted');
+  });
+
+  it('claims before a human send and rejects every later automated delivery until handback', async () => {
+    const { bridge, handoffs } = buildBridge(ctx);
+    const { transport, sent } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA takeover',
+    });
+    const target = '5511999999999@s.whatsapp.net';
+    await bridge.deliverToConnection({ connectionId: connection.id, chatId: target, body: 'human reply', actor: 'human' });
+    const snapshot = handoffs.findByChannel(ctx.workspace.id, connection.id, target)!;
+    expect(snapshot).toMatchObject({ state: 'human', source: 'explicit', automationEpoch: 1 });
+    await expect(bridge.deliverToConnection({
+      connectionId: connection.id, chatId: target, body: 'stale automation', conversationId: snapshot.conversationId,
+    })).rejects.toMatchObject({ code: 'CHANNEL_HUMAN_TAKEOVER_ACTIVE' });
+    expect(sent.map((item) => item.body)).toEqual(['human reply']);
+    const handedBack = handoffs.releaseToAgent(ctx.workspace.id, snapshot.conversationId);
+    expect(handedBack.automationEpoch).toBe(2);
+    await expect(bridge.deliverToConnection({
+      connectionId: connection.id,
+      chatId: target,
+      body: 'reply from stale turn',
+      conversationId: snapshot.conversationId,
+      expectedAutomationEpoch: snapshot.automationEpoch,
+    })).rejects.toMatchObject({ code: 'TURN_CANCELLED' });
+    await bridge.deliverToConnection({ connectionId: connection.id, chatId: target, body: 'agent is back' });
+    expect(sent.map((item) => item.body)).toEqual(['human reply', 'agent is back']);
   });
 
   it('persists a client-only WhatsApp submission as queued, never as sent', async () => {

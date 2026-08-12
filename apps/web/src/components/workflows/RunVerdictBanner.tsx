@@ -19,8 +19,8 @@ export interface RunVerdictView {
 
 const OUTCOME_META: Record<RunVerdictView['outcome'], { label: string; tone: string; Icon: typeof CheckCircle2 }> = {
   accomplished: { label: 'Accomplished — world-verified', tone: 'border-success/40 bg-success/10 text-success', Icon: CheckCircle2 },
-  partial: { label: 'Partial — some claims could not be verified', tone: 'border-amber-400/40 bg-amber-400/10 text-amber-400', Icon: HelpCircle },
-  hollow: { label: 'Hollow — completed but the output is empty/placeholder', tone: 'border-danger/40 bg-danger/10 text-danger', Icon: CircleAlert },
+  partial: { label: 'Blocked — required proof is unavailable', tone: 'border-amber-400/40 bg-amber-400/10 text-amber-400', Icon: HelpCircle },
+  hollow: { label: 'Not accomplished — output is empty or placeholder', tone: 'border-danger/40 bg-danger/10 text-danger', Icon: CircleAlert },
   failed_checks: { label: 'Not accomplished — verification failed', tone: 'border-danger/40 bg-danger/10 text-danger', Icon: CircleX },
 };
 
@@ -71,6 +71,20 @@ export function RunVerdictBanner({ runId, refreshKey }: { runId: string; refresh
               {verdict.sufficiency.typedEmptyFills.length > 0 && <div>empty keys: {verdict.sufficiency.typedEmptyFills.join(', ')}</div>}
             </div>
           ) : null}
+          {verdict.outcome !== 'accomplished' && (
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent('agentis:chat-panel-open', {
+                detail: {
+                  initialDraft: `Continue fixing workflow run ${runId}. Inspect its exact revision, failed contract, observed terminal output, and missing dependencies. Do not claim success until a clean verification of the same revision is accomplished.`,
+                  autoSendInitialDraft: false,
+                },
+              }))}
+              className="mt-1 inline-flex h-7 items-center rounded-md border border-current/25 px-2.5 text-[10.5px] font-semibold hover:bg-current/10"
+            >
+              Continue fixing
+            </button>
+          )}
         </div>
       )}
     </div>

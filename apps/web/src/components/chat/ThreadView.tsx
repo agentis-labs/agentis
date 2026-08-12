@@ -19,7 +19,7 @@ import { AgentTurnTrace } from './AgentTurnTrace';
 import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessage } from './messageModel';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
-import type { DurableConversationTurn } from './durableTurn';
+import type { DurableConversationTurn, DurableConversationTurnHistory } from './durableTurn';
 
 interface ThreadViewProps {
   kind: 'room' | 'agent';
@@ -575,7 +575,7 @@ export function ThreadView({
       .then(({ turns }) => {
         if (cancelled || turns.length === 0) return;
         const active = turns.find((turn) => turn.status === 'running')
-          ?? turns.find((turn) => turn.status === 'awaiting_approval' || turn.status === 'paused')
+          ?? turns.find((turn) => turn.status === 'awaiting_approval' || turn.status === 'blocked' || turn.status === 'paused')
           ?? turns[0]!;
         setActiveDurableTurn(active);
         subscribeRecoveredTurn(active);
@@ -583,6 +583,19 @@ export function ThreadView({
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [conversationId, id, kind, loadedConversationId, readOnly]);
+
+  useEffect(() => {
+    const targetConversationId = loadedConversationId ?? conversationId;
+    if (kind !== 'agent' || !targetConversationId) return;
+    let cancelled = false;
+    void api<{ history: DurableConversationTurnHistory[] }>(
+      `/v1/conversations/${id}/turns?conversationId=${encodeURIComponent(targetConversationId)}&limit=${PAGE_SIZE}`,
+    ).then(({ history }) => {
+      if (cancelled) return;
+      setMessages((current) => hydrateDurableTurnHistory(current, history));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [conversationId, id, kind, loadedConversationId]);
 
   async function loadOlder() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
@@ -1446,6 +1459,21 @@ export function ThreadView({
       .catch((error) => toast.error('Could not stop all work', apiErrorMessage(error)));
   }
 
+  async function resumeBlockedTurn() {
+    if (kind !== 'agent' || !activeDurableTurn || !['blocked', 'paused', 'interrupted'].includes(activeDurableTurn.status)) return;
+    try {
+      const { turn } = await api<{ turn: DurableConversationTurn }>(
+        `/v1/conversations/${id}/turns/${activeDurableTurn.id}/resume`,
+        { method: 'POST' },
+      );
+      resumedTurnIdsRef.current.delete(turn.id);
+      setActiveDurableTurn(turn);
+      subscribeRecoveredTurn(turn);
+    } catch (error) {
+      toast.error('Could not resume mission', apiErrorMessage(error));
+    }
+  }
+
   /** Reattach to a server-owned turn after reload, fullscreen/dock remount, or resume. */
   function subscribeRecoveredTurn(turn: DurableConversationTurn) {
     if (resumedTurnIdsRef.current.has(turn.id)) return;
@@ -1914,6 +1942,27 @@ export function ThreadView({
         </div>
       )}
 
+      {activeDurableTurn?.status === 'blocked' && (
+        <div className="border-t border-warn/25 bg-warn/8 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={14} className="shrink-0 text-warn" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[12px] font-medium text-text-primary">Work needs attention</div>
+              <div className="mt-0.5 text-[11px] text-text-muted">
+                {activeDurableTurn.error ?? 'Continue from the preserved turn after resolving the reported blocker.'}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void resumeBlockedTurn()}
+              className="h-8 rounded-md border border-warn/35 bg-warn/10 px-3 text-[11px] font-semibold text-warn hover:bg-warn/15"
+            >
+              Continue fixing
+            </button>
+          </div>
+        </div>
+      )}
+
       {readOnly ? (
         <div className="border-t border-line bg-surface-2 px-3 py-2 text-[12px] text-text-muted">
           This is a saved conversation. Use the + button in the header to start a fresh chat with {name}.
@@ -1952,6 +2001,49 @@ function withTurnProgress(message: ChatMessage, delta: Extract<ChatDelta, { type
     metadata.activity = upsertStable(message.metadata?.activity ?? [], delta);
   }
   return { ...message, metadata };
+}
+
+function hydrateDurableTurnHistory(
+  messages: ChatMessage[],
+  history: DurableConversationTurnHistory[],
+): ChatMessage[] {
+  if (history.length === 0) return messages;
+  const byClientTurn = new Map(history.map((entry) => [entry.turn.clientTurnId, entry]));
+  return messages.map((message) => {
+    const clientTurnId = message.metadata?.clientTurnId ?? message.metadata?.turn?.clientTurnId;
+    if (!clientTurnId || message.authorKind !== 'agent') return message;
+    const entry = byClientTurn.get(clientTurnId);
+    if (!entry) return message;
+    let hydrated: ChatMessage = {
+      ...message,
+      metadata: {
+        ...(message.metadata ?? {}),
+        durableTurnId: entry.turn.id,
+        turn: {
+          clientTurnId,
+          startedAt: entry.turn.startedAt ?? entry.turn.createdAt,
+          completedAt: entry.turn.completedAt ?? undefined,
+          status: durableTraceStatus(entry.turn.status),
+        },
+      },
+    };
+    for (const event of entry.events) {
+      if (event.visibility === 'technical') continue;
+      const delta = event.data as Partial<ChatDelta> | null;
+      if (delta?.type === 'commentary' || delta?.type === 'activity') {
+        hydrated = withTurnProgress(hydrated, delta as Extract<ChatDelta, { type: 'activity' | 'commentary' }>);
+      }
+    }
+    return hydrated;
+  });
+}
+
+function durableTraceStatus(status: DurableConversationTurn['status']): ChatTurnTrace['status'] {
+  if (status === 'completed') return 'completed';
+  if (status === 'failed' || status === 'cancelled') return 'failed';
+  if (status === 'interrupted' || status === 'paused') return 'interrupted';
+  if (status === 'awaiting_approval' || status === 'blocked') return 'blocked';
+  return 'running';
 }
 
 function ImmersiveEmptyState({ name, body }: { name: string; body?: string }) {

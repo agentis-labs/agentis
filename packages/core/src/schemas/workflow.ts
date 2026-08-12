@@ -228,7 +228,10 @@ const artifactSaveConfigSchema = z.object({
 const browserConfigSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('browser'),
-  operation: z.enum(['serve_html', 'screenshot', 'pdf', 'navigate', 'extract_text', 'fill_form', 'extract_table']),
+  operation: z.enum(['serve_html', 'screenshot', 'pdf', 'navigate', 'extract_text', 'fill_form', 'extract_table', 'session']),
+  sessionAction: z.string().optional(),
+  sessionId: z.string().optional(),
+  sessionArgs: z.record(z.string(), z.unknown()).optional(),
   url: z.string().optional(),
   html: z.string().optional(),
   htmlPath: z.string().optional(),

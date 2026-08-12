@@ -66,6 +66,7 @@ import { aggregateRunAnalytics } from '../services/run/runAnalytics.js';
 import type { StructuredCompleter } from '../services/structuredCompleter.js';
 import type { AppStaffingService } from '../services/app/appStaffing.js';
 import type { ConversationStore } from '../services/conversation/conversationStore.js';
+import { channelModelRole } from '../services/conversation/channelConversationRole.js';
 import type { AppContactService } from '../services/app/appContacts.js';
 import type { ConversationParticipantService } from '../services/conversation/conversationParticipants.js';
 import type { AppPresenceService } from '../services/app/appPresence.js';
@@ -95,6 +96,7 @@ import {
   upsertOrchestrationRule,
 } from '../services/workflow/orchestrationRuleService.js';
 import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt } from '../adapters/channels/types.js';
+import type { ConversationHandoffService } from '../services/conversation/conversationHandoffService.js';
 
 export interface AppRoutesDeps {
   db: AgentisSqliteDb;
@@ -110,8 +112,9 @@ export interface AppRoutesDeps {
   staffing?: AppStaffingService;
   /** Append + realtime-publish operator messages into a live thread (Phase 2 takeover). */
   conversations?: ConversationStore;
+  handoffs?: ConversationHandoffService;
   /** Deliver an operator's reply out to the origin channel (Phase 2 takeover). */
-  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string; idempotencyKey?: string }): Promise<ChannelDeliveryReceipt> };
+  channels?: { deliverToConnection(args: { connectionId: string; chatId: string; body: string; idempotencyKey?: string; actor?: 'automation' | 'human'; conversationId?: string }): Promise<ChannelDeliveryReceipt> };
   /** App relationship pipeline — list/update contacts (Phase 3). */
   contacts?: AppContactService;
   /** Multi-party threads (G1) — list/add/remove conversation participants + warm handoff. */
@@ -1094,6 +1097,9 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
         lastMessageAt: schema.conversations.lastMessageAt,
         unreadCount: schema.conversations.unreadCount,
         handoffState: schema.conversations.handoffState,
+        handoffSource: schema.conversations.handoffSource,
+        handoffClaimedAt: schema.conversations.handoffClaimedAt,
+        automationEpoch: schema.conversations.automationEpoch,
         needsAttention: schema.conversations.needsAttention,
         needsAttentionReason: schema.conversations.needsAttentionReason,
         kind: schema.channelConnections.kind,
@@ -1111,6 +1117,9 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       lastMessageAt: r.lastMessageAt,
       unread: r.unreadCount ?? 0,
       handoffState: r.handoffState ?? null,
+      handoffSource: r.handoffSource ?? null,
+      handoffClaimedAt: r.handoffClaimedAt ?? null,
+      automationEpoch: r.automationEpoch ?? 0,
       needsAttention: Boolean(r.needsAttention),
       needsAttentionReason: r.needsAttentionReason ?? null,
     })) });
@@ -1137,6 +1146,7 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       .select({
         id: schema.conversationMessages.id,
         authorType: schema.conversationMessages.authorType,
+        participantSide: schema.conversationMessages.participantSide,
         body: schema.conversationMessages.body,
         createdAt: schema.conversationMessages.createdAt,
         metadata: schema.conversationMessages.metadata,
@@ -1146,11 +1156,10 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       .orderBy(desc(schema.conversationMessages.createdAt))
       .limit(limit)
       .all();
-    // Map persisted author/metadata to a chat role: channel-inbound + operator = user.
+    // Resolve the external conversation side independently from platform actor identity.
     const messages = rows.reverse().map((r) => {
-      const meta = (r.metadata ?? {}) as { channelInbound?: boolean };
-      const role: 'user' | 'agent' | 'system' =
-        r.authorType === 'operator' || meta.channelInbound ? 'user' : r.authorType === 'system' ? 'system' : 'agent';
+      const resolvedRole = channelModelRole(r, true);
+      const role: 'user' | 'agent' | 'system' = resolvedRole === 'assistant' ? 'agent' : resolvedRole;
       return { id: r.id, role, content: r.body, at: r.createdAt };
     });
     return c.json({ data: messages });
@@ -1171,9 +1180,11 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       .where(and(eq(schema.conversations.id, conversationId), eq(schema.conversations.workspaceId, ws.workspaceId), eq(schema.conversations.appId, appId)))
       .get();
     if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
-    const handoffState = parsed.data.active ? 'human' : null;
-    deps.db.update(schema.conversations).set({ handoffState, updatedAt: new Date().toISOString() }).where(eq(schema.conversations.id, conversationId)).run();
-    return c.json({ data: { conversationId, handoffState } });
+    if (!deps.handoffs) throw new AgentisError('INTERNAL_ERROR', 'conversation handoff service is unavailable');
+    const snapshot = parsed.data.active
+      ? deps.handoffs.claimHuman({ workspaceId: ws.workspaceId, conversationId, source: 'explicit' })
+      : deps.handoffs.releaseToAgent(ws.workspaceId, conversationId);
+    return c.json({ data: { conversationId, handoffState: snapshot.state === 'human' ? 'human' : null, source: snapshot.source, claimedAt: snapshot.claimedAt, automationEpoch: snapshot.automationEpoch } });
   });
 
   // Operator send (Phase 2): post a human reply into the live thread and deliver it
@@ -1192,12 +1203,14 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
       .where(and(eq(schema.conversations.id, conversationId), eq(schema.conversations.workspaceId, ws.workspaceId), eq(schema.conversations.appId, appId)))
       .get();
     if (!conv) throw new AgentisError('RESOURCE_NOT_FOUND', `conversation ${conversationId} not found in this app`);
+    deps.handoffs?.claimHuman({ workspaceId: ws.workspaceId, conversationId, source: 'explicit' });
     const body = parsed.data.body.trim();
     const operatorDeliveryId = `operator_reply:${conversationId}:${randomUUID()}`;
     const outboundMessage = deps.conversations?.appendOutbound({
       workspaceId: ws.workspaceId,
       conversationId,
       operatorId: user.id,
+      participantSide: 'business',
       sessionMessageId: operatorDeliveryId,
       body,
       deliveryStatus: conv.channelConnectionId && conv.channelChatId && deps.channels ? 'sending' : 'failed',
@@ -1213,6 +1226,8 @@ export function buildAppRoutes(deps: AppRoutesDeps) {
           chatId: conv.channelChatId,
           body,
           idempotencyKey: operatorDeliveryId,
+          actor: 'human',
+          conversationId,
         });
         delivered = isAcknowledgedChannelDelivery(receipt);
         pending = !delivered;

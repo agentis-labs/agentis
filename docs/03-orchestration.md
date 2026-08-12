@@ -109,10 +109,23 @@ conversation continuations, and operator status surfaces all use the same outcom
 (`services/workflow/runOutcome.ts`).
 
 Every terminal run persists a **RunSettlement** that keeps execution truth separate from outcome
-truth: `executionStatus` records lifecycle state, while `outcomeStatus` is `unverified`,
-`accomplished`, `partial`, `failed`, or `blocked`. The settlement pins the workflow revision and
-semantic hash and carries evidence references, deficiencies, and `settledAt`. Published MCP
-workflow calls report success only when both dimensions are `completed` and `accomplished`.
+truth: `executionStatus` records lifecycle state, while the operator-facing `outcomeStatus` is
+`accomplished`, `blocked`, or `not_accomplished` (`unverified` remains a compatibility state for
+legacy and in-flight records). The settlement pins the workflow revision and semantic hash and
+carries evidence references, deficiencies, and `settledAt`. Published MCP workflow calls report
+success only when both dimensions are `completed` and `accomplished`.
+
+Before a run is admitted, preflight reconciles declared inputs, persisted configuration, output
+contract, terminal return, acceptance-check references, and named fixtures. A missing source,
+credential, or service produces `blocked` with an actionable requirement before an empty run is
+created. A mechanical or observable receipt is required for functional promotion; an unavailable
+LLM judge is never created as a gate and an available judge remains complementary evidence.
+
+Proof is revision-specific. `ProofReceipt` records the resource, revision, semantic hash, fixture,
+check, observed evidence, and artifacts used to validate a change. Synthetic happy-path, empty
+input, missing-dependency, and invalid-input fixtures are explicitly distinguished from production
+proof. A final model message, a schema check, or a dry-run cannot by itself settle a workflow as
+accomplished.
 
 World-changing operations also persist **mutation receipts**. A receipt records attempted,
 succeeded, failed, and skipped counts plus per-item terminal status and whether authoritative

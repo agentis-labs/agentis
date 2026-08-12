@@ -1320,8 +1320,9 @@ export function buildCanvasModel(
     }
   }
 
+  const positionedNodes = resolveCanvasCollisions(nodes, canvasSize.width);
   return {
-    nodes,
+    nodes: positionedNodes,
     edges: dedupeEdges(edges),
     orchestratorId,
     activeAgentIds: availableAgentIds,
@@ -3317,6 +3318,42 @@ function classifyAgents(agents: WorkspaceAgent[]) {
     .filter((agent) => agent.id !== orchestrator?.id && !managers.some((manager) => manager.id === agent.id))
     .sort(rankAgentByStatus);
   return { orchestrator, managers, workers };
+}
+
+/**
+ * Final cross-family layout pass. The resource packer cannot see agent cards,
+ * and persisted manual anchors can put siblings back on top of one another.
+ * Keep authority tiers and earlier anchors stable, then nudge only the later
+ * card downward. Identical input always produces identical coordinates.
+ */
+export function resolveCanvasCollisions(nodes: CanvasNode[], canvasWidth: number): CanvasNode[] {
+  void canvasWidth; // horizontal packing owns the virtual width; this pass only resolves cross-family overlap.
+  const order = [...nodes].sort((left, right) => (
+    left.tier - right.tier
+    || left.y - right.y
+    || left.x - right.x
+    || left.id.localeCompare(right.id)
+  ));
+  const placed: CanvasNode[] = [];
+  const byId = new Map<string, CanvasNode>();
+  for (const node of order) {
+    let positioned: CanvasNode = { ...node };
+    let guard = 0;
+    while (guard < nodes.length + 8) {
+      const collisions = placed.filter((other) => nodesOverlap(positioned, other));
+      if (collisions.length === 0) break;
+      positioned = {
+        ...positioned,
+        y: Math.max(...collisions.map((other) => (
+          other.y + (other.height + positioned.height) / 2 + RESOURCE_LAYOUT.nodeClearance
+        ))),
+      };
+      guard += 1;
+    }
+    placed.push(positioned);
+    byId.set(positioned.id, positioned);
+  }
+  return nodes.map((node) => byId.get(node.id) ?? node);
 }
 
 /**

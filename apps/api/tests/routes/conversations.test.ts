@@ -9,6 +9,7 @@ import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 import { ConversationTurnLeaseRegistry } from '../../src/services/conversation/conversationTurnLease.js';
+import { ConversationHandoffService } from '../../src/services/conversation/conversationHandoffService.js';
 
 let ctx: TestContext;
 let conversations: ConversationStore;
@@ -67,6 +68,32 @@ describe('GET /v1/conversations', () => {
   it('rejects without auth (401)', async () => {
     const res = await app().request('/v1/conversations');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('PATCH /v1/conversations/:conversationId/handoff', () => {
+  it('persists human ownership and releases it through the generic channel-safe API', async () => {
+    const agentId = seedAgent();
+    const conversation = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const handoffs = new ConversationHandoffService({ db: ctx.db, bus: ctx.bus });
+    const routed = ctx.buildApp([{ path: '/v1/conversations', app: buildConversationRoutes({
+      db: ctx.db, auth: ctx.auth, conversations, adapters, logger: ctx.logger, bus: ctx.bus, handoffs,
+    }) }]);
+    const claim = await routed.request(`/v1/conversations/${conversation.id}/handoff`, {
+      method: 'PATCH', headers: ctx.authHeaders, body: JSON.stringify({ state: 'human' }),
+    });
+    expect(claim.status).toBe(200);
+    expect(await claim.json()).toMatchObject({
+      conversationId: conversation.id, state: 'human', source: 'explicit', automationEpoch: 1,
+    });
+    const release = await routed.request(`/v1/conversations/${conversation.id}/handoff`, {
+      method: 'PATCH', headers: ctx.authHeaders, body: JSON.stringify({ state: 'agent' }),
+    });
+    expect(await release.json()).toMatchObject({
+      conversationId: conversation.id, state: 'agent', source: null, claimedAt: null, automationEpoch: 2,
+    });
   });
 });
 

@@ -54,9 +54,31 @@ the responsible agent/subject.
 - Internal strategy state, tool/runtime events, JIDs, connection settings, routing diagnostics,
   and provider receipts remain Agentis telemetry. Channel users receive the natural response;
   the only optional external status is the generic, identity-verified owner reasoning indicator.
-- WhatsApp `fromMe` events from the primary phone or another companion are mirrored into the
-  channel conversation even when Baileys reports them as `append`. Historical inbound `append`
-  events remain silent and never activate an agent turn.
+- A newly observed, uncorrelated WhatsApp `fromMe` event from the primary phone or another
+  companion claims that conversation for the human until an explicit **Hand back**. The claim is
+  durable and conversation-local: Agentis aborts the active turn and companion lane, revokes the
+  tool lease, clears typing, cancels pending durable turn jobs, and fences every automated provider
+  send with a monotonic `automationEpoch`. Agentis-originated provider echoes never claim ownership.
+- Operator messages are business-side conversation context and compile as model role `assistant`;
+  customer messages compile as `user`. Platform-chat actor semantics are unchanged. This prevents
+  a manual promise such as “I will send the proposal” from being interpreted as a new customer
+  instruction when automation resumes.
+- Baileys recent/bootstrap history is reconciled silently. Agentis keeps at most 160 messages per
+  conversation and 2,000 per sync session, persists them oldest-to-newest idempotently, and never
+  starts turns, increments unread, claims ownership, emits replies, or promotes imported text into
+  workspace memory. Only the newest 20 imported items per conversation may download media under
+  the existing limits; older media keeps truthful type/caption placeholders.
+- Model context is separate from the durable transcript: the newest complete exchanges are bounded
+  to 20 messages and 12,000 characters, with a relationship summary capped at 1,800 characters and
+  advanced by message watermark. History import invalidates and rebuilds that local summary in the
+  background without delaying the first live reply.
+
+The allow-listed WhatsApp behavior profile is version 2. Existing version 1 settings resolve lazily
+with safe defaults: `manualOutboundTakeover:"until_handback"` and
+`historyReconciliation:"recent"`. Operators may disable either behavior without exposing arbitrary
+Baileys socket options or browser-identity knobs. Generic clients can transfer ownership with
+`PATCH /v1/conversations/:conversationId/handoff` and `{ "state": "human" | "agent" }`; the App
+takeover route delegates to the same service.
 
 Inbound voice notes are understood by default. Agentis first uses a workspace transcription
 provider when configured, then a pinned Apache-2.0 local Whisper q8 fallback. The fallback is

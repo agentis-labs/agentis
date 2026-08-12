@@ -42,6 +42,7 @@ export function serializeConversationMessage(message: ConversationMessageRow) {
     role: message.authorType,
     authorType: message.authorType,
     authorId: message.authorId,
+    participantSide: message.participantSide ?? null,
     body: message.body,
     metadata: message.metadata ?? {},
     deliveryStatus: message.deliveryStatus,

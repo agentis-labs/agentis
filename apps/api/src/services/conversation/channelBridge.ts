@@ -45,6 +45,7 @@ import type { ChannelAccess, ChannelRecipient } from './channelAccess.js';
 import { normalizePersona, resolveHumanize, type ChannelPersona, type HumanizeConfig } from './humanize.js';
 import { ChannelSendGuard } from './channelGuards.js';
 import { channelCapabilities, type ChannelCapabilities } from '../../adapters/channels/channelCapabilities.js';
+import type { ConversationHandoffService } from './conversationHandoffService.js';
 
 export interface ChannelBridgeDeps {
   db: AgentisSqliteDb;
@@ -60,6 +61,7 @@ export interface ChannelBridgeDeps {
   artifacts?: ArtifactService;
   /** Voice model — turns an attachment's `text` into a spoken Opus voice note. */
   speech?: { synthesize(input: { text: string; voice?: string }): Promise<{ bytes: Buffer; mimeType: string } | null> };
+  handoffs?: ConversationHandoffService;
 }
 
 export interface CreateConnectionInput {
@@ -114,7 +116,7 @@ export type OwnerReasoningVisibility = 'off' | 'indicator';
  * migration. Socket/browser knobs intentionally do not belong here.
  */
 export interface WhatsAppConnectionProfile {
-  version: 1;
+  version: 2;
   reliability: {
     sessionRecovery: true;
     classifiedReconnect: true;
@@ -134,10 +136,12 @@ export interface WhatsAppConnectionProfile {
     chatSocketLogs: false;
   };
   ownerReasoningVisibility: OwnerReasoningVisibility;
+  manualOutboundTakeover: 'until_handback' | 'off';
+  historyReconciliation: 'recent' | 'off';
 }
 
 export const DEFAULT_WHATSAPP_CONNECTION_PROFILE: WhatsAppConnectionProfile = {
-  version: 1,
+  version: 2,
   reliability: {
     sessionRecovery: true,
     classifiedReconnect: true,
@@ -154,6 +158,8 @@ export const DEFAULT_WHATSAPP_CONNECTION_PROFILE: WhatsAppConnectionProfile = {
   },
   observability: { structuredDiagnostics: true, chatSocketLogs: false },
   ownerReasoningVisibility: 'off',
+  manualOutboundTakeover: 'until_handback',
+  historyReconciliation: 'recent',
 };
 
 /** Backward-compatible, allow-listed profile resolver for JSON connection settings. */
@@ -164,6 +170,8 @@ export function resolveWhatsAppConnectionProfile(value: unknown): WhatsAppConnec
   return {
     ...DEFAULT_WHATSAPP_CONNECTION_PROFILE,
     ownerReasoningVisibility: candidate?.ownerReasoningVisibility === 'indicator' ? 'indicator' : 'off',
+    manualOutboundTakeover: candidate?.manualOutboundTakeover === 'off' ? 'off' : 'until_handback',
+    historyReconciliation: candidate?.historyReconciliation === 'off' ? 'off' : 'recent',
   };
 }
 
@@ -226,7 +234,7 @@ export interface PersistentChannelTransport {
   onCreated?(conn: PersistentChannelRef): void;
   /** Current live-session state, if this transport owns the connection. */
   status?(connectionId: string): { status: string; qr?: string; selfId?: string } | null;
-  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[], humanize?: HumanizeConfig, native?: OutboundNativeContent): Promise<ChannelDeliveryReceipt>;
+  send(connectionId: string, chatId: string, body: string, attachments?: OutboundAttachment[], humanize?: HumanizeConfig, native?: OutboundNativeContent, authority?: { actor: 'automation' | 'human'; conversationId?: string; expectedEpoch?: number }): Promise<ChannelDeliveryReceipt>;
   /** Provider account/quota diagnostics; read-only and never sends a message. */
   outboundHealth?(connectionId: string): Promise<ChannelHealthCheck | null>;
   /** Show/clear the typing indicator (best-effort). */
@@ -398,13 +406,35 @@ export class ChannelBridge {
    * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
    * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
    */
-  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent; idempotencyKey?: string; bypassGuards?: boolean; pacing?: 'immediate' }): Promise<ChannelDeliveryReceipt> {
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent; idempotencyKey?: string; bypassGuards?: boolean; pacing?: 'immediate'; actor?: 'automation' | 'human'; conversationId?: string; expectedAutomationEpoch?: number }): Promise<ChannelDeliveryReceipt> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, args.connectionId))
       .get();
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
+    const targetConversation = this.#conversationForDelivery(row, args.chatId, args.actor === 'human');
+    if (args.actor === 'human') {
+      if (targetConversation) this.deps.handoffs?.claimHuman({
+        workspaceId: row.workspaceId,
+        conversationId: targetConversation.id,
+        source: 'explicit',
+      });
+    } else {
+      if (args.conversationId) {
+        this.deps.handoffs?.assertAutomationAllowed({
+          workspaceId: row.workspaceId,
+          conversationId: args.conversationId,
+          ...(args.expectedAutomationEpoch !== undefined ? { expectedEpoch: args.expectedAutomationEpoch } : {}),
+        });
+      }
+      this.deps.handoffs?.assertAutomationAllowedByChannel({
+        workspaceId: row.workspaceId,
+        connectionId: row.id,
+        chatId: args.chatId,
+        ...(!args.conversationId && args.expectedAutomationEpoch !== undefined ? { expectedEpoch: args.expectedAutomationEpoch } : {}),
+      });
+    }
     // §7 anti-ban rails — opt-in (default) so behaviour is unchanged until an
     // operator configures caps/opt-in. An operator cockpit send may bypass.
     if (!args.bypassGuards) {
@@ -472,7 +502,23 @@ export class ChannelBridge {
       status: 'sending',
     }).run();
     try {
-      const receipt = await this.#sendRow(row, args.chatId, args.body, attachments, args.pacing, args.native);
+      if (args.actor !== 'human') {
+        if (args.conversationId) this.deps.handoffs?.assertAutomationAllowed({
+          workspaceId: row.workspaceId,
+          conversationId: args.conversationId,
+          ...(args.expectedAutomationEpoch !== undefined ? { expectedEpoch: args.expectedAutomationEpoch } : {}),
+        });
+        this.deps.handoffs?.assertAutomationAllowedByChannel({
+          workspaceId: row.workspaceId,
+          connectionId: row.id,
+          chatId: args.chatId,
+        });
+      }
+      const receipt = await this.#sendRow(row, args.chatId, args.body, attachments, args.pacing, args.native, {
+        actor: args.actor === 'human' ? 'human' : 'automation',
+        ...(args.conversationId ? { conversationId: args.conversationId } : {}),
+        ...(args.expectedAutomationEpoch !== undefined ? { expectedEpoch: args.expectedAutomationEpoch } : {}),
+      });
       if (!receipt.providerMessageId?.trim()) {
         throw new AgentisError('CHANNEL_SEND_FAILED', `${row.kind} returned no provider message id; delivery is unverified`);
       }
@@ -511,17 +557,22 @@ export class ChannelBridge {
       return durableReceipt;
     } catch (err) {
       const msg = (err as Error).message ?? 'send failed';
+      const ownershipCancelled = err instanceof AgentisError
+        && (err.code === 'CHANNEL_HUMAN_TAKEOVER_ACTIVE' || err.code === 'TURN_CANCELLED');
       const providerRejected = err instanceof ChannelDeliveryRejectedError;
       // A provider rejection is certain and retryable only after remediation.
       // A transport exception remains uncertain because the message may have
       // crossed the provider boundary before the failure became visible.
       this.deps.db.update(schema.channelOutboundDeliveries).set({
-        status: providerRejected ? 'failed' : 'uncertain',
+        status: providerRejected || ownershipCancelled ? 'failed' : 'uncertain',
         ...(providerRejected ? { providerMessageId: err.providerMessageId } : {}),
         error: msg,
         updatedAt: new Date().toISOString(),
       }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
-      if (providerRejected) {
+      if (ownershipCancelled) {
+        // The provider boundary was never crossed. This is expected arbitration,
+        // not a transport failure and must not poison connection health.
+      } else if (providerRejected) {
         // A recipient/account policy rejection does not mean the live socket is
         // broken. Keep established conversations usable and expose the failure
         // through outbound health instead of flipping transport status to error.
@@ -752,7 +803,7 @@ export class ChannelBridge {
   updateTargets(workspaceId: string, id: string, input: UpdateConnectionTargetsInput): PublicConnection {
     const row = this.#row(workspaceId, id);
     const settings = { ...this.#settings(row) };
-    // Any behavior save upgrades legacy WhatsApp rows to the explicit v1 profile.
+    // Any behavior save upgrades legacy WhatsApp rows to the explicit v2 profile.
     if (row.kind === 'whatsapp') settings.whatsappProfile = resolveWhatsAppConnectionProfile(settings.whatsappProfile);
     if ('defaultChatId' in input) {
       const target = input.defaultChatId?.trim();
@@ -808,6 +859,8 @@ export class ChannelBridge {
     requireOptIn?: boolean;
     startWarmup?: boolean;
     ownerReasoningVisibility?: OwnerReasoningVisibility;
+    manualOutboundTakeover?: 'until_handback' | 'off';
+    historyReconciliation?: 'recent' | 'off';
   }): PublicConnection {
     const row = this.#row(workspaceId, id);
     const settings = { ...this.#settings(row) };
@@ -823,13 +876,15 @@ export class ChannelBridge {
     if (typeof input.requireOptIn === 'boolean') settings.requireOptIn = input.requireOptIn;
     if (input.startWarmup === true) settings.warmupStartedAt = new Date().toISOString();
     else if (input.startWarmup === false) delete settings.warmupStartedAt;
-    if (input.ownerReasoningVisibility !== undefined) {
+    if (input.ownerReasoningVisibility !== undefined || input.manualOutboundTakeover !== undefined || input.historyReconciliation !== undefined) {
       if (row.kind !== 'whatsapp') {
-        throw new AgentisError('VALIDATION_FAILED', 'owner reasoning visibility is available only for WhatsApp');
+        throw new AgentisError('VALIDATION_FAILED', 'WhatsApp profile behavior is available only for WhatsApp');
       }
       settings.whatsappProfile = {
         ...resolveWhatsAppConnectionProfile(settings.whatsappProfile),
-        ownerReasoningVisibility: input.ownerReasoningVisibility,
+        ...(input.ownerReasoningVisibility !== undefined ? { ownerReasoningVisibility: input.ownerReasoningVisibility } : {}),
+        ...(input.manualOutboundTakeover !== undefined ? { manualOutboundTakeover: input.manualOutboundTakeover } : {}),
+        ...(input.historyReconciliation !== undefined ? { historyReconciliation: input.historyReconciliation } : {}),
       };
     }
     this.deps.db
@@ -1015,6 +1070,7 @@ export class ChannelBridge {
       conversationId: conversation.id,
       sessionMessageId: parsed.externalId,
       authorType: 'system',
+      participantSide: 'customer',
       body: `${fromTag}${parsed.body}`,
       metadata: {
         channel: row.kind,
@@ -1306,7 +1362,7 @@ export class ChannelBridge {
       : this.#check('runtime', false, 'agent_missing', 'The connected agent no longer exists.', 'Reconnect the channel to an existing agent.');
   }
 
-  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = [], pacing?: 'immediate', native?: OutboundNativeContent): Promise<ChannelDeliveryReceipt> {
+  async #sendRow(row: ChannelConnectionRow, chatId: string, body: string, attachments: OutboundAttachment[] = [], pacing?: 'immediate', native?: OutboundNativeContent, authority?: { actor: 'automation' | 'human'; conversationId?: string; expectedEpoch?: number }): Promise<ChannelDeliveryReceipt> {
     const settings = this.#settings(row);
     const normalizedChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, chatId);
     const selfCheck = await this.#telegramSelfTargetCheck(row, normalizedChatId);
@@ -1321,6 +1377,7 @@ export class ChannelBridge {
         attachments.length ? attachments : undefined,
         pacing === 'immediate' ? undefined : resolveHumanize(settings.persona),
         native,
+        authority,
       );
     }
     if (this.#isWhatsAppCloud(row.kind as ChannelKind, settings)) {
@@ -1441,6 +1498,23 @@ export class ChannelBridge {
       throw new AgentisError('CHANNEL_SEND_FAILED', 'whatsapp cloud accepted no provider message id; delivery is unverified');
     }
     return { provider: 'whatsapp', providerMessageId, status: 'accepted', acceptedAt: new Date().toISOString(), recipient: chatId };
+  }
+
+  #conversationForDelivery(row: ChannelConnectionRow, chatId: string, create: boolean): { id: string } | null {
+    const existing = this.deps.handoffs?.findByChannel(row.workspaceId, row.id, chatId);
+    if (existing) return { id: existing.conversationId };
+    if (!create || !this.deps.handoffs) return null;
+    const agentId = row.agentId ?? this.#resolveInboundAgentId(row.workspaceId);
+    if (!agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'No agent is available to own this channel conversation');
+    return this.deps.conversations.getOrCreateByChannel({
+      workspaceId: row.workspaceId,
+      ambientId: row.ambientId,
+      userId: row.userId,
+      agentId,
+      channelConnectionId: row.id,
+      channelChatId: chatId,
+      appId: row.appId,
+    });
   }
 
   async #sendWhatsAppCloudNative(

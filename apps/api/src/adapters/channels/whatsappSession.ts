@@ -21,6 +21,48 @@
 
 import type { Logger } from '../../logger.js';
 import { ChannelDeliveryRejectedError, type ChannelDeliveryReceipt, type ChannelHealthCheck, type OutboundAttachment, type OutboundNativeContent } from './types.js';
+import { loadBaileys, silentBaileysLogger, type BaileysModule } from './whatsappBaileysRuntime.js';
+import {
+  artifactIdFromRef,
+  observedWhatsAppChatJid,
+  resolveWhatsAppInboundBody,
+  whatsappMediaContent,
+  whatsappNativeContent,
+  type InboundChannelMedia,
+} from './whatsappMessageCodec.js';
+import {
+  classifyWhatsAppReconnect,
+  messageTimestampMs,
+  normalizeWhatsAppJid,
+  readDisconnectStatus,
+  whatsappDeliverySignal,
+  whatsappDeliveryStatus,
+  whatsappProviderRejectionMessage,
+  whatsappReachoutRestrictionScope,
+  type WhatsAppDeliverySignal,
+  type WhatsAppMessageUpdate,
+  type WhatsAppReconnectClass,
+} from './whatsappProtocol.js';
+
+export {
+  extractWhatsAppText,
+  resolveWhatsAppInboundBody,
+  resolveWhatsAppNativeBody,
+  unwrapAudioMessage,
+  unwrapDocumentMessage,
+  unwrapImageMessage,
+  whatsappMediaContent,
+  whatsappNativeContent,
+} from './whatsappMessageCodec.js';
+export type { InboundChannelMedia } from './whatsappMessageCodec.js';
+export {
+  classifyWhatsAppReconnect,
+  shouldProcessWhatsAppUpsert,
+  whatsappDeliverySignal,
+  whatsappDeliveryStatus,
+  whatsappReachoutRestrictionScope,
+} from './whatsappProtocol.js';
+export type { WhatsAppReachoutRestrictionScope, WhatsAppReconnectClass } from './whatsappProtocol.js';
 
 export type WhatsAppSessionStatus =
   | 'idle'
@@ -44,18 +86,17 @@ export interface WhatsAppObservedOutbound {
   externalId: string;
   chatId: string;
   body: string;
+  attachmentIds?: string[];
 }
 
-export interface InboundChannelMedia {
-  kind: 'image' | 'video' | 'audio' | 'voice' | 'sticker' | 'file';
-  bytes: Buffer;
-  mimeType: string;
-  filename: string;
-  caption?: string;
-  gifPlayback?: boolean;
+export interface WhatsAppHistoryEntry {
+  externalId: string;
+  chatId: string;
+  body: string;
+  participantSide: 'customer' | 'business';
+  occurredAt: string;
+  attachmentIds?: string[];
 }
-
-export type WhatsAppReconnectClass = 'connection_lost' | 'restart_required' | 'service_unavailable' | 'session_conflict' | 'connection_closed' | 'reachout_paused' | 'exhausted';
 
 export interface WhatsAppRecoveryState {
   reason: WhatsAppReconnectClass;
@@ -70,6 +111,8 @@ export interface WhatsAppSessionOptions {
   onInbound: (msg: WhatsAppInbound) => void;
   /** Mirror messages sent from the primary phone or another companion. */
   onOutboundObserved?: (msg: WhatsAppObservedOutbound) => void;
+  /** Silent, bounded bootstrap history. It never enters the live inbound callback. */
+  onHistoryReconciled?: (messages: WhatsAppHistoryEntry[]) => void | Promise<void>;
   /** Notified whenever status/QR changes (for the login UI + DB status). */
   onStateChange?: (state: { status: WhatsAppSessionStatus; qr?: string; selfId?: string; recovery?: WhatsAppRecoveryState }) => void;
   /**
@@ -97,41 +140,8 @@ export interface WhatsAppSessionOptions {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   loadAuthState?: () => Promise<{ state: any; saveCreds: () => Promise<void> }>;
-}
-
-// A minimal pino-compatible logger — baileys only needs `.child()` + levels.
-// Avoids pulling pino into the dependency graph.
-function silentBaileysLogger(): unknown {
-  const noop = () => {};
-  const logger: Record<string, unknown> = { level: 'silent' };
-  for (const m of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) logger[m] = noop;
-  logger.child = () => logger;
-  return logger;
-}
-
-type BaileysModule = typeof import('baileys');
-let cachedBaileys: { ok: true; mod: BaileysModule } | { ok: false; reason: string } | undefined;
-async function loadBaileys() {
-  if (cachedBaileys) return cachedBaileys;
-  try {
-    const mod = (await import('baileys' as string)) as BaileysModule & { default?: BaileysModule };
-    // baileys (7.x, ESM) exposes its full API as named exports on the module
-    // namespace; its `default` export is the bare `makeWASocket` function alone,
-    // which lacks initAuthCreds/useMultiFileAuthState/DisconnectReason/etc. So the
-    // usual `mod.default ?? mod` interop pattern picks the WRONG object here and
-    // every destructured helper comes back undefined. Resolve to whichever object
-    // actually carries the API (probe a non-default helper).
-    const resolved = (typeof (mod as Partial<BaileysModule>).initAuthCreds === 'function'
-      ? mod
-      : mod.default) as BaileysModule | undefined;
-    if (!resolved || typeof resolved.makeWASocket !== 'function') {
-      throw new Error('baileys module did not expose makeWASocket');
-    }
-    cachedBaileys = { ok: true, mod: resolved };
-  } catch (err) {
-    cachedBaileys = { ok: false, reason: (err as Error).message };
-  }
-  return cachedBaileys;
+  /** Test seam; production always lazy-loads the OSS Baileys dependency. */
+  baileysModule?: unknown;
 }
 
 const RECONNECT_INITIAL_MS = 5_000;  // gentler first backoff — don't hammer the companion
@@ -150,78 +160,11 @@ const REACHOUT_UNKNOWN_PAUSE_MS = 30 * 60 * 1000;
 let cachedWaVersion: { version: [number, number, number]; fetchedAt: number } | undefined;
 const WA_VERSION_TTL_MS = 6 * 60 * 60 * 1000;
 const DELIVERY_ACK_TIMEOUT_MS = Math.max(1_000, Number(process.env.AGENTIS_WHATSAPP_ACK_TIMEOUT_MS) || 8_000);
-
-type WhatsAppDeliverySignal = {
-  status: number;
-  errorCode?: string;
-  error?: string;
-};
-
-type WhatsAppMessageUpdate = {
-  status?: unknown;
-  messageStubParameters?: unknown;
-};
-
-/** Parse both success statuses and Baileys' status=0 provider rejection. */
-export function whatsappDeliverySignal(update: WhatsAppMessageUpdate | null | undefined): WhatsAppDeliverySignal | null {
-  if (!update) return null;
-  const numeric = typeof update.status === 'number' ? update.status : Number(update.status);
-  if (!Number.isFinite(numeric)) return null;
-  if (numeric > 0) return { status: numeric };
-  const params = Array.isArray(update.messageStubParameters) ? update.messageStubParameters : [];
-  const errorCode = params[0] == null ? '' : String(params[0]).trim();
-  if (!errorCode) return null;
-  return { status: 0, errorCode, error: whatsappProviderRejectionMessage(errorCode) };
-}
-
-function whatsappProviderRejectionMessage(errorCode: string): string {
-  if (errorCode === '463') {
-    return 'WhatsApp rejected this linked-device send because a provider reach-out restriction is active (error 463).';
-  }
-  if (errorCode === '479') {
-    return 'WhatsApp rejected the message because the recipient addressing or device session is stale or invalid.';
-  }
-  return `WhatsApp rejected the message (provider error ${errorCode}).`;
-}
-
-export type WhatsAppReachoutRestrictionScope = 'companion' | 'account_or_business' | 'unknown';
-
-/** Interpret provider scope without pretending a companion restriction also blocks the primary phone. */
-export function whatsappReachoutRestrictionScope(enforcementType: unknown): WhatsAppReachoutRestrictionScope {
-  const value = typeof enforcementType === 'string' ? enforcementType.trim().toUpperCase() : '';
-  if (value.includes('COMPANION') || value === 'WEB_COMPANION_ONLY') return 'companion';
-  if (value.startsWith('BIZ_')) return 'account_or_business';
-  return 'unknown';
-}
-
-/** Baileys WebMessageInfo.Status: 2 server, 3 delivered, 4+ read/played. */
-export function whatsappDeliveryStatus(status: unknown): ChannelDeliveryReceipt['status'] {
-  const numeric = typeof status === 'number' ? status : Number(status);
-  if (!Number.isFinite(numeric) || numeric < 2) return 'queued';
-  if (numeric >= 4) return 'read';
-  if (numeric >= 3) return 'delivered';
-  return 'accepted';
-}
-
-function normalizeWhatsAppJid(jid: string): string {
-  return jid.trim().toLowerCase().replace(/:\d+@/u, '@');
-}
-
-/** Decide which Baileys upserts may enter live conversation state. */
-export function shouldProcessWhatsAppUpsert(type: string, fromMe: boolean): boolean {
-  return type === 'notify' || fromMe;
-}
-
-/** Stable recovery classes persisted as diagnostics; provider codes stay in logs. */
-export function classifyWhatsAppReconnect(statusCode: number | undefined): WhatsAppReconnectClass {
-  switch (statusCode) {
-    case 408: return 'connection_lost';
-    case 440: return 'session_conflict';
-    case 503: return 'service_unavailable';
-    case 515: return 'restart_required';
-    default: return 'connection_closed';
-  }
-}
+const HISTORY_PER_CHAT_LIMIT = 160;
+const HISTORY_SESSION_LIMIT = 2_000;
+const HISTORY_MEDIA_LIMIT = 20;
+const HISTORY_INACTIVITY_FLUSH_MS = 1_500;
+const LOCAL_SUBMISSION_CORRELATION_TIMEOUT_MS = 30_000;
 
 export class WhatsAppSession {
   #status: WhatsAppSessionStatus = 'idle';
@@ -245,6 +188,13 @@ export class WhatsAppSession {
   readonly #deliveryWaiters = new Map<string, Set<(signal: WhatsAppDeliverySignal) => void>>();
   readonly #deliveryRecipients = new Map<string, string>();
   readonly #locallySubmittedMessageIds = new Set<string>();
+  readonly #localSubmissionsByChat = new Map<string, number>();
+  readonly #localSubmissionWaiters = new Map<string, Set<(settled: boolean) => void>>();
+  readonly #history = new Map<string, Map<string, { message: unknown; occurredAt: number }>>();
+  readonly #historyMediaPersistedByChat = new Map<string, number>();
+  #historyFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  #historyFlushPromise: Promise<void> | undefined;
+  #openedAt = 0;
 
   constructor(private readonly opts: WhatsAppSessionOptions) {}
 
@@ -288,6 +238,15 @@ export class WhatsAppSession {
     this.#startPromise = undefined;
     this.#deliverySignals.clear();
     this.#deliveryWaiters.clear();
+    this.#history.clear();
+    this.#historyMediaPersistedByChat.clear();
+    if (this.#historyFlushTimer) clearTimeout(this.#historyFlushTimer);
+    this.#historyFlushTimer = undefined;
+    this.#localSubmissionsByChat.clear();
+    for (const waiters of this.#localSubmissionWaiters.values()) {
+      for (const settle of waiters) settle(false);
+    }
+    this.#localSubmissionWaiters.clear();
     this.#deliveryRecipients.clear();
     this.#locallySubmittedMessageIds.clear();
     this.#recovery = undefined;
@@ -347,16 +306,27 @@ export class WhatsAppSession {
       if (!match) throw new Error(`whatsapp recipient ${jid} is not registered or could not be resolved`);
       if (typeof match.jid === 'string' && match.jid) recipient = match.jid;
     }
-    const sent = await this.#sock.sendMessage(recipient, content);
+    const localKey = normalizeWhatsAppJid(recipient);
+    this.#localSubmissionsByChat.set(localKey, (this.#localSubmissionsByChat.get(localKey) ?? 0) + 1);
+    let sent;
+    try {
+      sent = await this.#sock.sendMessage(recipient, content);
+      const submittedId = typeof sent?.key?.id === 'string' ? sent.key.id.trim() : '';
+      if (submittedId) this.#rememberLocalSubmission(submittedId);
+    } finally {
+      const remaining = Math.max(0, (this.#localSubmissionsByChat.get(localKey) ?? 1) - 1);
+      if (remaining === 0) {
+        this.#localSubmissionsByChat.delete(localKey);
+        const waiters = this.#localSubmissionWaiters.get(localKey);
+        this.#localSubmissionWaiters.delete(localKey);
+        for (const settle of waiters ?? []) settle(true);
+      } else this.#localSubmissionsByChat.set(localKey, remaining);
+    }
     const providerMessageId = typeof sent?.key?.id === 'string' ? sent.key.id.trim() : '';
     if (!providerMessageId) {
       throw new Error('whatsapp provider accepted no message id; outbound delivery is unverified');
     }
-    this.#locallySubmittedMessageIds.add(providerMessageId);
-    if (this.#locallySubmittedMessageIds.size > 2_000) {
-      const oldest = this.#locallySubmittedMessageIds.values().next().value as string | undefined;
-      if (oldest) this.#locallySubmittedMessageIds.delete(oldest);
-    }
+    this.#rememberLocalSubmission(providerMessageId);
     const providerRecipient = typeof sent?.key?.remoteJid === 'string' && sent.key.remoteJid
       ? sent.key.remoteJid
       : recipient;
@@ -575,7 +545,9 @@ export class WhatsAppSession {
 
 
   async #connect(): Promise<void> {
-    const loaded = await loadBaileys();
+    const loaded = this.opts.baileysModule
+      ? { ok: true as const, mod: this.opts.baileysModule as BaileysModule }
+      : await loadBaileys();
     if (!loaded.ok) {
       this.opts.logger.warn('whatsapp.baileys_unavailable', { reason: loaded.reason });
       this.#setStatus('error');
@@ -649,6 +621,7 @@ export class WhatsAppSession {
         this.#selfId = sock.user?.id;
         this.#reachoutBlockedUntil = undefined; // a real open clears any reach-out pause
         this.#recovery = undefined;
+        this.#openedAt = Date.now();
         this.#setStatus('open');
         // Only reset the backoff after the connection STAYS open — a flap
         // (open→close during enforcement) must grow the backoff, not zero it each time.
@@ -669,16 +642,27 @@ export class WhatsAppSession {
 
     sock.ev.on('messages.upsert', (event) => {
       for (const msg of event.messages) {
-        // A message authored in the primary phone/another companion can arrive
-        // as `append`, while genuinely new inbound messages arrive as `notify`.
-        // Keep append inbound silent (history must never trigger replies), but
-        // mirror fromMe append events so the next agent turn has the human's
-        // actual WhatsApp-side context.
-        if (!shouldProcessWhatsAppUpsert(event.type, msg?.key?.fromMe === true)) continue;
+        const liveManualOutbound = event.type === 'append'
+          && msg?.key?.fromMe === true
+          && messageTimestampMs(msg) >= this.#openedAt - 5_000;
+        if (event.type !== 'notify' && !liveManualOutbound) {
+          this.#stageHistory(msg);
+          continue;
+        }
         void this.#handleMessage(msg).catch((err) => {
           this.opts.logger.warn('whatsapp.inbound_handler_threw', { err: (err as Error).message });
         });
       }
+    });
+
+    const historyEvents = sock.ev as unknown as { on(name: string, listener: (event: any) => void): void };
+    historyEvents.on('messaging-history.set', (event) => {
+      for (const message of Array.isArray(event?.messages) ? event.messages : []) this.#stageHistory(message);
+      if (event?.isLatest === true) void this.#flushHistory();
+    });
+    historyEvents.on('messaging-history.status', (event) => {
+      const status = String(event?.status ?? event ?? '').toLowerCase();
+      if (status.includes('complete') || status.includes('pause')) void this.#flushHistory();
     });
 
     // `sendMessage()` returning an id proves only local submission. These
@@ -703,6 +687,97 @@ export class WhatsAppSession {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  #stageHistory(msg: any): void {
+    if (!this.opts.onHistoryReconciled) return;
+    const key = msg?.key;
+    const chatId = observedWhatsAppChatJid(key) ?? key?.remoteJid;
+    if (!chatId || chatId === 'status@broadcast') return;
+    const externalId = typeof key?.id === 'string' ? key.id.trim() : '';
+    if (!externalId) return;
+    const occurredAt = messageTimestampMs(msg);
+    const chat = this.#history.get(chatId) ?? new Map<string, { message: unknown; occurredAt: number }>();
+    chat.set(externalId, { message: msg, occurredAt });
+    if (chat.size > HISTORY_PER_CHAT_LIMIT) {
+      const oldest = [...chat.entries()].sort((a, b) => a[1].occurredAt - b[1].occurredAt)[0];
+      if (oldest) chat.delete(oldest[0]);
+    }
+    this.#history.set(chatId, chat);
+    while ([...this.#history.values()].reduce((sum, entries) => sum + entries.size, 0) > HISTORY_SESSION_LIMIT) {
+      let oldest: { chatId: string; id: string; occurredAt: number } | undefined;
+      for (const [candidateChatId, entries] of this.#history) {
+        for (const [id, entry] of entries) {
+          if (!oldest || entry.occurredAt < oldest.occurredAt) oldest = { chatId: candidateChatId, id, occurredAt: entry.occurredAt };
+        }
+      }
+      if (!oldest) break;
+      this.#history.get(oldest.chatId)?.delete(oldest.id);
+    }
+    if (this.#historyFlushTimer) clearTimeout(this.#historyFlushTimer);
+    this.#historyFlushTimer = setTimeout(() => { void this.#flushHistory(); }, HISTORY_INACTIVITY_FLUSH_MS);
+    this.#historyFlushTimer.unref?.();
+  }
+
+  async #flushHistory(): Promise<void> {
+    if (this.#historyFlushPromise) return this.#historyFlushPromise;
+    if (!this.opts.onHistoryReconciled || this.#history.size === 0) return;
+    if (this.#historyFlushTimer) clearTimeout(this.#historyFlushTimer);
+    this.#historyFlushTimer = undefined;
+    const staged: Array<[string, Array<[string, { message: unknown; occurredAt: number }]>]> =
+      [...this.#history.entries()].map(([chatId, entries]) => [chatId, [...entries.entries()]]);
+    this.#history.clear();
+    this.#historyFlushPromise = (async () => {
+      const reconciled: WhatsAppHistoryEntry[] = [];
+      for (const [chatId, entries] of staged) {
+        const orderedEntries = [...entries].sort((a, b) => a[1].occurredAt - b[1].occurredAt);
+        const richFrom = Math.max(0, orderedEntries.length - HISTORY_MEDIA_LIMIT);
+        for (let index = 0; index < orderedEntries.length; index += 1) {
+          const [externalId, entry] = orderedEntries[index]!;
+          const attachmentIds: string[] = [];
+          const persistedMedia = this.#historyMediaPersistedByChat.get(chatId) ?? 0;
+          const rich = index >= richFrom && persistedMedia < HISTORY_MEDIA_LIMIT;
+          const body = await resolveWhatsAppInboundBody(entry.message, rich ? {
+            downloadMedia: this.#downloadMedia,
+            persistMedia: this.opts.persistMedia
+              ? async (media) => {
+                  const ref = await this.opts.persistMedia!(media);
+                  const artifactId = artifactIdFromRef(ref);
+                  if (artifactId) attachmentIds.push(artifactId);
+                  return ref;
+                }
+              : undefined,
+            onFailure: (kind, err) => this.opts.logger.warn(`whatsapp.history_${kind}_failed`, { err: err.message }),
+          } : {});
+          const fromMe = Boolean((entry.message as { key?: { fromMe?: boolean } })?.key?.fromMe);
+          reconciled.push({
+            externalId,
+            chatId,
+            body: body ?? (fromMe ? '[Outbound WhatsApp message]' : '[WhatsApp message]'),
+            participantSide: fromMe ? 'business' : 'customer',
+            occurredAt: new Date(entry.occurredAt).toISOString(),
+            ...(attachmentIds.length ? { attachmentIds: [...new Set(attachmentIds)] } : {}),
+          });
+          if (attachmentIds.length) this.#historyMediaPersistedByChat.set(chatId, persistedMedia + 1);
+        }
+      }
+      reconciled.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+      if (reconciled.length) {
+        try {
+          await this.opts.onHistoryReconciled!(reconciled);
+        } catch (err) {
+          this.opts.logger.warn('whatsapp.history_reconciliation_failed', { err: (err as Error).message });
+        }
+      }
+    })().finally(() => {
+      this.#historyFlushPromise = undefined;
+      if (this.#history.size > 0 && !this.#historyFlushTimer) {
+        this.#historyFlushTimer = setTimeout(() => { void this.#flushHistory(); }, HISTORY_INACTIVITY_FLUSH_MS);
+        this.#historyFlushTimer.unref?.();
+      }
+    });
+    return this.#historyFlushPromise;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async #handleMessage(msg: any): Promise<void> {
     const key = msg?.key;
     if (!key) return;
@@ -711,11 +786,35 @@ export class WhatsAppSession {
       if (!externalId || this.#locallySubmittedMessageIds.has(externalId)) return;
       const chatId = observedWhatsAppChatJid(key);
       if (!chatId || chatId === 'status@broadcast') return;
-      const body = extractWhatsAppText(msg.message) ?? '[Outbound WhatsApp message]';
-      // Allow the explicit Agentis send path to persist its provider id first.
-      // The supervisor performs a second durable dedupe before mirroring.
-      const timer = setTimeout(() => this.opts.onOutboundObserved?.({ externalId, chatId, body }), 750);
-      if (typeof timer === 'object' && 'unref' in timer) timer.unref();
+      const attachmentIds: string[] = [];
+      const body = await resolveWhatsAppInboundBody(msg, {
+        downloadMedia: this.#downloadMedia,
+        persistMedia: this.opts.persistMedia
+          ? async (media) => {
+              const ref = await this.opts.persistMedia!(media);
+              const artifactId = artifactIdFromRef(ref);
+              if (artifactId) attachmentIds.push(artifactId);
+              return ref;
+            }
+          : undefined,
+        onFailure: (kind, err) => this.opts.logger.warn(`whatsapp.outbound_${kind}_failed`, { err: err.message }),
+      }) ?? '[Outbound WhatsApp message]';
+      const localKey = normalizeWhatsAppJid(chatId);
+      if ((this.#localSubmissionsByChat.get(localKey) ?? 0) > 0) {
+        const settled = await this.#waitForLocalSubmission(localKey);
+        if (!settled) {
+          this.opts.logger.warn('whatsapp.outbound_origin_ambiguous', { connectionId: this.opts.connectionId, chatId, externalId });
+          return;
+        }
+      }
+      if (!this.#locallySubmittedMessageIds.has(externalId)) {
+        this.opts.onOutboundObserved?.({
+          externalId,
+          chatId,
+          body,
+          ...(attachmentIds.length ? { attachmentIds: [...new Set(attachmentIds)] } : {}),
+        });
+      }
       return;
     }
     await this.#handleInbound(msg);
@@ -768,6 +867,35 @@ export class WhatsAppSession {
       body,
       ...(from ? { from } : {}),
       ...(attachmentIds.length ? { attachmentIds: [...new Set(attachmentIds)] } : {}),
+    });
+  }
+
+  #rememberLocalSubmission(providerMessageId: string): void {
+    this.#locallySubmittedMessageIds.add(providerMessageId);
+    if (this.#locallySubmittedMessageIds.size <= 2_000) return;
+    const oldest = this.#locallySubmittedMessageIds.values().next().value as string | undefined;
+    if (oldest) this.#locallySubmittedMessageIds.delete(oldest);
+  }
+
+  #waitForLocalSubmission(chatKey: string): Promise<boolean> {
+    if ((this.#localSubmissionsByChat.get(chatKey) ?? 0) === 0) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let finished = false;
+      const settle = (settled: boolean) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        resolve(settled);
+      };
+      const waiters = this.#localSubmissionWaiters.get(chatKey) ?? new Set<(settled: boolean) => void>();
+      waiters.add(settle);
+      this.#localSubmissionWaiters.set(chatKey, waiters);
+      const timer = setTimeout(() => {
+        waiters.delete(settle);
+        if (waiters.size === 0) this.#localSubmissionWaiters.delete(chatKey);
+        settle(false);
+      }, LOCAL_SUBMISSION_CORRELATION_TIMEOUT_MS);
+      timer.unref?.();
     });
   }
 
@@ -861,439 +989,4 @@ export class WhatsAppSession {
       ...(this.#recovery ? { recovery: this.#recovery } : {}),
     });
   }
-}
-
-/**
- * Turn every supported inbound WhatsApp media message into useful turn context.
- *
- * Captions must not suppress media understanding: an image often has both a
- * caption ("what is this?") and the actual question encoded in its pixels. When
- * a model is unavailable or a provider call fails, retain a truthful placeholder
- * instead of silently dropping the message and making the customer wait forever.
- */
-export async function resolveWhatsAppInboundBody(
-  message: unknown,
-  options: {
-    downloadMedia?: (message: unknown) => Promise<Buffer>;
-    transcribeAudio?: (bytes: Buffer, mimeType: string) => Promise<string | null>;
-    describeImage?: (bytes: Buffer, mimeType: string, caption?: string) => Promise<string | null>;
-    extractDocument?: (bytes: Buffer, mimeType: string, fileName?: string) => Promise<string | null>;
-    persistMedia?: (media: InboundChannelMedia) => Promise<string | null>;
-    onFailure?: (kind: 'download_media' | 'persist_media' | 'transcribe' | 'describe_image' | 'extract_document', error: Error) => void;
-  } = {},
-): Promise<string | undefined> {
-  // Baileys hands the live session an envelope (`{ key, message, ... }`), while
-  // tests and callers may pass the message content directly. Normalize once but
-  // retain the original envelope for `downloadMediaMessage`.
-  const content = message && typeof message === 'object' && 'message' in message
-    ? (message as { message?: unknown }).message
-    : message;
-  let bytesPromise: Promise<Buffer | null> | undefined;
-  const mediaBytes = async (): Promise<Buffer | null> => {
-    if (!bytesPromise) {
-      bytesPromise = options.downloadMedia
-        ? options.downloadMedia(message).catch((error) => {
-          options.onFailure?.('download_media', error instanceof Error ? error : new Error(String(error)));
-          return null;
-        })
-        : Promise.resolve(null);
-    }
-    return bytesPromise;
-  };
-  const persist = async (media: Omit<InboundChannelMedia, 'bytes'>): Promise<string | null> => {
-    if (!options.persistMedia) return null;
-    const bytes = await mediaBytes();
-    if (!bytes) return null;
-    try {
-      return await options.persistMedia({ ...media, bytes });
-    } catch (error) {
-      options.onFailure?.('persist_media', error instanceof Error ? error : new Error(String(error)));
-      return null;
-    }
-  };
-  const attachmentLine = (ref: string | null) => ref ? `Attachment: ${ref}` : null;
-
-  const audio = unwrapAudioMessage(content);
-  if (audio) {
-    const mimeType = String(audio.mimetype ?? 'audio/ogg');
-    const ref = await persist({
-      kind: 'voice',
-      mimeType,
-      filename: mediaFilename('voice-note', mimeType),
-    });
-    if (options.downloadMedia && options.transcribeAudio) {
-      try {
-        const bytes = await mediaBytes();
-        const transcript = bytes ? await options.transcribeAudio(bytes, mimeType) : null;
-        if (transcript?.trim()) return [
-          '[Voice note transcript]',
-          transcript.trim(),
-          attachmentLine(ref),
-        ].filter(Boolean).join('\n');
-      } catch (error) {
-        options.onFailure?.('transcribe', error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-    return [
-      '[Voice note received. Transcription is unavailable.]',
-      attachmentLine(ref),
-    ].filter(Boolean).join('\n');
-  }
-
-  const image = unwrapImageMessage(content);
-  if (image) {
-    const caption = typeof image.caption === 'string' && image.caption.trim() ? image.caption.trim() : null;
-    const mimeType = String(image.mimetype ?? 'image/jpeg');
-    const ref = await persist({ kind: 'image', mimeType, filename: mediaFilename('image', mimeType), ...(caption ? { caption } : {}) });
-    let description: string | null = null;
-    if (options.downloadMedia && options.describeImage) {
-      try {
-        const bytes = await mediaBytes();
-        description = bytes ? await options.describeImage(bytes, mimeType, caption ?? undefined) : null;
-      } catch (error) {
-        options.onFailure?.('describe_image', error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-    return [
-      '[Image received]',
-      ...(caption ? [`Caption: ${caption}`] : []),
-      attachmentLine(ref),
-      description?.trim()
-        ? `Visual analysis: ${description.trim()}`
-        : 'Visual analysis is unavailable. Do not claim to know what is in the image.',
-    ].join('\n');
-  }
-
-  const video = unwrapWhatsAppMediaMessage(content, 'videoMessage') as { mimetype?: string; caption?: string; gifPlayback?: boolean; jpegThumbnail?: Uint8Array } | undefined;
-  if (video) {
-    const caption = cleanText(video.caption);
-    const mimeType = String(video.mimetype ?? 'video/mp4');
-    const gifPlayback = Boolean(video.gifPlayback);
-    const ref = await persist({
-      kind: 'video', mimeType, filename: mediaFilename(gifPlayback ? 'animation' : 'video', mimeType), gifPlayback,
-      ...(caption ? { caption } : {}),
-    });
-    let previewDescription: string | null = null;
-    if (options.describeImage && video.jpegThumbnail?.byteLength) {
-      try {
-        previewDescription = await options.describeImage(Buffer.from(video.jpegThumbnail), 'image/jpeg', caption ?? 'Preview frame from a received video');
-      } catch (error) {
-        options.onFailure?.('describe_image', error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-    return [
-      gifPlayback ? '[Animated GIF received]' : '[Video received]',
-      ...(caption ? [`Caption: ${caption}`] : []),
-      attachmentLine(ref),
-      ...(previewDescription?.trim() ? [`Preview-frame analysis: ${previewDescription.trim()}`] : []),
-    ].filter(Boolean).join('\n');
-  }
-
-  const sticker = unwrapWhatsAppMediaMessage(content, 'stickerMessage') as { mimetype?: string } | undefined;
-  if (sticker) {
-    const mimeType = String(sticker.mimetype ?? 'image/webp');
-    const ref = await persist({ kind: 'sticker', mimeType, filename: mediaFilename('sticker', mimeType) });
-    let description: string | null = null;
-    if (options.describeImage) {
-      try {
-        const bytes = await mediaBytes();
-        description = bytes ? await options.describeImage(bytes, mimeType, 'Sticker sent in the conversation') : null;
-      } catch (error) {
-        options.onFailure?.('describe_image', error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-    return [
-      '[Sticker received]',
-      attachmentLine(ref),
-      ...(description?.trim() ? [`Visual analysis: ${description.trim()}`] : []),
-    ].filter(Boolean).join('\n');
-  }
-
-  const doc = unwrapDocumentMessage(content);
-  if (doc) {
-    const fileName = typeof doc.fileName === 'string' && doc.fileName.trim() ? doc.fileName.trim() : null;
-    const caption = typeof doc.caption === 'string' && doc.caption.trim() ? doc.caption.trim() : null;
-    const mimeType = String(doc.mimetype ?? 'application/octet-stream');
-    const ref = await persist({
-      kind: 'file', mimeType, filename: fileName ?? mediaFilename('document', mimeType), ...(caption ? { caption } : {}),
-    });
-    let text: string | null = null;
-    if (options.downloadMedia && options.extractDocument) {
-      try {
-        text = await options.extractDocument(
-          await options.downloadMedia(message),
-          mimeType,
-          fileName ?? undefined,
-        );
-      } catch (error) {
-        options.onFailure?.('extract_document', error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-    return [
-      `[Document received${fileName ? `: ${fileName}` : ''}]`,
-      ...(caption ? [`Caption: ${caption}`] : []),
-      attachmentLine(ref),
-      text?.trim() ? text.trim() : 'Text extraction is unavailable. Do not claim to have read the document.',
-    ].join('\n');
-  }
-
-  const native = resolveWhatsAppNativeBody(content);
-  if (native) return native;
-
-  return extractWhatsAppText(content);
-}
-
-function cleanText(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function artifactIdFromRef(ref: string | null): string | null {
-  if (!ref?.startsWith('artifact:')) return null;
-  const id = ref.slice('artifact:'.length).trim();
-  return id || null;
-}
-
-function mediaFilename(stem: string, mimeType: string): string {
-  const mime = mimeType.split(';', 1)[0]!.toLowerCase();
-  const ext = mime === 'image/jpeg' ? 'jpg'
-    : mime === 'image/svg+xml' ? 'svg'
-      : mime === 'audio/ogg' ? 'ogg'
-        : mime === 'audio/mpeg' ? 'mp3'
-          : mime === 'video/mp4' ? 'mp4'
-            : mime.split('/')[1]?.replace(/[^a-z0-9]+/g, '') || 'bin';
-  return `${stem}.${ext}`;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function unwrapWhatsAppMediaMessage(message: any, key: string): unknown {
-  let m = message;
-  for (let i = 0; i < 5 && m && typeof m === 'object'; i += 1) {
-    if (m[key]) return m[key];
-    const inner = m.ephemeralMessage?.message
-      ?? m.viewOnceMessage?.message
-      ?? m.viewOnceMessageV2?.message
-      ?? m.viewOnceMessageV2Extension?.message
-      ?? m.documentWithCaptionMessage?.message;
-    if (!inner) break;
-    m = inner;
-  }
-  return undefined;
-}
-
-/** Normalize non-binary WhatsApp events into exact, model-usable context. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function resolveWhatsAppNativeBody(message: any): string | undefined {
-  let m = message;
-  for (let i = 0; i < 5 && m && typeof m === 'object'; i += 1) {
-    const inner = m.ephemeralMessage?.message
-      ?? m.viewOnceMessage?.message
-      ?? m.viewOnceMessageV2?.message
-      ?? m.viewOnceMessageV2Extension?.message;
-    if (!inner) break;
-    m = inner;
-  }
-  if (!m || typeof m !== 'object') return undefined;
-  const location = m.locationMessage ?? m.liveLocationMessage;
-  if (location && Number.isFinite(location.degreesLatitude) && Number.isFinite(location.degreesLongitude)) {
-    return [
-      m.liveLocationMessage ? '[Live location received]' : '[Location received]',
-      `Coordinates: ${location.degreesLatitude}, ${location.degreesLongitude}`,
-      ...(cleanText(location.name) ? [`Name: ${cleanText(location.name)}`] : []),
-      ...(cleanText(location.address) ? [`Address: ${cleanText(location.address)}`] : []),
-      `Map: https://maps.google.com/?q=${location.degreesLatitude},${location.degreesLongitude}`,
-    ].join('\n');
-  }
-  const contacts = m.contactsArrayMessage?.contacts ?? (m.contactMessage ? [m.contactMessage] : null);
-  if (Array.isArray(contacts) && contacts.length > 0) {
-    return ['[Contact card received]', ...contacts.flatMap((contact: any) => [
-      ...(cleanText(contact.displayName) ? [`Name: ${cleanText(contact.displayName)}`] : []),
-      ...(cleanText(contact.vcard) ? [`vCard:\n${cleanText(contact.vcard)}`] : []),
-    ])].join('\n');
-  }
-  const poll = m.pollCreationMessage ?? m.pollCreationMessageV2 ?? m.pollCreationMessageV3;
-  if (poll) {
-    const options = Array.isArray(poll.options)
-      ? poll.options.map((option: any) => cleanText(option.optionName)).filter(Boolean)
-      : [];
-    return [
-      '[Poll received]',
-      ...(cleanText(poll.name) ? [`Question: ${cleanText(poll.name)}`] : []),
-      ...options.map((option: string, index: number) => `${index + 1}. ${option}`),
-    ].join('\n');
-  }
-  const reaction = m.reactionMessage;
-  if (reaction && cleanText(reaction.text)) {
-    return `[Reaction received: ${cleanText(reaction.text)}${reaction.key?.id ? ` to message ${reaction.key.id}` : ''}]`;
-  }
-  return undefined;
-}
-
-/**
- * Build a baileys message content object for one resolved attachment. baileys
- * accepts a raw Buffer for every media field, so no upload plumbing is needed
- * here — the socket encrypts + uploads on send. mimetype is passed explicitly
- * for audio/voice/document where WhatsApp mis-renders without it.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function whatsappMediaContent(att: OutboundAttachment, caption?: string): any {
-  const text = caption ?? att.caption;
-  const cap = typeof text === 'string' && text.trim() ? text : undefined;
-  switch (att.kind) {
-    case 'image':
-      return { image: att.data, ...(cap ? { caption: cap } : {}), ...(att.viewOnce ? { viewOnce: true } : {}) };
-    case 'video':
-      return {
-        video: att.data,
-        ...(cap ? { caption: cap } : {}),
-        ...(att.gifPlayback ? { gifPlayback: true } : {}),
-        ...(att.seconds ? { seconds: att.seconds } : {}),
-        ...(att.viewOnce ? { viewOnce: true } : {}),
-      };
-    case 'audio':
-      return { audio: att.data, mimetype: att.mimeType || 'audio/mp4', ...(att.seconds ? { seconds: att.seconds } : {}) };
-    case 'voice':
-      return {
-        audio: att.data,
-        ptt: true,
-        mimetype: att.mimeType || 'audio/ogg; codecs=opus',
-        ...(att.seconds ? { seconds: att.seconds } : {}),
-      };
-    case 'sticker':
-      return { sticker: att.data };
-    case 'file':
-    default:
-      return {
-        document: att.data,
-        mimetype: att.mimeType || 'application/octet-stream',
-        fileName: att.filename,
-        ...(cap ? { caption: cap } : {}),
-      };
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function whatsappNativeContent(native: OutboundNativeContent): any {
-  if (native.kind === 'location') {
-    return {
-      location: {
-        degreesLatitude: native.latitude,
-        degreesLongitude: native.longitude,
-        ...(native.name ? { name: native.name } : {}),
-        ...(native.address ? { address: native.address } : {}),
-      },
-    };
-  }
-  if (native.kind === 'contact') {
-    const digits = native.phone.replace(/[^+\d]/g, '');
-    const vcard = native.vcard ?? [
-      'BEGIN:VCARD', 'VERSION:3.0', `FN:${native.displayName}`, `TEL;TYPE=CELL:${digits}`, 'END:VCARD',
-    ].join('\n');
-    return { contacts: { displayName: native.displayName, contacts: [{ displayName: native.displayName, vcard }] } };
-  }
-  return {
-    poll: {
-      name: native.question,
-      values: native.options,
-      selectableCount: native.selectableCount ?? 1,
-    },
-  };
-}
-
-function observedWhatsAppChatJid(key: { remoteJid?: unknown; remoteJidAlt?: unknown }): string | null {
-  const remoteJid = typeof key.remoteJid === 'string' ? key.remoteJid : '';
-  if (!remoteJid) return null;
-  const remoteJidAlt = typeof key.remoteJidAlt === 'string' ? key.remoteJidAlt : '';
-  return remoteJid.endsWith('@lid') && remoteJidAlt.includes('@s.whatsapp.net')
-    ? remoteJidAlt.replace(/:\d+@/u, '@')
-    : remoteJid;
-}
-
-/**
- * Extract the human-visible text from a baileys message (port of OpenClaw's
- * `extract.ts` `extractText`, reduced to the common text shapes). Walks the
- * common wrapper messages so ephemeral/viewOnce text still resolves.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function extractWhatsAppText(message: any): string | undefined {
-  let m = message;
-  // Unwrap the common envelope wrappers.
-  for (let i = 0; i < 4 && m && typeof m === 'object'; i += 1) {
-    const inner = m.ephemeralMessage?.message
-      ?? m.viewOnceMessage?.message
-      ?? m.viewOnceMessageV2?.message
-      ?? m.viewOnceMessageV2Extension?.message
-      ?? m.documentWithCaptionMessage?.message;
-    if (!inner) break;
-    m = inner;
-  }
-  if (!m || typeof m !== 'object') return undefined;
-  const conversation = typeof m.conversation === 'string' ? m.conversation.trim() : '';
-  if (conversation) return conversation;
-  const extended = m.extendedTextMessage?.text;
-  if (typeof extended === 'string' && extended.trim()) return extended.trim();
-  const caption = m.imageMessage?.caption ?? m.videoMessage?.caption ?? m.documentMessage?.caption;
-  if (typeof caption === 'string' && caption.trim()) return caption.trim();
-  return undefined;
-}
-
-/** Return the audioMessage (voice note or audio file), unwrapping envelopes. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function unwrapAudioMessage(message: any): { mimetype?: string } | undefined {
-  let m = message;
-  for (let i = 0; i < 4 && m && typeof m === 'object'; i += 1) {
-    if (m.audioMessage) return m.audioMessage as { mimetype?: string };
-    const inner = m.ephemeralMessage?.message
-      ?? m.viewOnceMessage?.message
-      ?? m.viewOnceMessageV2?.message
-      ?? m.viewOnceMessageV2Extension?.message;
-    if (!inner) break;
-    m = inner;
-  }
-  return undefined;
-}
-
-/** Return the imageMessage (or image-mime document), unwrapping envelopes. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function unwrapImageMessage(message: any): { mimetype?: string; caption?: string } | undefined {
-  let m = message;
-  for (let i = 0; i < 4 && m && typeof m === 'object'; i += 1) {
-    if (m.imageMessage) return m.imageMessage as { mimetype?: string; caption?: string };
-    const doc = m.documentMessage;
-    if (doc && typeof doc.mimetype === 'string' && doc.mimetype.startsWith('image/')) {
-      return doc as { mimetype?: string; caption?: string };
-    }
-    const inner = m.ephemeralMessage?.message
-      ?? m.viewOnceMessage?.message
-      ?? m.viewOnceMessageV2?.message
-      ?? m.viewOnceMessageV2Extension?.message
-      ?? m.documentWithCaptionMessage?.message;
-    if (!inner) break;
-    m = inner;
-  }
-  return undefined;
-}
-
-/** Return a non-image documentMessage (PDF, text, …), unwrapping envelopes. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function unwrapDocumentMessage(message: any): { mimetype?: string; fileName?: string; caption?: string } | undefined {
-  let m = message;
-  for (let i = 0; i < 4 && m && typeof m === 'object'; i += 1) {
-    const doc = m.documentMessage;
-    if (doc && !(typeof doc.mimetype === 'string' && doc.mimetype.startsWith('image/'))) {
-      return doc as { mimetype?: string; fileName?: string; caption?: string };
-    }
-    const inner = m.ephemeralMessage?.message
-      ?? m.viewOnceMessage?.message
-      ?? m.viewOnceMessageV2?.message
-      ?? m.documentWithCaptionMessage?.message;
-    if (!inner) break;
-    m = inner;
-  }
-  return undefined;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function readDisconnectStatus(error: any): number | undefined {
-  const status = error?.output?.statusCode ?? error?.statusCode;
-  return typeof status === 'number' ? status : undefined;
 }

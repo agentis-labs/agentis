@@ -76,6 +76,7 @@ export const REALTIME_ACTIVITY_EVENTS = [
   REALTIME_EVENTS.AGENT_TERMINAL_MESSAGE,
   REALTIME_EVENTS.AGENT_STATUS_CHANGED,
   REALTIME_EVENTS.CANVAS_BUILD_COMPLETE,
+  REALTIME_EVENTS.CONVERSATION_TURN_EVENT,
 ] as const;
 
 export function describeRealtimeActivity(
@@ -130,6 +131,23 @@ export function describeRealtimeActivity(
   };
 
   switch (env.event) {
+    case REALTIME_EVENTS.CONVERSATION_TURN_EVENT: {
+      const category = stringField(payload, ['category']);
+      const visibility = stringField(payload, ['visibility']);
+      const summary = stringField(payload, ['summary']);
+      // Tool and execution events already have richer workspace projections.
+      // The ledger event fills the historical gap for safe host/provider
+      // narration without exposing private reasoning or sensitive arguments.
+      if (category !== 'narration' || visibility === 'technical' || !summary) return null;
+      return {
+        ...base,
+        id: stringField(payload, ['id']) ?? base.id,
+        kind: 'message',
+        tone: 'muted',
+        title: agentName ?? 'Agent update',
+        detail: summary,
+      };
+    }
     case REALTIME_EVENTS.RUN_CREATED:
     case REALTIME_EVENTS.RUN_RUNNING: {
       const status = stringField(payload, ['status']);

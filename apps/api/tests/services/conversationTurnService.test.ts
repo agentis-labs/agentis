@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
+import { REALTIME_EVENTS } from '@agentis/core';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ConversationTurnService, classifyConversationExecutionMode } from '../../src/services/conversation/conversationTurnService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -36,9 +37,14 @@ describe('ConversationTurnService', () => {
     });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    const realtimeEvents: Array<{ event: string; payload: unknown }> = [];
+    const unsubscribe = ctx.bus.subscribe(({ envelope }) => {
+      realtimeEvents.push({ event: envelope.event, payload: envelope.payload });
+    });
     const service = new ConversationTurnService({
       db: ctx.db,
       logger: ctx.logger,
+      bus: ctx.bus,
       execute: async (_turn, sink) => {
         await gate;
         await sink.writeSSE({ event: 'delta', data: JSON.stringify({ type: 'text', delta: 'done' }) });
@@ -63,13 +69,26 @@ describe('ConversationTurnService', () => {
     });
 
     expect(ctx.db.select().from(schema.conversationTurns).where(eq(schema.conversationTurns.id, turn.id)).get()).toMatchObject({ status: 'queued' });
-    expect(service.events(ctx.workspace.id, turn.id, 0)).toHaveLength(1);
+    expect(service.events(ctx.workspace.id, turn.id, 0)).toHaveLength(2);
+    expect(service.events(ctx.workspace.id, turn.id, 0)[1]?.data).toMatchObject({ type: 'commentary', source: 'host' });
     release();
     await expect.poll(() => service.require(ctx.workspace.id, turn.id).status).toBe('completed');
     const events = service.events(ctx.workspace.id, turn.id, 0);
-    expect(events.map((event) => event.seq)).toEqual([1, 2, 3]);
-    expect(events.map((event) => event.event)).toEqual(['delta', 'delta', 'done']);
-    expect(service.events(ctx.workspace.id, turn.id, 1).map((event) => event.seq)).toEqual([2, 3]);
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(events.map((event) => event.event)).toEqual(['delta', 'delta', 'delta', 'done', 'turn']);
+    expect(events[1]?.data).toMatchObject({ type: 'commentary', source: 'host' });
+    expect(service.events(ctx.workspace.id, turn.id, 1).map((event) => event.seq)).toEqual([2, 3, 4, 5]);
+    const history = service.history(ctx.workspace.id, conversation.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]?.events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(history[0]?.events.find((event) => event.category === 'narration')).toMatchObject({ visibility: 'both' });
+    expect(realtimeEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: REALTIME_EVENTS.CONVERSATION_TURN_EVENT,
+        payload: expect.objectContaining({ category: 'narration', visibility: 'both' }),
+      }),
+    ]));
+    unsubscribe();
   });
 
   it('recovers a running turn after a process restart and completes it from persisted state', async () => {
@@ -136,7 +155,7 @@ describe('ConversationTurnService', () => {
     service.recover();
 
     await expect.poll(() => service.require(ctx.workspace.id, turnId).status).toBe('completed');
-    expect(service.events(ctx.workspace.id, turnId, 0).map((event) => event.event)).toEqual(['delta', 'done']);
+    expect(service.events(ctx.workspace.id, turnId, 0).map((event) => event.event)).toEqual(['delta', 'done', 'turn']);
     expect(service.events(ctx.workspace.id, turnId, 0)[0]?.data).toMatchObject({ label: 'Recovered after restart' });
   });
 
@@ -178,6 +197,32 @@ describe('ConversationTurnService', () => {
     await expect.poll(() => service.require(ctx.workspace.id, turn.id).status).toBe('awaiting_approval');
     expect(service.resolveAwaiting(ctx.workspace.id, conversation.id, 'completed')).toMatchObject({ id: turn.id, status: 'completed' });
     expect(service.events(ctx.workspace.id, turn.id, 0).at(-1)?.data).toMatchObject({ type: 'turn_status', status: 'completed' });
+  });
+
+  it('keeps runtime capacity failures recoverable instead of marking the turn complete', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      name: 'Capacity Agent', adapterType: 'http',
+    }).run();
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const conversation = conversations.getOrCreateByAgent({ workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId });
+    const message = conversations.appendOutbound({ workspaceId: ctx.workspace.id, conversationId: conversation.id, operatorId: ctx.user.id, body: 'Build this' });
+    const now = new Date().toISOString();
+    const service = new ConversationTurnService({
+      db: ctx.db,
+      logger: ctx.logger,
+      execute: async () => { throw new Error('Selected model is at capacity. Please try again.'); },
+    });
+    const turn = service.enqueue({
+      workspaceId: ctx.workspace.id, conversationId: conversation.id, agentId, userId: ctx.user.id,
+      messageId: message.id, clientTurnId: randomUUID(), prompt: 'Build this', requestedMode: 'mission',
+      effectiveMode: 'mission', permissionMode: 'auto', attachmentIds: [],
+      contextManifest: { version: 1, generatedAt: now, historyMessages: 0, attachmentCount: 0, attachments: [], sources: [], warnings: [] },
+      executionEnvelope: { version: 1, requestedMode: 'mission', effectiveMode: 'mission', classificationReason: 'test', adapterType: 'http', model: 'test', configuredReasoningEffort: 'high', effectiveReasoningEffort: 'high', fastMode: false, loadedSources: ['agentis'], toolMode: 'none', durable: true, createdAt: now, warnings: [] },
+    });
+    await expect.poll(() => service.require(ctx.workspace.id, turn.id).status).toBe('blocked');
+    expect(service.listActive(ctx.workspace.id, conversation.id)).toEqual(expect.arrayContaining([expect.objectContaining({ id: turn.id, status: 'blocked' })]));
   });
 });
 

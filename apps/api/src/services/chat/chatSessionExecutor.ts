@@ -187,6 +187,11 @@ export class ChatSessionExecutor {
     this.#deps.turnLeases?.complete(workspaceId, conversationId, token);
   }
 
+  /** Revoke every active capability for a conversation (for example on human takeover). */
+  static revokeTurnLeases(workspaceId: string, conversationId: string): boolean {
+    return this.#deps.turnLeases?.revoke(workspaceId, conversationId) ?? false;
+  }
+
   /**
    * The configured orchestrator runtime (native function-calling brain), if any.
    * Channel turns whose bound agent has no chat-capable adapter of its own fall
@@ -1332,6 +1337,22 @@ export class ChatSessionExecutor {
         if (!producedText) yield { type: 'text', delta: TURN_LIMIT_MESSAGE };
         yield { type: 'done', finishReason: 'max_turns' };
         return;
+      }
+
+      if (!assistantPreamble) {
+        const labels = batch.slice(0, 2).map((call) => prettyToolLabel(call.name));
+        const operation = labels.length === 1
+          ? labels[0]!
+          : labels.length === 2
+            ? `${labels[0]} and ${labels[1]}`
+            : 'the requested operations';
+        yield {
+          type: 'commentary',
+          id: `host-tool-preamble-${ctx.clientTurnId ?? ctx.conversationId}-${turn + 1}`,
+          text: `I’ll run ${operation} now, inspect the observed result, and adjust the work if it does not match the objective.`,
+          source: 'host',
+          createdAt: new Date().toISOString(),
+        };
       }
 
       const confirmationCall = batch.find((call) =>

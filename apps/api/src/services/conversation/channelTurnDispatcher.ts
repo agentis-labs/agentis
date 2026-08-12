@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { type AgentAdapter, type ApprovalSensitivity, type ChannelToolOrigin, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
+import { AgentisError, type AgentAdapter, type ApprovalSensitivity, type ChannelToolOrigin, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
 import type { AdapterManager } from '../../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from '../chat/chatSessionExecutor.js';
@@ -41,12 +41,14 @@ import type { EventBus } from '../../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from '../agent/agentWorkProgress.js';
 import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type OutboundAttachmentRef } from '../../adapters/channels/types.js';
 import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
+import { channelModelRole } from './channelConversationRole.js';
+import type { ConversationHandoffService, ConversationHandoffSnapshot } from './conversationHandoffService.js';
 
 /** Channel activity is never a chat message unless it is this verified-owner indicator. */
 export type ChannelDeliveryClass = 'internal' | 'owner_reasoning_indicator' | 'reply';
 
 export interface ChannelTurnDeliver {
-  (args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string; pacing?: 'immediate' }): Promise<ChannelDeliveryReceipt | undefined>;
+  (args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; idempotencyKey?: string; pacing?: 'immediate'; conversationId?: string; expectedAutomationEpoch?: number }): Promise<ChannelDeliveryReceipt | undefined>;
 }
 
 export interface ChannelTurnDispatcherDeps {
@@ -85,6 +87,8 @@ export interface ChannelTurnDispatcherDeps {
    * window-only context (no summary), byte-identical.
    */
   summaries?: ConversationSummaryService;
+  /** Durable ownership fence shared by ingress, tools, routes and provider delivery. */
+  handoffs?: ConversationHandoffService;
   /** Multi-party threads (G1) — resolve the active responder (specialist warm handoff) + seed the primary. */
   participants?: ConversationParticipantService;
   /**
@@ -153,6 +157,7 @@ export interface ChannelTurnDispatcherDeps {
 /** The durable-queue sink. `enqueue` returns the queue id, or null on failure. */
 export interface ChannelTurnEnqueuer {
   enqueue(input: ChannelTurnInput): string | null;
+  cancelConversation?(workspaceId: string, conversationId: string): number;
 }
 
 interface PendingChannelConfirmation {
@@ -170,6 +175,8 @@ interface PendingBatch {
 }
 
 interface ActiveChannelTurn {
+  conversationId: string;
+  automationEpoch?: number;
   generation: number;
   controller: AbortController;
   clientTurnId: string;
@@ -180,6 +187,7 @@ interface ActiveChannelTurn {
   mailbox: Array<{ input: ChannelTurnInput; queueId: string }>;
   /** Companion replies are serialized so one runtime session is never driven concurrently. */
   companionTail: Promise<void>;
+  turnLease?: string;
 }
 
 const CONFIRM_TTL_MS = 5 * 60 * 1000;
@@ -225,9 +233,12 @@ export interface ChannelTurnInput {
   excludeMessageIds?: string[];
   /** Monotonic per-chat input version. Messages received before execution are ordered by generation. */
   turnGeneration?: number;
+  /** Ownership version captured before this automated turn began. */
+  automationEpoch?: number;
 }
 
 const HISTORY_LIMIT = 20;
+const HISTORY_CHAR_LIMIT = 12_000;
 /** How many turn-windows of history the summary maintainer reads (G4). */
 const SUMMARY_LOOKBACK_WINDOWS = 8;
 const NOT_CONNECTED =
@@ -260,6 +271,38 @@ export class ChannelTurnDispatcher {
    */
   setQueue(queue: ChannelTurnEnqueuer): void {
     this.#queue = queue;
+  }
+
+  /** Immediately silence every automated lane when durable ownership moves to a human. */
+  handleHandoffChanged(snapshot: ConversationHandoffSnapshot): void {
+    if (snapshot.state !== 'human') return;
+    for (const [key, batch] of this.#batches) {
+      if (batch.latest.conversationId !== snapshot.conversationId) continue;
+      clearTimeout(batch.timer);
+      this.#batches.delete(key);
+    }
+    for (const [key, pending] of this.#pending) {
+      if (pending.conversationId === snapshot.conversationId) this.#pending.delete(key);
+    }
+    for (const [key, active] of this.#activeTurns) {
+      if (active.conversationId !== snapshot.conversationId) continue;
+      for (const queued of active.mailbox) {
+        try {
+          this.deps.conversations.discardQueuedMessage({
+            workspaceId: snapshot.workspaceId,
+            conversationId: snapshot.conversationId,
+            queueId: queued.queueId,
+          });
+        } catch { /* already consumed/discarded */ }
+      }
+      active.mailbox.length = 0;
+      active.controller.abort(new AgentisError('TURN_CANCELLED', 'A human operator took over this conversation.'));
+      this.#turnGenerations.set(key, active.generation + 1);
+      this.#activeTurns.delete(key);
+      void this.deps.setTyping?.(snapshot.connectionId ?? key.split(':', 1)[0]!, snapshot.chatId ?? key.slice(key.indexOf(':') + 1), false).catch(() => {});
+    }
+    ChatSessionExecutor.revokeTurnLeases(snapshot.workspaceId, snapshot.conversationId);
+    this.#queue?.cancelConversation?.(snapshot.workspaceId, snapshot.conversationId);
   }
 
   /**
@@ -411,6 +454,9 @@ export class ChannelTurnDispatcher {
    * that instead of starting a fresh turn. Never throws.
    */
   async #executeTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
+    const ownership = this.deps.handoffs?.current(input.workspaceId, input.conversationId);
+    if (ownership?.state === 'human') return { replied: false, reason: 'human_handling' };
+    if (ownership) input = { ...input, automationEpoch: ownership.automationEpoch };
     const clientTurnId = `channel-${randomUUID()}`;
     const active = this.#beginTurn(input, clientTurnId);
     if (!active) return { replied: false, reason: 'superseded' };
@@ -528,6 +574,8 @@ export class ChannelTurnDispatcher {
         kind: input.kind,
         connectionId: input.connectionId,
         chatId: input.chatId,
+        conversationId: input.conversationId,
+        ...(input.automationEpoch !== undefined ? { automationEpoch: input.automationEpoch } : {}),
         ownerVerified,
         ...(() => {
           const explicitRecipients = extractExplicitChannelRecipients(input.kind, runtimeText);
@@ -535,6 +583,7 @@ export class ChannelTurnDispatcher {
         })(),
       };
       turnLease = ChatSessionExecutor.issueTurnLease(input.workspaceId, input.conversationId, { channelOrigin });
+      active.turnLease = turnLease;
 
       let stream: AsyncIterable<import('@agentis/core').ChatDelta>;
       let ownerReasoning: OwnerReasoningIndicatorState | undefined;
@@ -754,6 +803,12 @@ export class ChannelTurnDispatcher {
       });
       return { replied: true };
     } catch (err) {
+      if (err instanceof AgentisError && (err.code === 'CHANNEL_HUMAN_TAKEOVER_ACTIVE' || err.code === 'TURN_CANCELLED')) {
+        return { replied: false, reason: 'human_handling' };
+      }
+      if (this.deps.handoffs?.current(input.workspaceId, input.conversationId).state === 'human') {
+        return { replied: false, reason: 'human_handling' };
+      }
       if (!this.#isActive(input, active)) {
         this.deps.logger.info('channel.turn.superseded', {
           connectionId: input.connectionId,
@@ -1072,6 +1127,7 @@ export class ChannelTurnDispatcher {
         conversationId: input.conversationId,
         sessionMessageId,
         authorType: 'agent',
+        participantSide: 'business',
         body: delivery.body || '[Media sent]',
         deliveryStatus: result.deliveryStatus === 'delivered' || result.deliveryStatus === 'read' ? 'delivered' : 'sent',
         metadata: {
@@ -1123,12 +1179,18 @@ export class ChannelTurnDispatcher {
       attachments?: OutboundAttachmentRef[];
     } = {},
   ): Promise<void> {
+    this.deps.handoffs?.assertAutomationAllowed({
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      ...(input.automationEpoch !== undefined ? { expectedEpoch: input.automationEpoch } : {}),
+    });
     const sessionMessageId = `channel_reply_${randomUUID()}`;
     const message = this.deps.conversations.appendMirrored({
       workspaceId: input.workspaceId,
       conversationId: input.conversationId,
       sessionMessageId,
       authorType: 'agent',
+      participantSide: 'business',
       body,
       deliveryStatus: 'sending',
       metadata: {
@@ -1142,12 +1204,26 @@ export class ChannelTurnDispatcher {
         ...('attachments' in options && options.attachments ? { channelAttachments: options.attachments } : {}),
       },
     });
-    const receipt = await this.#safeDeliver(
-      input,
-      body,
-      sessionMessageId,
-      'attachments' in options ? options.attachments : undefined,
-    );
+    let receipt: ChannelDeliveryReceipt | null;
+    try {
+      receipt = await this.#safeDeliver(
+        input,
+        body,
+        sessionMessageId,
+        'attachments' in options ? options.attachments : undefined,
+      );
+    } catch (err) {
+      if (err instanceof AgentisError && (err.code === 'CHANNEL_HUMAN_TAKEOVER_ACTIVE' || err.code === 'TURN_CANCELLED')) {
+        this.deps.conversations.updateDeliveryStatus({
+          workspaceId: input.workspaceId,
+          conversationId: input.conversationId,
+          messageId: message.id,
+          deliveryStatus: 'failed',
+          metadata: { channelAutomationCancelled: true, cancellationReason: err.code },
+        });
+      }
+      throw err;
+    }
     const deliveryStatus = !receipt
       ? 'failed'
       : isAcknowledgedChannelDelivery(receipt)
@@ -1284,24 +1360,37 @@ export class ChannelTurnDispatcher {
   #buildHistory(input: ChannelTurnInput, excludeMessageIds: string[] = []): ChatMessage[] {
     const excluded = new Set(excludeMessageIds);
     const rows = this.deps.conversations.messages(input.conversationId, HISTORY_LIMIT);
-    return rows
+    const relevant = rows
       .filter((row) => !excluded.has(row.id))
+      .filter((row) => !((row.metadata as { channelAutomationCancelled?: boolean } | null)?.channelAutomationCancelled))
       .filter((row) => {
         const meta = (row.metadata ?? {}) as { channelInbound?: boolean; threadId?: string };
         // Keep operator/agent turns and channel-inbound human turns; drop bare
         // platform system notices so they don't pollute the model's context.
-        if (row.authorType === 'system' && meta.channelInbound !== true) return false;
+        if (row.authorType === 'system' && channelModelRole(row, true) === 'system') return false;
         // Subject isolation: when this turn is in a thread, only include messages
         // from the same thread (untagged agent/operator turns are always kept).
         if (input.threadId && meta.threadId && meta.threadId !== input.threadId) return false;
         return true;
       })
-      .map((row) => {
-        const meta = (row.metadata ?? {}) as { channelInbound?: boolean };
-        const role: 'user' | 'assistant' =
-          row.authorType === 'operator' || meta.channelInbound ? 'user' : 'assistant';
-        return { role, content: row.body };
-      });
+      .map((row) => ({
+        role: channelModelRole(row, true) === 'user' ? 'user' as const : 'assistant' as const,
+        content: row.body,
+      }));
+    const bounded: ChatMessage[] = [];
+    let chars = 0;
+    for (let index = relevant.length - 1; index >= 0; index -= 1) {
+      const message = relevant[index]!;
+      const cost = message.content.length + 16;
+      if (bounded.length > 0 && chars + cost > HISTORY_CHAR_LIMIT) break;
+      if (bounded.length === 0 && cost > HISTORY_CHAR_LIMIT) {
+        bounded.push({ ...message, content: `${message.content.slice(0, HISTORY_CHAR_LIMIT - 32)}\n[message truncated]` });
+        break;
+      }
+      bounded.push(message);
+      chars += cost;
+    }
+    return bounded.reverse();
   }
 
   /**
@@ -1320,25 +1409,31 @@ export class ChannelTurnDispatcher {
       const rows = this.deps.conversations.messages(input.conversationId, HISTORY_LIMIT * SUMMARY_LOOKBACK_WINDOWS);
       const messages = rows
         .filter((row) => {
-          const meta = (row.metadata ?? {}) as { channelInbound?: boolean };
           // Drop bare platform system notices from the model's conversation context.
-          return !(row.authorType === 'system' && meta.channelInbound !== true);
+          return !(row.authorType === 'system' && channelModelRole(row, true) === 'system');
         })
-        .map((row) => {
-          const meta = (row.metadata ?? {}) as { channelInbound?: boolean };
-          const role: 'user' | 'assistant' = row.authorType === 'operator' || meta.channelInbound ? 'user' : 'assistant';
-          return { role, content: row.body };
-        });
+        .map((row) => ({
+          role: channelModelRole(row, true) === 'user' ? 'user' as const : 'assistant' as const,
+          content: row.body,
+          id: row.id,
+          createdAt: row.createdAt,
+        }));
       // A chat-capable adapter drives a model-agnostic summary; absent → deterministic.
       const completer = adapter.chat ? new AdapterStructuredCompleter(adapter, 'conversation summary') : null;
-      await summaries.maybeUpdate({
+      // Compaction is deliberately off the response critical path. The current
+      // turn uses the already durable summary + bounded recent transcript; this
+      // refresh becomes available to the next turn.
+      void summaries.maybeUpdate({
         conversationId: input.conversationId,
         workspaceId: input.workspaceId,
         appId: input.appId ?? null,
         messages,
         windowSize: HISTORY_LIMIT,
         completer,
-      });
+      }).catch((err) => this.deps.logger.warn('channel.turn.summary_background_failed', {
+        conversationId: input.conversationId,
+        err: (err as Error).message,
+      }));
       return summaries.injectionBlock(input.conversationId);
     } catch (err) {
       this.deps.logger.warn('channel.turn.summary_failed', {
@@ -1356,6 +1451,11 @@ export class ChannelTurnDispatcher {
     attachments?: OutboundAttachmentRef[],
   ): Promise<ChannelDeliveryReceipt | null> {
     try {
+      this.deps.handoffs?.assertAutomationAllowed({
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        ...(input.automationEpoch !== undefined ? { expectedEpoch: input.automationEpoch } : {}),
+      });
       // Typing is already live while the model is working. Do not add a second,
       // simulated typing delay after the answer is ready.
       return await this.deps.deliver({
@@ -1365,8 +1465,11 @@ export class ChannelTurnDispatcher {
         ...(attachments?.length ? { attachments } : {}),
         idempotencyKey,
         pacing: 'immediate',
+        conversationId: input.conversationId,
+        ...(input.automationEpoch !== undefined ? { expectedAutomationEpoch: input.automationEpoch } : {}),
       }) ?? null;
     } catch (err) {
+      if (err instanceof AgentisError && (err.code === 'CHANNEL_HUMAN_TAKEOVER_ACTIVE' || err.code === 'TURN_CANCELLED')) throw err;
       this.deps.logger.warn('channel.turn.deliver_failed', {
         connectionId: input.connectionId,
         err: (err as Error).message,
@@ -1407,6 +1510,8 @@ export class ChannelTurnDispatcher {
     active: ActiveChannelTurn,
     queueId: string,
   ): Promise<{ replied: boolean; reason?: string }> {
+    if (active.automationEpoch !== undefined) input = { ...input, automationEpoch: active.automationEpoch };
+    if (active.controller.signal.aborted) return { replied: false, reason: 'human_handling' };
     const access = this.#resolveAccess(input);
     if (!access.allow) return { replied: false, reason: 'not_authorized' };
     const responderAgentId = this.#resolveResponder(input);
@@ -1436,6 +1541,7 @@ export class ChannelTurnDispatcher {
       permissionMode: 'ask',
       maxTurns: 2,
       viewport: null,
+      signal: active.controller.signal,
       artifactPolicy: { mode: 'intentional', saveScreenshots: true, saveGeneratedAssets: true },
     };
     let finalText = '';
@@ -1557,6 +1663,8 @@ export class ChannelTurnDispatcher {
     const generation = input.turnGeneration ?? this.#turnGenerations.get(key) ?? 1;
     if ((this.#turnGenerations.get(key) ?? generation) !== generation) return null;
     const active: ActiveChannelTurn = {
+      conversationId: input.conversationId,
+      ...(input.automationEpoch !== undefined ? { automationEpoch: input.automationEpoch } : {}),
       generation,
       controller: new AbortController(),
       clientTurnId,

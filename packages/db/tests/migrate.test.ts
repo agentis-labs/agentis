@@ -632,4 +632,50 @@ VALUES ('room-1', 'ws-1', 'user-1', 'team-1', 'team', 'Ops', 1, 'team');
       sqlite.close();
     }
   });
+
+  it('installs durable channel handoff, participant side, and summary watermark columns', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const conversationColumns = sqlite.prepare("PRAGMA table_info('conversations')").all() as Array<{ name: string }>;
+      expect(conversationColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        'handoff_source',
+        'handoff_claimed_at',
+        'automation_epoch',
+      ]));
+
+      const messageColumns = sqlite.prepare("PRAGMA table_info('conversation_messages')").all() as Array<{ name: string }>;
+      expect(messageColumns.map((column) => column.name)).toContain('participant_side');
+
+      const summaryColumns = sqlite.prepare("PRAGMA table_info('conversation_summaries')").all() as Array<{ name: string }>;
+      expect(summaryColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        'covered_through_message_id',
+        'covered_through_at',
+      ]));
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('installs encrypted extension browser checkpoint storage', () => {
+    const path = tempDbPath();
+    const { sqlite } = openSqlite({ path });
+    try {
+      const columns = sqlite.prepare("PRAGMA table_info('extension_browser_checkpoints')").all() as Array<{ name: string }>;
+      expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        'workspace_id',
+        'extension_id',
+        'session_name',
+        'encrypted_value',
+        'last_used_at',
+      ]));
+      const indexes = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='extension_browser_checkpoints'").all() as Array<{ name: string }>;
+      expect(indexes.map((row) => row.name)).toEqual(expect.arrayContaining([
+        'idx_extension_browser_checkpoint_owner',
+        'idx_extension_browser_checkpoint_recent',
+      ]));
+    } finally {
+      sqlite.close();
+    }
+  });
 });

@@ -44,6 +44,7 @@ export type ConversationTurnStatus =
   | 'queued'
   | 'running'
   | 'awaiting_approval'
+  | 'blocked'
   | 'paused'
   | 'completed'
   | 'failed'
@@ -181,6 +182,30 @@ export interface ChatCommentary {
   id: string;
   text: string;
   source: 'reasoning_summary' | 'assistant_preamble' | 'host';
+  createdAt: string;
+}
+
+/**
+ * Durable, replay-safe projection of a conversation turn event. The stored
+ * transport payload remains provider-compatible, while this envelope gives
+ * every consumer (Chat, Home and Tech) the same scoped ordering and safe
+ * operator-facing summary.
+ */
+export interface TurnEventV2 {
+  version: 2;
+  id: string;
+  workspaceId: string;
+  conversationId: string;
+  turnId: string;
+  agentId: string;
+  runId?: string;
+  seq: number;
+  transportEvent: string;
+  category: 'narration' | 'operation' | 'verification' | 'status';
+  visibility: 'chat' | 'technical' | 'both';
+  summary: string;
+  /** Sanitized replay payload. Never contains private reasoning or secrets. */
+  data: unknown;
   createdAt: string;
 }
 
@@ -458,6 +483,10 @@ export interface ChannelToolOrigin {
   kind: string;
   connectionId: string;
   chatId: string;
+  /** Durable channel conversation whose ownership fences this tool-capable turn. */
+  conversationId?: string;
+  /** Ownership epoch captured before the turn began; mismatches cancel stale sends. */
+  automationEpoch?: number;
   /** True only when this exact channel identity is explicitly linked to the owner. */
   ownerVerified: boolean;
   /** Explicit recipient addresses present in the initiating request, normalized by the channel host. */

@@ -50,7 +50,8 @@ type LibraryFilter = 'all' | 'apps' | 'agents' | 'workflows' | 'extensions';
 type LibraryKind = 'app' | 'agent' | 'workflow' | 'extension';
 type ExtensionPermission =
   | 'network' | 'credentials' | 'workspace.read' | 'workspace.write' | 'filesystem'
-  | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write';
+  | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write'
+  | 'browser' | 'browser.evaluate' | 'browser.session.persist' | 'browser.auth';
 
 interface WorkflowPackage {
   id: string;
@@ -135,6 +136,34 @@ const PERMISSIONS: Array<{
     description: 'HTTP/HTTPS access to declared domains only.',
     icon: Globe,
     tone: 'text-sky-300 bg-sky-500/10 border-sky-400/20',
+  },
+  {
+    value: 'browser',
+    label: 'Browser',
+    description: 'Drive headless Chromium on declared domains.',
+    icon: Globe,
+    tone: 'text-sky-300 bg-sky-500/10 border-sky-400/20',
+  },
+  {
+    value: 'browser.evaluate',
+    label: 'Page evaluate',
+    description: 'Run bounded JavaScript inside the loaded page.',
+    icon: Globe,
+    tone: 'text-indigo-300 bg-indigo-500/10 border-indigo-400/20',
+  },
+  {
+    value: 'browser.session.persist',
+    label: 'Persistent browser session',
+    description: 'Keep a live page and encrypted resumable checkpoint.',
+    icon: Radio,
+    tone: 'text-violet-300 bg-violet-500/10 border-violet-400/20',
+  },
+  {
+    value: 'browser.auth',
+    label: 'Browser auth profiles',
+    description: 'Restore operator-saved encrypted browser authentication.',
+    icon: Key,
+    tone: 'text-amber-300 bg-amber-500/10 border-amber-400/20',
   },
   {
     value: 'credentials',

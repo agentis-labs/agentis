@@ -5,6 +5,7 @@ import {
   REALTIME_EVENTS,
   REALTIME_ROOMS,
   type ChatPlan,
+  type BuildMission,
   type PlanDecisionRecord,
   type PlanDeviationKind,
   type PlanDeviationRecord,
@@ -16,6 +17,7 @@ import {
   type PlanStatus,
   type PlanVerification,
   type PlanVerificationCriterion,
+  type ProofReceipt,
   type RealtimeEventName,
   type WorkStepStatus,
   projectPlanSteps,
@@ -290,6 +292,7 @@ export class PlanService {
       title: args.title ?? generated.title,
       acceptanceCriteria: args.acceptanceCriteria ?? generated.acceptanceCriteria,
       assumptions: args.assumptions ?? generated.assumptions,
+      mission: buildMissionFromObjective(args.objective) ?? previous?.mission,
     };
     if (!previous) {
       this.db.insert(schema.plans).values({
@@ -597,12 +600,21 @@ export class PlanService {
   async verifyCompletion(workspaceId: string, userId: string, planId: string, args: {
     output: unknown;
     evidence?: PlanEvidenceRef[];
+    receipts?: ProofReceipt[];
     judge?: TaskCompletionJudge;
   }): Promise<{ plan: ChatPlan; passed: boolean; verification: PlanVerification }> {
     const verifying = this.setStatus(workspaceId, userId, planId, 'verifying');
-    const judged = args.judge
+    const mechanical = deterministicCompletionJudge(verifying, args.output, args.evidence, args.receipts);
+    const semantic = args.judge
       ? await args.judge({ plan: verifying, output: args.output, evidence: args.evidence })
-      : deterministicCompletionJudge(verifying, args.output, args.evidence);
+      : null;
+    const judged = semantic
+      ? {
+          status: mechanical.status === 'passed' && semantic.status === 'passed' ? 'passed' as const : 'failed' as const,
+          criteria: [...mechanical.criteria, ...semantic.criteria],
+          verifier: 'judge' as const,
+        }
+      : mechanical;
     const verification: PlanVerification = {
       id: randomUUID(),
       status: judged.status,
@@ -610,6 +622,10 @@ export class PlanService {
       output: args.output,
       verifiedAt: new Date().toISOString(),
       verifier: judged.verifier,
+      outcome: judged.status === 'passed'
+        ? 'accomplished'
+        : args.receipts?.some((receipt) => receipt.status === 'blocked') ? 'blocked' : 'not_accomplished',
+      ...(args.receipts?.length ? { receipts: args.receipts } : {}),
     };
     const passed = verification.status === 'passed' && verification.criteria.every((criterion) => criterion.passed);
     const plan = this.revise(workspaceId, userId, {
@@ -770,6 +786,7 @@ function deterministicCompletionJudge(
   plan: ChatPlan,
   output: unknown,
   evidence?: PlanEvidenceRef[],
+  receipts: ProofReceipt[] = [],
 ): Omit<PlanVerification, 'id' | 'verifiedAt'> {
   const criteria = plan.acceptanceCriteria?.length
     ? plan.acceptanceCriteria
@@ -778,17 +795,89 @@ function deterministicCompletionJudge(
     && output !== undefined
     && (!(typeof output === 'string') || output.trim().length > 0)
     && (!(typeof output === 'object') || JSON.stringify(output) !== '{}');
-  const verdicts: PlanVerificationCriterion[] = criteria.map((criterion) => ({
-    criterion,
-    passed: hasOutput,
-    reason: hasOutput
-      ? 'The completion supplied output for operator review; no model judge was configured for deeper semantic grading.'
-      : 'The completion output was empty.',
-    ...(evidence ? { evidence } : {}),
+  const passedReceipts = receipts.filter((receipt) => receipt.status === 'passed');
+  const mutations = passedReceipts.filter((receipt) => receipt.kind === 'persisted_mutation');
+  const verifications = passedReceipts.filter((receipt) => receipt.kind === 'functional_verification');
+  const persisted = mutations.length > 0;
+  const verified = verifications.length > 0;
+  const exactProofChain = mutations.some((mutation) => verifications.some((verification) => (
+    requiredProofIdentity(mutation.resourceId, verification.resourceId)
+    && optionalProofIdentity(mutation.revisionId, verification.revisionId)
+    && optionalProofIdentity(mutation.semanticHash, verification.semanticHash)
+    && verification.observedAt >= mutation.observedAt
+  )));
+  const needsMechanicalProof = Boolean(plan.mission);
+  const receiptEvidence: PlanEvidenceRef[] = passedReceipts.map((receipt) => ({
+    label: `${receipt.kind}: ${receipt.tool}`,
+    ...(receipt.runId ? { runId: receipt.runId } : {}),
+    payload: receipt,
   }));
+  const verdicts: PlanVerificationCriterion[] = criteria.map((criterion) => {
+    const lower = criterion.toLowerCase();
+    const requiresPersistence = /persist|deliver|creat|implement|requested/.test(lower);
+    const requiresVerification = /verif|pass|work|function|evidence/.test(lower);
+    const passed = !needsMechanicalProof
+      ? hasOutput
+      : hasOutput
+        && (!requiresPersistence || persisted)
+        && (!requiresVerification || (verified && exactProofChain))
+        && (requiresPersistence || requiresVerification || (persisted && verified && exactProofChain));
+    return {
+      criterion,
+      passed,
+      reason: passed
+        ? needsMechanicalProof
+          ? 'The exact turn produced durable tool evidence for this criterion.'
+          : 'The non-build completion supplied a non-empty output.'
+        : !hasOutput
+          ? 'The completion output was empty.'
+          : !persisted && requiresPersistence
+            ? 'No successful persisted mutation was observed in this turn.'
+            : (!verified || !exactProofChain) && requiresVerification
+              ? 'No successful functional verification of the same resource revision was observed after the mutation.'
+              : 'The turn did not supply the mechanical evidence required for this criterion.',
+      ...((receiptEvidence.length || evidence?.length) ? { evidence: [...(evidence ?? []), ...receiptEvidence] } : {}),
+    };
+  });
   return {
     status: verdicts.every((criterion) => criterion.passed) ? 'passed' : 'failed',
     criteria: verdicts,
     verifier: 'deterministic',
+  };
+}
+
+function requiredProofIdentity(left: string | undefined, right: string | undefined): boolean {
+  return Boolean(left && right && left === right);
+}
+
+function optionalProofIdentity(left: string | undefined, right: string | undefined): boolean {
+  return (!left && !right) || Boolean(left && right && left === right);
+}
+
+function buildMissionFromObjective(objective: string): BuildMission | undefined {
+  const lower = objective.toLowerCase();
+  const buildIntent = /\b(?:build|implement|create|update|fix|debug|redesign|refactor|ship|deploy|constru|implementar|criar|corrigir)\b/.test(lower);
+  if (!buildIntent) return undefined;
+  const mappings: Array<[BuildMission['deliverables'][number]['kind'], RegExp]> = [
+    ['workflow', /\bworkflow|fluxo\b/],
+    ['app', /\bapp|application|aplicativo|aplicação\b/],
+    ['interface', /\binterface|ui|surface|dashboard|tela\b/],
+    ['agent', /\bagent|agente\b/],
+    ['integration', /\bintegration|integração|connector|conexão\b/],
+  ];
+  const deliverables: BuildMission['deliverables'] = mappings
+    .filter(([, pattern]) => pattern.test(lower))
+    .map(([kind]) => ({ kind, label: kind, required: true }));
+  if (deliverables.length === 0) deliverables.push({ kind: 'resource', label: 'requested resource', required: true });
+  return {
+    version: 1,
+    objective,
+    deliverables,
+    fixtures: [
+      { id: 'happy_path', purpose: 'happy_path', required: true },
+      { id: 'missing_dependency', purpose: 'missing_dependency', required: false },
+    ],
+    requiredProofs: ['persisted_mutation', 'functional_verification'],
+    createdAt: new Date().toISOString(),
   };
 }

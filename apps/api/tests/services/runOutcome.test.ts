@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRunSettlement, evaluateRunOutcome } from '../../src/services/workflow/runOutcome.js';
+import { buildRunSettlement, evaluateRunOutcome, normalizeRunOutcomeStatus } from '../../src/services/workflow/runOutcome.js';
 
 describe('evaluateRunOutcome', () => {
   it('allows legacy clean completion while keeping it explicitly unverified', () => {
@@ -47,11 +47,18 @@ describe('evaluateRunOutcome', () => {
     });
     expect(settlement).toMatchObject({
       executionStatus: 'completed',
-      outcomeStatus: 'failed',
+      outcomeStatus: 'not_accomplished',
       revisionId: 'rev-1',
       semanticHash: 'hash-1',
       evidence: [{ kind: 'check', id: 'delivered', summary: 'Provider receipt was absent.' }],
       deficiencies: [{ code: 'delivered', detail: 'Delivery was not proven.', producingNodeIds: ['send'] }],
     });
+  });
+
+  it('normalizes legacy terminal outcomes into the three-state public contract', () => {
+    expect(normalizeRunOutcomeStatus('partial')).toBe('blocked');
+    expect(normalizeRunOutcomeStatus('failed')).toBe('not_accomplished');
+    expect(normalizeRunOutcomeStatus('failed_checks')).toBe('not_accomplished');
+    expect(normalizeRunOutcomeStatus('accomplished')).toBe('accomplished');
   });
 });

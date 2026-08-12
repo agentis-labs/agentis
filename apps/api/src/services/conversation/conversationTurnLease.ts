@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { AgentisError, type ChannelToolOrigin } from '@agentis/core';
+import { AgentisError, type ChannelToolOrigin, type ProofReceipt } from '@agentis/core';
 
 export interface ConversationTurnLeaseContext {
   channelOrigin?: ChannelToolOrigin;
@@ -28,6 +28,59 @@ export interface ConversationTurnExperience {
     resultCharsObserved: number;
     repeatedResultChars: number;
   };
+}
+
+export function proofReceiptsFromExperience(experience: ConversationTurnExperience): ProofReceipt[] {
+  const receipts: ProofReceipt[] = [];
+  let mutationFrontier = 0;
+  let hasMutation = false;
+  for (const observation of experience.observations) {
+    if (!observation.ok) continue;
+    const facts = proofFacts(observation.result);
+    const verificationTool = /(?:revision[._ -]?verify|app[._ -]?verify|doctor|app[._ -]?test|browser|run[._ -]?await|test[._ -]?run|debug[._ -]?run|playwright|probe)/i.test(observation.name);
+    const structuralObservation = /(?:inspect|validate|dry[._ -]?run|contract|schema|publish|promote)/i.test(observation.name);
+    const executionOrApprovalOnly = /(?:^|[._ -])(?:run|verify|validate|inspect|doctor|test|probe|publish|promote|activate|approve|abandon|discard)(?:$|[._ -])/i.test(observation.name);
+    const deliveryMutation = observation.mutating && !executionOrApprovalOnly;
+    if (deliveryMutation) {
+      mutationFrontier = observation.index;
+      hasMutation = true;
+    }
+    if (deliveryMutation) {
+      receipts.push({
+        id: randomUUID(),
+        kind: 'persisted_mutation',
+        status: facts.blocked ? 'blocked' : facts.failed ? 'failed' : 'passed',
+        tool: observation.name,
+        ...facts.identity,
+        evidence: facts.summary,
+        observedAt: new Date().toISOString(),
+      });
+    }
+    const explicitVerification = facts.outcome === 'accomplished'
+      || (!structuralObservation && facts.verified && Boolean(facts.identity.resourceId) && Boolean(facts.identity.revisionId || facts.identity.semanticHash));
+    if (hasMutation && observation.index >= mutationFrontier && (verificationTool || explicitVerification)) {
+      receipts.push({
+        id: randomUUID(),
+        kind: 'functional_verification',
+        status: facts.blocked ? 'blocked' : facts.failed ? 'failed' : 'passed',
+        tool: observation.name,
+        ...facts.identity,
+        evidence: facts.summary,
+        observedAt: new Date().toISOString(),
+      });
+    } else if (hasMutation && observation.index >= mutationFrontier && (structuralObservation || facts.published)) {
+      receipts.push({
+        id: randomUUID(),
+        kind: 'observed_state',
+        status: facts.blocked ? 'blocked' : facts.failed ? 'failed' : 'passed',
+        tool: observation.name,
+        ...facts.identity,
+        evidence: facts.summary,
+        observedAt: new Date().toISOString(),
+      });
+    }
+  }
+  return receipts;
 }
 
 interface ActiveTurnLease {
@@ -225,4 +278,63 @@ function stableJson(value: unknown): string {
     return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function proofFacts(value: unknown): {
+  identity: Pick<ProofReceipt, 'resourceKind' | 'resourceId' | 'revisionId' | 'semanticHash' | 'runId' | 'fixtureId'>;
+  verified: boolean;
+  published: boolean;
+  blocked: boolean;
+  failed: boolean;
+  outcome?: string;
+  summary: unknown;
+} {
+  const flat = flattenProofObject(value);
+  const outcome = firstString(flat, ['outcome', 'verdict', 'status']);
+  const reason = firstString(flat, ['reason', 'error', 'errorMessage']);
+  const passed = firstBoolean(flat, ['passed', 'valid', 'ok', 'verified']);
+  const published = firstBoolean(flat, ['published', 'promoted', 'activated']) === true;
+  const blocked = outcome === 'blocked' || outcome === 'blocked_on_human' || /blocked|missing|required|not_configured/i.test(reason ?? '');
+  const failed = passed === false || /failed|not_accomplished|error/i.test(outcome ?? '');
+  return {
+    identity: {
+      ...(firstString(flat, ['resourceKind', 'kind', 'type']) ? { resourceKind: firstString(flat, ['resourceKind', 'kind', 'type']) } : {}),
+      ...(firstString(flat, ['resourceId', 'workflowId', 'appId', 'agentId']) ? { resourceId: firstString(flat, ['resourceId', 'workflowId', 'appId', 'agentId']) } : {}),
+      ...(firstString(flat, ['revisionId', 'candidateRevisionId', 'interfaceRevisionId']) ? { revisionId: firstString(flat, ['revisionId', 'candidateRevisionId', 'interfaceRevisionId']) } : {}),
+      ...(firstString(flat, ['semanticHash', 'graphHash', 'contentHash']) ? { semanticHash: firstString(flat, ['semanticHash', 'graphHash', 'contentHash']) } : {}),
+      ...(firstString(flat, ['runId']) ? { runId: firstString(flat, ['runId']) } : {}),
+      ...(firstString(flat, ['fixtureId']) ? { fixtureId: firstString(flat, ['fixtureId']) } : {}),
+    },
+    verified: passed === true,
+    published,
+    blocked,
+    failed,
+    outcome,
+    summary: compactExperienceValue(value),
+  };
+}
+
+function flattenProofObject(value: unknown, depth = 0, target = new Map<string, unknown>()): Map<string, unknown> {
+  if (!value || typeof value !== 'object' || depth > 4) return target;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!target.has(key)) target.set(key, entry);
+    if (entry && typeof entry === 'object') flattenProofObject(entry, depth + 1, target);
+  }
+  return target;
+}
+
+function firstString(values: Map<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = values.get(key);
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function firstBoolean(values: Map<string, unknown>, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = values.get(key);
+    if (typeof value === 'boolean') return value;
+  }
+  return undefined;
 }

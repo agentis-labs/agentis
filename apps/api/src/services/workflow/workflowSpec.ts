@@ -124,6 +124,9 @@ export function validateWorkflowSpec(spec: WorkflowSpec, args: SpecValidationArg
   }
   const declaredKeys = new Set(workflowContractFields(args.graph?.outputContract).map((field) => field.key));
   const seenIds = new Set<string>();
+  if (spec.acceptance.length > 0 && spec.acceptance.every((check) => check.verify === 'judge')) {
+    errors.push('acceptance requires at least one mechanical or world-observable check; a judge cannot be the only proof.');
+  }
   for (const check of spec.acceptance ?? []) {
     const label = `acceptance "${check.id || check.claim || '?'}"`;
     if (!check.id?.trim()) errors.push(`${label}: id is required.`);
@@ -227,9 +230,9 @@ export interface SpecDraftResult {
 
 /**
  * Derive an acceptance draft from the request. Deterministic: pattern → check
- * templates keyed off intent verbs + available services. Judge is always
- * appended as the catch-all, but hardening requires ≥1 worldly check — when
- * none is derivable, the draft carries the elicitation question.
+ * templates keyed off intent verbs + available services. A judge is never
+ * invented as a catch-all. When no mechanical proof can be derived, the draft
+ * remains incomplete and carries the elicitation question.
  */
 export function deriveSpecDraft(args: SpecDraftArgs): SpecDraftResult {
   const description = args.description.trim();
@@ -279,15 +282,23 @@ export function deriveSpecDraft(args: SpecDraftArgs): SpecDraftResult {
     });
   }
 
-  const worldly = acceptance.length;
-  // Judge — the catch-all for quality judgment, evidence-grounded at verdict time.
-  acceptance.push({
-    id: 'objective_met',
-    claim: 'The final output fulfills the stated objective, with no placeholder or partial content',
-    verify: 'judge',
-    rubric: `Evaluate STRICTLY whether the run's final output fulfills: "${objective}". Fail empty, placeholder, truncated, or advisory-only content (e.g. instructions to do the work instead of the work).`,
-    minScore: 7,
-  });
+  if (acceptance.length === 0 && args.graph) {
+    const contractFields = workflowContractFields(args.graph.outputContract);
+    const field = contractFields.find((candidate) => candidate.required) ?? contractFields[0];
+    if (field) {
+      acceptance.push({
+        id: `output_${field.key}`,
+        claim: `The terminal output contains a usable ${field.key}`,
+        verify: 'expr',
+        expr: field.type === 'array'
+          ? `output.${field.key}.length >= 1`
+          : `output.${field.key} != null`,
+      });
+      sufficiency.push({ key: field.key, nonEmpty: true, ...(field.type === 'array' ? { minItems: 1 } : {}) });
+    }
+  }
+
+  const mechanical = acceptance.length;
 
   const spec: WorkflowSpec = {
     version: 1,
@@ -295,10 +306,11 @@ export function deriveSpecDraft(args: SpecDraftArgs): SpecDraftResult {
     acceptance,
     ...(sufficiency.length > 0 ? { sufficiency } : {}),
     reworkBudget: 1,
+    verification: 'probes_only',
     createdAt: new Date().toISOString(),
     ...(args.graph ? { reconciledHash: graphContentHash(args.graph) } : {}),
   };
-  return worldly > 0
+  return mechanical > 0
     ? { spec }
     : {
         spec,

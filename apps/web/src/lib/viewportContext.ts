@@ -47,9 +47,13 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
       resourceId: derived.resourceId,
       resourceKind: derived.resourceKind,
       activeRunId: activeRun?.runId ?? null,
-      appView: derived.resourceKind === 'app' && derived.resourceId
+      // The App's Workflow facet can display any one of several workflows.
+      // Keep the App lease for App-aware tools, but make the selected workflow
+      // the primary resource so the agent never has to guess which canvas the
+      // operator means.
+      appView: (derived.appId ?? (derived.resourceKind === 'app' ? derived.resourceId : undefined))
         ? {
-            appId: derived.resourceId,
+            appId: derived.appId ?? derived.resourceId!,
             ...(derived.page ? { page: derived.page } : {}),
             ...(derived.mode ? { mode: derived.mode } : {}),
             ...(derived.selectedNodeId ? { selectedNodeId: derived.selectedNodeId } : {}),
@@ -57,6 +61,9 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
             targetLocked: true,
           }
         : null,
+      metadata: derived.appId && derived.resourceKind === 'workflow'
+        ? { appId: derived.appId, appFacet: derived.facet ?? 'workflow' }
+        : undefined,
     } satisfies ViewportContext;
   }, [activeRuns, ambientId, location.hash, location.pathname, location.search, runModal, workspaceId]);
 
@@ -77,6 +84,8 @@ export function useViewportAwareness(): { context: ViewportContext; label: strin
 }
 
 export function deriveSurface(pathname: string, search = ''): Pick<ViewportContext, 'surface' | 'resourceId' | 'resourceKind' | 'title'> & {
+  /** Owning App when a sub-resource is visible inside the App editor. */
+  appId?: string;
   page?: string;
   mode?: 'live' | 'edit' | 'history' | 'code';
   selectedNodeId?: string;
@@ -107,6 +116,20 @@ export function deriveSurface(pathname: string, search = ''): Pick<ViewportConte
     const selectedNodeId = interfaceActive ? params.get('node') ?? undefined : undefined;
     const activeFacet = facet ?? (interfaceActive ? 'interface' : null);
     const facetLabel = activeFacet ? activeFacet.charAt(0).toUpperCase() + activeFacet.slice(1) : null;
+    // An App can own several workflows. `workflow` is maintained by
+    // AppEditorPage whenever the workflow switcher changes, turning the visual
+    // canvas selection into a stable, shareable viewport target.
+    const selectedWorkflowId = activeFacet === 'workflow' ? params.get('workflow') : null;
+    if (selectedWorkflowId) {
+      return {
+        surface: 'workflow_detail',
+        resourceKind: 'workflow',
+        resourceId: selectedWorkflowId,
+        title: 'Workflow',
+        appId: id,
+        facet: 'workflow',
+      };
+    }
     return {
       surface: 'app_detail',
       resourceKind: 'app',

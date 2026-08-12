@@ -30,6 +30,8 @@ export interface SummaryMessage {
   /** 'user' = the contact/operator; 'assistant' = the resident agent. */
   role: 'user' | 'assistant';
   content: string;
+  id?: string;
+  createdAt?: string;
 }
 
 export interface SummaryUpdateInput {
@@ -55,6 +57,8 @@ export interface ConversationSummaryRow {
   summary: string;
   coveredCount: number;
   source: string;
+  coveredThroughMessageId: string | null;
+  coveredThroughAt: string | null;
 }
 
 /** How many salient lines the deterministic fallback keeps. */
@@ -63,6 +67,8 @@ const DETERMINISTIC_LINES = 12;
 const MAX_SUMMARY_CHARS = 1800;
 /** Re-summarize only after at least this many new out-of-window messages accrue. */
 const RESUMMARIZE_EVERY = 6;
+/** Each background compaction call remains small even after a history import. */
+const MAX_SUMMARY_BATCH_CHARS = 24_000;
 
 export class ConversationSummaryService {
   constructor(
@@ -78,6 +84,8 @@ export class ConversationSummaryService {
           summary: schema.conversationSummaries.summary,
           coveredCount: schema.conversationSummaries.coveredCount,
           source: schema.conversationSummaries.source,
+          coveredThroughMessageId: schema.conversationSummaries.coveredThroughMessageId,
+          coveredThroughAt: schema.conversationSummaries.coveredThroughAt,
         })
         .from(schema.conversationSummaries)
         .where(eq(schema.conversationSummaries.conversationId, conversationId))
@@ -91,6 +99,12 @@ export class ConversationSummaryService {
       });
       return null;
     }
+  }
+
+  /** Imported provider history can precede an old watermark; rebuild locally on the next turn. */
+  invalidate(conversationId: string): void {
+    this.deps.db.delete(schema.conversationSummaries)
+      .where(eq(schema.conversationSummaries.conversationId, conversationId)).run();
   }
 
   /**
@@ -121,16 +135,32 @@ export class ConversationSummaryService {
       if (outOfWindow <= 0) return existing;
       // Throttle: only re-summarize once enough new out-of-window turns have
       // accrued past what we already captured (keeps cost flat over a long thread).
-      const covered = existing?.coveredCount ?? 0;
-      if (existing && outOfWindow - covered < RESUMMARIZE_EVERY) return existing;
-
-      // The turns to fold: everything that has scrolled out of the live window.
       const older = input.messages.slice(0, outOfWindow);
-      const { summary, source } = await this.#summarize(older, existing?.summary ?? null, input.completer ?? null, input.signal);
-      if (!summary.trim()) return existing;
+      let newlyExpired = older;
+      if (existing?.coveredThroughMessageId) {
+        const watermarkIndex = older.findIndex((message) => message.id === existing.coveredThroughMessageId);
+        if (watermarkIndex >= 0) newlyExpired = older.slice(watermarkIndex + 1);
+        else if (existing.coveredThroughAt) {
+          newlyExpired = older.filter((message) => Boolean(message.createdAt && message.createdAt > existing.coveredThroughAt!));
+        }
+      } else if (existing) {
+        newlyExpired = older.slice(Math.min(existing.coveredCount, older.length));
+      }
+      if (existing && newlyExpired.length < RESUMMARIZE_EVERY) return existing;
+
+      let summary = existing?.summary ?? null;
+      let source: 'model' | 'deterministic' = existing?.source === 'model' ? 'model' : 'deterministic';
+      for (const batch of summaryBatches(newlyExpired)) {
+        const compacted = await this.#summarize(batch, summary, input.completer ?? null, input.signal);
+        if (compacted.summary.trim()) summary = compacted.summary;
+        if (compacted.source === 'model') source = 'model';
+      }
+      if (!summary?.trim()) return existing;
 
       const now = new Date().toISOString();
       const bounded = summary.trim().slice(0, MAX_SUMMARY_CHARS);
+      const watermark = older.at(-1);
+      const coveredCount = Math.max(outOfWindow, (existing?.coveredCount ?? 0) + newlyExpired.length);
       this.deps.db
         .insert(schema.conversationSummaries)
         .values({
@@ -138,17 +168,33 @@ export class ConversationSummaryService {
           workspaceId: input.workspaceId,
           appId: input.appId ?? null,
           summary: bounded,
-          coveredCount: outOfWindow,
+          coveredCount,
+          coveredThroughMessageId: watermark?.id ?? null,
+          coveredThroughAt: watermark?.createdAt ?? null,
           source,
           createdAt: now,
           updatedAt: now,
         })
         .onConflictDoUpdate({
           target: schema.conversationSummaries.conversationId,
-          set: { summary: bounded, coveredCount: outOfWindow, source, updatedAt: now },
+          set: {
+            summary: bounded,
+            coveredCount,
+            coveredThroughMessageId: watermark?.id ?? null,
+            coveredThroughAt: watermark?.createdAt ?? null,
+            source,
+            updatedAt: now,
+          },
         })
         .run();
-      return { conversationId: input.conversationId, summary: bounded, coveredCount: outOfWindow, source };
+      return {
+        conversationId: input.conversationId,
+        summary: bounded,
+        coveredCount,
+        source,
+        coveredThroughMessageId: watermark?.id ?? null,
+        coveredThroughAt: watermark?.createdAt ?? null,
+      };
     } catch (err) {
       this.deps.logger?.warn?.('conversation.summary.update_failed', {
         conversationId: input.conversationId,
@@ -226,3 +272,21 @@ function oneLine(text: string): string {
 }
 
 export const CONVERSATION_SUMMARY_RESUMMARIZE_EVERY = RESUMMARIZE_EVERY;
+
+function summaryBatches(messages: SummaryMessage[]): SummaryMessage[][] {
+  const batches: SummaryMessage[][] = [];
+  let current: SummaryMessage[] = [];
+  let chars = 0;
+  for (const message of messages) {
+    const cost = Math.min(oneLine(message.content).length, 240) + 16;
+    if (current.length > 0 && chars + cost > MAX_SUMMARY_BATCH_CHARS) {
+      batches.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(message);
+    chars += cost;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}

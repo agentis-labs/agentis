@@ -109,18 +109,6 @@ function recordsTable(ctx: Ctx): ViewNode {
 }
 
 /** The live operations rail — the App's agentic heartbeat beside the working area. */
-function opsRail(): ViewNode {
-  return {
-    type: 'Stack',
-    gap: 12,
-    style: { span: 1 },
-    children: [
-      { type: 'RunMonitor', limit: 5 },
-      { type: 'AgentFeed', limit: 20 },
-    ],
-  };
-}
-
 function recordsTabs(ctx: Ctx, extra: ViewNode[] = []): ViewNode {
   return {
     type: 'Tabs',
@@ -173,12 +161,12 @@ function pipelineView(ctx: Ctx): BuiltSurface {
     view: {
       type: 'Stack',
       gap: 16,
-      style: { theme: 'product', design: 'agentis' },
+      style: { theme: 'product', design: 'editorial', density: 'compact' },
       children: [
-        { type: 'Hero', title: humanize(ctx.name) },
-        { type: 'OrchestrationPanel' },
+        { type: 'Toolbar', title: humanize(ctx.name), children: [{ type: 'Badge', value: 'Live pipeline', tone: 'success' }] },
         flow,
-        { type: 'Grid', columns: 3, gap: 16, children: [kanban, opsRail()] },
+        kanban,
+        { type: 'ActivityStream', title: 'Recent movement', limit: 12 },
         recordsTabs(ctx),
       ],
     },
@@ -191,7 +179,7 @@ function pipelineView(ctx: Ctx): BuiltSurface {
 function crmView(ctx: Ctx): BuiltSurface {
   const records: ViewNode = {
     type: 'RecordMaster',
-    style: { span: 2 },
+    style: { span: 3 },
     bind: { collection: ctx.name, live: true, limit: 200 },
     ...(ctx.titleField ? { titleField: ctx.titleField } : {}),
     ...(ctx.subtitleField ? { subtitleField: ctx.subtitleField } : {}),
@@ -201,12 +189,11 @@ function crmView(ctx: Ctx): BuiltSurface {
     view: {
       type: 'Stack',
       gap: 16,
-      style: { theme: 'product', design: 'agentis' },
+      style: { theme: 'product', design: 'operations' },
       children: [
-        { type: 'Hero', title: humanize(ctx.name) },
-        { type: 'OrchestrationPanel' },
-        { type: 'Grid', columns: 3, gap: 16, children: [records, opsRail()] },
-        { type: 'Tabs', tabs: [{ label: `Add ${humanize(ctx.name)}`, children: [addForm(ctx)] }] },
+        { type: 'Toolbar', title: humanize(ctx.name), children: [{ type: 'Text', value: 'Search, review, and update the complete relationship history.' }] },
+        records,
+        { type: 'Accordion', sections: [{ title: `Add ${humanize(ctx.name)}`, children: [addForm(ctx)] }] },
       ],
     },
     actions: crudActions(ctx),
@@ -232,10 +219,9 @@ function roadmapView(ctx: Ctx): BuiltSurface {
       gap: 16,
       style: { theme: 'product', design: 'agentis' },
       children: [
-        { type: 'Hero', title: humanize(ctx.name) },
-        { type: 'OrchestrationPanel' },
+        { type: 'Hero', eyebrow: 'Plan', title: humanize(ctx.name), subtitle: 'Sequence milestones, dates, and delivery risk.' },
         roadmap,
-        { type: 'Grid', columns: 3, gap: 16, children: [table, opsRail()] },
+        { type: 'Split', ratio: 2, left: table, right: { type: 'RunMonitor', title: 'Delivery automations', limit: 5, controls: true } },
         { type: 'Tabs', tabs: [{ label: `Add ${humanize(ctx.name)}`, children: [addForm(ctx)] }] },
       ],
     },
@@ -268,9 +254,9 @@ function analyticsView(ctx: Ctx): BuiltSurface {
       gap: 16,
       style: { theme: 'analytics', design: 'agentis' },
       children: [
-        { type: 'Hero', title: humanize(ctx.name) },
-        { type: 'OrchestrationPanel' },
-        { type: 'Grid', columns: 3, gap: 16, children: [chartCard, opsRail()] },
+        { type: 'Heading', value: humanize(ctx.name) },
+        { type: 'Narrative', title: 'Reading the signal', value: 'Explore the trend, then inspect the records behind each movement.', tone: 'brief' },
+        chartCard,
         recordsTabs(ctx),
       ],
     },
@@ -303,9 +289,9 @@ function operationsView(ctx: Ctx): BuiltSurface {
       gap: 16,
       style: { theme: 'operations', design: 'agentis' },
       children: [
-        { type: 'Hero', title: humanize(ctx.name) },
+        { type: 'Toolbar', title: humanize(ctx.name), children: [{ type: 'Badge', value: 'Operational', tone: 'neutral' }] },
         { type: 'OrchestrationPanel' },
-        { type: 'Grid', columns: 3, gap: 16, children: [main, opsRail()] },
+        { type: 'Split', ratio: 2, left: main, right: { type: 'Stack', gap: 12, children: [{ type: 'RunMonitor', limit: 5 }, { type: 'AgentFeed', limit: 12 }] } },
       ],
     },
     actions: crudActions(ctx),

@@ -17,6 +17,7 @@ import type { ExtensionKvStore } from '../extensions/kv.js';
 import type { CredentialVault } from './credentialVault.js';
 import type { ResolvedExtensionCredential } from '../extensions/credentialAttach.js';
 import { validateComponentManifest } from '../extensions/componentBundle.js';
+import type { ExtensionBrowserBackend } from '../extensions/browserBackend.js';
 
 /** Minimal cursor surface the ExtensionSource passes to a listener-source op. */
 export interface ListenerSourceCursor {
@@ -90,7 +91,26 @@ export class ExtensionRuntime {
     private readonly kv?: ExtensionKvStore,
     /** Decrypts operator-bound credentials (INTEGRATION-CEILING-10X §3). Absent → extensions declaring `credentials` get none resolved (fail closed, not a crash). */
     private readonly vault?: CredentialVault,
+    private readonly browser?: ExtensionBrowserBackend,
   ) {}
+
+  async browserHealth(workspaceId?: string): Promise<Record<string, unknown>> {
+    return this.browser
+      ? this.browser.health(workspaceId)
+      : { available: false, backend: 'none', checkpointing: false };
+  }
+
+  async cleanupExtensionBrowser(workspaceId: string, extensionId: string): Promise<void> {
+    await this.browser?.cleanupExtension(workspaceId, extensionId);
+  }
+
+  async refreshExtensionBrowser(workspaceId: string, extensionId: string): Promise<void> {
+    await this.browser?.refreshExtension(workspaceId, extensionId);
+  }
+
+  async shutdownBrowser(): Promise<void> {
+    await this.browser?.shutdown();
+  }
 
   /**
    * Operator-set bindings (schema.extensions.credentialBindings: declared
@@ -180,6 +200,12 @@ export class ExtensionRuntime {
     if (!source) throw new AgentisError('VALIDATION_FAILED', 'node_worker extension is missing inline source');
 
     const kv = this.kv;
+    const browserInvocation = this.browser?.createInvocation({
+      workspaceId: args.workspaceId,
+      extensionId: extension.id,
+      permissions,
+      allowedDomains: manifest.allowedDomains ?? [],
+    });
     const outcome = await runNodeWorkerExtension({
       manifest,
       operationName: args.operationName,
@@ -192,6 +218,7 @@ export class ExtensionRuntime {
       timeoutMs: clampTimeout(manifest.timeoutMs),
       logger: this.logger,
       credentials: this.#resolveCredentials(extension, manifest),
+      ...(browserInvocation ? { browserCall: (action: string, browserArgs: unknown[]) => browserInvocation.call(action, browserArgs) } : {}),
       listenerHooks: {
         emit: args.onEmit,
         getCursor: () => args.cursor?.read(),
@@ -199,7 +226,7 @@ export class ExtensionRuntime {
         kvGet: (key) => kv?.get(args.workspaceId, extension.id, key),
         kvSet: (key, value, ttlSeconds) => kv?.set(args.workspaceId, extension.id, key, value, ttlSeconds),
       },
-    });
+    }).finally(() => browserInvocation?.finish());
     if (!outcome.ok) {
       throw new AgentisError(
         outcome.errorCode === 'EXTENSION_PERMISSION_DENIED' ? 'EXTENSION_PERMISSION_DENIED' : 'EXTENSION_INTERNAL',
@@ -258,6 +285,16 @@ export class ExtensionRuntime {
     // trusted and excluded so a long deploy never starves the sandbox pool.
     const needsSandboxSlot = manifest.runtime === 'node_worker' || manifest.runtime === 'docker_sandbox' || manifest.runtime === 'component_oci';
     const releaseSandboxSlot = needsSandboxSlot ? await acquireSandboxSlot() : null;
+    const browserInvocation = manifest.runtime === 'node_worker' ? this.browser?.createInvocation({
+      workspaceId: args.workspaceId,
+      extensionId: extension.id,
+      runId: args.runId,
+      taskId: args.taskId,
+      permissions: manifest.permissions ?? [],
+      allowedDomains: manifest.allowedDomains ?? [],
+      ...(args.signal ? { signal: args.signal } : {}),
+    }) : undefined;
+    let browserFinishError: unknown;
     try {
       if (args.signal?.aborted) throw new Error('__ABORTED__');
       switch (manifest.runtime) {
@@ -268,6 +305,16 @@ export class ExtensionRuntime {
           ));
           break;
         case 'node_worker': {
+          if ((manifest.permissions ?? []).includes('browser') && !browserInvocation) {
+            outcome = {
+              ok: false,
+              errorCode: 'EXTENSION_RUNTIME_UNAVAILABLE',
+              message: 'Extension requested browser access but no browser backend is wired',
+              durationMs: Date.now() - startedAt,
+              operationName,
+            };
+            break;
+          }
           const source = typeof manifest.source === 'string' ? manifest.source : '';
           if (!source) {
             outcome = {
@@ -292,6 +339,7 @@ export class ExtensionRuntime {
             timeoutMs,
             logger: this.logger,
             credentials: this.#resolveCredentials(extension, manifest),
+            ...(browserInvocation ? { browserCall: (action: string, browserArgs: unknown[]) => browserInvocation.call(action, browserArgs) } : {}),
             ...(args.signal ? { signal: args.signal } : {}),
           }));
           break;
@@ -347,7 +395,22 @@ export class ExtensionRuntime {
         operationName,
       };
     } finally {
+      try {
+        await browserInvocation?.finish();
+      } catch (error) {
+        browserFinishError = error;
+      }
       releaseSandboxSlot?.();
+    }
+
+    if (browserFinishError && outcome.ok) {
+      outcome = {
+        ok: false,
+        errorCode: 'EXTENSION_INTERNAL',
+        message: `Browser checkpoint failed: ${browserFinishError instanceof Error ? browserFinishError.message : String(browserFinishError)}`,
+        durationMs: Date.now() - startedAt,
+        operationName,
+      };
     }
 
     try {
@@ -508,6 +571,17 @@ export function validateExtensionManifest(manifest: ExtensionManifest, opts: { i
   if (permissions.includes('credentials') && (!manifest.credentialKeys || manifest.credentialKeys.length === 0)) {
     throw new AgentisError('EXTENSION_MANIFEST_INVALID', `Extension ${manifest.slug} declares credentials but has no credentialKeys`);
   }
+  if (permissions.includes('browser') && (!manifest.allowedDomains || manifest.allowedDomains.length === 0)) {
+    throw new AgentisError('EXTENSION_MANIFEST_INVALID', `Extension ${manifest.slug} declares browser but has no allowedDomains`);
+  }
+  if (permissions.includes('browser') && manifest.runtime !== 'node_worker') {
+    throw new AgentisError('EXTENSION_PERMISSION_INVALID', 'browser permission is only valid for node_worker extensions');
+  }
+  for (const permission of ['browser.evaluate', 'browser.session.persist', 'browser.auth'] as const) {
+    if (permissions.includes(permission) && !permissions.includes('browser')) {
+      throw new AgentisError('EXTENSION_PERMISSION_INVALID', `${permission} requires the browser permission`);
+    }
+  }
   if (permissions.includes('spawn') && manifest.runtime !== 'docker_sandbox' && manifest.runtime !== 'component_oci') {
     throw new AgentisError('EXTENSION_PERMISSION_INVALID', 'spawn permission is only valid for OCI-backed extensions');
   }
@@ -585,6 +659,10 @@ export function normalizePermissions(value: unknown): ExtensionPermission[] {
     'listener.cursor',
     'kv.read',
     'kv.write',
+    'browser',
+    'browser.evaluate',
+    'browser.session.persist',
+    'browser.auth',
   ]);
   return [...new Set(value.filter((v): v is ExtensionPermission => typeof v === 'string' && allowed.has(v as ExtensionPermission)))];
 }

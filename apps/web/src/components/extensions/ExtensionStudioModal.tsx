@@ -23,7 +23,8 @@ export interface CreatedExtension {
 
 type Permission =
   | 'network' | 'credentials' | 'workspace.read' | 'workspace.write' | 'filesystem'
-  | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write';
+  | 'listener' | 'listener.emit' | 'listener.cursor' | 'kv.read' | 'kv.write'
+  | 'browser' | 'browser.evaluate' | 'browser.session.persist' | 'browser.auth';
 
 interface OpDraft {
   name: string;
@@ -31,12 +32,16 @@ interface OpDraft {
   isListenerSource: boolean;
 }
 
-const PERMISSIONS: Array<{ value: Permission; label: string; hint: string; group: 'core' | 'listener' }> = [
+const PERMISSIONS: Array<{ value: Permission; label: string; hint: string; group: 'core' | 'listener' | 'browser' }> = [
   { value: 'network', label: 'Network', hint: 'HTTP to declared domains', group: 'core' },
   { value: 'credentials', label: 'Credentials', hint: 'Read workspace secrets', group: 'core' },
   { value: 'workspace.read', label: 'Read state', hint: 'Read scratchpad', group: 'core' },
   { value: 'workspace.write', label: 'Write state', hint: 'Write scratchpad', group: 'core' },
   { value: 'filesystem', label: 'Filesystem', hint: 'Sandbox temp dir', group: 'core' },
+  { value: 'browser', label: 'Browser', hint: 'ctx.browser on declared domains', group: 'browser' },
+  { value: 'browser.evaluate', label: 'Page evaluate', hint: 'Run bounded JavaScript in the page', group: 'browser' },
+  { value: 'browser.session.persist', label: 'Persistent session', hint: 'Live session + encrypted checkpoint', group: 'browser' },
+  { value: 'browser.auth', label: 'Auth profiles', hint: 'Restore operator-saved browser auth', group: 'browser' },
   { value: 'listener', label: 'Listener source', hint: 'Usable as a trigger source', group: 'listener' },
   { value: 'listener.emit', label: 'Emit events', hint: 'ctx.emit()', group: 'listener' },
   { value: 'listener.cursor', label: 'Cursor', hint: 'ctx.cursor / setCursor', group: 'listener' },
@@ -45,7 +50,7 @@ const PERMISSIONS: Array<{ value: Permission; label: string; hint: string; group
 ];
 
 const STARTER = `// One exported async function per operation: (inputs, ctx) => structured JSON.
-// ctx.http.fetch (sandboxed), ctx.kv (durable), ctx.emit (listener sources).
+// ctx.http.fetch (sandboxed), ctx.browser (permissioned), ctx.kv (durable), ctx.emit (listeners).
 export async function run(inputs, ctx) {
   const res = await ctx.http.fetch(\`https://api.example.com/items?q=\${inputs.query}\`);
   return { count: res.body.items?.length ?? 0, items: res.body.items ?? [] };
@@ -120,7 +125,17 @@ export function ExtensionStudioModal({
   const togglePerm = (p: Permission) =>
     setPermissions((prev) => {
       const next = new Set(prev);
-      next.has(p) ? next.delete(p) : next.add(p);
+      if (next.has(p)) {
+        next.delete(p);
+        if (p === 'browser') {
+          next.delete('browser.evaluate');
+          next.delete('browser.session.persist');
+          next.delete('browser.auth');
+        }
+      } else {
+        next.add(p);
+        if (p.startsWith('browser.')) next.add('browser');
+      }
       return next;
     });
 
@@ -146,7 +161,7 @@ export function ExtensionStudioModal({
     const domains = allowedDomains.split(',').map((s) => s.trim()).filter(Boolean);
     const creds = credentialKeys.split(',').map((s) => s.trim()).filter(Boolean);
     const perms = [...permissions];
-    if (perms.includes('network') && domains.length === 0) return setError('Network permission needs at least one allowed domain.');
+    if ((perms.includes('network') || perms.includes('browser')) && domains.length === 0) return setError('Network/browser permission needs at least one allowed domain.');
     if (perms.includes('credentials') && creds.length === 0) return setError('Credentials permission needs at least one credential key.');
     const listenerOperations = ops.filter((o) => o.isListenerSource).map((o) => o.name);
     if (listenerOperations.length && !perms.includes('listener')) return setError('Grant the "Listener source" permission to expose a listener operation.');
@@ -265,7 +280,7 @@ export function ExtensionStudioModal({
               ))}
             </div>
 
-            {permissions.has('network') && (
+            {(permissions.has('network') || permissions.has('browser')) && (
               <>
                 <label className={`${labelCls} mt-3`}>Allowed domains (comma-separated)</label>
                 <input className={inputCls} value={allowedDomains} onChange={(e) => setAllowedDomains(e.target.value)} placeholder="api.example.com" />
@@ -300,6 +315,5 @@ export function ExtensionStudioModal({
     </>
   );
 }
-
 
 

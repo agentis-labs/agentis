@@ -38,6 +38,8 @@ import { ExtensionRuntime } from './services/extensionRuntime.js';
 import { SubflowExecutor } from './services/subflowExecutor.js';
 import { ConversationStore } from './services/conversation/conversationStore.js';
 import { ConversationSummaryService } from './services/conversation/conversationSummaryService.js';
+import { ConversationHandoffService } from './services/conversation/conversationHandoffService.js';
+import { channelModelRole } from './services/conversation/channelConversationRole.js';
 import { SessionMirror } from './services/sessionMirror.js';
 import { RegistryClient } from './services/registryClient.js';
 import { ChannelBridge } from './services/conversation/channelBridge.js';
@@ -587,6 +589,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // vocalize (default no-op TTS — the provider speaks the text). Held as a named
   // ref so the voice reply-retrieval route can read its pending-reply buffer.
   const voiceChannelAdapter = new VoiceChannelAdapter();
+  const conversationHandoffs = new ConversationHandoffService({ db: sqlite, bus });
+  const conversationSummaries = new ConversationSummaryService({ db: sqlite, logger });
   const channelBridge = new ChannelBridge({
     db: sqlite,
     vault: credentialVault,
@@ -600,6 +604,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       voice: voiceChannelAdapter,
     },
     artifacts: artifactService,
+    handoffs: conversationHandoffs,
   });
   const seed = await seedIfEmpty({ db: sqlite, env, auth, logger });
 
@@ -1153,6 +1158,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     workspaceIntelligence,
     agentLibrary,
     extensionLibrary,
+    extensionRuntime: extensions,
     specialists: specialistAgents,
     specialistProfiles,
     specialistRuntime,
@@ -1204,7 +1210,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
           )).get();
           const recent = sqlite.select({
             authorType: schema.conversationMessages.authorType,
+            participantSide: schema.conversationMessages.participantSide,
             body: schema.conversationMessages.body,
+            metadata: schema.conversationMessages.metadata,
           }).from(schema.conversationMessages).where(and(
             eq(schema.conversationMessages.conversationId, conversationId),
             eq(schema.conversationMessages.workspaceId, workspaceId),
@@ -1218,9 +1226,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
           sessionStore.appendMessages(session.id, [
             { role: 'user', content: originHeader },
             ...recent.map((message) => ({
-              role: message.authorType === 'agent' || message.authorType === 'assistant'
-                ? 'assistant' as const
-                : 'user' as const,
+              role: channelModelRole(message, Boolean(origin?.channelConnectionId)) === 'user'
+                ? 'user' as const
+                : 'assistant' as const,
               content: message.body,
             })),
           ], session.totalSteps);
@@ -1531,6 +1539,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       workspaceId,
       conversationId,
       operatorId: 'system',
+      participantSide: 'business',
       sessionMessageId,
       body,
       deliveryStatus: 'sending',
@@ -1538,7 +1547,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     });
     let receipt: ChannelDeliveryReceipt | undefined;
     try {
-      receipt = await channelBridge.deliverToConnection({ connectionId, chatId, body, idempotencyKey: sessionMessageId });
+      receipt = await channelBridge.deliverToConnection({ connectionId, chatId, body, idempotencyKey: sessionMessageId, conversationId });
       if (!isAcknowledgedChannelDelivery(receipt)) {
         conversations.updateDeliveryStatus({
           workspaceId,
@@ -1599,7 +1608,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     setTyping: (connectionId, chatId, on) => channelBridge.setTyping(connectionId, chatId, on),
     identity: channelIdentity,
     contacts: appContacts,
-    summaries: new ConversationSummaryService({ db: sqlite, logger }),
+    summaries: conversationSummaries,
+    handoffs: conversationHandoffs,
     participants: conversationParticipants,
     outboundPolicy,
     requestOutboundApproval: (a) => requestOutboundApproval(a),
@@ -1797,6 +1807,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     // Wire both directions: dispatch() enqueues; the worker calls runQueued().
     channelTurnDispatcher.setQueue(channelTurnQueue);
   }
+  conversationHandoffs.subscribe((snapshot) => channelTurnDispatcher.handleHandoffChanged(snapshot));
 
   // Inbound voice understanding is available by default through managed local
   // Whisper. A workspace transcription profile is only an optional accelerator.
@@ -1888,6 +1899,8 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       logger,
     }).describe({ bytes, mimeType: mime, ...(caption ? { caption } : {}) }),
     extractDocument: (bytes, mime, _workspaceId, fileName) => documentExtraction.extract({ bytes, mimeType: mime, ...(fileName ? { fileName } : {}) }),
+    handoffs: conversationHandoffs,
+    summaries: conversationSummaries,
   });
   channelBridge.setPersistentTransport(channelSupervisor);
   // §PERF-BOOT (GAP B) — startAll() is NOT called here any more. Despite the
@@ -2017,6 +2030,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     chatMemoryCapture,
     commandAutonomyMaster,
     connectionGrants,
+    conversationHandoffs,
     conversationParticipants,
     conversationSimulator,
     defaultCognitiveCompleter,
@@ -2251,6 +2265,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       orchestratorBridge.stop();
       channelBridge.shutdown();
       await channelSupervisor.shutdown().catch((err) => logger.warn('agentis.shutdown.channel_supervisor', { err: (err as Error).message }));
+      await extensions.shutdownBrowser().catch((err) => logger.warn('agentis.shutdown.extension_browser', { err: (err as Error).message }));
       await browserSessionManager.shutdown().catch((err) => logger.warn('agentis.shutdown.browser_sessions', { err: (err as Error).message }));
       await browserPool.shutdown().catch((err) => logger.warn('agentis.shutdown.browser', { err: (err as Error).message }));
       await registry.shutdown().catch((err) => logger.warn('agentis.shutdown.registry', { err: (err as Error).message }));

@@ -23,6 +23,7 @@ import { resolveStartAt } from '../workflow/deferredStart.js';
 import { resolveWorkflowExecutionTarget } from '../workflow/workflowExecutionTarget.js';
 import { queueWorkflowRun } from '../scheduler.js';
 import type { ToolHandlerDeps } from './deps.js';
+import { normalizeRunOutcomeStatus } from '../workflow/runOutcome.js';
 
 export function registerRunTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -1121,7 +1122,7 @@ function runStatus(deps: ToolHandlerDeps, workspaceId: string, runId: string) {
     isEphemeral: run.isEphemeral,
     status: run.status,
     executionStatus: run.executionStatus,
-    outcomeStatus: run.outcomeStatus,
+    outcomeStatus: normalizeRunOutcomeStatus(run.outcomeStatus),
     settlement: run.settlement,
     // The honest headline. `accomplished:false` on a COMPLETED run is the whole
     // point of SWIFT — do NOT report success to the operator on that basis.

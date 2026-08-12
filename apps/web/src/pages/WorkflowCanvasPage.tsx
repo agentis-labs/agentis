@@ -1612,7 +1612,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       setRunDialogOpen(false);
       setRunControlOpen(false);
       setTab('canvas');
-      toast.success(target === 'candidate' ? 'Candidate verification run started' : 'Active production run started');
+      toast.success(target === 'candidate' ? 'Change verification started' : 'Live execution started');
     } catch (e) {
       toast.error('Failed to start run', apiErrorMessage(e));
     } finally {
@@ -1835,7 +1835,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
             title="Workflow revision and proof"
           >
             <GitBranch size={11} />
-            {wf.candidateRevision ? 'Candidate' : wf.trustState === 'proven' ? 'Proven' : 'Legacy'}
+            {wf.candidateRevision ? 'Needs verification' : wf.trustState === 'proven' ? 'Live' : 'Needs proof'}
           </button>
           {revisionOpen && (
             <WorkflowRevisionPopover
@@ -2502,7 +2502,7 @@ export function WorkflowCanvasPage({ embedded = false, workflowId }: { embedded?
       <RunInputDialog
         open={runDialogOpen}
         onClose={() => setRunDialogOpen(false)}
-        variables={wf.variables ?? []}
+        variables={workflowRunVariables(wf.variables ?? [], wf.graph.inputContract)}
         activeRevision={wf.activeRevision}
         candidateRevision={wf.candidateRevision}
         onRun={(inputs, target) => void runWorkflow(inputs, target)}
@@ -2604,7 +2604,7 @@ function headerRunStatusLabel(status: WorkflowRunSummary['status'] | null): stri
   if (status === 'pending') return 'Preparing';
   if (status === 'running') return 'Running';
   if (status === 'failed') return 'Failed';
-  if (status === 'completed') return 'Completed';
+  if (status === 'completed') return 'Execution finished';
   return 'Run';
 }
 
@@ -2663,19 +2663,19 @@ function WorkflowRevisionPopover({
           method: 'POST',
           body: JSON.stringify({ operatorApproval: candidate.proof.approvalRequired }),
         });
-        toast.success('Revision promoted', 'Production now points to the proven candidate.');
+        toast.success('Verified change published', 'The tested revision is now live.');
       } else {
         await api(`/v1/workflows/${workflow.id}/revisions/${candidate.id}/abandon`, {
           method: 'POST',
           body: JSON.stringify({ reason: 'Abandoned from the workflow revision control' }),
         });
-        toast.success('Candidate abandoned', 'The canvas returned to the active production revision.');
+        toast.success('Pending change discarded', 'The canvas returned to the live version.');
       }
       await onChanged();
       await load();
     } catch (error) {
       toast.error(
-        action === 'verify' ? 'Verification could not start' : action === 'promote' ? 'Promotion blocked' : 'Could not abandon candidate',
+        action === 'verify' ? 'Verification could not start' : action === 'promote' ? 'Publication blocked' : 'Could not discard the pending change',
         apiErrorMessage(error),
       );
       await load();
@@ -2691,7 +2691,7 @@ function WorkflowRevisionPopover({
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">Production lineage</p>
             <h3 className="mt-1 text-sm font-semibold text-text-primary">
-              {candidate ? 'Unverified work is isolated' : 'Production is protected'}
+              {candidate ? 'A change needs attention' : 'Live version is protected'}
             </h3>
           </div>
           <button type="button" onClick={onClose} className="rounded-md p-1 text-text-muted hover:bg-surface-3 hover:text-text-primary" aria-label="Close revision control">
@@ -2700,15 +2700,15 @@ function WorkflowRevisionPopover({
         </div>
         <p className="mt-1.5 text-xs leading-5 text-text-secondary">
           {candidate
-            ? 'Runs continue on the active revision until this exact candidate passes every proof gate.'
-            : 'Edits create a candidate. The active graph changes only after clean verification and promotion.'}
+            ? 'The live workflow is unchanged. Verify this exact change; safe changes publish automatically when every proof passes.'
+            : 'Changes are isolated internally, verified, and published automatically. You only need to act when verification fails or approval is required.'}
         </p>
       </div>
 
       <div className="space-y-3 p-4">
         <div className="grid grid-cols-2 gap-2">
-          <RevisionCard label="Active" revision={active} tone="active" />
-          <RevisionCard label="Candidate" revision={candidate} tone="candidate" />
+          <RevisionCard label="Live" revision={active} tone="active" />
+          <RevisionCard label="Pending change" revision={candidate} tone="candidate" />
         </div>
 
         {candidate && (
@@ -2742,7 +2742,7 @@ function WorkflowRevisionPopover({
         {candidate ? (
           <div className="flex items-center gap-2">
             <Button size="sm" variant="secondary" loading={busy === 'verify'} onClick={() => void act('verify')}>
-              Verify cleanly
+              Verify & publish
             </Button>
             <Button
               size="sm"
@@ -2751,10 +2751,10 @@ function WorkflowRevisionPopover({
               disabled={!candidate.proof.readyForPromotion && !(candidate.proof.approvalRequired && candidate.proof.missing.every((gate) => gate === 'operator_approval'))}
               onClick={() => void act('promote')}
             >
-              {candidate.proof.approvalRequired ? 'Approve & promote' : 'Promote'}
+              {candidate.proof.approvalRequired ? 'Review & publish' : 'Publish verified change'}
             </Button>
             <button type="button" disabled={Boolean(busy)} onClick={() => void act('abandon')} className="ml-auto text-xs font-medium text-danger hover:underline disabled:opacity-40">
-              Abandon
+              Discard change
             </button>
           </div>
         ) : (
@@ -3526,7 +3526,7 @@ function DeploymentPanel({
             )}
             {changed && (
               <div className="rounded-input border border-accent/25 bg-accent-soft px-2.5 py-2 text-[11px] leading-4 text-text-secondary">
-                The canvas trigger changed after the last activation. Activate again to apply the draft.
+                The trigger changed after the last activation. Verify and publish the change to apply it.
               </div>
             )}
             {error && (
@@ -3798,6 +3798,28 @@ function activationSuccessMessage(triggerType: WorkflowDeployment['triggerType']
   return 'Persistent listener activated';
 }
 
+function workflowRunVariables(
+  variables: Array<{ name: string; type: string; default?: unknown; label?: string }>,
+  contract?: WorkflowContractValue,
+): Array<{ name: string; type: string; default?: unknown; label?: string; required?: boolean }> {
+  const contractFields = contract?.fields ?? [];
+  const existing = new Map(variables.map((variable) => [variable.name, variable]));
+  const merged = variables.map((variable) => {
+    const field = contractFields.find((candidate) => candidate.key === variable.name);
+    return { ...variable, ...(field?.required ? { required: true } : {}) };
+  });
+  for (const field of contractFields) {
+    if (existing.has(field.key)) continue;
+    merged.push({
+      name: field.key,
+      type: field.type,
+      label: humanizeInputName(field.key),
+      ...(field.required ? { required: true } : {}),
+    });
+  }
+  return merged;
+}
+
 function RunInputDialog({
   open,
   onClose,
@@ -3809,7 +3831,7 @@ function RunInputDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  variables: Array<{ name: string; type: string; default?: unknown; label?: string }>;
+  variables: Array<{ name: string; type: string; default?: unknown; label?: string; required?: boolean }>;
   activeRevision: WorkflowRevisionSummary | undefined;
   candidateRevision: WorkflowRevisionSummary | null | undefined;
   onRun: (inputs: Record<string, unknown>, target: 'active' | 'candidate') => void;
@@ -3829,6 +3851,8 @@ function RunInputDialog({
       setTarget(candidateRevision ? 'candidate' : 'active');
     }
   }, [open, variables]);
+
+  const missingRequired = variables.filter((variable) => variable.required && !(values[variable.name] ?? '').trim());
 
   if (!open) return null;
   return (
@@ -3858,12 +3882,12 @@ function RunInputDialog({
         <div className="space-y-4 px-5 py-5">
           <div className="hidden grid grid-cols-2 gap-2" role="radiogroup" aria-label="Revision to run">
             <button type="button" role="radio" aria-checked={target === 'active'} onClick={() => setTarget('active')} className={clsx('rounded-lg border p-3 text-left', target === 'active' ? 'border-accent bg-accent/10' : 'border-line bg-surface-2')}>
-              <div className="text-[12px] font-semibold text-text-primary">Active · production</div>
-              <div className="mt-1 font-mono text-[10px] text-text-muted">{activeRevision ? activeRevision.id.slice(0, 8) : 'Compatibility active'}</div>
+              <div className="text-[12px] font-semibold text-text-primary">Live version</div>
+              <div className="mt-1 font-mono text-[10px] text-text-muted">{activeRevision ? activeRevision.id.slice(0, 8) : 'Legacy live version'}</div>
             </button>
             <button type="button" role="radio" aria-checked={target === 'candidate'} disabled={!candidateRevision} onClick={() => candidateRevision && setTarget('candidate')} className={clsx('rounded-lg border p-3 text-left disabled:cursor-not-allowed disabled:opacity-45', target === 'candidate' ? 'border-warn bg-warn/10' : 'border-line bg-surface-2')}>
-              <div className="text-[12px] font-semibold text-text-primary">Candidate · debug</div>
-              <div className="mt-1 font-mono text-[10px] text-text-muted">{candidateRevision ? candidateRevision.id.slice(0, 8) : 'No candidate'}</div>
+              <div className="text-[12px] font-semibold text-text-primary">Pending change verification</div>
+              <div className="mt-1 font-mono text-[10px] text-text-muted">{candidateRevision ? candidateRevision.id.slice(0, 8) : 'No pending change'}</div>
             </button>
           </div>
           <div className={clsx(
@@ -3871,12 +3895,12 @@ function RunInputDialog({
             candidateRevision ? 'border-warn/35 bg-warn/10' : 'border-accent/35 bg-accent/10',
           )}>
             <div className="text-[12px] font-semibold text-text-primary">
-              {candidateRevision ? 'Testing the current draft' : 'Running the published workflow'}
+              {candidateRevision ? 'Verifying a pending change' : 'Running the live workflow'}
             </div>
             <div className="mt-1 text-[11px] text-text-secondary">
               {candidateRevision
-                ? `Draft ${candidateRevision.id.slice(0, 8)} stays isolated until its checks pass and it is published.`
-                : `Published revision ${activeRevision?.id.slice(0, 8) ?? 'compatibility active'} will run in production.`}
+                ? `Change ${candidateRevision.id.slice(0, 8)} is isolated. It will publish automatically only after this exact revision passes.`
+                : `Live revision ${activeRevision?.id.slice(0, 8) ?? 'legacy live version'} will run.`}
             </div>
           </div>
           {variables.length === 0 ? null : (
@@ -3890,7 +3914,7 @@ function RunInputDialog({
                 return (
                   <div key={v.name} className="space-y-1.5">
                     <label className="text-[12px] font-medium text-text-secondary">
-                      {displayLabel}
+                      {displayLabel}{v.required ? <span className="ml-1 text-danger">Required</span> : null}
                     </label>
                     <input
                       type="text"
@@ -3906,7 +3930,11 @@ function RunInputDialog({
                   </div>
                 );
               })}
-              <p className="text-[11px] text-text-muted">Leave blank to use defaults.</p>
+              <p className={clsx('text-[11px]', missingRequired.length > 0 ? 'text-danger' : 'text-text-muted')}>
+                {missingRequired.length > 0
+                  ? `Provide ${missingRequired.map((field) => field.label || humanizeInputName(field.name)).join(', ')} before running.`
+                  : 'Optional values may be left blank to use defaults.'}
+              </p>
             </>
           )}
         </div>
@@ -3920,7 +3948,7 @@ function RunInputDialog({
           </button>
           <button
             type="submit"
-            disabled={running}
+            disabled={running || missingRequired.length > 0}
             className="inline-flex h-9 items-center gap-1.5 rounded-btn bg-accent px-3 text-[13px] font-semibold text-canvas hover:bg-accent-hover disabled:opacity-60"
           >
             {running ? 'Starting…' : 'Run'}

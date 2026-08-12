@@ -32,13 +32,16 @@ import type { CredentialVault } from '../credentialVault.js';
 import type { ArtifactService } from '../artifactService.js';
 import type { ConversationStore } from './conversationStore.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
-import { WhatsAppSession, type InboundChannelMedia, type WhatsAppObservedOutbound, type WhatsAppRecoveryState } from '../../adapters/channels/whatsappSession.js';
+import { WhatsAppSession, type InboundChannelMedia, type WhatsAppHistoryEntry, type WhatsAppObservedOutbound, type WhatsAppRecoveryState } from '../../adapters/channels/whatsappSession.js';
 import { TelegramSession } from '../../adapters/channels/telegramSession.js';
 import { resolveTelegramTransport } from '../../adapters/channels/telegram.js';
 import { DiscordSession } from '../../adapters/channels/discordSession.js';
 import { useVaultAuthState, clearVaultAuthState } from '../../adapters/channels/whatsappVaultAuthState.js';
 import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, ChannelStatus, OutboundAttachment, OutboundNativeContent } from '../../adapters/channels/types.js';
 import { chunkText, sleep, typingDelayMs, type HumanizeConfig } from './humanize.js';
+import type { ConversationHandoffService } from './conversationHandoffService.js';
+import type { ConversationSummaryService } from './conversationSummaryService.js';
+import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
 
@@ -86,6 +89,8 @@ export interface ChannelConnectionSupervisorDeps {
   describeImage?: (bytes: Buffer, mimeType: string, workspaceId: string, caption?: string) => Promise<string | null>;
   /** Optional document text extraction for inbound documents (WhatsApp). */
   extractDocument?: (bytes: Buffer, mimeType: string, workspaceId: string, fileName?: string) => Promise<string | null>;
+  handoffs?: ConversationHandoffService;
+  summaries?: ConversationSummaryService;
 }
 
 export interface LoginState {
@@ -252,9 +257,13 @@ export class ChannelConnectionSupervisor {
     attachments?: OutboundAttachment[],
     humanize?: HumanizeConfig,
     native?: OutboundNativeContent,
+    authority?: { actor: 'automation' | 'human'; conversationId?: string; expectedEpoch?: number },
   ): Promise<ChannelDeliveryReceipt> {
     const session = this.#sessions.get(connectionId);
     if (!session) throw new Error(`no live session for connection ${connectionId}`);
+    const connection = this.deps.db.select({ workspaceId: schema.channelConnections.workspaceId })
+      .from(schema.channelConnections).where(eq(schema.channelConnections.id, connectionId)).get();
+    if (!connection) throw new Error(`channel connection ${connectionId} not found`);
     const media = attachments ?? [];
     const cfg = humanize?.enabled ? humanize : undefined;
     const typer = session as { setTyping?: (chatId: string, on: boolean) => Promise<void> };
@@ -264,6 +273,18 @@ export class ChannelConnectionSupervisor {
     const isStale = () => (this.#pacingEpoch.get(pacingKey) ?? 0) !== pacingEpoch;
     const assertFresh = () => {
       if (isStale()) throw new ChannelPacingCancelledError(connectionId, chatId);
+      if (authority?.actor === 'human') return;
+      if (authority?.conversationId) this.deps.handoffs?.assertAutomationAllowed({
+        workspaceId: connection.workspaceId,
+        conversationId: authority.conversationId,
+        ...(authority.expectedEpoch !== undefined ? { expectedEpoch: authority.expectedEpoch } : {}),
+      });
+      else this.deps.handoffs?.assertAutomationAllowedByChannel({
+        workspaceId: connection.workspaceId,
+        connectionId,
+        chatId,
+        ...(authority?.expectedEpoch !== undefined ? { expectedEpoch: authority.expectedEpoch } : {}),
+      });
     };
 
     if (native) {
@@ -273,13 +294,19 @@ export class ChannelConnectionSupervisor {
       }
       assertFresh();
       const receipts = [await nativeSession.sendNative(chatId, native)];
-      if (body.trim()) receipts.push(await session.sendText(chatId, body.trim()));
+      if (body.trim()) {
+        assertFresh();
+        receipts.push(await session.sendText(chatId, body.trim()));
+      }
       return aggregateReceipts(receipts);
     }
 
     // Text-only: optionally chunk into a burst, typing before each piece.
     if (media.length === 0) {
-      if (!cfg) return session.sendText(chatId, body);
+      if (!cfg) {
+        assertFresh();
+        return session.sendText(chatId, body);
+      }
       const chunks = chunkText(body, cfg);
       if (chunks.length <= 1) {
         await this.#typingPause(typer, chatId, body.length, cfg, canType, isStale);
@@ -301,6 +328,7 @@ export class ChannelConnectionSupervisor {
       // Session type has no media transport yet (e.g. Discord gateway). Deliver
       // the text rather than silently dropping the whole message.
       this.deps.logger.warn('channel.session_media_unsupported', { connectionId, kind: session.constructor.name, attachments: media.length });
+      assertFresh();
       return session.sendText(chatId, body);
     }
 
@@ -448,12 +476,20 @@ export class ChannelConnectionSupervisor {
       });
     } else {
       const authDir = path.join(this.deps.dataDir, 'channels', 'whatsapp', connectionId);
+      const profile = resolveWhatsAppConnectionProfile(
+        row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+          ? (row.settings as { whatsappProfile?: unknown }).whatsappProfile
+          : undefined,
+      );
       session = new WhatsAppSession({
         connectionId,
         authDir,
         logger: this.deps.logger,
         onInbound: (msg) => this.#onInbound(connectionId, msg),
         onOutboundObserved: (msg) => this.observeOutbound(connectionId, msg),
+        ...(profile.historyReconciliation === 'recent'
+          ? { onHistoryReconciled: (messages: WhatsAppHistoryEntry[]) => this.#reconcileWhatsAppHistory(connectionId, messages) }
+          : {}),
         onStateChange: (state) => this.#onStateChange(connectionId, state),
         onDeliveryUpdate: (update) => this.#onDeliveryUpdate(connectionId, update),
         // Persist creds/keys vault-encrypted in the DB, not plaintext on disk.
@@ -559,6 +595,7 @@ export class ChannelConnectionSupervisor {
       conversationId: conversation.id,
       sessionMessageId: msg.externalId,
       authorType: 'system',
+      participantSide: 'customer',
       body: `${fromTag}${msg.body}`,
       metadata: {
         channel: row.kind,
@@ -608,6 +645,8 @@ export class ChannelConnectionSupervisor {
 
   /** Persist an operator send observed from the primary phone or another companion. */
   observeOutbound(connectionId: string, msg: WhatsAppObservedOutbound): void {
+    const pacingKey = `${connectionId}:${msg.chatId}`;
+    this.#pacingEpoch.set(pacingKey, (this.#pacingEpoch.get(pacingKey) ?? 0) + 1);
     const row = this.deps.db.select().from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, connectionId)).get();
     if (!row) return;
@@ -634,10 +673,23 @@ export class ChannelConnectionSupervisor {
       channelChatId: msg.chatId,
       appId: row.appId ?? null,
     });
+    const profile = resolveWhatsAppConnectionProfile(
+      row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+        ? (row.settings as { whatsappProfile?: unknown }).whatsappProfile
+        : undefined,
+    );
+    if (profile.manualOutboundTakeover === 'until_handback') {
+      this.deps.handoffs?.claimHuman({
+        workspaceId: row.workspaceId,
+        conversationId: conversation.id,
+        source: 'provider_observed',
+      });
+    }
     const message = this.deps.conversations.appendOutbound({
       workspaceId: row.workspaceId,
       conversationId: conversation.id,
       operatorId: row.userId,
+      participantSide: 'business',
       sessionMessageId: msg.externalId,
       body: msg.body,
       deliveryStatus: 'sent',
@@ -647,6 +699,7 @@ export class ChannelConnectionSupervisor {
         channelOutboundObserved: true,
         source: 'external_whatsapp_client',
         providerMessageId: msg.externalId,
+        ...(msg.attachmentIds?.length ? { artifactIds: msg.attachmentIds } : {}),
       },
     });
     this.deps.db.insert(schema.channelDeliveries).values({
@@ -666,6 +719,55 @@ export class ChannelConnectionSupervisor {
       providerAcknowledged: true,
       observed: true,
       source: 'external_whatsapp_client',
+    });
+  }
+
+  async #reconcileWhatsAppHistory(connectionId: string, entries: WhatsAppHistoryEntry[]): Promise<void> {
+    const row = this.deps.db.select().from(schema.channelConnections)
+      .where(eq(schema.channelConnections.id, connectionId)).get();
+    if (!row || row.kind !== 'whatsapp') return;
+    const profile = resolveWhatsAppConnectionProfile(
+      row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+        ? (row.settings as { whatsappProfile?: unknown }).whatsappProfile
+        : undefined,
+    );
+    if (profile.historyReconciliation !== 'recent') return;
+    const agentId = row.agentId ?? this.#resolveInboundAgentId(row.workspaceId);
+    if (!agentId) return;
+    const touched = new Set<string>();
+    for (const entry of [...entries].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))) {
+      const conversation = this.deps.conversations.getOrCreateByChannel({
+        workspaceId: row.workspaceId,
+        ambientId: row.ambientId,
+        userId: row.userId,
+        agentId,
+        channelConnectionId: row.id,
+        channelChatId: entry.chatId,
+        appId: row.appId ?? null,
+      });
+      this.deps.conversations.appendReconciledChannelMessage({
+        workspaceId: row.workspaceId,
+        conversationId: conversation.id,
+        sessionMessageId: entry.externalId,
+        body: entry.body,
+        participantSide: entry.participantSide,
+        occurredAt: entry.occurredAt,
+        metadata: {
+          channel: 'whatsapp',
+          channelConnectionId: row.id,
+          channelChatId: entry.chatId,
+          providerMessageId: entry.externalId,
+          ...(entry.participantSide === 'customer' ? { channelInbound: true } : { channelOutboundObserved: true }),
+          ...(entry.attachmentIds?.length ? { artifactIds: entry.attachmentIds } : {}),
+        },
+      });
+      touched.add(conversation.id);
+    }
+    for (const conversationId of touched) this.deps.summaries?.invalidate(conversationId);
+    this.deps.logger.info('whatsapp.history_reconciled', {
+      connectionId,
+      conversations: touched.size,
+      messages: entries.length,
     });
   }
 

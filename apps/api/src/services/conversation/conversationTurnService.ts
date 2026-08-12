@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import type {
   ChatExecutionEnvelope,
   ChatContextManifest,
@@ -8,10 +8,13 @@ import type {
   ConversationTurnStatus,
   EffectiveConversationExecutionMode,
   ViewportContext,
+  TurnEventV2,
 } from '@agentis/core';
 import { AgentisError } from '@agentis/core';
+import { REALTIME_EVENTS, REALTIME_ROOMS } from '@agentis/core/events';
 import { schema, type AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { Logger } from '../../logger.js';
+import type { EventBus } from '../../event-bus.js';
 
 export type ConversationTurnRow = typeof schema.conversationTurns.$inferSelect;
 export type ConversationTurnEventRow = typeof schema.conversationTurnEvents.$inferSelect;
@@ -35,13 +38,14 @@ export interface DurableTurnInput {
 }
 
 export interface DurableTurnExecutionResult {
-  status: Extract<ConversationTurnStatus, 'completed' | 'failed' | 'awaiting_approval' | 'interrupted'>;
+  status: Extract<ConversationTurnStatus, 'completed' | 'failed' | 'blocked' | 'awaiting_approval' | 'interrupted'>;
   error?: string | null;
 }
 
 interface ConversationTurnServiceDeps {
   db: AgentisSqliteDb;
   logger: Logger;
+  bus?: EventBus;
   execute: (turn: ConversationTurnRow, sink: DurableTurnEventSink, signal: AbortSignal) => Promise<DurableTurnExecutionResult>;
   onCancel?: (turn: ConversationTurnRow) => Promise<void> | void;
 }
@@ -53,6 +57,7 @@ export interface DurableTurnEventSink {
 const TERMINAL_STATUSES: ConversationTurnStatus[] = ['completed', 'failed', 'cancelled'];
 const CLAIMABLE_STATUSES: ConversationTurnStatus[] = ['queued', 'interrupted'];
 const LEASE_MS = 30_000;
+const NARRATION_HEARTBEAT_MS = 45_000;
 
 export class ConversationTurnService {
   readonly #running = new Map<string, AbortController>();
@@ -101,6 +106,13 @@ export class ConversationTurnService {
       envelope: input.executionEnvelope,
       context: input.contextManifest,
     });
+    // Host narration is persisted synchronously with acceptance, so a queued
+    // turn still acknowledges its next action within the two-second UX budget.
+    this.appendEvent(row.id, row.workspaceId, 'delta', hostCommentary(
+      row,
+      'starting',
+      `host-${row.clientTurnId}-starting`,
+    ));
     queueMicrotask(() => void this.start(row.id));
     return row;
   }
@@ -180,11 +192,27 @@ export class ConversationTurnService {
       )).run();
     }, 10_000);
     heartbeat.unref?.();
+    let lastNarrationAt = Date.now();
+    const narrationHeartbeat = setInterval(() => {
+      if (Date.now() - lastNarrationAt < NARRATION_HEARTBEAT_MS) return;
+      lastNarrationAt = Date.now();
+      const latest = this.getById(turnId);
+      if (!latest || latest.status !== 'running') return;
+      this.appendEvent(turnId, turn.workspaceId, 'delta', hostCommentary(
+        latest,
+        'working',
+        `host-${turn.clientTurnId}-working-${Math.floor(lastNarrationAt / NARRATION_HEARTBEAT_MS)}`,
+      ));
+    }, 5_000);
+    narrationHeartbeat.unref?.();
 
     const sink: DurableTurnEventSink = {
       writeSSE: async ({ event = 'message', data }) => {
         let parsed: unknown = data;
         try { parsed = JSON.parse(data); } catch { /* retain transport text */ }
+        if (parsed && typeof parsed === 'object' && (parsed as { type?: unknown }).type === 'commentary') {
+          lastNarrationAt = Date.now();
+        }
         this.appendEvent(turnId, turn.workspaceId, event, parsed);
       },
     };
@@ -199,11 +227,19 @@ export class ConversationTurnService {
       const latest = this.getById(turnId);
       if (latest?.status === 'paused' || latest?.status === 'cancelled') return;
       const message = (error as Error).message || 'Durable conversation turn failed.';
+      this.appendEvent(turnId, turn.workspaceId, 'delta', hostCommentary(
+        turn,
+        'failed',
+        `host-${turn.clientTurnId}-failed`,
+      ));
       this.appendEvent(turnId, turn.workspaceId, 'error', { code: 'DURABLE_TURN_FAILED', message });
-      this.finish(turnId, controller.signal.aborted ? 'interrupted' : 'failed', message);
+      this.finish(turnId, controller.signal.aborted
+        ? 'interrupted'
+        : isRecoverableRuntimeBlock(message) ? 'blocked' : 'failed', message);
       this.deps.logger.error('chat.turn_worker_failed', { turnId, conversationId: turn.conversationId, error: message });
     } finally {
       clearInterval(heartbeat);
+      clearInterval(narrationHeartbeat);
       this.#running.delete(turnId);
     }
   }
@@ -224,7 +260,7 @@ export class ConversationTurnService {
 
   resume(workspaceId: string, turnId: string): ConversationTurnRow {
     const turn = this.require(workspaceId, turnId);
-    if (turn.status !== 'paused' && turn.status !== 'interrupted') return turn;
+    if (turn.status !== 'paused' && turn.status !== 'interrupted' && turn.status !== 'blocked') return turn;
     this.deps.db.update(schema.conversationTurns).set({
       status: 'queued',
       error: null,
@@ -287,8 +323,25 @@ export class ConversationTurnService {
     return this.deps.db.select().from(schema.conversationTurns).where(and(
       eq(schema.conversationTurns.workspaceId, workspaceId),
       eq(schema.conversationTurns.conversationId, conversationId),
-      inArray(schema.conversationTurns.status, ['queued', 'running', 'awaiting_approval', 'paused', 'interrupted']),
+      inArray(schema.conversationTurns.status, ['queued', 'running', 'awaiting_approval', 'blocked', 'paused', 'interrupted']),
     )).orderBy(asc(schema.conversationTurns.createdAt)).all();
+  }
+
+  listRecent(workspaceId: string, conversationId: string, limit = 50): ConversationTurnRow[] {
+    return this.deps.db.select().from(schema.conversationTurns).where(and(
+      eq(schema.conversationTurns.workspaceId, workspaceId),
+      eq(schema.conversationTurns.conversationId, conversationId),
+    )).orderBy(desc(schema.conversationTurns.createdAt)).limit(Math.min(Math.max(limit, 1), 100)).all().reverse();
+  }
+
+  history(workspaceId: string, conversationId: string, limit = 50): Array<{
+    turn: ConversationTurnRow;
+    events: TurnEventV2[];
+  }> {
+    return this.listRecent(workspaceId, conversationId, limit).map((turn) => ({
+      turn,
+      events: this.events(workspaceId, turn.id, 0, 1_000).map((event) => projectTurnEvent(turn, event)),
+    }));
   }
 
   events(workspaceId: string, turnId: string, after = 0, limit = 500): ConversationTurnEventRow[] {
@@ -311,15 +364,37 @@ export class ConversationTurnService {
   }
 
   private appendEvent(turnId: string, workspaceId: string, event: string, data: unknown): void {
+    const eventId = randomUUID();
+    const createdAt = new Date().toISOString();
+    let insertedSeq: number | null = null;
     this.deps.db.transaction((tx) => {
       const turn = tx.select({ lastEventSeq: schema.conversationTurns.lastEventSeq }).from(schema.conversationTurns)
         .where(eq(schema.conversationTurns.id, turnId)).get();
       if (!turn) return;
       const seq = turn.lastEventSeq + 1;
-      tx.insert(schema.conversationTurnEvents).values({ id: randomUUID(), workspaceId, turnId, seq, event, data }).run();
-      tx.update(schema.conversationTurns).set({ lastEventSeq: seq, updatedAt: new Date().toISOString() })
+      tx.insert(schema.conversationTurnEvents).values({ id: eventId, workspaceId, turnId, seq, event, data, createdAt }).run();
+      tx.update(schema.conversationTurns).set({ lastEventSeq: seq, updatedAt: createdAt })
         .where(eq(schema.conversationTurns.id, turnId)).run();
+      insertedSeq = seq;
     });
+    if (insertedSeq == null || !this.deps.bus) return;
+    const turn = this.getById(turnId);
+    if (!turn) return;
+    const projected = projectTurnEvent(turn, {
+      id: eventId,
+      workspaceId,
+      turnId,
+      seq: insertedSeq,
+      event,
+      data,
+      createdAt,
+    });
+    this.deps.bus.publish(
+      REALTIME_ROOMS.workspace(workspaceId),
+      REALTIME_EVENTS.CONVERSATION_TURN_EVENT,
+      projected,
+      turn.clientTurnId,
+    );
   }
 
   private finish(turnId: string, status: DurableTurnExecutionResult['status'], error: string | null): void {
@@ -330,9 +405,10 @@ export class ConversationTurnService {
       error,
       leaseOwner: null,
       leaseExpiresAt: null,
-      completedAt: status === 'awaiting_approval' ? null : now,
+      completedAt: status === 'awaiting_approval' || status === 'blocked' ? null : now,
       updatedAt: now,
     }).where(eq(schema.conversationTurns.id, turnId)).run();
+    if (current) this.appendEvent(turnId, current.workspaceId, 'turn', { type: 'turn_status', status, error });
     if (current && status !== 'awaiting_approval') {
       const next = this.deps.db.select({ id: schema.conversationTurns.id }).from(schema.conversationTurns).where(and(
         eq(schema.conversationTurns.workspaceId, current.workspaceId),
@@ -342,6 +418,112 @@ export class ConversationTurnService {
       if (next) queueMicrotask(() => void this.start(next.id));
     }
   }
+}
+
+function isRecoverableRuntimeBlock(message: string): boolean {
+  return /\b(?:capacity|overloaded|rate.?limit|quota|temporarily unavailable|try again|no healthy runtime)\b/i.test(message);
+}
+
+function hostCommentary(
+  turn: Pick<ConversationTurnRow, 'clientTurnId' | 'prompt'>,
+  phase: 'starting' | 'working' | 'failed',
+  id: string,
+) {
+  const portuguese = /\b(?:vou|você|voce|preciso|faça|faca|implemente|corrija|crie|workflow|agente)\b/i.test(turn.prompt);
+  const text = portuguese
+    ? phase === 'starting'
+      ? 'Vou revisar o contexto e confirmar o que precisa ser feito antes de alterar os recursos.'
+      : phase === 'working'
+        ? 'Continuo executando e verificando o trabalho; vou informar a próxima descoberta ou resultado concreto.'
+        : 'A execução foi interrompida por uma falha; vou preservar o diagnóstico para que o trabalho possa ser retomado.'
+    : phase === 'starting'
+      ? 'I’ll review the context and confirm what must be done before changing any resources.'
+      : phase === 'working'
+        ? 'I’m still executing and verifying the work; I’ll report the next concrete finding or result.'
+        : 'Execution stopped because of a failure; I’ll preserve the diagnosis so the work can be resumed.';
+  return {
+    type: 'commentary' as const,
+    id,
+    text,
+    source: 'host' as const,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export function projectTurnEvent(turn: ConversationTurnRow, event: ConversationTurnEventRow): TurnEventV2 {
+  const value = event.data && typeof event.data === 'object' ? event.data as Record<string, unknown> : {};
+  const type = typeof value.type === 'string' ? value.type : event.event;
+  const runId = typeof value.runId === 'string' ? value.runId : undefined;
+  const category: TurnEventV2['category'] = type === 'commentary'
+    ? 'narration'
+    : type === 'activity' || type === 'tool_call' || type === 'tool_result'
+      ? 'operation'
+      : type === 'plan'
+        ? 'verification'
+        : 'status';
+  const visibility: TurnEventV2['visibility'] = type === 'execution' || type === 'tool_call' || type === 'tool_result'
+    ? 'technical'
+    : 'both';
+  const summary = safeEventSummary(type, value, event.event);
+  return {
+    version: 2,
+    id: event.id,
+    workspaceId: turn.workspaceId,
+    conversationId: turn.conversationId,
+    turnId: turn.id,
+    agentId: turn.agentId,
+    ...(runId ? { runId } : {}),
+    seq: event.seq,
+    transportEvent: event.event,
+    category,
+    visibility,
+    summary,
+    data: safeReplayData(type, value),
+    createdAt: event.createdAt,
+  };
+}
+
+function safeEventSummary(type: string, value: Record<string, unknown>, fallback: string): string {
+  if (type === 'commentary' && typeof value.text === 'string') return sanitizeSafeText(value.text);
+  if (type === 'activity' && typeof value.label === 'string') {
+    const detail = typeof value.detail === 'string' && value.detail.trim() ? ` — ${value.detail.trim()}` : '';
+    return sanitizeSafeText(`${value.label}${detail}`);
+  }
+  if (type === 'tool_call') return `Started ${typeof value.name === 'string' ? value.name : 'an operation'}`;
+  if (type === 'tool_result') return `${value.error ? 'Failed' : 'Completed'} ${typeof value.name === 'string' ? value.name : 'an operation'}`;
+  if (type === 'turn_status' && typeof value.status === 'string') return `Turn ${value.status}`;
+  if (typeof value.message === 'string') return sanitizeSafeText(value.message);
+  return fallback;
+}
+
+function safeReplayData(type: string, value: Record<string, unknown>): unknown {
+  if (type === 'thinking') return { type: 'status', hidden: true };
+  if (type === 'tool_call') return { type, id: value.id, name: value.name };
+  if (type === 'tool_result') return { type, id: value.id, name: value.name, error: typeof value.error === 'string' ? sanitizeSafeText(value.error) : value.error };
+  if (type === 'commentary') return { type, id: value.id, text: sanitizeSafeText(String(value.text ?? '')), source: value.source, createdAt: value.createdAt };
+  if (type === 'activity') return {
+    type,
+    id: value.id,
+    phase: value.phase,
+    status: value.status,
+    label: typeof value.label === 'string' ? sanitizeSafeText(value.label) : value.label,
+    detail: typeof value.detail === 'string' ? sanitizeSafeText(value.detail) : value.detail,
+    workflowId: value.workflowId,
+    runId: value.runId,
+    nodeId: value.nodeId,
+    clientTurnId: value.clientTurnId,
+    agentId: value.agentId,
+    startedAt: value.startedAt,
+  };
+  if (type === 'error') return { type, code: value.code, message: typeof value.message === 'string' ? sanitizeSafeText(value.message) : undefined };
+  return value;
+}
+
+function sanitizeSafeText(input: string): string {
+  return input
+    .replace(/\b(?:bearer\s+)?(?:sk|pk|rk|api)[-_][a-z0-9_-]{12,}\b/gi, '[redacted]')
+    .replace(/\b(password|passwd|secret|api[_ -]?key|token)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .slice(0, 1_200);
 }
 
 export function classifyConversationExecutionMode(

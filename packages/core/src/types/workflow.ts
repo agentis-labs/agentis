@@ -1310,9 +1310,8 @@ export type RunExecutionStatus =
 export type RunOutcomeStatus =
   | 'unverified'
   | 'accomplished'
-  | 'partial'
-  | 'failed'
-  | 'blocked';
+  | 'blocked'
+  | 'not_accomplished';
 
 export interface RunEvidenceRef {
   kind: 'check' | 'artifact' | 'record' | 'http' | 'browser' | 'operator';

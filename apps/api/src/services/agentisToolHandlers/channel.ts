@@ -255,6 +255,8 @@ export function registerChannelTools(registry: AgentisToolRegistry, deps: ToolHa
             attachments: parseAttachments(args.attachments),
             ...(args.native != null ? { native: parseNativeContent(args.native) } : {}),
             ...(Array.isArray(args.messages) ? { messages: parseMessages(args.messages) } : {}),
+            ...(origin?.conversationId ? { conversationId: origin.conversationId } : {}),
+            ...(origin?.automationEpoch !== undefined ? { expectedAutomationEpoch: origin.automationEpoch } : {}),
           },
         );
       },

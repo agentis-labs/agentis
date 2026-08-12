@@ -8,6 +8,7 @@ import type { Logger } from '../logger.js';
 import { embedText, selectEmbeddingProvider, type EmbeddingProvider } from './embedding/embeddingProvider.js';
 import type { CognitivePromotionQueueWorker } from './cognitivePromotionQueueWorker.js';
 import { normalizeTextKey, safeJson, scoreText, tokenize } from './brain/brainText.js';
+import { channelModelRole } from './conversation/channelConversationRole.js';
 
 export type PeerType = 'user' | 'agent';
 export type PeerCardCategory = 'INSTRUCTION' | 'PREFERENCE' | 'TRAIT' | 'IDENTITY' | 'CONTEXT' | 'BELIEF';
@@ -38,6 +39,18 @@ export interface PeerConclusion {
   supersededById: string | null;
   status: string;
   createdAt: string;
+}
+
+export function memoryEligiblePeerMessages(
+  rows: Array<{ authorType: string; participantSide?: string | null; body: string; metadata?: unknown }>,
+  channelScoped: boolean,
+): Array<{ role: string; text: string }> {
+  return rows
+    // Provider bootstrap history is transcript context, never evidence for a
+    // peer card or governing/workspace memory promotion.
+    .filter((row) => !((row.metadata as { channelHistoryReconciled?: unknown } | null)?.channelHistoryReconciled))
+    .map((row) => ({ role: channelModelRole(row, channelScoped), text: row.body }))
+    .filter((row) => row.text.length > 0);
 }
 
 export interface PeerConclusionQueryOptions {
@@ -255,7 +268,7 @@ export class PeerProfileService {
     const observerPeerId = args.observerPeerId ?? null;
     const isDirectional = Boolean(observerPeerId && observerPeerId !== args.peerId);
     const messages = this.#loadSessionMessages(args.workspaceId, args.sessionId);
-    const operatorLines = messages.filter((m) => m.role === 'operator' || m.role === 'user').map((m) => m.text);
+    const operatorLines = messages.filter((m) => m.role === 'user').map((m) => m.text);
     const factCandidates = extractPeerFacts(operatorLines);
     const signalLines = factCandidates.map((fact) => `${fact.category}: ${fact.content}`);
     const existing = this.getSummary(args.workspaceId, peerType, args.peerId, isDirectional ? observerPeerId! : 'global');
@@ -440,7 +453,12 @@ export class PeerProfileService {
   }
 
   #loadSessionMessages(workspaceId: string, sessionId: string): Array<{ role: string; text: string }> {
-    return this.db.select().from(schema.conversationMessages)
+    const conversation = this.db.select({ channelConnectionId: schema.conversations.channelConnectionId })
+      .from(schema.conversations)
+      .where(and(eq(schema.conversations.workspaceId, workspaceId), eq(schema.conversations.id, sessionId)))
+      .get();
+    const channelScoped = Boolean(conversation?.channelConnectionId);
+    const rows = this.db.select().from(schema.conversationMessages)
       .where(and(
         eq(schema.conversationMessages.workspaceId, workspaceId),
         or(eq(schema.conversationMessages.conversationId, sessionId), eq(schema.conversationMessages.sessionMessageId, sessionId))!,
@@ -448,9 +466,8 @@ export class PeerProfileService {
       .orderBy(desc(schema.conversationMessages.createdAt))
       .limit(40)
       .all()
-      .reverse()
-      .map((row) => ({ role: row.authorType, text: row.body }))
-      .filter((row) => row.text.length > 0);
+      .reverse();
+    return memoryEligiblePeerMessages(rows, channelScoped);
   }
 
   #resolveEmbeddingProvider(workspaceId: string): EmbeddingProvider {

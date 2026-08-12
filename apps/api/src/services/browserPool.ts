@@ -285,6 +285,8 @@ export class BrowserPool {
     storageState?: PWStorageState;
     viewport?: { width: number; height: number };
     profileName?: string;
+    /** Optional per-session hostname allowlist, enforced for every request. */
+    allowedDomains?: string[];
     /** Explicit allow decision for `attach` (resolved from the Settings opt-in). Undefined → fall back to the env master. */
     allowCdp?: boolean;
   } = {}): Promise<SessionSurface> {
@@ -297,7 +299,7 @@ export class BrowserPool {
       ...(opts.viewport ? { viewport: opts.viewport } : {}),
     });
     const page = await context.newPage();
-    await this.guardPage(page);
+    await this.guardPage(page, opts.allowedDomains);
     return { page, storageState: () => context.storageState(), close: () => context.close() };
   }
 
@@ -363,13 +365,20 @@ export class BrowserPool {
   }
 
   /** Apply the SSRF request guard to a session-owned page (same as one-shot ops). */
-  async guardPage(page: PWPage): Promise<void> {
-    return this.#guardNetworkRequests(page);
+  async guardPage(page: PWPage, allowedDomains: string[] = []): Promise<void> {
+    return this.#guardNetworkRequests(page, allowedDomains);
+  }
+
+  get capacity(): { limit: number; active: number; queued: number } {
+    return { limit: this.#limit, active: this.#active, queued: this.#waiters.length };
   }
 
   /** Validate + normalize a navigation URL against the SSRF policy. Throws on block. */
-  async resolveSafeNavUrl(raw: string): Promise<string> {
-    const url = await assertSafeUrl(raw, { allowPrivate: browserPrivateNetworkAllowed() });
+  async resolveSafeNavUrl(raw: string, allowedDomains: string[] = []): Promise<string> {
+    const url = await assertSafeUrl(raw, {
+      allowPrivate: browserPrivateNetworkAllowed(),
+      ...(allowedDomains.length > 0 ? { allowedDomains } : {}),
+    });
     return url.toString();
   }
 
@@ -458,7 +467,7 @@ export class BrowserPool {
     }
   }
 
-  async #guardNetworkRequests(page: PWPage): Promise<void> {
+  async #guardNetworkRequests(page: PWPage, allowedDomains: string[] = []): Promise<void> {
     await page.route('**/*', async (route) => {
       const url = route.request().url();
       if (url.startsWith('about:') || url.startsWith('data:') || url.startsWith('blob:')) {
@@ -466,7 +475,10 @@ export class BrowserPool {
         return;
       }
       try {
-        await assertSafeUrl(url, { allowPrivate: browserPrivateNetworkAllowed() });
+        await assertSafeUrl(url, {
+          allowPrivate: browserPrivateNetworkAllowed(),
+          ...(allowedDomains.length > 0 ? { allowedDomains } : {}),
+        });
         await route.continue();
       } catch {
         await route.abort('blockedbyclient');

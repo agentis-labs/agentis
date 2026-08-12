@@ -6,6 +6,42 @@ import {
 } from '../../src/lib/realtimeActivity';
 
 describe('realtimeActivity task spine events', () => {
+  it('projects safe durable narration into the workspace feed', () => {
+    expect(REALTIME_ACTIVITY_EVENTS).toContain(REALTIME_EVENTS.CONVERSATION_TURN_EVENT);
+    const activity = describeRealtimeActivity({
+      event: REALTIME_EVENTS.CONVERSATION_TURN_EVENT,
+      emittedAt: '2026-08-12T12:00:00.000Z',
+      payload: {
+        version: 2,
+        id: 'event-1',
+        workspaceId: 'workspace-1',
+        conversationId: 'conversation-1',
+        turnId: 'turn-1',
+        agentId: 'agent-1',
+        seq: 2,
+        category: 'narration',
+        visibility: 'both',
+        summary: 'I will verify the exact revision before publishing it.',
+        createdAt: '2026-08-12T12:00:00.000Z',
+      },
+    });
+    expect(activity).toMatchObject({
+      id: 'event-1',
+      kind: 'message',
+      detail: 'I will verify the exact revision before publishing it.',
+      conversationId: 'conversation-1',
+      agentId: 'agent-1',
+    });
+  });
+
+  it('does not duplicate technical ledger operations in the workspace feed', () => {
+    expect(describeRealtimeActivity({
+      event: REALTIME_EVENTS.CONVERSATION_TURN_EVENT,
+      emittedAt: '2026-08-12T12:00:00.000Z',
+      payload: { category: 'operation', visibility: 'technical', summary: 'Started a tool' },
+    })).toBeNull();
+  });
+
   it('maps task spine verification into Mission Control activity', () => {
     expect(REALTIME_ACTIVITY_EVENTS).toContain(REALTIME_EVENTS.TASK_SPINE_VERIFYING);
 

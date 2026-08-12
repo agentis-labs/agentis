@@ -72,6 +72,19 @@ async function main(): Promise<void> {
   });
   const evaluatedPairs = pairs.filter((pair) => pair.scoreDelta !== null).length;
   const regressions = pairs.filter((pair) => pair.scoreDelta !== null && pair.scoreDelta! < -0.05).map((pair) => pair.taskId);
+  const agentisObservations = scored.filter((item) => item.surface === 'agentis');
+  const functionalAgentisTasks = agentisObservations.filter((item) => item.score === 1 && item.ok).length;
+  const functionalCompletionRate = agentisObservations.length > 0
+    ? functionalAgentisTasks / agentisObservations.length
+    : null;
+  const falseAccomplished = agentisObservations
+    .filter((item) => {
+      const task = tasks.find((candidate) => candidate.id === item.taskId);
+      return task?.assertions?.requireEvidence === true
+        && item.turnStatus === 'completed'
+        && !hasMissionEvidence(item);
+    })
+    .map((item) => item.taskId);
   const allowUnpaired = args.get('allow-unpaired') === 'true';
   const report = {
     version: 1,
@@ -83,7 +96,14 @@ async function main(): Promise<void> {
       evaluatedPairs,
       expectedPairs: tasks.length,
       regressions,
-      passed: regressions.length === 0 && (allowUnpaired || evaluatedPairs === tasks.length),
+      falseAccomplished,
+      functionalCompletionRate,
+      minimumFunctionalCompletionRate: 0.9,
+      maximumParityGap: 0.05,
+      passed: regressions.length === 0
+        && falseAccomplished.length === 0
+        && (functionalCompletionRate == null || functionalCompletionRate >= 0.9)
+        && (allowUnpaired || evaluatedPairs === tasks.length),
     },
   };
   const outputDir = path.resolve(root, args.get('output') ?? 'artifacts/runtime-parity');
@@ -240,8 +260,13 @@ function summarize(observation: Observation & { score: number }) { return { ok: 
 function hasMissionEvidence(observation: Observation): boolean {
   const plan = observation.plan ?? {};
   const verification = objectOf(plan.verification);
-  const nodes = Array.isArray(plan.nodes) ? plan.nodes : [];
-  return verification.status === 'passed' || nodes.some((node) => Array.isArray(objectOf(node).evidence) && (objectOf(node).evidence as unknown[]).length > 0);
+  const receipts = Array.isArray(verification.receipts) ? verification.receipts.map(objectOf) : [];
+  const hasPersistedMutation = receipts.some((receipt) => receipt.check === 'persisted_mutation' && receipt.state === 'verified');
+  const hasFunctionalProof = receipts.some((receipt) => receipt.check === 'functional_verification' && receipt.state === 'verified');
+  return verification.status === 'passed'
+    && verification.outcome === 'accomplished'
+    && hasPersistedMutation
+    && hasFunctionalProof;
 }
 function objectOf(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function parseJsonEnv<T>(name: string): T | null { const raw = process.env[name]; return raw ? JSON.parse(raw) as T : null; }

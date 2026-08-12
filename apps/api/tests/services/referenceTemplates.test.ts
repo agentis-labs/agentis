@@ -43,10 +43,9 @@ describe('buildArchetypeSurface', () => {
     expect(built.view).toMatchObject({ type: 'Stack', style: { theme: 'product' } });
     expect(json).toContain('"type":"Kanban"');
     expect(json).toContain('"type":"PipelineFlow"');
-    expect(json).toContain('"type":"OrchestrationPanel"');
-    expect(json).toContain('"type":"RunMonitor"');
-    expect(json).toContain('"type":"AgentFeed"');
-    expect(json).toContain('"type":"Hero"');
+    expect(json).toContain('"type":"Toolbar"');
+    expect(json).toContain('"type":"ActivityStream"');
+    expect(json).not.toContain('"type":"Hero"');
     expect(built.actions).toEqual([
       { name: 'create_leads', kind: 'data', target: 'leads.insert' },
       { name: 'update_leads', kind: 'data', target: 'leads.update' },
@@ -72,6 +71,7 @@ describe('buildArchetypeSurface', () => {
     expect(json).toContain('"type":"Chart"');
     expect(json).toContain('"series"'); // two numeric fields → multi-series
     expect(json).toContain('"type":"Tabs"');
+    expect(json).not.toContain('"type":"OrchestrationPanel"');
   });
 
   it('operations -> table + add tab', () => {

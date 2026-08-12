@@ -98,6 +98,20 @@ describe('ChannelTurnQueue', () => {
     expect(count).toBe(1);
   });
 
+  it('cancels pending durable turns on takeover and never replays them after handback', async () => {
+    const runs: ChannelTurnInput[] = [];
+    const queue = new ChannelTurnQueue({
+      db: ctx.db,
+      logger: ctx.logger,
+      runner: { async runQueued(turn) { runs.push(turn); return { replied: true }; } },
+    });
+    const id = queue.enqueue(input({ text: 'must not replay' }))!;
+    expect(queue.cancelConversation(ctx.workspace.id, conversationId)).toBe(1);
+    expect(queue.getStatus(id)).toMatchObject({ status: 'cancelled', failReason: 'human_takeover' });
+    await queue.poll();
+    expect(runs).toEqual([]);
+  });
+
   it('the worker drains a pending row, runs the turn once, and marks it done', async () => {
     const runs: ChannelTurnInput[] = [];
     const runner: ChannelTurnRunner = {

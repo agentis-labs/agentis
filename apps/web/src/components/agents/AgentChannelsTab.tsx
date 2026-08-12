@@ -76,7 +76,7 @@ interface ChannelConnection {
   rateLimit?: { perMinute?: number; perDay?: number } | null;
   requireOptIn?: boolean;
   warmupStartedAt?: string | null;
-  whatsappProfile?: { version: 1; ownerReasoningVisibility: 'off' | 'indicator' } | null;
+  whatsappProfile?: { version: 2; ownerReasoningVisibility: 'off' | 'indicator'; manualOutboundTakeover: 'until_handback' | 'off'; historyReconciliation: 'recent' | 'off' } | null;
   capabilities?: ChannelCapabilities;
   health: ChannelHealth;
   lastError?: string | null;

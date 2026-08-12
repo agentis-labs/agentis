@@ -24,4 +24,15 @@ describe('deriveSurface', () => {
       facet: 'interface',
     });
   });
+
+  it('makes the selected App workflow the concrete chat target', () => {
+    expect(deriveSurface('/apps/app-1', '?facet=workflow&workflow=wf-outbound')).toEqual({
+      surface: 'workflow_detail',
+      resourceKind: 'workflow',
+      resourceId: 'wf-outbound',
+      title: 'Workflow',
+      appId: 'app-1',
+      facet: 'workflow',
+    });
+  });
 });

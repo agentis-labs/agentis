@@ -69,24 +69,21 @@ export function NotificationPanel() {
     if (settlementToastKeys.current.has(settlementKey)) return;
     settlementToastKeys.current.add(settlementKey);
     const accomplished = outcome === 'accomplished';
-    const partial = outcome === 'partial';
     const cancelled = outcome === 'cancelled';
     const label = accomplished
       ? 'Outcome accomplished'
-      : partial
-        ? 'Outcome only partially verified'
-        : cancelled
+      : cancelled
           ? 'Run cancelled'
           : outcome === 'blocked'
             ? 'Run blocked'
-            : outcome === 'failed' || outcome === 'failed_checks'
+            : outcome === 'not_accomplished' || outcome === 'failed' || outcome === 'failed_checks'
               ? 'Outcome not achieved'
               : 'Outcome not yet verified';
     
     toast.push({
       title: label,
       body: accomplished ? title : `${title}: ${label.toLowerCase()}.`,
-      tone: accomplished ? 'success' : partial || cancelled || outcome === 'blocked' ? 'warn' : 'danger',
+      tone: accomplished ? 'success' : cancelled || outcome === 'blocked' ? 'warn' : 'danger',
       action: runId ? {
         label: 'View details',
         onClick: () => openRunModal({ runId, workflowId, source: 'toast' }),

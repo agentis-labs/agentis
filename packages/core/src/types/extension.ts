@@ -34,6 +34,10 @@ export type ExtensionPermission =
   | 'workspace.write'
   | 'filesystem'
   | 'spawn'
+  | 'browser'
+  | 'browser.evaluate'
+  | 'browser.session.persist'
+  | 'browser.auth'
   // Listener / cross-run capabilities (EXTENSIONS-AND-LISTENER-10X §2.2).
   // Grant-only: the UI surfaces these explicitly and they are never
   // auto-granted from the registry.

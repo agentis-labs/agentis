@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AgentisToolRegistry } from '../../src/services/agentisToolRegistry.js';
-import { ConversationTurnLeaseRegistry } from '../../src/services/conversation/conversationTurnLease.js';
+import { ConversationTurnLeaseRegistry, proofReceiptsFromExperience } from '../../src/services/conversation/conversationTurnLease.js';
 import { createLogger } from '../../src/logger.js';
 
 describe('ConversationTurnLeaseRegistry', () => {
@@ -84,5 +84,48 @@ describe('ConversationTurnLeaseRegistry', () => {
       repeatedResultChars: expect.any(Number),
     });
     expect(experience.efficiency.repeatedResultChars).toBeGreaterThan(0);
+  });
+
+  it('derives revision-bound mutation and verification receipts without trusting prose', () => {
+    const receipts = proofReceiptsFromExperience({
+      toolCalls: 2,
+      recalledAtomIds: [],
+      efficiency: { uniqueObservations: 2, coalescedReads: 0, mutatingCalls: 1, argumentCharsObserved: 0, resultCharsObserved: 0, repeatedResultChars: 0 },
+      observations: [
+        { index: 1, name: 'agentis.ui.render', args: {}, result: { appId: 'app-1', interfaceRevisionId: 'rev-1', semanticHash: 'hash-1' }, ok: true, mutating: true, repeats: 1, durationMs: 4 },
+        { index: 2, name: 'agentis.app.verify', args: {}, result: { appId: 'app-1', revisionId: 'rev-1', passed: true }, ok: true, mutating: false, repeats: 1, durationMs: 6 },
+      ],
+    });
+    expect(receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'persisted_mutation', resourceId: 'app-1', revisionId: 'rev-1', status: 'passed' }),
+      expect.objectContaining({ kind: 'functional_verification', resourceId: 'app-1', revisionId: 'rev-1', status: 'passed' }),
+    ]));
+  });
+
+  it('does not mistake inspection or synthetic dry-run output for functional proof', () => {
+    const receipts = proofReceiptsFromExperience({
+      toolCalls: 3,
+      recalledAtomIds: [],
+      efficiency: { uniqueObservations: 3, coalescedReads: 0, mutatingCalls: 1, argumentCharsObserved: 0, resultCharsObserved: 0, repeatedResultChars: 0 },
+      observations: [
+        { index: 1, name: 'agentis.workflow.revision.inspect', args: {}, result: { workflowId: 'wf-1', revisionId: 'old', passed: true }, ok: true, mutating: false, repeats: 1, durationMs: 1 },
+        { index: 2, name: 'agentis.workflow.build', args: {}, result: { workflowId: 'wf-1', revisionId: 'rev-2', semanticHash: 'hash-2' }, ok: true, mutating: true, repeats: 1, durationMs: 2 },
+        { index: 3, name: 'agentis.workflow.dry_run', args: {}, result: { workflowId: 'wf-1', revisionId: 'rev-2', passed: true }, ok: true, mutating: false, repeats: 1, durationMs: 3 },
+      ],
+    });
+    expect(receipts.some((receipt) => receipt.kind === 'functional_verification')).toBe(false);
+    expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'observed_state', revisionId: 'rev-2' })]));
+  });
+
+  it('does not count a proof-run mutation as construction of the requested resource', () => {
+    const receipts = proofReceiptsFromExperience({
+      toolCalls: 1,
+      recalledAtomIds: [],
+      efficiency: { uniqueObservations: 1, coalescedReads: 0, mutatingCalls: 1, argumentCharsObserved: 0, resultCharsObserved: 0, repeatedResultChars: 0 },
+      observations: [
+        { index: 1, name: 'agentis.workflow.revision.verify', args: {}, result: { workflowId: 'wf-1', revisionId: 'rev-1', passed: true }, ok: true, mutating: true, repeats: 1, durationMs: 3 },
+      ],
+    });
+    expect(receipts).toEqual([]);
   });
 });

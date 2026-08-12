@@ -21,6 +21,7 @@ import type { EvaluatorRuntime } from '../evaluatorRuntime.js';
 import type { WorkspaceIntelligenceService } from '../workspace/workspaceIntelligence.js';
 import type { AgentLibraryService } from '../agent/agentLibrary.js';
 import type { ExtensionLibraryService } from '../extensionLibrary.js';
+import type { ExtensionRuntime } from '../extensionRuntime.js';
 import type { SpecialistAgentService } from '../specialist/specialistAgents.js';
 import type { SpecialistDemandRouter } from '../specialist/specialistDemandRouter.js';
 import type { SpecialistProfileService } from '../specialist/specialistProfileService.js';
@@ -108,6 +109,8 @@ export interface ToolHandlerDeps {
   agentLibrary?: AgentLibraryService;
   /** Optional workspace-volume extension source library available to synthesis. */
   extensionLibrary?: ExtensionLibraryService;
+  /** Canonical runtime, including optional host capabilities such as ctx.browser. */
+  extensionRuntime?: ExtensionRuntime;
   /**
    * Optional — Layer 2 specialist library. Lets build_workflow MATERIALIZE the
    * cast (commission real specialist agents for each agentRole and pin them to

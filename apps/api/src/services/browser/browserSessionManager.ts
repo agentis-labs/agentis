@@ -19,7 +19,7 @@ import type { BrowserPool, PWStorageState } from '../browserPool.js';
 import { BrowserSession } from './browserSession.js';
 
 export interface SessionOwner {
-  kind: 'run' | 'agent';
+  kind: 'run' | 'agent' | 'extension';
   id: string;
 }
 
@@ -65,6 +65,10 @@ export interface OpenSessionRequest {
   sessionId: string;
   /** Named auth profile to seed cookies/localStorage from ("log in once, reuse"). */
   restoreAuthName?: string;
+  /** Direct checkpoint restore; used only by the trusted extension backend. */
+  storageState?: PWStorageState;
+  /** Restrict every navigation and sub-resource request for this session. */
+  allowedDomains?: string[];
   viewport?: { width: number; height: number };
   /**
    * Visibility mode:
@@ -91,6 +95,13 @@ export interface BrowserSessionCaps {
   ttlMs: number;
 }
 
+export type BrowserSessionCloseHook = (args: {
+  workspaceId: string;
+  owner: SessionOwner;
+  sessionId: string;
+  session: BrowserSession;
+}) => Promise<void>;
+
 const REAPER_INTERVAL_MS = 30_000;
 
 function resolveCaps(override?: Partial<BrowserSessionCaps>): BrowserSessionCaps {
@@ -107,9 +118,11 @@ function resolveCaps(override?: Partial<BrowserSessionCaps>): BrowserSessionCaps
 
 export class BrowserSessionManager {
   readonly #sessions = new Map<string, BrowserSession>();
+  readonly #owners = new Map<string, SessionOwner>();
   readonly #byOwner = new Map<string, Set<string>>();
   readonly #caps: BrowserSessionCaps;
   #reaper: ReturnType<typeof setInterval> | null = null;
+  #beforeClose?: BrowserSessionCloseHook;
 
   constructor(
     private readonly pool: BrowserPool,
@@ -138,7 +151,7 @@ export class BrowserSessionManager {
 
     this.#enforceCaps(req.owner);
 
-    let storageState: PWStorageState | undefined;
+    let storageState: PWStorageState | undefined = req.storageState;
     if (req.restoreAuthName) {
       if (!this.deps.authStore) {
         throw new AgentisError('VALIDATION_FAILED', 'browser auth store not wired — cannot restore auth profile');
@@ -154,6 +167,7 @@ export class BrowserSessionManager {
       ...(storageState ? { storageState } : {}),
       ...(req.viewport ? { viewport: req.viewport } : {}),
       ...(req.profileName ? { profileName: req.profileName } : {}),
+      ...(req.allowedDomains?.length ? { allowedDomains: req.allowedDomains } : {}),
       // Real-Chrome attach is gated by the per-workspace opt-in (env master wins).
       ...(req.mode === 'attach' && this.deps.resolveRealChromeAllowed
         ? { allowCdp: this.deps.resolveRealChromeAllowed(req.workspaceId) }
@@ -167,9 +181,11 @@ export class BrowserSessionManager {
       surface.page,
       { close: surface.close, storageState: surface.storageState },
       Date.now(),
+      req.allowedDomains ?? [],
     );
 
     this.#sessions.set(key, session);
+    this.#owners.set(key, req.owner);
     this.#ownerSet(req.owner).add(key);
     this.#ensureReaper();
     this.#wireAbort(session, req.signal);
@@ -232,15 +248,34 @@ export class BrowserSessionManager {
       clearInterval(this.#reaper);
       this.#reaper = null;
     }
-    const sessions = [...this.#sessions.values()];
+    const keys = [...this.#sessions.keys()];
+    for (const key of keys) await this.#closeKey(key, null);
     this.#sessions.clear();
+    this.#owners.clear();
     this.#byOwner.clear();
-    await Promise.all(sessions.map((s) => s.close().catch(() => {})));
   }
 
   /** Live session count — for tests/observability. */
   get size(): number {
     return this.#sessions.size;
+  }
+
+  get capacity(): { active: number; perOwner: number; global: number; ttlMs: number; operations: { limit: number; active: number; queued: number } } {
+    return {
+      active: this.#sessions.size,
+      perOwner: this.#caps.perOwner,
+      global: this.#caps.global,
+      ttlMs: this.#caps.ttlMs,
+      operations: this.pool.capacity,
+    };
+  }
+
+  available(): Promise<boolean> {
+    return this.pool.available();
+  }
+
+  setBeforeCloseHook(hook: BrowserSessionCloseHook): void {
+    this.#beforeClose = hook;
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
@@ -265,11 +300,26 @@ export class BrowserSessionManager {
   async #closeKey(key: string, owner: SessionOwner | null): Promise<void> {
     const session = this.#sessions.get(key);
     if (!session) return;
+    const actualOwner = owner ?? this.#owners.get(key) ?? null;
     this.#sessions.delete(key);
+    this.#owners.delete(key);
     if (owner) {
       this.#byOwner.get(this.#ownerKey(owner))?.delete(key);
     } else {
       for (const set of this.#byOwner.values()) set.delete(key);
+    }
+    if (actualOwner && this.#beforeClose) {
+      await this.#beforeClose({
+        workspaceId: session.workspaceId,
+        owner: actualOwner,
+        sessionId: session.sessionId,
+        session,
+      }).catch((err) => this.deps.logger.warn('browser.session.before_close_failed', {
+        workspaceId: session.workspaceId,
+        sessionId: session.sessionId,
+        owner: `${actualOwner.kind}:${actualOwner.id}`,
+        err: (err as Error).message,
+      }));
     }
     await session.close().catch(() => {});
   }

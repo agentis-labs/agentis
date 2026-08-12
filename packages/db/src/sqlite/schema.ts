@@ -418,6 +418,32 @@ export const workflows = sqliteTable('workflows', {
   ...baseTimestamps(),
 });
 
+/**
+ * Encrypted, resumable browser state owned by one extension session.
+ * The ciphertext contains Playwright storageState plus the last safe URL;
+ * neither cookies nor token-bearing URLs are stored in plaintext.
+ */
+export const extensionBrowserCheckpoints = sqliteTable('extension_browser_checkpoints', {
+  id: text('id').primaryKey(),
+  workspaceId: text('workspace_id')
+    .notNull()
+    .references(() => workspaces.id, { onDelete: 'cascade' }),
+  extensionId: text('extension_id')
+    .notNull()
+    .references(() => extensions.id, { onDelete: 'cascade' }),
+  sessionName: text('session_name').notNull(),
+  encryptedValue: text('encrypted_value').notNull(),
+  lastUsedAt: text('last_used_at').notNull(),
+  ...baseTimestamps(),
+}, (table) => ({
+  ownerUnique: uniqueIndex('idx_extension_browser_checkpoint_owner').on(
+    table.workspaceId,
+    table.extensionId,
+    table.sessionName,
+  ),
+  workspaceRecent: index('idx_extension_browser_checkpoint_recent').on(table.workspaceId, table.lastUsedAt),
+}));
+
 /** Non-secret, immutable launch facts for runtime parity and postmortems. */
 export const agentExecutionEnvelopes = sqliteTable('agent_execution_envelopes', {
   id: text('id').primaryKey(),
@@ -1169,8 +1195,13 @@ export const conversations = sqliteTable('conversations', {
   channelChatId: text('channel_chat_id'),
   /** When set, this thread belongs to an Agentic App — the agent answers in App context (Living Apps Phase 0, migration v95). */
   appId: text('app_id').references((): AnySQLiteColumn => apps.id, { onDelete: 'set null' }),
-  
+  /** null | human. Human ownership is conversation-scoped and survives restarts. */
   handoffState: text('handoff_state'),
+  /** explicit | provider_observed. Kept separate from state for audit and UX. */
+  handoffSource: text('handoff_source'),
+  handoffClaimedAt: text('handoff_claimed_at'),
+  /** Incremented on every ownership transition; stale automation must present the epoch it started under. */
+  automationEpoch: integer('automation_epoch').notNull().default(0),
   
   needsAttention: integer('needs_attention').notNull().default(0),
   
@@ -1230,6 +1261,8 @@ export const conversationMessages = sqliteTable('conversation_messages', {
   
   authorType: text('author_type').notNull(),
   authorId: text('author_id'),
+  /** Channel conversational side. Null keeps ordinary platform-chat semantics. */
+  participantSide: text('participant_side').$type<'customer' | 'business' | null>(),
   /** Reference to the OpenClaw session.message id when mirrored. */
   sessionMessageId: text('session_message_id'),
   issueId: text('issue_id'),
@@ -3345,6 +3378,9 @@ export const conversationSummaries = sqliteTable(
     summary: text('summary').notNull().default(''),
     /** High-water mark — how many messages have been folded into the summary so far. */
     coveredCount: integer('covered_count').notNull().default(0),
+    /** Stable watermark for incremental compaction when history is inserted out of order. */
+    coveredThroughMessageId: text('covered_through_message_id'),
+    coveredThroughAt: text('covered_through_at'),
     /** 'model' (StructuredCompleter) or 'deterministic' (last-N + counts fallback). */
     source: text('source').notNull().default('deterministic'),
     ...baseTimestamps(),

@@ -13,6 +13,8 @@ import { ActiveWorkflowRegistry } from '../engine/ActiveWorkflowRegistry.js';
 import { loadEnv, type AgentisEnv } from '../env.js';
 import { createInProcessEventBus } from '../event-bus.js';
 import { ExtensionKvStore } from '../extensions/kv.js';
+import { ExtensionBrowserCheckpointStore } from '../extensions/browserCheckpointStore.js';
+import { LocalExtensionBrowserBackend } from '../extensions/browserBackend.js';
 import { createLogger } from '../logger.js';
 import { loadOrCreateSecrets } from '../secrets.js';
 import { ActivityFeedService } from '../services/activityFeed.js';
@@ -157,7 +159,6 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
   observability.startLegacyBridge();
   const approvals = new ApprovalInboxService(sqlite, bus);
   const extensionKv = new ExtensionKvStore(sqlite);
-  const extensions = new ExtensionRuntime(sqlite, logger, { dockerEnabled: !!env.AGENTIS_EXTENSION_DOCKER }, extensionKv, credentialVault);
 
   // Telemetry (D38) — opt-in via AGENTIS_OTEL_ENDPOINT. Falls back to a
   // no-op tracer if the OTel SDK packages are not installed, so the
@@ -244,6 +245,20 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     // Per-workspace Settings→Governance opt-in gates real-Chrome attach (env master wins).
     resolveRealChromeAllowed: (workspaceId) => resolveRealChromeAllowed(sqlite, workspaceId),
   });
+  const extensionBrowserCheckpoints = new ExtensionBrowserCheckpointStore(sqlite, credentialVault);
+  const extensionBrowserBackend = new LocalExtensionBrowserBackend(
+    browserSessionManager,
+    extensionBrowserCheckpoints,
+    logger,
+  );
+  const extensions = new ExtensionRuntime(
+    sqlite,
+    logger,
+    { dockerEnabled: !!env.AGENTIS_EXTENSION_DOCKER },
+    extensionKv,
+    credentialVault,
+    extensionBrowserBackend,
+  );
   // Shared artifact persistence/resolution — screenshots become referenceable
   // artifacts and channel attachments resolve back to bytes. The assets dir lets
   // it resolve `asset://<hash>` refs off the content-addressed store.
@@ -351,6 +366,7 @@ export async function wireFoundation(envSource: NodeJS.ProcessEnv) {
     browserPool,
     browserSessionManager,
     browserAuthStore,
+    extensionBrowserBackend,
     artifactService,
     assetStore,
     mcpAllowPrivate,

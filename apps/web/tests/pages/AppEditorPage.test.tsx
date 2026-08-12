@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { AppEditorPage } from '../../src/pages/AppEditorPage';
 
 vi.mock('../../src/pages/WorkflowCanvasPage', () => ({
@@ -74,10 +74,15 @@ function renderEditor(facet: 'interface' | 'workflow' = 'interface') {
   render(
     <MemoryRouter initialEntries={[`/apps/app-1?facet=${facet}`]}>
       <Routes>
-        <Route path="/apps/:id" element={<AppEditorPage />} />
+        <Route path="/apps/:id" element={<><AppEditorPage /><LocationProbe /></>} />
       </Routes>
     </MemoryRouter>,
   );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-search">{location.search}</output>;
 }
 
 describe('<AppEditorPage />', () => {
@@ -129,6 +134,32 @@ describe('<AppEditorPage />', () => {
 
     expect(screen.getByRole('tab', { name: 'Renamed workflow' })).toBeInTheDocument();
     expect(screen.getByTestId('workflow-canvas')).toHaveTextContent('Canvas wf-1');
+  });
+
+  it('keeps the selected workflow in the URL so viewport-aware chat can target it', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = init?.method ?? 'GET';
+      const realtime = realtimeStreamResponse(path, method);
+      if (realtime) return realtime;
+      if (path === '/v1/apps/app-1' && method === 'GET') return jsonResponse({ data: appRecord() });
+      if (path === '/v1/apps/app-1/surfaces' && method === 'GET') return jsonResponse({ data: [] });
+      if (path === '/v1/apps/app-1/collections' && method === 'GET') return jsonResponse({ data: [] });
+      if (path === '/v1/apps/app-1/workflows' && method === 'GET') {
+        return jsonResponse({ data: [
+          { id: 'wf-1', title: 'Outbound ICP', purpose: null, order: 0, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null },
+          { id: 'wf-2', title: 'Follow-up', purpose: null, order: 1, enabled: true, dependsOn: [], triggerKind: 'manual', lastRun: null },
+        ] });
+      }
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEditor('workflow');
+
+    expect(await screen.findByTestId('workflow-canvas')).toHaveTextContent('Canvas wf-1');
+    await userEvent.click(screen.getByRole('tab', { name: 'Follow-up' }));
+    await waitFor(() => expect(screen.getByTestId('workflow-canvas')).toHaveTextContent('Canvas wf-2'));
+    await waitFor(() => expect(screen.getByTestId('location-search')).toHaveTextContent('workflow=wf-2'));
   });
 
   it('renames surfaces and adds a block on the live builder canvas', async () => {

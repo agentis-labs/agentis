@@ -74,6 +74,41 @@ export interface PlanEvidenceRef {
   payload?: unknown;
 }
 
+export type OutcomeState = 'accomplished' | 'blocked' | 'not_accomplished';
+export type RevisionState = 'building' | 'verifying' | 'needs_attention' | 'awaiting_approval' | 'active';
+
+export interface BuildMission {
+  version: 1;
+  objective: string;
+  deliverables: Array<{
+    kind: 'workflow' | 'app' | 'interface' | 'agent' | 'integration' | 'resource';
+    label: string;
+    required: boolean;
+  }>;
+  fixtures: Array<{
+    id: string;
+    purpose: 'happy_path' | 'empty_input' | 'missing_dependency' | 'invalid_input';
+    required: boolean;
+  }>;
+  requiredProofs: Array<'persisted_mutation' | 'functional_verification'>;
+  createdAt: string;
+}
+
+export interface ProofReceipt {
+  id: string;
+  kind: 'persisted_mutation' | 'functional_verification' | 'observed_state';
+  status: 'passed' | 'failed' | 'blocked';
+  tool: string;
+  resourceKind?: string;
+  resourceId?: string;
+  revisionId?: string;
+  semanticHash?: string;
+  runId?: string;
+  fixtureId?: string;
+  evidence?: unknown;
+  observedAt: string;
+}
+
 export interface PlanDecisionRecord {
   id: string;
   summary: string;
@@ -115,6 +150,8 @@ export interface PlanVerification {
   output?: unknown;
   verifiedAt: string;
   verifier: 'deterministic' | 'judge';
+  outcome?: OutcomeState;
+  receipts?: ProofReceipt[];
 }
 
 export interface PlanPatch {
@@ -148,6 +185,7 @@ export interface ChatPlan {
   decisions?: PlanDecisionRecord[];
   deviations?: PlanDeviationRecord[];
   verification?: PlanVerification;
+  mission?: BuildMission;
   createdAt: string;
   updatedAt: string;
 }

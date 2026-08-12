@@ -23,9 +23,9 @@ and a live product surface they can operate with you.
 [![Node](https://img.shields.io/badge/node-%3E%3D20.10-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-9.12-orange.svg)](https://pnpm.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org)
-![Status](https://img.shields.io/badge/status-1.0.8%20stable-brightgreen.svg)
+![Status](https://img.shields.io/badge/status-1.1.0%20stable-brightgreen.svg)
 
-> **Status: 1.0.8 stable.** Agentis is now in public release, and the CLI,
+> **Status: 1.1.0 stable.** Agentis is now in public release, and the CLI,
 > dashboard, and core runtime are ready for production use across 1.x updates.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fagentis-labs%2Fagentis)
@@ -224,6 +224,9 @@ See [`.env.example`](./.env.example) for the complete set.
 | `AGENTIS_HTTP_HOST` | `127.0.0.1` | Bind host. |
 | `AGENTIS_EXTENSION_REQUIRE_ISOLATE` | unset | Fail closed instead of using `node:vm` for untrusted extension code. |
 | `AGENTIS_EXTENSION_DOCKER` | unset | Enable the Docker extension sandbox. |
+| `AGENTIS_BROWSER_CONCURRENCY` | `3` | Concurrent native Chromium operations shared by browser nodes, tools, and extensions (max 16). |
+| `AGENTIS_BROWSER_SESSION_MAX` | `20` | Maximum live browser sessions on this host (max 128); encrypted checkpoints survive eviction/restart. |
+| `AGENTIS_BROWSER_SESSION_TTL_MS` | `300000` | Idle lifetime for a live browser session before its page is reaped. |
 | `AGENTIS_ORCHESTRATOR_BASE_URL` / `_API_KEY` / `_MODEL` | unset | Optional OpenAI-compatible model endpoint for the orchestrator. |
 
 ---

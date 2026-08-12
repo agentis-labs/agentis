@@ -34,7 +34,7 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
       const operationName = stringArg(args.operationName);
       // A throwaway runtime built from the deps we already hold (db + logger) —
       // node_worker extensions run in the in-process sandbox, no DI/bootstrap needed.
-      const runtime = new ExtensionRuntime(deps.db, deps.logger, {
+      const runtime = deps.extensionRuntime ?? new ExtensionRuntime(deps.db, deps.logger, {
         dockerEnabled: String(process.env.AGENTIS_EXTENSION_DOCKER ?? '').toLowerCase() === 'true',
       });
       const outcome = await runtime.execute({
@@ -194,6 +194,7 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
         permissionsAcknowledged: payload.permissionsAcknowledged,
         bundleFiles: payload.bundleFiles,
       });
+      await deps.extensionRuntime?.cleanupExtensionBrowser(ctx.workspaceId, installed.id);
       return {
         extensionId: installed.id,
         runtime: installed.manifest.runtime,
@@ -227,7 +228,7 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
           description: { type: 'string', description: 'What the extension does.' },
           source: {
             type: 'string',
-            description: 'JavaScript source: declare a TOP-LEVEL async function per operation — `async function <operationName>(inputs, ctx) { ... }`. Do NOT use module.exports, exports, require, or import (all blocked by the sandbox); use `ctx.http.fetch(url, opts)` for network. Return the operation output object.',
+            description: 'JavaScript source: declare a TOP-LEVEL async function per operation — `async function <operationName>(inputs, ctx) { ... }`. Do NOT use module.exports, exports, require, or import. Use `ctx.http.fetch` for HTTP and permissioned `ctx.browser` methods for deterministic Chromium automation. Return a structured object.',
           },
           operations: {
             type: 'array',
@@ -311,6 +312,11 @@ export function registerCapabilityTools(registry: AgentisToolRegistry, deps: Too
           ...(timeoutMs ? { timeoutMs } : {}),
         },
       );
+      if (effectivePermissions.includes('browser.session.persist')) {
+        await deps.extensionRuntime?.refreshExtensionBrowser(ctx.workspaceId, created.id);
+      } else {
+        await deps.extensionRuntime?.cleanupExtensionBrowser(ctx.workspaceId, created.id);
+      }
       return {
         extensionId: created.id,
         name: created.manifest.name,
@@ -385,6 +391,10 @@ const EXTENSION_PERMISSIONS = new Set<ExtensionPermission>([
   'listener.cursor',
   'kv.read',
   'kv.write',
+  'browser',
+  'browser.evaluate',
+  'browser.session.persist',
+  'browser.auth',
 ]);
 
 function normalizePermissions(value: unknown): ExtensionPermission[] {

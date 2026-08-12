@@ -76,6 +76,17 @@ describe('durable conversation turn routes', () => {
     expect(stream).toContain('Durable result');
     expect(stream).toContain('event: message');
 
+    const historyResponse = await app.request(
+      `/v1/conversations/${agentId}/turns?conversationId=${created.conversationId}`,
+      { headers: ctx.authHeaders },
+    );
+    expect(historyResponse.status).toBe(200);
+    const history = await historyResponse.json() as { history: Array<{ turn: { status: string }; events: Array<{ category: string; visibility: string; seq: number }> }> };
+    expect(history.history).toHaveLength(1);
+    expect(history.history[0]?.turn.status).toBe('completed');
+    expect(history.history[0]?.events.some((event) => event.category === 'narration' && event.visibility === 'both')).toBe(true);
+    expect(history.history[0]?.events.map((event) => event.seq)).toEqual([...history.history[0]!.events.map((event) => event.seq)].sort((a, b) => a - b));
+
     expect(adapter.seenOptions).toMatchObject({ latencyClass: 'deliberate', reasoningEffort: 'high', fastMode: false });
   });
 });

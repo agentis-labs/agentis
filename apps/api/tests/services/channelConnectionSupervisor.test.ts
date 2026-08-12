@@ -5,6 +5,7 @@ import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS } from '@agentis/core';
 import { ChannelConnectionSupervisor } from '../../src/services/conversation/channelConnectionSupervisor.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
+import { ConversationHandoffService } from '../../src/services/conversation/conversationHandoffService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
 
 let ctx: TestContext;
@@ -36,6 +37,7 @@ function fixture() {
     settings: { mode: 'qr_local' },
   }).run();
   const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+  const handoffs = new ConversationHandoffService({ db: ctx.db, bus: ctx.bus });
   const supervisor = new ChannelConnectionSupervisor({
     db: ctx.db,
     bus: ctx.bus,
@@ -43,8 +45,9 @@ function fixture() {
     vault: ctx.vault,
     conversations,
     dataDir: '.',
+    handoffs,
   });
-  return { agentId, connectionId, supervisor };
+  return { agentId, connectionId, supervisor, handoffs };
 }
 
 describe('ChannelConnectionSupervisor observed outbound synchronization', () => {
@@ -66,7 +69,7 @@ describe('ChannelConnectionSupervisor observed outbound synchronization', () => 
   });
 
   it('mirrors a primary-phone send once and publishes provider-backed outbound evidence', () => {
-    const { connectionId, supervisor } = fixture();
+    const { connectionId, supervisor, handoffs } = fixture();
     const capture = ctx.captureBus();
 
     supervisor.observeOutbound(connectionId, {
@@ -91,6 +94,10 @@ describe('ChannelConnectionSupervisor observed outbound synchronization', () => 
         channelOutboundObserved: true,
         source: 'external_whatsapp_client',
       }),
+    });
+    const conversationId = messages[0]!.conversationId;
+    expect(handoffs.current(ctx.workspace.id, conversationId)).toMatchObject({
+      state: 'human', source: 'provider_observed', automationEpoch: 1,
     });
     expect(capture.events.some((event) => event.envelope.event === REALTIME_EVENTS.CHANNEL_MESSAGE_SENT
       && (event.envelope.payload as { observed?: boolean }).observed === true)).toBe(true);

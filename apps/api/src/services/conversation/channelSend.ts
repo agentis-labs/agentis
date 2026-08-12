@@ -49,6 +49,9 @@ export interface ChannelSendArgs {
   idempotencyKey?: string;
   /** Bypass §7 anti-ban rails (rate/warmup/opt-in). Operator-initiated sends only. */
   bypassGuards?: boolean;
+  actor?: 'automation' | 'human';
+  conversationId?: string;
+  expectedAutomationEpoch?: number;
 }
 
 export type ChannelSendResult =
@@ -184,6 +187,9 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
         ...(d.native ? { native: d.native } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
         ...(args.bypassGuards ? { bypassGuards: true } : {}),
+        ...(args.actor ? { actor: args.actor } : {}),
+        ...(args.conversationId ? { conversationId: args.conversationId } : {}),
+        ...(args.expectedAutomationEpoch !== undefined ? { expectedAutomationEpoch: args.expectedAutomationEpoch } : {}),
       });
     } catch (err) {
       if (err instanceof ChannelDeliveryRejectedError) {

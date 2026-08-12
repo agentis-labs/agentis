@@ -57,13 +57,15 @@ import { serializeConversationMessage, serializeQueueItem, delay, workflowIdFrom
 import type { AgentRow, StreamedChatMetadata } from '../services/conversation/conversationTurnHelpers.js';
 import { collectAppDoctorSnapshot } from '../services/app/appDoctorSnapshot.js';
 import { validateAppConformance, type AppDoctorReport } from '../services/app/appDoctor.js';
-import type { ConversationTurnExperience, ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
+import { proofReceiptsFromExperience, type ConversationTurnExperience, type ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
 import type { PlanService } from '../services/planService.js';
 import { ArtifactService } from '../services/artifactService.js';
 import { DocumentExtractionService } from '../services/documentExtractionService.js';
 import type { VisionService } from '../services/visionService.js';
 import type { TranscriptionService } from '../services/transcriptionService.js';
 import type { RuntimeProfileService } from '../services/runtime/runtimeProfileService.js';
+import type { ConversationHandoffService } from '../services/conversation/conversationHandoffService.js';
+import { channelModelRole } from '../services/conversation/channelConversationRole.js';
 import { ConversationAttachmentContextService } from '../services/conversation/conversationAttachmentContext.js';
 import {
   ConversationTurnService,
@@ -132,6 +134,7 @@ type ConversationRouteDeps = {
   vision?: VisionService;
   transcription?: TranscriptionService;
   runtimeProfiles?: RuntimeProfileService;
+  handoffs?: ConversationHandoffService;
   memoryCapture?: {
     captureImmediateCorrection?(args: {
       workspaceId: string;
@@ -203,6 +206,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
   const durableTurns = new ConversationTurnService({
     db: deps.db,
     logger: deps.logger,
+    bus: deps.bus,
     execute: (turn, sink, signal) => executeDurableConversationTurn(deps, turn, sink, signal),
     onCancel: async (turn) => {
       deps.turnLeases?.revoke(turn.workspaceId, turn.conversationId);
@@ -321,10 +325,31 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
         channelChatId: r.channelChatId,
         channelKind: channel?.kind ?? null,
         channelName: channel?.name ?? null,
+        handoffState: r.handoffState === 'human' ? 'human' : 'agent',
+        handoffSource: r.handoffSource ?? null,
+        handoffClaimedAt: r.handoffClaimedAt ?? null,
+        automationEpoch: r.automationEpoch ?? 0,
         createdAt: r.createdAt,
       };
     });
     return c.json({ conversations: enriched });
+  });
+
+  app.patch('/:conversationId/handoff', async (c) => {
+    const ws = getWorkspace(c);
+    if (!deps.handoffs) throw new AgentisError('INTERNAL_ERROR', 'conversation handoff service is unavailable');
+    const input = z.object({ state: z.enum(['human', 'agent']) }).parse(await c.req.json());
+    const conversationId = c.req.param('conversationId');
+    const snapshot = input.state === 'human'
+      ? deps.handoffs.claimHuman({ workspaceId: ws.workspaceId, conversationId, source: 'explicit' })
+      : deps.handoffs.releaseToAgent(ws.workspaceId, conversationId);
+    return c.json({
+      conversationId: snapshot.conversationId,
+      state: snapshot.state,
+      source: snapshot.source,
+      claimedAt: snapshot.claimedAt,
+      automationEpoch: snapshot.automationEpoch,
+    });
   });
 
   app.get('/:agentId', (c) => {
@@ -471,6 +496,23 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     return c.json({ turns: durableTurns.listActive(ws.workspaceId, conversationId).map(serializeDurableTurn) });
   });
 
+  app.get('/:agentId/turns', (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const conversationId = c.req.query('conversationId');
+    if (!conversationId) throw new AgentisError('VALIDATION_FAILED', 'conversationId is required');
+    const conversation = deps.conversations.getById(ws.workspaceId, conversationId);
+    if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
+    const requestedLimit = Number(c.req.query('limit') ?? 50);
+    const limit = Number.isFinite(requestedLimit) ? requestedLimit : 50;
+    return c.json({
+      history: durableTurns.history(ws.workspaceId, conversationId, limit).map(({ turn, events }) => ({
+        turn: serializeDurableTurn(turn),
+        events,
+      })),
+    });
+  });
+
   app.get('/:agentId/turns/:turnId', (c) => {
     const ws = getWorkspace(c);
     const turn = durableTurns.require(ws.workspaceId, c.req.param('turnId'));
@@ -494,7 +536,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
           await stream.writeSSE({ id: String(event.seq), event: event.event, data: JSON.stringify(event.data) });
         }
         const latest = durableTurns.require(ws.workspaceId, turnId);
-        if (['completed', 'failed', 'cancelled', 'paused', 'awaiting_approval', 'interrupted'].includes(latest.status) && cursor >= latest.lastEventSeq) break;
+        if (['completed', 'failed', 'cancelled', 'paused', 'blocked', 'awaiting_approval', 'interrupted'].includes(latest.status) && cursor >= latest.lastEventSeq) break;
         await delay(350);
       }
     });
@@ -1025,11 +1067,14 @@ function conversationHistoryForTurn(
   conversationId: string,
   currentMessageId: string | null,
 ) {
+  const conversation = deps.db.select({ channelConnectionId: schema.conversations.channelConnectionId })
+    .from(schema.conversations).where(eq(schema.conversations.id, conversationId)).get();
+  const channelScoped = Boolean(conversation?.channelConnectionId);
   return deps.conversations
     .messages(conversationId, 20)
     .filter((row) => row.id !== currentMessageId)
     .map((row) => ({
-      role: row.authorType === 'operator' ? 'user' as const : 'assistant' as const,
+      role: channelModelRole(row, channelScoped) === 'user' ? 'user' as const : 'assistant' as const,
       content: row.body,
     }));
 }
@@ -1070,8 +1115,10 @@ async function executeDurableConversationTurn(
   let finishReason: ChatFinishReason = 'stop';
   let awaitingApproval = false;
   let sawError = false;
+  let runtimeError = '';
   let finalMessageId: string | null = null;
   let finalMessageText = '';
+  let durableExperience: ConversationTurnExperience | null = null;
   const trackingSink: ChatSseStream = {
     writeSSE: async (event) => {
       if (event.event === 'delta') {
@@ -1090,6 +1137,7 @@ async function executeDurableConversationTurn(
         } catch { /* noop */ }
       } else if (event.event === 'error') {
         sawError = true;
+        try { runtimeError = (JSON.parse(event.data) as { message?: string }).message ?? runtimeError; } catch { /* noop */ }
       }
       await sink.writeSSE(event);
     },
@@ -1111,7 +1159,14 @@ async function executeDurableConversationTurn(
     }, reg);
   } finally {
     signal.removeEventListener('abort', abort);
-    if (turnLease) deps.turnLeases?.complete(turn.workspaceId, turn.conversationId, turnLease);
+    if (turnLease) {
+      try {
+        durableExperience = deps.turnLeases?.experience(turn.workspaceId, turn.conversationId, turnLease) ?? null;
+      } catch (error) {
+        if (!(error instanceof AgentisError) || error.code !== 'TURN_CANCELLED') throw error;
+      }
+      deps.turnLeases?.complete(turn.workspaceId, turn.conversationId, turnLease);
+    }
     if (activeConversationTurns.get(turn.conversationId) === controller) activeConversationTurns.delete(turn.conversationId);
     if (!controller.signal.aborted && !hardStoppedConversations.delete(turn.conversationId)) {
       deps.conversations.dispatchNextQueued({ workspaceId: turn.workspaceId, conversationId: turn.conversationId });
@@ -1124,19 +1179,29 @@ async function executeDurableConversationTurn(
   const terminalReason = finishReason as ChatFinishReason;
   if (controller.signal.aborted || terminalReason === 'interrupted') return { status: 'interrupted' as const };
   if (sawError || terminalReason === 'error') {
-    if (turn.planId && deps.plans) deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, 'failed');
-    return { status: 'failed' as const, error: 'The agent runtime failed during this turn.' };
+    const blocked = /\b(?:capacity|overloaded|rate.?limit|quota|temporarily unavailable|try again|no healthy runtime)\b/i.test(runtimeError || finalMessageText);
+    if (turn.planId && deps.plans) deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, blocked ? 'blocked' : 'failed');
+    return {
+      status: blocked ? 'blocked' as const : 'failed' as const,
+      error: runtimeError || (blocked ? 'The selected runtime is temporarily unavailable. Resume this turn or change model.' : 'The agent runtime failed during this turn.'),
+    };
   }
   if (turn.planId && deps.plans) {
     if (/verification blocked|cannot truthfully mark|\bnot (?:done|complete|ready)\b/i.test(finalMessageText)) {
       deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, 'blocked');
-      return { status: 'failed' as const, error: 'Mission completion was blocked by verification.' };
+      return { status: 'blocked' as const, error: 'Mission completion was blocked by verification.' };
     }
+    const receipts = durableExperience ? proofReceiptsFromExperience(durableExperience) : [];
     const verification = await deps.plans.verifyCompletion(turn.workspaceId, turn.userId, turn.planId, {
       output: { messageId: finalMessageId, text: finalMessageText },
-      evidence: finalMessageId ? [{ label: 'Persisted final conversation output', payload: { messageId: finalMessageId } }] : [],
+      evidence: receipts.map((receipt) => ({
+        label: `${receipt.kind}: ${receipt.tool}`,
+        ...(receipt.runId ? { runId: receipt.runId } : {}),
+        payload: receipt,
+      })),
+      receipts,
     });
-    if (!verification.passed) return { status: 'failed' as const, error: 'Mission acceptance verification did not pass.' };
+    if (!verification.passed) return { status: 'blocked' as const, error: 'Mission acceptance verification did not pass. Continue fixing from the preserved turn.' };
   }
   return { status: 'completed' as const };
 }

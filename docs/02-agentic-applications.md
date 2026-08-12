@@ -90,8 +90,11 @@ claiming that it did so.
 
 Portable `.agentisapp` bundles carry the App's transitive workflows, surfaces, data contracts,
 runtime requirements, and content-addressed portable component files. The operator-facing export
-terms are **Published workflow** (the verified graph used by production) and **Saved draft** (the
-editable graph currently being viewed). Historical revision fields remain available for lineage and
+terms are **Live version** (the verified graph used by production) and **Change needs attention**
+when a verified-safe change cannot be promoted. Candidate revisions remain an internal isolation
+and rollback mechanism rather than a user-facing drafts product: safe changes verify and publish
+automatically; cron, external sends, credentials, and other irreversible effects remain awaiting
+approval for the exact verified hash. Historical revision fields remain available for lineage and
 compatibility. Local executable paths, commands, working directories, environment values,
 repository paths, and runtime project roots are removed from the bundle. Import verifies
 manifest/runtime compatibility, file hashes, dependency locks, and component entrypoints before
@@ -99,8 +102,10 @@ activating anything; unsafe or conflicting bundles fail closed.
 
 `GET /v1/build-sessions/latest?conversationId=...` and `...?appId=...` recover the latest build
 evidence. `agentis.app.verify` settles the session from compiler, dry-run, suite, runtime, and
-delivery evidence. A failed verification gets one bounded deterministic repair attempt; otherwise
-the session is blocked with an actionable diagnostic.
+delivery evidence. Every materialized resource contributes a revision-specific `ProofReceipt`; the
+agent's final prose is a summary and cannot promote or complete the build. A failed verification
+gets one bounded deterministic repair attempt; otherwise the session is blocked with an actionable
+diagnostic and controls to continue fixing, compare with the live version, or discard the change.
 
 ## App Goals & the Evolution Loop
 

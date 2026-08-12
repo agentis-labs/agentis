@@ -40,6 +40,7 @@ export async function runVmExtension(args: {
   listenerHooks?: ListenerHooks;
   /** Operator-bound credentials this extension may reference by key (INTEGRATION-CEILING-10X §3). Never exposed to the sandbox directly. */
   credentials?: Record<string, ResolvedExtensionCredential>;
+  browserCall?: (action: string, args: unknown[]) => Promise<unknown>;
 }): Promise<ExtensionExecutionOutcome> {
   const start = Date.now();
   const hasPerm = (p: ExtensionPermission) => args.permissions.includes(p);
@@ -131,6 +132,34 @@ export async function runVmExtension(args: {
     http: { fetch: fetchProxy },
   };
 
+  if (args.browserCall) {
+    const call = async (action: string, browserArgs: unknown[]) => {
+      try {
+        return await args.browserCall!(action, browserArgs);
+      } catch (err) {
+        const code = err instanceof AgentisError ? err.code : 'EXTENSION_INTERNAL';
+        throw new Error(`__BROWSER_ERROR__${code}:${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    ctx.browser = {
+      open: (opts: unknown) => call('open', [opts]),
+      navigate: (session: unknown, url: unknown) => call('navigate', [session, url]),
+      click: (session: unknown, selector: unknown) => call('click', [session, selector]),
+      fill: (session: unknown, selector: unknown, value: unknown) => call('fill', [session, selector, value]),
+      type: (session: unknown, selector: unknown, text: unknown, delay?: unknown) => call('type', [session, selector, text, delay]),
+      press: (session: unknown, key: unknown, selector?: unknown) => call('press', [session, key, selector]),
+      selectOption: (session: unknown, selector: unknown, value: unknown) => call('selectOption', [session, selector, value]),
+      hover: (session: unknown, selector: unknown) => call('hover', [session, selector]),
+      scroll: (session: unknown, opts: unknown) => call('scroll', [session, opts]),
+      waitFor: (session: unknown, opts: unknown) => call('waitFor', [session, opts]),
+      get: (session: unknown, opts: unknown) => call('get', [session, opts]),
+      queryAll: (session: unknown, opts: unknown) => call('queryAll', [session, opts]),
+      evaluate: (session: unknown, expression: unknown) => call('evaluate', [session, expression]),
+      checkpoint: (session: unknown) => call('checkpoint', [session]),
+      close: (session: unknown, opts?: unknown) => call('close', [session, opts]),
+    };
+  }
+
   if (args.listenerHooks) {
     const hooks = args.listenerHooks;
     ctx.emit = (payload: Record<string, unknown>) => {
@@ -195,6 +224,16 @@ return await (__entrypoint.length >= 2 ? __entrypoint(__ctx.inputs, __ctx) : __e
     return { ok: true, output, durationMs: Date.now() - start, operationName: args.operationName };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const browserError = message.match(/__BROWSER_ERROR__(EXTENSION_PERMISSION_DENIED|EXTENSION_NETWORK_VIOLATION|EXTENSION_SSRF_BLOCKED):(.+)/s);
+    if (browserError) {
+      return {
+        ok: false,
+        errorCode: browserError[1] as 'EXTENSION_PERMISSION_DENIED' | 'EXTENSION_NETWORK_VIOLATION' | 'EXTENSION_SSRF_BLOCKED',
+        message: browserError[2]!,
+        durationMs: Date.now() - start,
+        operationName: args.operationName,
+      };
+    }
     if (err instanceof AgentisError) {
       return { ok: false, errorCode: err.code === 'EXTENSION_PERMISSION_DENIED' ? 'EXTENSION_PERMISSION_DENIED' : 'EXTENSION_INTERNAL', message, durationMs: Date.now() - start, operationName: args.operationName };
     }

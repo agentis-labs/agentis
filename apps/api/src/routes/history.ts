@@ -11,6 +11,7 @@ import type { AuthService } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { firstFailedNodeId } from '../services/run/runStateFailures.js';
+import { normalizeRunOutcomeStatus } from '../services/workflow/runOutcome.js';
 
 type HistoryType = 'all' | 'runs' | 'activity' | 'audit';
 type WorkflowRunRow = typeof schema.workflowRuns.$inferSelect;
@@ -168,9 +169,10 @@ function loadObservationAgentNames(
 }
 
 function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEvent {
-  const status = run.outcomeStatus === 'accomplished'
+  const outcomeStatus = normalizeRunOutcomeStatus(run.outcomeStatus);
+  const status = outcomeStatus === 'accomplished'
     ? 'completed'
-    : run.executionStatus === 'completed' && run.outcomeStatus !== 'accomplished'
+    : run.executionStatus === 'completed'
       ? 'failed'
       : mapRunStatus(run.status);
   const workflowName = workflow?.title ?? run.ephemeralTitle ?? 'Workflow';
@@ -197,7 +199,7 @@ function presentRunEvent(run: WorkflowRunRow, workflow?: WorkflowRow): HistoryEv
       workflowId: run.workflowId,
       revisionId: run.workflowRevisionId,
       executionStatus: run.executionStatus,
-      outcomeStatus: run.outcomeStatus,
+      outcomeStatus,
       settlement: run.settlement,
       isEphemeral: run.isEphemeral,
       replanCount: run.replanCount,

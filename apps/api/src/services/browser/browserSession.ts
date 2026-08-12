@@ -36,7 +36,13 @@ export interface PageSnapshot {
 export interface InteractionResult {
   snapshot: PageSnapshot;
   /** Present for read ops (`get`, `select_option`) — the requested value(s). */
-  value?: string | string[];
+  value?: unknown;
+}
+
+export interface BrowserQueryField {
+  selector?: string;
+  what?: 'text' | 'value' | 'attribute' | 'innerHTML';
+  attribute?: string;
 }
 
 /** Bounded per-op timeout for session primitives — below the 120s one-shot max so a blocking wait can't starve one-shot ops. */
@@ -67,6 +73,7 @@ export class BrowserSession {
     private readonly page: PWPage,
     private readonly lifecycle: SessionLifecycle,
     now: number,
+    private readonly allowedDomains: string[] = [],
   ) {
     this.#lastUsedAt = now;
   }
@@ -93,7 +100,7 @@ export class BrowserSession {
   /** Load a URL in the live page. SSRF-guarded. */
   navigate(url: string): Promise<InteractionResult> {
     return this.#op(async (page) => {
-      const safe = await this.pool.resolveSafeNavUrl(url);
+      const safe = await this.pool.resolveSafeNavUrl(url, this.allowedDomains);
       await page.goto(safe, { waitUntil: 'networkidle', timeout: SESSION_OP_TIMEOUT_MS });
       return {};
     });
@@ -196,6 +203,36 @@ export class BrowserSession {
     });
   }
 
+  /** Structured, bounded collection primitive that does not require page-evaluate permission. */
+  queryAll(opts: { selector: string; fields: Record<string, BrowserQueryField>; limit?: number }): Promise<InteractionResult> {
+    const selector = this.#sel(opts.selector);
+    const fields = opts.fields && typeof opts.fields === 'object' ? opts.fields : {};
+    const limit = Math.max(1, Math.min(Number(opts.limit ?? 1_000) || 1_000, 5_000));
+    return this.#op(async (page) => {
+      const value = await page.evaluate<Array<Record<string, string | null>>, { selector: string; fields: Record<string, BrowserQueryField>; limit: number }>(
+        ({ selector: rootSelector, fields: fieldMap, limit: maxRows }) => {
+          const roots = Array.from(document.querySelectorAll(rootSelector)).slice(0, maxRows);
+          return roots.map((root) => {
+            const row: Record<string, string | null> = {};
+            for (const [name, spec] of Object.entries(fieldMap)) {
+              const target = spec.selector ? root.querySelector(spec.selector) : root;
+              if (!target) { row[name] = null; continue; }
+              switch (spec.what ?? 'text') {
+                case 'attribute': row[name] = spec.attribute ? target.getAttribute(spec.attribute) : null; break;
+                case 'innerHTML': row[name] = target.innerHTML; break;
+                case 'value': row[name] = 'value' in target ? String((target as HTMLInputElement).value ?? '') : null; break;
+                default: row[name] = (target.textContent ?? '').trim();
+              }
+            }
+            return row;
+          });
+        },
+        { selector, fields, limit },
+      );
+      return { value };
+    }, selector);
+  }
+
   /**
    * Set files on a file input. Paths MUST already be validated/resolved by the
    * caller (tool dispatch) — the session never accepts raw agent-supplied FS
@@ -217,9 +254,9 @@ export class BrowserSession {
    * size are capped. Residual page-origin fetch is already bounded by the route
    * guard (private ranges blocked).
    */
-  evaluate(expression: string): Promise<InteractionResult> {
+  evaluate(expression: string, permissionGranted = false): Promise<InteractionResult> {
     return this.#op(async (page) => {
-      if (!evaluateAllowed()) {
+      if (!permissionGranted && !evaluateAllowed()) {
         throw new AgentisError('VALIDATION_FAILED', 'browser session evaluate is disabled (set AGENTIS_BROWSER_ALLOW_EVALUATE=true to enable)');
       }
       const expr = this.#requireStr(expression, 'expression');
@@ -257,7 +294,7 @@ export class BrowserSession {
 
   /** Mutex + concurrency slot + lastUsedAt bump + snapshot. `selectorForError` improves not-found messages. */
   async #op(
-    action: (page: PWPage) => Promise<{ value?: string | string[] }>,
+    action: (page: PWPage) => Promise<{ value?: unknown }>,
     selectorForError?: string,
   ): Promise<InteractionResult> {
     if (this.#closing) throw new AgentisError('VALIDATION_FAILED', 'browser session is closed');
@@ -272,6 +309,13 @@ export class BrowserSession {
         } catch (err) {
           const snapshot = await this.#snapshot().catch(() => ({ url: '', title: '', text: '' }));
           const message = (err as Error).message ?? String(err);
+          if (err instanceof AgentisError && (
+            err.code === 'EXTENSION_NETWORK_VIOLATION'
+            || err.code === 'EXTENSION_SSRF_BLOCKED'
+            || err.code === 'EXTENSION_PERMISSION_DENIED'
+          )) {
+            throw err;
+          }
           // Playwright's timeout on a selector wait/action → a legible NOT_FOUND.
           if (/timeout/i.test(message) && selectorForError !== undefined) {
             throw new AgentisError(

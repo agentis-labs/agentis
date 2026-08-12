@@ -3280,6 +3280,44 @@ CREATE INDEX idx_conversation_turn_events_turn
 ALTER TABLE conversations ADD COLUMN approval_sensitivity TEXT NOT NULL DEFAULT 'balanced';
 `,
   },
+  {
+    version: 130,
+    name: 'channel_handoff_and_participant_side',
+    sql: `
+-- Durable per-conversation human ownership and a race fence for stale automation.
+ALTER TABLE conversations ADD COLUMN handoff_source TEXT;
+ALTER TABLE conversations ADD COLUMN handoff_claimed_at TEXT;
+ALTER TABLE conversations ADD COLUMN automation_epoch INTEGER NOT NULL DEFAULT 0;
+
+-- Actor identity (operator/agent/system) is not the same as the side of an
+-- external conversation (business/customer). Legacy rows resolve lazily.
+ALTER TABLE conversation_messages ADD COLUMN participant_side TEXT;
+ALTER TABLE conversation_summaries ADD COLUMN covered_through_message_id TEXT;
+ALTER TABLE conversation_summaries ADD COLUMN covered_through_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_conversations_channel_handoff
+  ON conversations(workspace_id, channel_connection_id, channel_chat_id, handoff_state);
+`,
+  },
+  {
+    version: 131,
+    name: 'extension_browser_checkpoints',
+    sql: `
+CREATE TABLE IF NOT EXISTS extension_browser_checkpoints (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  extension_id    TEXT NOT NULL REFERENCES extensions(id) ON DELETE CASCADE,
+  session_name    TEXT NOT NULL,
+  encrypted_value TEXT NOT NULL,
+  last_used_at    TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_browser_checkpoint_owner
+  ON extension_browser_checkpoints(workspace_id, extension_id, session_name);
+CREATE INDEX IF NOT EXISTS idx_extension_browser_checkpoint_recent
+  ON extension_browser_checkpoints(workspace_id, last_used_at);
+`,
+  },
 ];
 
 

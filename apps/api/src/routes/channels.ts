@@ -78,6 +78,8 @@ const behaviorSchema = z.object({
   requireOptIn: z.boolean().optional(),
   startWarmup: z.boolean().optional(),
   ownerReasoningVisibility: z.enum(['off', 'indicator']).optional(),
+  manualOutboundTakeover: z.enum(['until_handback', 'off']).optional(),
+  historyReconciliation: z.enum(['recent', 'off']).optional(),
 });
 
 const sendAttachmentSchema = z.object({
@@ -376,6 +378,7 @@ export function buildChannelRoutes(deps: {
         to: body.to ?? null,
         agentId: null,
         bypassGuards: true,
+        actor: 'human',
         ...(body.attachments ? { attachments: body.attachments } : {}),
         ...(body.messages ? { messages: body.messages } : {}),
       },

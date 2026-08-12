@@ -6,7 +6,7 @@
  * dispatcher, and the orchestrator's reply reaches adapter.send.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
@@ -19,6 +19,7 @@ import { ConversationTurnLeaseRegistry } from '../../src/services/conversation/c
 import { ChatSessionExecutor } from '../../src/services/chat/chatSessionExecutor.js';
 import { ChannelIdentityService } from '../../src/services/conversation/channelIdentityService.js';
 import { ConversationSummaryService } from '../../src/services/conversation/conversationSummaryService.js';
+import { ConversationHandoffService } from '../../src/services/conversation/conversationHandoffService.js';
 import { AppContactService } from '../../src/services/app/appContacts.js';
 import { AppStore } from '@agentis/app';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
@@ -1170,6 +1171,81 @@ describe('ChannelTurnDispatcher', () => {
     expect(turns[0]!.history).toEqual([]);
   });
 
+  it('maps a human business-side outbound as assistant context, not as a new customer request', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    conversations.appendOutbound({
+      workspaceId: ctx.workspace.id, conversationId: conv.id, operatorId: ctx.user.id,
+      participantSide: 'business', sessionMessageId: 'phone-1', body: 'I will send the proposal today.',
+    });
+    conversations.appendMirrored({
+      workspaceId: ctx.workspace.id, conversationId: conv.id, sessionMessageId: 'customer-1',
+      authorType: 'system', participantSide: 'customer', body: 'Great, what time?', metadata: { channelInbound: true },
+    });
+    let captured: ChatMessage[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger,
+      deliver: async () => ackReceipt(), fallbackAdapter: () => chatStub('ok'),
+      runTurn: async function* (_adapter, history) {
+        captured = history;
+        yield { type: 'text', delta: 'ok' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa', kind: 'whatsapp', chatId: '5511', text: 'live follow-up',
+    });
+    expect(captured).toEqual([
+      { role: 'assistant', content: 'I will send the proposal today.' },
+      { role: 'user', content: 'Great, what time?' },
+    ]);
+  });
+
+  it('aborts the model lane, revokes its tool lease and blocks final delivery on human takeover', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const handoffs = new ConversationHandoffService({ db: ctx.db, bus: ctx.bus });
+    const leases = new ConversationTurnLeaseRegistry();
+    ChatSessionExecutor.setTurnLeaseRegistry(leases);
+    const agentId = seedAgent(ctx);
+    const conv = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, agentId,
+    });
+    const delivered: string[] = [];
+    const typing: boolean[] = [];
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    let lease = '';
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger, handoffs,
+      deliver: async ({ body }) => { delivered.push(body); return ackReceipt(); },
+      setTyping: async (_connectionId, _chatId, on) => { typing.push(on); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* (_adapter, _history, _text, turnContext) {
+        lease = turnContext.turnLease ?? '';
+        started();
+        await new Promise<void>((resolve) => turnContext.signal?.addEventListener('abort', () => resolve(), { once: true }));
+        if (turnContext.signal?.aborted) throw new Error('aborted');
+        yield { type: 'text', delta: 'stale reply' } as ChatDelta;
+      } as unknown as typeof import('../../src/services/chat/chatSessionExecutor.js').ChatSessionExecutor.turn,
+    });
+    handoffs.subscribe((snapshot) => dispatcher.handleHandoffChanged(snapshot));
+    const running = dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'wa', kind: 'whatsapp', chatId: '5511', text: 'long task',
+    });
+    await didStart;
+    const snapshot = handoffs.claimHuman({ workspaceId: ctx.workspace.id, conversationId: conv.id, source: 'provider_observed' });
+    expect(snapshot.automationEpoch).toBe(1);
+    expect(() => leases.assertActive(ctx.workspace.id, conv.id, lease)).toThrow(/stopped|superseded/i);
+    expect(await running).toEqual({ replied: false, reason: 'human_handling' });
+    expect(delivered).toEqual([]);
+    expect(typing).toContain(false);
+  });
+
   it('keeps the work lane alive and answers a new message through the companion lane', async () => {
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
     const agentId = seedAgent(ctx);
@@ -1327,12 +1403,18 @@ describe('ChannelTurnDispatcher', () => {
       agentId, conversationId: conv.id, connectionId: 'c', kind: 'telegram', chatId: '1', text: 'where were we',
     });
 
-    // A summary row exists, covers the out-of-window turns, and was injected.
+    // A summary row exists and covers the out-of-window turns without delaying
+    // the first live response.
+    await vi.waitFor(() => expect(summaries.current(conv.id)).not.toBeNull());
     const stored = summaries.current(conv.id);
     expect(stored).not.toBeNull();
     expect(stored!.coveredCount).toBeGreaterThan(20);
     // The fallback chatStub is not JSON-structured, so the deterministic path runs.
     expect(stored!.source).toBe('deterministic');
+    await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId: 'c', kind: 'telegram', chatId: '1', text: 'and now?',
+    });
     expect(capturedAddendum).toMatch(/CONVERSATION MEMORY/);
     expect(capturedAddendum).toMatch(/beyond the recent window/);
   });

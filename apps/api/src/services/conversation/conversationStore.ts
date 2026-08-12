@@ -351,12 +351,14 @@ export class ConversationStore {
     body: string;
     metadata?: Record<string, unknown>;
     deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed';
+    participantSide?: 'customer' | 'business' | null;
   }) {
     return this.#append({
       conversationId: args.conversationId,
       workspaceId: args.workspaceId,
       authorType: 'operator',
       authorId: args.operatorId,
+      participantSide: args.participantSide ?? null,
       sessionMessageId: args.sessionMessageId ?? null,
       body: args.body,
       metadata: args.metadata,
@@ -374,17 +376,49 @@ export class ConversationStore {
     authorType: 'agent' | 'system';
     metadata?: Record<string, unknown>;
     deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
+    participantSide?: 'customer' | 'business' | null;
   }) {
     return this.#append({
       conversationId: args.conversationId,
       workspaceId: args.workspaceId,
       authorType: args.authorType,
       authorId: null,
+      participantSide: args.participantSide ?? null,
       sessionMessageId: args.sessionMessageId,
       body: args.body,
       metadata: args.metadata,
       deliveryStatus: args.deliveryStatus ?? 'mirrored',
       eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
+    });
+  }
+
+  /**
+   * Persist provider history as inert transcript. It is chronological and
+   * idempotent, but never increments unread state or wakes any realtime agent.
+   */
+  appendReconciledChannelMessage(args: {
+    workspaceId: string;
+    conversationId: string;
+    sessionMessageId: string;
+    body: string;
+    participantSide: 'customer' | 'business';
+    occurredAt: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    return this.#append({
+      conversationId: args.conversationId,
+      workspaceId: args.workspaceId,
+      authorType: args.participantSide === 'business' ? 'operator' : 'system',
+      authorId: null,
+      participantSide: args.participantSide,
+      sessionMessageId: args.sessionMessageId,
+      body: args.body,
+      metadata: { ...(args.metadata ?? {}), channelHistoryReconciled: true },
+      deliveryStatus: args.participantSide === 'business' ? 'sent' : 'mirrored',
+      eventName: REALTIME_EVENTS.CONVERSATION_MESSAGE_RECEIVED,
+      occurredAt: args.occurredAt,
+      incrementUnread: false,
+      publishRealtime: false,
     });
   }
 
@@ -512,11 +546,15 @@ export class ConversationStore {
     workspaceId: string;
     authorType: 'operator' | 'agent' | 'system';
     authorId: string | null;
+    participantSide?: 'customer' | 'business' | null;
     sessionMessageId: string | null;
     body: string;
     metadata?: Record<string, unknown>;
     deliveryStatus: 'sending' | 'sent' | 'delivered' | 'failed' | 'mirrored';
     eventName: RealtimeEventName;
+    occurredAt?: string;
+    incrementUnread?: boolean;
+    publishRealtime?: boolean;
   }) {
     if (!args.body || args.body.length === 0) {
       throw new AgentisError('VALIDATION_FAILED', 'Conversation message body required');
@@ -545,33 +583,41 @@ export class ConversationStore {
       if (existing) return existing;
     }
     const now = new Date().toISOString();
+    const occurredAt = args.occurredAt && !Number.isNaN(Date.parse(args.occurredAt))
+      ? new Date(args.occurredAt).toISOString()
+      : now;
     const row = {
       id: randomUUID(),
       conversationId: args.conversationId,
       workspaceId: args.workspaceId,
       authorType: args.authorType,
       authorId: args.authorId,
+      participantSide: args.participantSide ?? null,
       sessionMessageId: args.sessionMessageId,
       body: args.body,
       metadata: args.metadata ?? {},
       deliveryStatus: args.deliveryStatus,
-      createdAt: now,
+      createdAt: occurredAt,
     };
     this.deps.db.insert(schema.conversationMessages).values(row).run();
     this.deps.db
       .update(schema.conversations)
       .set({
-        lastMessageAt: now,
-        unreadCount: args.authorType === 'operator' ? conversation.unreadCount : conversation.unreadCount + 1,
+        lastMessageAt: !conversation.lastMessageAt || occurredAt > conversation.lastMessageAt ? occurredAt : conversation.lastMessageAt,
+        unreadCount: args.incrementUnread === false
+          ? conversation.unreadCount
+          : args.authorType === 'operator' ? conversation.unreadCount : conversation.unreadCount + 1,
         updatedAt: now,
       })
       .where(eq(schema.conversations.id, args.conversationId))
       .run();
-    this.deps.bus.publish(
-      REALTIME_ROOMS.conversation(conversation.agentId),
-      args.eventName,
-      { message: row, conversationId: args.conversationId, agentId: conversation.agentId },
-    );
+    if (args.publishRealtime !== false) {
+      this.deps.bus.publish(
+        REALTIME_ROOMS.conversation(conversation.agentId),
+        args.eventName,
+        { message: row, conversationId: args.conversationId, agentId: conversation.agentId },
+      );
+    }
     return row;
   }
 

@@ -123,6 +123,13 @@ export function AppEditorPage() {
   const [status, setStatus] = useState<string | null>(null);
 
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  // `load` is intentionally stable across query-string changes; retain the
+  // latest deep-link target without forcing a complete App refetch whenever
+  // the workflow switcher updates the URL.
+  const requestedWorkflowIdRef = useRef<string | null>(searchParams.get('workflow'));
+  useEffect(() => {
+    requestedWorkflowIdRef.current = searchParams.get('workflow');
+  }, [searchParams]);
   // Bumped when a build of the shown workflow completes, to hard-refresh the
   // embedded canvas onto the final persisted graph even if its own live link
   // missed the stream.
@@ -182,8 +189,16 @@ export function AppEditorPage() {
       const { registerResourceName } = useAgentisStore.getState();
       registerResourceName('app', appRow.id, appRow.name);
       for (const w of refs) registerResourceName('workflow', w.id, w.title);
+      // Preserve a deep-linked workflow when it belongs to this App. The
+      // current selection wins during ordinary refreshes; a stale selection
+      // falls back to the URL target and then the first workflow.
+      const requestedWorkflowId = requestedWorkflowIdRef.current;
       setSelectedWorkflowId((current) =>
-        current && refs.some((workflow) => workflow.id === current) ? current : refs[0]?.id ?? null,
+        current && refs.some((workflow) => workflow.id === current)
+          ? current
+          : requestedWorkflowId && refs.some((workflow) => workflow.id === requestedWorkflowId)
+            ? requestedWorkflowId
+            : refs[0]?.id ?? null,
       );
       setSelectedSurface((current) =>
         current && surfaceRows.some((surface) => surface.name === current) ? current : surfaceRows[0]?.name ?? null,
@@ -260,6 +275,29 @@ export function AppEditorPage() {
   const facet: AppFacet =
     facetParam && facets.some((f) => f.value === facetParam) ? facetParam : defaultFacet;
 
+  // A Workflow facet is not an App-wide canvas: it renders the selected member
+  // workflow. Reflect that selection in the route so global chat awareness can
+  // bind "this workflow" to exactly what is on screen.
+  useEffect(() => {
+    if (facet !== 'workflow' || !selectedWorkflowId) return;
+    setSearchParams((params) => {
+      if (params.get('workflow') === selectedWorkflowId) return params;
+      const next = new URLSearchParams(params);
+      next.set('workflow', selectedWorkflowId);
+      return next;
+    }, { replace: true });
+  }, [facet, selectedWorkflowId, setSearchParams]);
+
+  // Honour browser back/forward and copied links without allowing a workflow
+  // from another App to be rendered in this editor.
+  useEffect(() => {
+    const requestedWorkflowId = searchParams.get('workflow');
+    if (facet !== 'workflow' || !requestedWorkflowId || requestedWorkflowId === selectedWorkflowId) return;
+    if (workflows.some((workflow) => workflow.id === requestedWorkflowId)) {
+      setSelectedWorkflowId(requestedWorkflowId);
+    }
+  }, [facet, searchParams, selectedWorkflowId, workflows]);
+
   const setFacet = useCallback((value: AppFacet) => {
     setSearchParams((params) => {
       const next = new URLSearchParams(params);
@@ -272,6 +310,7 @@ export function AppEditorPage() {
         next.delete('mode');
         next.delete('node');
       }
+      if (value !== 'workflow') next.delete('workflow');
       return next;
     }, { replace: true });
   }, [setSearchParams]);

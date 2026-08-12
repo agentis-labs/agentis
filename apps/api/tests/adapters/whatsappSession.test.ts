@@ -3,9 +3,10 @@
  * `extract.ts`. Pure function: no socket, no baileys runtime needed.
  */
 
-import { describe, expect, it } from 'vitest';
-import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, resolveWhatsAppNativeBody, shouldProcessWhatsAppUpsert, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent, whatsappNativeContent } from '../../src/adapters/channels/whatsappSession.js';
+import { describe, expect, it, vi } from 'vitest';
+import { classifyWhatsAppReconnect, extractWhatsAppText, resolveWhatsAppInboundBody, resolveWhatsAppNativeBody, shouldProcessWhatsAppUpsert, unwrapAudioMessage, unwrapImageMessage, unwrapDocumentMessage, whatsappMediaContent, whatsappNativeContent, WhatsAppSession } from '../../src/adapters/channels/whatsappSession.js';
 import type { OutboundAttachment } from '../../src/adapters/channels/types.js';
+import { createLogger } from '../../src/logger.js';
 
 describe('whatsappMediaContent', () => {
   const base = (kind: OutboundAttachment['kind'], over: Partial<OutboundAttachment> = {}): OutboundAttachment => ({
@@ -161,10 +162,125 @@ describe('classifyWhatsAppReconnect', () => {
 });
 
 describe('shouldProcessWhatsAppUpsert', () => {
-  it('mirrors companion-authored append events without activating append history inbound', () => {
+  it('keeps append events in silent history reconciliation rather than the live turn path', () => {
     expect(shouldProcessWhatsAppUpsert('notify', false)).toBe(true);
-    expect(shouldProcessWhatsAppUpsert('append', true)).toBe(true);
+    expect(shouldProcessWhatsAppUpsert('append', true)).toBe(false);
     expect(shouldProcessWhatsAppUpsert('append', false)).toBe(false);
+  });
+});
+
+describe('WhatsAppSession bounded history events', () => {
+  it('reconciles a mocked reverse bootstrap chunk silently and oldest-to-newest', async () => {
+    const listeners = new Map<string, (event: unknown) => void>();
+    const socket = {
+      ev: { on: (name: string, listener: (event: unknown) => void) => { listeners.set(name, listener); } },
+      user: { id: 'self@s.whatsapp.net' },
+      end: () => {},
+      updateMediaMessage: async () => {},
+      sendMessage: async () => ({ key: { id: 'local' } }),
+      sendPresenceUpdate: async () => {},
+    };
+    const history: Array<{ externalId: string; body: string; participantSide: string; occurredAt: string }> = [];
+    const inbound = vi.fn();
+    const outbound = vi.fn();
+    const session = new WhatsAppSession({
+      connectionId: 'wa-test', authDir: '.', logger: createLogger({ level: 'error' }),
+      onInbound: inbound,
+      onOutboundObserved: outbound,
+      onHistoryReconciled: (messages) => { history.push(...messages); },
+      persistMedia: async () => 'artifact:manual-media',
+      loadAuthState: async () => ({ state: { creds: {}, keys: {} }, saveCreds: async () => {} }),
+      baileysModule: {
+        makeWASocket: () => socket,
+        useMultiFileAuthState: async () => ({ state: { creds: {}, keys: {} }, saveCreds: async () => {} }),
+        fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
+        makeCacheableSignalKeyStore: (keys: unknown) => keys,
+        DisconnectReason: { loggedOut: 401 },
+        Browsers: { appropriate: () => ['Agentis', 'Chrome', '1.0.0'] },
+        downloadMediaMessage: async () => Buffer.from('image'),
+      },
+    });
+    await session.start();
+    listeners.get('messaging-history.set')?.({
+      isLatest: true,
+      messages: [
+        { key: { id: 'm3', remoteJid: '5511@s.whatsapp.net', fromMe: false }, messageTimestamp: 3, message: { conversation: 'customer reply' } },
+        { key: { id: 'm2', remoteJid: '5511@s.whatsapp.net', fromMe: true }, messageTimestamp: 2, message: { conversation: 'business promise' } },
+        { key: { id: 'm1', remoteJid: '5511@s.whatsapp.net', fromMe: false }, messageTimestamp: 1, message: { conversation: 'customer opener' } },
+      ],
+    });
+    await vi.waitFor(() => expect(history).toHaveLength(3));
+    expect(history.map((item) => [item.externalId, item.participantSide, item.body])).toEqual([
+      ['m1', 'customer', 'customer opener'],
+      ['m2', 'business', 'business promise'],
+      ['m3', 'customer', 'customer reply'],
+    ]);
+    expect(inbound).not.toHaveBeenCalled();
+    expect(outbound).not.toHaveBeenCalled();
+
+    listeners.get('messages.upsert')?.({
+      type: 'append',
+      messages: [{
+        key: { id: 'manual-image', remoteJid: '5511@s.whatsapp.net', fromMe: true },
+        messageTimestamp: Math.floor(Date.now() / 1_000),
+        message: { imageMessage: { caption: 'manual photo', mimetype: 'image/jpeg' } },
+      }],
+    });
+    await vi.waitFor(() => expect(outbound).toHaveBeenCalledTimes(1));
+    expect(outbound).toHaveBeenCalledWith(expect.objectContaining({
+      externalId: 'manual-image',
+      chatId: '5511@s.whatsapp.net',
+      attachmentIds: ['manual-media'],
+    }));
+    expect(outbound.mock.calls[0]?.[0]?.body).toContain('manual photo');
+    await session.stop();
+  });
+
+  it('correlates an Agentis echo even when Baileys emits it before sendMessage resolves', async () => {
+    const listeners = new Map<string, (event: any) => void>();
+    let resolveSend!: (value: unknown) => void;
+    const socket = {
+      ev: { on: (name: string, listener: (event: any) => void) => { listeners.set(name, listener); } },
+      user: { id: 'self@s.whatsapp.net' },
+      end: () => {},
+      updateMediaMessage: async () => {},
+      sendMessage: () => new Promise((resolve) => { resolveSend = resolve; }),
+      sendPresenceUpdate: async () => {},
+    };
+    const outbound = vi.fn();
+    const session = new WhatsAppSession({
+      connectionId: 'wa-echo-race', authDir: '.', logger: createLogger({ level: 'error' }),
+      onInbound: vi.fn(),
+      onOutboundObserved: outbound,
+      loadAuthState: async () => ({ state: { creds: {}, keys: {} }, saveCreds: async () => {} }),
+      baileysModule: {
+        makeWASocket: () => socket,
+        useMultiFileAuthState: async () => ({ state: { creds: {}, keys: {} }, saveCreds: async () => {} }),
+        fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
+        makeCacheableSignalKeyStore: (keys: unknown) => keys,
+        DisconnectReason: { loggedOut: 401 },
+        Browsers: { appropriate: () => ['Agentis', 'Chrome', '1.0.0'] },
+        downloadMediaMessage: async () => Buffer.from(''),
+      },
+    });
+    await session.start();
+    listeners.get('connection.update')?.({ connection: 'open' });
+
+    const send = session.sendText('5511@s.whatsapp.net', 'Agentis reply');
+    listeners.get('messages.upsert')?.({
+      type: 'append',
+      messages: [{
+        key: { id: 'agentis-provider-id', remoteJid: '5511@s.whatsapp.net', fromMe: true },
+        messageTimestamp: Math.floor(Date.now() / 1_000),
+        message: { conversation: 'Agentis reply' },
+      }],
+    });
+    resolveSend({ key: { id: 'agentis-provider-id', remoteJid: '5511@s.whatsapp.net' }, status: 2 });
+    await send;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(outbound).not.toHaveBeenCalled();
+    await session.stop();
   });
 });
 

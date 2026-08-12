@@ -85,11 +85,21 @@ export function executionStatusFor(status: string): RunExecutionStatus {
 
 export function outcomeStatusFor(status: string, verdict: RunVerdictOutcome | null): RunOutcomeStatus {
   if (status === 'CANCELLED') return 'blocked';
-  if (status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION') return 'failed';
+  if (status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION') return 'not_accomplished';
   if (status !== 'COMPLETED') return 'unverified';
   if (verdict === 'accomplished') return 'accomplished';
-  if (verdict === 'partial') return 'partial';
-  if (verdict === 'hollow' || verdict === 'failed_checks') return 'failed';
+  // `partial` is the legacy internal verdict for unavailable proof. Publicly it
+  // is a recoverable blocker, never a partially successful delivery.
+  if (verdict === 'partial') return 'blocked';
+  if (verdict === 'hollow' || verdict === 'failed_checks') return 'not_accomplished';
+  return 'unverified';
+}
+
+/** Backward-compatible reader for rows written before terminal outcome V2. */
+export function normalizeRunOutcomeStatus(value: unknown): RunOutcomeStatus {
+  if (value === 'accomplished' || value === 'blocked' || value === 'not_accomplished' || value === 'unverified') return value;
+  if (value === 'partial' || value === 'cancelled') return 'blocked';
+  if (value === 'failed' || value === 'failed_checks' || value === 'hollow') return 'not_accomplished';
   return 'unverified';
 }
 

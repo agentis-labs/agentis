@@ -202,10 +202,14 @@ export const REALTIME_EVENTS = {
   CONVERSATION_SESSION_DISCOVERED: 'conversation.session.discovered',
   CONVERSATION_SESSION_SYNCED: 'conversation.session.synced',
   CONVERSATION_SESSION_STALE: 'conversation.session.stale',
+  /** Conversation ownership moved between resident automation and a human operator. */
+  CONVERSATION_HANDOFF_CHANGED: 'conversation.handoff.changed',
   // Queue-then-auto-continue composer: a message queued/discarded while a turn
   // was streaming, or dispatched into a fresh turn once the prior one ended.
   // Payload: { conversationId, agentId, item, action: 'added'|'dispatched'|'discarded' }.
   CONVERSATION_QUEUE_UPDATED: 'conversation.queue.updated',
+  /** Sanitized, durable projection of one ordered conversation turn event. */
+  CONVERSATION_TURN_EVENT: 'conversation.turn.event',
 
   // Channel bridge (Batch 4 / V1-SPEC §0.3 #24, §11)
   CHANNEL_MESSAGE_RECEIVED: 'channel.message.received',

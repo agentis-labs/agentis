@@ -851,7 +851,30 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           },
         }, ctx);
         if (!result.ok) throw new AgentisError('WORKFLOW_GRAPH_INVALID', result.errorMessage ?? 'Candidate verification could not start', { details: result.details });
-        return { candidateRevisionId: candidate.revision.id, semanticHash: candidate.revision.semanticHash, run: result.output };
+        const refreshed = deps.revisions.proofState(ctx.workspaceId, String(args.workflowId), candidate.revision.id);
+        const active = deps.revisions.active(ctx.workspaceId, String(args.workflowId));
+        const alreadyActive = active.revision.id === candidate.revision.id;
+        const autoPromotion = refreshed.readyForPromotion && !refreshed.approvalRequired && !alreadyActive
+          ? deps.revisions.promote({
+              workspaceId: ctx.workspaceId,
+              workflowId: String(args.workflowId),
+              revisionId: candidate.revision.id,
+              expectedActiveRevisionId: active.revision.id,
+              actor: { type: 'agent', id: ctx.agentId ?? null },
+            })
+          : null;
+        return {
+          candidateRevisionId: candidate.revision.id,
+          semanticHash: candidate.revision.semanticHash,
+          run: result.output,
+          revisionState: autoPromotion || alreadyActive
+            ? 'active'
+            : refreshed.approvalRequired && refreshed.missing.every((gate) => gate === 'operator_approval')
+              ? 'awaiting_approval'
+              : refreshed.failed.length > 0 ? 'needs_attention' : 'verifying',
+          ...(autoPromotion || alreadyActive ? { autoPromoted: true, ...(autoPromotion ? { promotion: autoPromotion } : {}) } : {}),
+          proof: refreshed,
+        };
       },
     },
     {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { HomePage } from '../../src/pages/HomePage';
-import { WorkspaceEcosystemCanvas, buildCanvasModel } from '../../src/components/home/WorkspaceEcosystemCanvas';
+import { WorkspaceEcosystemCanvas, buildCanvasModel, resolveCanvasCollisions } from '../../src/components/home/WorkspaceEcosystemCanvas';
 import { useChatPanelStore } from '../../src/components/chat/ChatPanelStore';
 
 const mocks = vi.hoisted(() => ({
@@ -122,6 +122,27 @@ describe('<HomePage />', () => {
 });
 
 describe('<WorkspaceEcosystemCanvas />', () => {
+  it('resolves collisions across agent and resource families deterministically', () => {
+    const input = [
+      { id: 'agent-brain', kind: 'orchestrator' as const, role: 'orchestrator' as const, tier: 0, title: 'Brain', subtitle: 'online', x: 600, y: 180, width: 280, height: 90, tooltipLines: [] },
+      { id: 'agent-bia', kind: 'manager' as const, role: 'manager' as const, tier: 1, title: 'Bia', subtitle: 'manager', x: 600, y: 330, width: 250, height: 82, tooltipLines: [] },
+      { id: 'workflow-talki', kind: 'workflow' as const, tier: 3, title: 'Talki', subtitle: 'App', x: 600, y: 330, width: 240, height: 76, tooltipLines: [] },
+      { id: 'knowledge-private', kind: 'knowledge' as const, tier: 3, title: 'Private knowledge', subtitle: 'knowledge', x: 600, y: 330, width: 240, height: 76, tooltipLines: [] },
+    ];
+    const first = resolveCanvasCollisions(input, 1_200);
+    const second = resolveCanvasCollisions(input, 1_200);
+    expect(second).toEqual(first);
+    for (let left = 0; left < first.length; left += 1) {
+      for (let right = left + 1; right < first.length; right += 1) {
+        const a = first[left]!;
+        const b = first[right]!;
+        const horizontalClearance = Math.abs(a.x - b.x) >= (a.width + b.width) / 2 + 24;
+        const verticalClearance = Math.abs(a.y - b.y) >= (a.height + b.height) / 2 + 24;
+        expect(horizontalClearance || verticalClearance).toBe(true);
+      }
+    }
+  });
+
   beforeEach(() => {
     useChatPanelStore.getState().setState('hidden');
     vi.stubGlobal('ResizeObserver', class ResizeObserver {

@@ -59,10 +59,16 @@ Agent-authored operations in a sandbox (`apps/api/src/extensions/`, `services/ex
 - **Runtimes** — `node:vm` fallback (default, not a security boundary), `isolated-vm` V8
   isolate when installed (auto-downgrades otherwise), or opt-in Docker
   (`AGENTIS_EXTENSION_DOCKER`, `AGENTIS_EXTENSION_REQUIRE_ISOLATE`).
-- **Permissions** — granular gates: `network`, `network.unrestricted`, `listener`,
-  `listener.emit`, `database`. Injected `fetch` is SSRF-checked and IP-pinned.
+- **Permissions** — granular gates: `network`, `network.unrestricted`, `browser`,
+  `browser.evaluate`, `browser.session.persist`, `browser.auth`, `listener`, and
+  `listener.emit`. Injected HTTP and browser navigation are domain-scoped and SSRF-checked.
 - **State** — listener sources hook `ctx.emit()`, `ctx.cursor` / `ctx.setCursor`, and
   `ctx.kv` (workspace-scoped, `extension_kv`).
+- **Native browser bridge** — authorized `node_worker` extensions receive serializable
+  `ctx.browser` methods backed by the shared headless Chromium pool. Sessions are isolated by
+  workspace + extension + name, remain live within configured caps, and persist encrypted
+  cookies/storage plus the last URL for restart-safe rehydration. Extensions never receive a
+  Playwright object, filesystem path, raw cookie, host process, or CDP access.
 - **Build loop** — `agentis.extension.test` dry-runs an operation with sample inputs and
   returns real output + `durationMs`, catching contract violations before wiring it into a
   workflow. Tables: `extensions`, `agent_packages`, `extension_executions`. Routes:

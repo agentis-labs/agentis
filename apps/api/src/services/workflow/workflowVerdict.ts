@@ -169,7 +169,13 @@ export async function evaluateRunVerdict(args: EvaluateRunVerdictArgs): Promise<
   const { spec, output } = args;
   const sufficiency = evaluateSufficiency(spec.sufficiency ?? [], output);
   const checks: VerdictCheckResult[] = [];
+  const mechanicalAcceptance = (spec.acceptance ?? []).filter((check) => check.verify !== 'judge');
+  const judgeAvailable = args.mode === 'full' && Boolean(args.deps.judge);
   for (const check of spec.acceptance ?? []) {
+    // A missing optional evaluator must not manufacture a failed/unavailable
+    // check. New specs require mechanical acceptance; judge-only legacy specs
+    // remain blocked below without exposing a fictitious runtime verdict.
+    if (check.verify === 'judge' && !judgeAvailable) continue;
     checks.push(await runCheck(check, args));
   }
 
@@ -178,12 +184,13 @@ export async function evaluateRunVerdict(args: EvaluateRunVerdictArgs): Promise<
   const hollow = sufficiency.typedEmptyFills.length > 0
     || sufficiency.stubSuspects.length > 0
     || sufficiency.floorViolations.length > 0;
+  const lacksMechanicalProof = mechanicalAcceptance.length === 0 && (spec.sufficiency ?? []).length === 0;
 
   const outcome: RunVerdict['outcome'] = realFailures.length > 0
     ? 'failed_checks'
     : hollow
       ? 'hollow'
-      : unavailable.length > 0
+      : unavailable.length > 0 || (lacksMechanicalProof && !judgeAvailable)
         ? 'partial'
         : 'accomplished';
 

@@ -84,7 +84,7 @@ describe('deriveSpecDraft', () => {
     const kinds = spec.acceptance.map((c) => c.verify);
     expect(kinds).toContain('http_probe');
     expect(kinds).toContain('expr');       // at least 10 products
-    expect(kinds).toContain('judge');      // catch-all, always last
+    expect(kinds).not.toContain('judge');  // no unavailable evaluator is invented
     expect(spec.sufficiency).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'deploymentUrl', format: 'url' }),
       expect.objectContaining({ key: 'products', minItems: 10 }),
@@ -100,8 +100,22 @@ describe('deriveSpecDraft', () => {
   it('asks the ONE pointed question when nothing worldly is derivable', () => {
     const { spec, question } = deriveSpecDraft({ description: 'Think about strategy.' });
     expect(question).toMatch(/what URL, record, file, or measurable value/i);
-    // Judge-only is still present so the spec is usable, but it cannot harden alone.
-    expect(spec.acceptance.every((c) => c.verify === 'judge')).toBe(true);
+    expect(spec.acceptance).toEqual([]);
+  });
+
+  it('rejects judge-only acceptance because it cannot prove a functional workflow', () => {
+    const spec = baseSpec({ acceptance: [{ id: 'judge', claim: 'looks right', verify: 'judge', rubric: 'Review it' }] });
+    expect(validateWorkflowSpec(spec).join(' ')).toMatch(/judge cannot be the only proof/);
+  });
+
+  it('derives a mechanical check from the declared output contract', () => {
+    const graph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], edges: [],
+      outputContract: { fields: [{ key: 'businesses', type: 'array', required: true }] },
+    } as unknown as WorkflowGraph;
+    const { spec, question } = deriveSpecDraft({ description: 'Prospect companies.', graph });
+    expect(question).toBeUndefined();
+    expect(spec.acceptance).toEqual([expect.objectContaining({ verify: 'expr', expr: 'output.businesses.length >= 1' })]);
   });
 });
 

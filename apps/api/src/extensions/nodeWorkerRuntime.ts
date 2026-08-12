@@ -83,6 +83,8 @@ export async function runNodeWorkerExtension(args: {
   signal?: AbortSignal;
   /** Operator-bound credentials this extension may reference by key (INTEGRATION-CEILING-10X §3). Never exposed to the sandbox directly. */
   credentials?: Record<string, ResolvedExtensionCredential>;
+  /** Host-owned browser bridge. Arguments/results cross the isolate as JSON only. */
+  browserCall?: (action: string, args: unknown[]) => Promise<unknown>;
 }): Promise<ExtensionExecutionOutcome> {
   const start = Date.now();
   const loaded = await loadIsolatedVm();
@@ -171,6 +173,20 @@ export async function runNodeWorkerExtension(args: {
     );
 
     const hasPerm = (p: ExtensionPermission) => args.permissions.includes(p);
+    if (args.browserCall) {
+      await jail.set(
+        '_browserProxy',
+        new ivm.Reference(async (action: string, rawArgs: string) => {
+          try {
+            const parsed = JSON.parse(rawArgs) as unknown[];
+            return JSON.stringify({ ok: true, value: await args.browserCall!(action, parsed) });
+          } catch (err) {
+            const errorCode = err instanceof AgentisError ? err.code : 'EXTENSION_INTERNAL';
+            return JSON.stringify({ ok: false, errorCode, message: err instanceof Error ? err.message : String(err) });
+          }
+        }),
+      );
+    }
     if (args.listenerHooks) {
       const hooks = args.listenerHooks;
       await jail.set(
@@ -278,6 +294,29 @@ const kv = (typeof _kvGet !== 'undefined') ? {
   get: (k) => JSON.parse(_kvGet.applySync(undefined, [String(k)])).value,
   set: (k, v, ttl) => _kvSet.applySync(undefined, [String(k), JSON.stringify(v ?? null), ttl]),
 } : undefined;
+const __browserCall = (typeof _browserProxy !== 'undefined') ? (async (action, args) => {
+  const raw = await _browserProxy.apply(undefined, [action, JSON.stringify(args || [])], { result: { promise: true } });
+  const response = JSON.parse(raw);
+  if (!response.ok) throw new Error('__BROWSER_ERROR__' + response.errorCode + ':' + response.message);
+  return response.value;
+}) : undefined;
+const browser = __browserCall ? {
+  open: (opts) => __browserCall('open', [opts]),
+  navigate: (session, url) => __browserCall('navigate', [session, url]),
+  click: (session, selector) => __browserCall('click', [session, selector]),
+  fill: (session, selector, value) => __browserCall('fill', [session, selector, value]),
+  type: (session, selector, text, delay) => __browserCall('type', [session, selector, text, delay]),
+  press: (session, key, selector) => __browserCall('press', [session, key, selector]),
+  selectOption: (session, selector, value) => __browserCall('selectOption', [session, selector, value]),
+  hover: (session, selector) => __browserCall('hover', [session, selector]),
+  scroll: (session, opts) => __browserCall('scroll', [session, opts]),
+  waitFor: (session, opts) => __browserCall('waitFor', [session, opts]),
+  get: (session, opts) => __browserCall('get', [session, opts]),
+  queryAll: (session, opts) => __browserCall('queryAll', [session, opts]),
+  evaluate: (session, expression) => __browserCall('evaluate', [session, expression]),
+  checkpoint: (session) => __browserCall('checkpoint', [session]),
+  close: (session, opts) => __browserCall('close', [session, opts]),
+} : undefined;
 `,
       { timeout: 1000 },
     );
@@ -313,6 +352,7 @@ ctx.http = { fetch };
 if (emit) ctx.emit = emit;
 if (setCursor) ctx.setCursor = setCursor;
 if (kv) ctx.kv = kv;
+if (browser) ctx.browser = browser;
 ctx.cursor = __readCursor();
 return await (__entrypoint.length >= 2 ? __entrypoint(ctx.inputs, ctx) : __entrypoint(ctx));
 })(${JSON.stringify(runtimeCtx)})
@@ -336,6 +376,16 @@ return await (__entrypoint.length >= 2 ? __entrypoint(ctx.inputs, ctx) : __entry
     }
     if (message.includes('Script execution timed out')) {
       return { ok: false, errorCode: 'EXTENSION_TIMEOUT', message, durationMs: Date.now() - start, operationName: args.operationName };
+    }
+    const browserError = message.match(/__BROWSER_ERROR__(EXTENSION_PERMISSION_DENIED|EXTENSION_NETWORK_VIOLATION|EXTENSION_SSRF_BLOCKED):(.+)/s);
+    if (browserError) {
+      return {
+        ok: false,
+        errorCode: browserError[1] as 'EXTENSION_PERMISSION_DENIED' | 'EXTENSION_NETWORK_VIOLATION' | 'EXTENSION_SSRF_BLOCKED',
+        message: browserError[2]!,
+        durationMs: Date.now() - start,
+        operationName: args.operationName,
+      };
     }
     return {
       ok: false,

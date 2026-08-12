@@ -586,7 +586,7 @@ export class WorkflowEngine {
       const now = new Date().toISOString();
       this.deps.db
         .update(schema.workflowRuns)
-        .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', completedAt: now, updatedAt: now })
+        .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'not_accomplished', completedAt: now, updatedAt: now })
         .where(eq(schema.workflowRuns.id, args.initialState.runId))
         .run();
       const payload = {
@@ -813,7 +813,7 @@ export class WorkflowEngine {
         state.status = 'FAILED';
         const now = new Date().toISOString();
         this.deps.db.update(schema.workflowRuns).set({
-          status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', runState: state as unknown as object, completedAt: now, updatedAt: now,
+          status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'not_accomplished', runState: state as unknown as object, completedAt: now, updatedAt: now,
         }).where(eq(schema.workflowRuns.id, run.id)).run();
         const payload = { runId: run.id, status: 'FAILED', workflowId: run.workflowId, workspaceId: run.workspaceId };
         this.deps.bus.publish(REALTIME_ROOMS.run(run.id), REALTIME_EVENTS.RUN_FAILED, payload);
@@ -908,7 +908,7 @@ export class WorkflowEngine {
         // Truly unrecoverable (no graph or no persisted state) — fail loud.
         this.deps.db
           .update(schema.workflowRuns)
-          .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'not_accomplished', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
           .where(eq(schema.workflowRuns.id, run.id))
           .run();
         failed += 1;
@@ -1033,7 +1033,7 @@ export class WorkflowEngine {
         this.deps.logger.warn('engine.run_resume_failed', { runId: run.id, err: (err as Error).message });
         this.deps.db
           .update(schema.workflowRuns)
-          .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+          .set({ status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'not_accomplished', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
           .where(eq(schema.workflowRuns.id, run.id))
           .run();
         failed += 1;
@@ -8051,7 +8051,7 @@ export class WorkflowEngine {
       state.status = 'FAILED';
       const now = new Date().toISOString();
       await this.deps.db.update(schema.workflowRuns).set({
-        status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'failed', runState: state as unknown as object, completedAt: now, updatedAt: now,
+        status: 'FAILED', executionStatus: 'failed', outcomeStatus: 'not_accomplished', runState: state as unknown as object, completedAt: now, updatedAt: now,
       }).where(eq(schema.workflowRuns.id, runId));
       const payload = { runId, status: 'FAILED', workflowId: run.workflowId, workspaceId: run.workspaceId };
       this.deps.bus.publish(REALTIME_ROOMS.run(runId), REALTIME_EVENTS.RUN_FAILED, payload);

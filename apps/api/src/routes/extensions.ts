@@ -117,16 +117,22 @@ export function buildExtensionRoutes(deps: {
     return c.json({ sources });
   });
 
-  app.get('/runtime-health', async (c) => c.json({
-    oci: {
-      available: await isDockerSandboxAvailable(),
-      backend: 'docker',
-      python: '3.12',
-      node: '20',
-      egressProxyConfigured: Boolean(process.env.AGENTIS_COMPONENT_EGRESS_PROXY && process.env.AGENTIS_COMPONENT_NETWORK),
-    },
-    legacyNodeWorker: { available: true },
-  }));
+  app.get('/runtime-health', async (c) => {
+    const ws = getWorkspace(c);
+    return c.json({
+      oci: {
+        available: await isDockerSandboxAvailable(),
+        backend: 'docker',
+        python: '3.12',
+        node: '20',
+        egressProxyConfigured: Boolean(process.env.AGENTIS_COMPONENT_EGRESS_PROXY && process.env.AGENTIS_COMPONENT_NETWORK),
+      },
+      browser: deps.runtime
+        ? await deps.runtime.browserHealth(ws.workspaceId)
+        : { available: false, backend: 'none', checkpointing: false },
+      legacyNodeWorker: { available: true },
+    });
+  });
 
   app.post('/install-component', async (c) => {
     const ws = getWorkspace(c);
@@ -140,6 +146,7 @@ export function buildExtensionRoutes(deps: {
       permissionsAcknowledged: body.permissionsAcknowledged,
       ...(body.bundleDir ? { bundleDir: body.bundleDir } : { bundleFiles: body.bundleFiles! }),
     });
+    await deps.runtime?.cleanupExtensionBrowser(ws.workspaceId, installed.id);
     return c.json({ extension: installed }, installed.created ? 201 : 200);
   });
 
@@ -173,6 +180,11 @@ export function buildExtensionRoutes(deps: {
         timeoutMs: manifest.timeoutMs,
       },
     );
+    if ((manifest.permissions ?? []).includes('browser.session.persist')) {
+      await deps.runtime?.refreshExtensionBrowser(ws.workspaceId, created.id);
+    } else {
+      await deps.runtime?.cleanupExtensionBrowser(ws.workspaceId, created.id);
+    }
     return c.json({
       extension: {
         id: created.id,
@@ -215,11 +227,18 @@ export function buildExtensionRoutes(deps: {
     return c.json({ result });
   });
 
-  app.delete('/:id', (c) => {
+  app.delete('/:id', async (c) => {
     const ws = getWorkspace(c);
+    const extensionId = c.req.param('id');
+    const existing = deps.db.select({ id: schema.extensions.id })
+      .from(schema.extensions)
+      .where(and(eq(schema.extensions.id, extensionId), eq(schema.extensions.workspaceId, ws.workspaceId)))
+      .get();
+    if (!existing) throw new AgentisError('EXTENSION_NOT_FOUND', 'extension not found');
+    await deps.runtime?.cleanupExtensionBrowser(ws.workspaceId, extensionId);
     const result = deps.db
       .delete(schema.extensions)
-      .where(and(eq(schema.extensions.id, c.req.param('id')), eq(schema.extensions.workspaceId, ws.workspaceId)))
+      .where(and(eq(schema.extensions.id, extensionId), eq(schema.extensions.workspaceId, ws.workspaceId)))
       .run();
     if (result.changes === 0) throw new AgentisError('EXTENSION_NOT_FOUND', 'extension not found');
     return c.json({ ok: true });

@@ -124,7 +124,7 @@ describe('WorkflowMonitorCard', () => {
       summary: 'Done',
     });
 
-    expect(screen.getByText('Run completed')).toBeInTheDocument();
+    expect(screen.getByText('Execution finished')).toBeInTheDocument();
     expect(screen.queryByText(/Realtime monitor|Events|Review|1m|seconds/i)).not.toBeInTheDocument();
     expect(screen.getByTestId('workflow-realtime-monitor').querySelector('.animate-pulse')).toBeNull();
   });
@@ -254,7 +254,7 @@ describe('WorkflowMonitorCard', () => {
     rerender(<WorkflowMonitorCard {...props} activeRunId={null} activeRunStatus={null} />);
     await act(async () => undefined);
 
-    expect(screen.getByText('Run completed')).toBeInTheDocument();
+    expect(screen.getByText('Execution finished')).toBeInTheDocument();
     expect(screen.queryByText('Latest run failed')).not.toBeInTheDocument();
   });
 

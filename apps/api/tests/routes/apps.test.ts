@@ -21,6 +21,7 @@ import { ConversationSimulatorService } from '../../src/services/conversation/co
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import type { AgentAdapter, ChatDelta } from '@agentis/core';
 import { WorkflowRevisionService } from '../../src/services/workflow/workflowRevisionService.js';
+import { ConversationHandoffService } from '../../src/services/conversation/conversationHandoffService.js';
 
 let ctx: TestContext;
 
@@ -139,8 +140,9 @@ describe('/v1/apps live conversations (Phase 1)', () => {
     }).run();
 
     const delivered: Array<{ connectionId: string; chatId: string; body: string; idempotencyKey?: string }> = [];
+    const handoffs = new ConversationHandoffService({ db: ctx.db, bus: ctx.bus });
     const routed = ctx.buildApp([{ path: '/v1/apps', app: buildAppRoutes({
-      db: ctx.db, auth: ctx.auth, conversations,
+      db: ctx.db, auth: ctx.auth, conversations, handoffs,
       channels: { deliverToConnection: async (a) => { delivered.push(a); return { provider: 'telegram', providerMessageId: randomUUID(), status: 'accepted', acceptedAt: new Date().toISOString(), providerAcknowledged: true }; } },
     }) }]);
 

@@ -151,6 +151,21 @@ export class ChannelTurnQueue {
     }
   }
 
+  /** Permanently cancel every not-yet-finished turn for a human-owned conversation. */
+  cancelConversation(workspaceId: string, conversationId: string): number {
+    const now = new Date().toISOString();
+    const result = this.deps.db
+      .update(schema.channelTurnQueue)
+      .set({ status: 'cancelled', leasedAt: null, failReason: 'human_takeover', updatedAt: now })
+      .where(and(
+        eq(schema.channelTurnQueue.workspaceId, workspaceId),
+        eq(schema.channelTurnQueue.conversationId, conversationId),
+        sql`${schema.channelTurnQueue.status} in ('pending', 'processing')`,
+      ))
+      .run();
+    return result.changes;
+  }
+
   /** Begin polling. Idempotent. Reclaims crashed leases first (resume on startup). */
   start(): void {
     if (this.#timer) return;
@@ -257,7 +272,7 @@ export class ChannelTurnQueue {
       this.deps.db
         .update(schema.channelTurnQueue)
         .set({ status: 'done', leasedAt: null, updatedAt: new Date().toISOString() })
-        .where(eq(schema.channelTurnQueue.id, row.id))
+        .where(and(eq(schema.channelTurnQueue.id, row.id), eq(schema.channelTurnQueue.status, 'processing')))
         .run();
     } catch (err) {
       const failedAt = new Date().toISOString();
@@ -273,7 +288,7 @@ export class ChannelTurnQueue {
           scheduledFor: terminal ? row.scheduledFor : new Date(Date.now() + backoffMs).toISOString(),
           updatedAt: failedAt,
         })
-        .where(eq(schema.channelTurnQueue.id, row.id))
+        .where(and(eq(schema.channelTurnQueue.id, row.id), eq(schema.channelTurnQueue.status, 'processing')))
         .run();
       this.deps.logger[terminal ? 'error' : 'warn']('channel_turn_queue.turn_failed', {
         id: row.id,

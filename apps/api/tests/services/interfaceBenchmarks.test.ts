@@ -27,4 +27,19 @@ describe('interface benchmark fixtures', () => {
       expect(benchmark.requiredBlocks.every((kind) => kinds.has(kind))).toBe(true);
     });
   }
+
+  it('covers the release domains without a universal template composition', () => {
+    expect(interfaceBenchmarks.map((benchmark) => benchmark.name)).toEqual(expect.arrayContaining([
+      'prospecting pipeline',
+      'customer support inbox',
+      'relationship workspace',
+      'operations control room',
+      'editorial intelligence',
+    ]));
+    const kindSets = interfaceBenchmarks.map((benchmark) => blockKinds(benchmark.view));
+    const commonKinds = [...kindSets[0]!].filter((kind) => kindSets.every((set) => set.has(kind)));
+    expect(commonKinds).toEqual(['Stack']);
+    expect(new Set(interfaceBenchmarks.map((benchmark) => JSON.stringify([...blockKinds(benchmark.view)].sort()))).size)
+      .toBe(interfaceBenchmarks.length);
+  });
 });

@@ -158,7 +158,7 @@ describe('evaluateRunVerdict — probes', () => {
     expect(saved[0]).toMatch(/verdict-render\.png/);
   });
 
-  it('judge: evidence-grounded, honors minScore, and is skipped under probes_only (→ partial, never fake-passed)', async () => {
+  it('judge: evidence-grounded when available and absent—not failed—under probes_only', async () => {
     const judged: unknown[] = [];
     const judgeSpec = spec({
       acceptance: [{ id: 'quality', claim: 'copy is good', verify: 'judge', rubric: 'Strictly grade the store copy.', minScore: 7 }],
@@ -182,7 +182,25 @@ describe('evaluateRunVerdict — probes', () => {
       deps: { judge: async () => { throw new Error('must not be called'); } },
     });
     expect(probesOnly.outcome).toBe('partial');
-    expect(probesOnly.checks[0]!.unavailable).toBe(true);
+    expect(probesOnly.checks).toEqual([]);
+  });
+
+  it('lets mechanical proof stand when a complementary judge is unavailable', async () => {
+    const verdict = await evaluateRunVerdict({
+      ...BASE,
+      spec: spec({
+        acceptance: [
+          { id: 'mechanical', claim: 'lead exists', verify: 'expr', expr: 'output.leads.length == 1' },
+          { id: 'quality', claim: 'lead quality is high', verify: 'judge', rubric: 'Assess quality.' },
+        ],
+        sufficiency: [{ key: 'leads', minItems: 1 }],
+      }),
+      output: { leads: [{ id: 'lead-1' }] },
+      deps: {},
+    });
+    expect(verdict.outcome).toBe('accomplished');
+    expect(verdict.checks.map((check) => check.checkId)).toEqual(['mechanical']);
+    expect(JSON.stringify(verdict)).not.toContain('judge unavailable');
   });
 
   it('file_probe: the FILESYSTEM catches a fabricated harvest — dir empty ⇒ failed, real files ⇒ accomplished', async () => {

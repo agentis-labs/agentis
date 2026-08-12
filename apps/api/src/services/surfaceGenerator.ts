@@ -168,9 +168,10 @@ CRAFT RULES (this is what separates a great surface from a dumb one):
 - TWO TIERS, PICK PER SURFACE: for an operable data app (records, boards, live-ops, editable, data-bound) author the
   typed nodes below — that is the default here. For a bespoke showpiece / pixel-perfect custom dashboard, or anything the
   typed composites would render flat, emit a CodeSurface (see KEY NODES) and write real code with full design control.
-- NEVER emit one tall stack of identical cards. COMPOSE a layout: a Hero or Toolbar header; a Split
-  (main content + an activity rail) or a Grid; Tabs/Accordion for progressive disclosure instead of one
-  giant scroll.
+- Start from an explicit design brief: purpose, audience, information density, tone, and one memorable
+  interaction or visual idea. Let that brief determine the composition; never force a universal header/KPI/rail recipe.
+- NEVER emit one tall stack of identical cards. Use the smallest hierarchy that supports the work; choose
+  editorial flow, focused workspaces, boards, tables, or split views only when the domain calls for them.
 - Choose a THEME on the ROOT node's style: { "style": { "theme": "analytics"|"product"|"editorial"|"operations", "density": "comfortable"|"compact" } }.
   analytics = KPI dashboards; product = consumer-grade; editorial = content-forward; operations = dense command centers.
 - Every surface renders on the flagship Agentis design system — premium cards, a real type scale, auto-formatted
@@ -184,11 +185,9 @@ CRAFT RULES (this is what separates a great surface from a dumb one):
   Never create visual distance with oversized gaps, blank cards, or ad hoc spacer rows. Use Grid spans/Split rails.
 - Visualize, don't narrate: use Chart (line/area/bar/pie/donut, multi-series via "series"), KPIStrip, Sparkline,
   ProgressBar, Timeline — not paragraphs of Text.
-- MISSION-CONTROL-FIRST for an App overview (the App is an operational unit, not a form): lead with the headline
-  numbers (a KPIStrip or PipelineFlow), then — when the App owns workflows — an OrchestrationPanel (the operator
-  sees every workflow's rules and can run/pause/chain them) with the LIVE rail beside the working area: a Grid of
-  { the working composite (span 2) , a Stack of RunMonitor + AgentFeed (span 1) }. The operator should see what the
-  agents are DOING right now without scrolling. Put data-entry Forms behind a Tab, never at the top.
+- For an operational overview, surface the primary decision and current state first. Add live run and agent controls
+  where they materially help; they may be inline, in a rail, or on a dedicated operations surface. Forms may be
+  primary when data entry is the actual job. Do not repeat the same mission-control composition across apps.
 - PICK THE WORKING COMPOSITE for the data, not a plain Table by default:
   • Kanban — anything with a status/stage field the operator moves through states (deals, tickets, orders, content,
     hiring). Drag writes the field back: give it "update": { "action": "<declared update action>" }.
@@ -265,7 +264,8 @@ SurfaceAction = { "name":string, "kind":"data"|"workflow"|"tool", "target":strin
 Rules:
 - Bind Table/List/Chart/DataBoard/Timeline to collections that EXIST (listed in the prompt). Never invent collection or field names.
 - A create Form's submit must reference a declared "data" action targeting "<collection>.insert".
-- Pick the theme + layout that fit the domain. Lead with a Hero, then a Split/Grid — not a flat stack.`;
+- Pick a distinctive theme and layout that fit the domain. Do not reuse a fixed Hero/KPI/Split formula;
+  prioritize working controls, real bindings, and an intentional visual concept.`;
 
 function userPrompt(prompt: string, collections: CollectionInfo[], surface?: string): string {
   const schema = collections.length === 0

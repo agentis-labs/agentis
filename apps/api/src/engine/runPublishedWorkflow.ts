@@ -15,6 +15,7 @@ import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { WorkflowEngine } from './WorkflowEngine.js';
 import { buildInitialRunState } from './initialRunState.js';
 import { validateWorkflowGraph } from './validateGraph.js';
+import { normalizeRunOutcomeStatus } from '../services/workflow/runOutcome.js';
 
 export interface RunPublishedWorkflowArgs {
   db: AgentisSqliteDb;
@@ -93,7 +94,7 @@ export async function runPublishedWorkflow(args: RunPublishedWorkflowArgs): Prom
     output: executionCompleted ? finalOutput(args.graph, final.runState as WorkflowRunState) : null,
     terminal,
     executionStatus: final.executionStatus as RunExecutionStatus,
-    outcomeStatus: final.outcomeStatus as RunOutcomeStatus,
+    outcomeStatus: normalizeRunOutcomeStatus(final.outcomeStatus),
     settlement: final.settlement && typeof final.settlement === 'object' ? final.settlement as RunSettlement : null,
   };
 }

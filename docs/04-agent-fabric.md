@@ -143,22 +143,28 @@ explicitly for harness smoke testing.
 
 ### Execution truth and operator progress
 
-Every turn terminates as `completed`, `failed`, `interrupted`, or `blocked`. An operator Stop
+Every turn terminates as `completed`, `failed`, `interrupted`, or `blocked`. A provider-capacity
+or rate-limit failure is `blocked` and recoverable: the same durable turn can be resumed or run
+with another model, rather than being presented as a completed answer. An operator Stop
 revokes its execution lease, aborts the adapter and child runs, and fences late results; it is
 recorded as **Response interrupted**, never as a provider failure. CLI adapters share this rule,
 including non-zero child-process exits produced while their process tree is being cancelled.
 
-The conversation renders safe commentary and a small factual activity set in chronological order
-while a turn runs. Commentary accepts provider-designated reasoning summaries in both nested
-`item.completed` and flat `item.reasoning` Codex envelopes, plus assistant preambles and
-host-authored progress; raw chain-of-thought remains private. Stable event ids update an existing
-row in place, internal discovery calls are suppressed, and recovered retries collapse to their
-latest successful state. Both commentary and tool activity persist in message metadata so a
-reconnect reconstructs the same timeline. Completed work collapses to a quiet duration row by
-default. The transcript intentionally does not mount build-session, durable-plan, architecture,
-proactive-status, or run-control cards: plans remain readable reply text, while operational state
-belongs to its dedicated App/Run surface. Confirmation actions and requested file artifacts remain
-inline because they are part of the conversation itself.
+`conversation_turn_events` is the canonical ordered ledger for Chat, Home, and the technical
+panel. Each versioned event is scoped to workspace, conversation, turn, agent, and optional run,
+with a durable cursor and a visibility level (`chat`, `technical`, or `both`). SSE and historical
+reads use this same contract, so reconnecting, reopening Chat, or moving away from Home replays
+one coherent timeline without leaks or duplicates.
+
+The conversation renders safe commentary and a small factual activity set in chronological order.
+The host guarantees a natural-language first update, an update before a material mutation, a
+meaningful heartbeat at most every 45 seconds, and a validation, block, or failure summary even
+when a provider emits no commentary. Provider-designated summaries, assistant preambles, and
+host-authored progress are sanitized before persistence; raw chain-of-thought, prompts, secrets,
+and sensitive tool arguments remain private. The technical panel can additionally show the
+sanitized operation, affected resource, duration, and result. Stable event ids update an existing
+row in place, internal discovery calls are suppressed, and recovered retries remain attached to
+the same turn.
 
 Codex model-catalogue parse failures (including a missing `base_instructions` field) are treated
 as recoverable runtime state. Agentis only quarantines an identified `models-cache.json` or
@@ -175,7 +181,9 @@ shape, a minimal valid graph, and graph identity repair rules. Draft validation 
 
 Agent positions are durable workspace data. `/v1/agents/reconcile-layout` backfills only
 missing or invalid legacy coordinates, preserves manual layouts, and emits an agent update so
-Home and Agents canvases converge immediately.
+Home and Agents canvases converge immediately. The Home resolver then lays out agents, managers,
+workers, Apps, and sources in one deterministic collision pass. Manual coordinates are soft
+anchors; event activity never recalculates topology or animates a stable layout.
 
 ## API surface
 
