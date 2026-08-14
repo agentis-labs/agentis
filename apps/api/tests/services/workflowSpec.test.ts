@@ -65,6 +65,26 @@ describe('validateWorkflowSpec', () => {
     expect(validateWorkflowSpec(spec, { graph }).join(' ')).toMatch(/expr references output\.value.*declares no "value" key/);
   });
 
+  it('validates native App probe limits and nested output templates at scope time', () => {
+    const graph = {
+      version: 1, viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], edges: [],
+      outputContract: { fields: [{ key: 'searchRun', type: 'object' }] },
+    } as unknown as WorkflowGraph;
+    const tooLarge = baseSpec({ acceptance: [{
+      id: 'rows', claim: 'rows exist', verify: 'data_probe', integration: 'agentis_app', operation: 'query',
+      params: { collection: 'restaurants', filter: { runId: '{output.searchRun.runId}' }, limit: 1000 },
+      expr: 'probe.rows.length >= 1',
+    }] });
+    expect(validateWorkflowSpec(tooLarge, { graph }).join(' ')).toMatch(/limit must be an integer from 1 to 500/);
+
+    const unknownPath = baseSpec({ acceptance: [{
+      id: 'rows', claim: 'rows exist', verify: 'data_probe', integration: 'agentis_app', operation: 'query',
+      params: { collection: 'restaurants', filter: { runId: '{output.unknown.runId}' }, limit: 25 },
+      expr: 'probe.rows.length >= 1',
+    }] });
+    expect(validateWorkflowSpec(unknownPath, { graph }).join(' ')).toMatch(/params reference \{output\.unknown\}.*declares no "unknown" key/);
+  });
+
   it('requires at least one acceptance claim + duplicate-id detection', () => {
     expect(validateWorkflowSpec(baseSpec({ acceptance: [] })).join(' ')).toMatch(/at least one verifiable claim/);
     const dup = baseSpec({

@@ -58,6 +58,7 @@ import { probeCliRuntime } from './cliRuntimeProbe.js';
 import { nativeRuntimeCapabilities } from './runtimeCapabilityDeclarations.js';
 import type { RuntimeSessionStore } from '../services/runtime/runtimeSessionStore.js';
 import { antigravityModelLabel, normalizeAntigravityModel } from './antigravityModels.js';
+import { compactPublicProgress } from './publicProgress.js';
 
 const DEFAULT_INTERACTIVE_CHAT_TIMEOUT_MS = 20_000;
 const DEFAULT_STRUCTURED_CHAT_TIMEOUT_MS = 30_000;
@@ -260,6 +261,8 @@ export class AntigravityAdapter implements AgentAdapter {
     signal?: AbortSignal;
     timeoutMs?: number;
     onTextDelta?: (text: string) => void;
+    /** Safe, model-authored progress retained by agy's transcript. */
+    onCommentary?: (commentary: { id: string; text: string }) => void;
     onActivity?: (delta: Extract<ChatDelta, { type: 'activity' }>) => void;
     /**
      * Live-stream callbacks. agy emits nothing to stdout, but it writes its
@@ -274,7 +277,42 @@ export class AntigravityAdapter implements AgentAdapter {
     const controller = new AbortController();
     const unlink = linkAbortSignal(input.signal, controller);
     let timer: NodeJS.Timeout | undefined;
+    let transcriptTimer: NodeJS.Timeout | undefined;
     let timedOut = false;
+    // `agy --print` writes its actual model turn to this transcript progressively.
+    // Its stdout supplies tool lifecycle events, but not the model's pre-tool
+    // sentence, which is precisely the useful live update the operator expects.
+    const brainDir = agyBrainDir(this.opts.env, input.env);
+    const priorConversations = listConversationDirs(brainDir);
+    let transcriptConversation: string | null = null;
+    const seenTranscriptRows = new Set<string>();
+    const tailTranscript = () => {
+      transcriptConversation ??= newestNewConversation(brainDir, priorConversations);
+      if (!transcriptConversation) return;
+      const conversationDir = join(brainDir, transcriptConversation);
+      for (const row of readTranscriptRows(conversationDir)) {
+        const step = typeof row.step_index === 'number' ? row.step_index : -1;
+        const source = String(row.source ?? '').toUpperCase();
+        const status = String(row.status ?? '').toUpperCase();
+        const content = firstString(row.content, row.text, row.message) ?? '';
+        const key = `${step}:${source}:${status}:${content}`;
+        if (seenTranscriptRows.has(key)) continue;
+        seenTranscriptRows.add(key);
+        const activity = transcriptRowActivity(row, step);
+        if (activity) input.onActivity?.(activity);
+        // Never expose transcript `thinking`: it is private chain-of-thought.
+        // MODEL content, on the other hand, is the operator-facing message that
+        // precedes an Agentis tool marker and is safe after transport cleanup.
+        // Agy has used both DONE and in-progress status values for a model row
+        // across releases. The row's source is the authority here; emit the
+        // operator-facing content as soon as it exists, while never reading its
+        // separate private `thinking` field.
+        if (source !== 'MODEL' || !content) continue;
+        const { cleaned } = extractMarkerToolCalls(content);
+        const text = cleaned.replace(/\s+/g, ' ').trim();
+        if (text) input.onCommentary?.({ id: `antigravity-commentary-${step}`, text: clipText(text, 1_200) });
+      }
+    };
     return new Promise((resolve) => {
       let settled = false;
       const finish = (result: { text: string; error?: string }) => {
@@ -282,6 +320,7 @@ export class AntigravityAdapter implements AgentAdapter {
         settled = true;
         unlink();
         if (timer) clearTimeout(timer);
+        if (transcriptTimer) clearInterval(transcriptTimer);
         resolve(result);
       };
       let child: ReturnType<typeof spawn>;
@@ -300,6 +339,11 @@ export class AntigravityAdapter implements AgentAdapter {
         child = spawn(target.command, target.args, {
           cwd, env, windowsHide: true, signal: controller.signal, stdio: ['ignore', 'pipe', 'pipe'],
         });
+        // Read immediately and then frequently enough to feel live without
+        // turning the local transcript into a polling hotspot.
+        tailTranscript();
+        transcriptTimer = setInterval(tailTranscript, 250);
+        transcriptTimer.unref?.();
       } catch (err) {
         finish({ text: '', error: `antigravity_spawn_failed: ${(err as Error).message}` });
         return;
@@ -335,6 +379,9 @@ export class AntigravityAdapter implements AgentAdapter {
         finish({ text: '', error: timedOut ? `Antigravity (agy) timed out` : `antigravity_error: ${err.message}` });
       });
       child.on('exit', (code) => {
+        // Capture a final transcript row written in the same tick as process
+        // shutdown; the interval may not get another chance before `finish`.
+        tailTranscript();
         if (stdoutRemainder.trim()) {
           const parsedLine = parseAntigravityStdoutLine(stdoutRemainder);
           if (parsedLine.delta) input.onTextDelta?.(parsedLine.delta);
@@ -377,23 +424,12 @@ export class AntigravityAdapter implements AgentAdapter {
           : DEFAULT_CHAT_TURN_TIMEOUT_MS;
     const timeoutMs = clampChatTimeout(options?.timeoutMs ?? configuredTimeoutMs);
     const hardCeilingMs = chatHardCeilingMs(timeoutMs, 'AGENTIS_ANTIGRAVITY_CHAT_HARD_CEILING_MS');
-    const sessionKey = options?.sessionKey?.trim() || 'default';
     const queue = createChatQueue();
-
-    queue.push({
-      type: 'activity',
-      id: `antigravity-runtime-${sessionKey}`,
-      label: 'Starting Antigravity',
-      detail: 'Running the turn and waiting for verified runtime output.',
-      phase: 'runtime',
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      agentId: this.opts.agentId,
-    });
 
     void (async () => {
       try {
         let streamedText = '';
+        let streamedOperatorText = '';
         let streamSuppressed = false;
         const result = await this.#runAgy({
           args: buildAntigravityArgs(this.opts, options?.preferredModel),
@@ -403,11 +439,25 @@ export class AntigravityAdapter implements AgentAdapter {
           timeoutMs: hardCeilingMs > 0 ? hardCeilingMs : timeoutMs,
           onTextDelta: (delta) => {
             streamedText += delta;
-            // Never stream the known CLI-help persona or an Agentis marker before
-            // the complete response has been validated and tool calls extracted.
-            if (/--dangerously-skip-permissions|AGENTIS_TOOL_CALL/i.test(streamedText)) streamSuppressed = true;
-            if (!streamSuppressed && delta) queue.push({ type: 'text', delta });
+            // Stream the operator-facing sentence immediately, but stop exactly
+            // at the marker boundary. Holding a possible partial marker suffix
+            // prevents `AGENTIS_TOOL_...` from flashing in the chat between chunks.
+            if (/--dangerously-skip-permissions/i.test(streamedText)) streamSuppressed = true;
+            if (streamSuppressed) return;
+            const visible = antigravityOperatorPrefix(streamedText);
+            if (visible.length > streamedOperatorText.length) {
+              const addition = visible.slice(streamedOperatorText.length);
+              streamedOperatorText = visible;
+              if (addition) queue.push({ type: 'text', delta: addition });
+            }
           },
+          onCommentary: (commentary) => queue.push({
+            type: 'commentary',
+            id: commentary.id,
+            text: compactPublicProgress(commentary.text),
+            source: 'assistant_preamble',
+            createdAt: new Date().toISOString(),
+          }),
           onActivity: (delta) => queue.push(delta),
         });
 
@@ -427,22 +477,18 @@ export class AntigravityAdapter implements AgentAdapter {
         // out so the platform executes them, exactly like the other CLI adapters.
         const { cleaned, calls } = extractMarkerToolCalls(result.text);
         const body = (cleaned || result.text).trim();
-        if (body && (!streamedText || streamSuppressed)) queue.push({ type: 'text', delta: body });
+        if (body && !streamedOperatorText.trim()) {
+          queue.push({ type: 'text', delta: body });
+        } else if (body && body.startsWith(streamedOperatorText.trim())) {
+          const remainder = body.slice(streamedOperatorText.trim().length);
+          if (remainder) queue.push({ type: 'text', delta: remainder });
+        }
         for (const call of calls) {
           queue.push({ type: 'tool_call', id: randomUUID(), name: call.name, args: call.args });
         }
         if (!body && calls.length === 0) {
           this.opts.logger.warn('antigravity.chat.empty_answer', {});
         }
-        queue.push({
-          type: 'activity',
-          id: `antigravity-runtime-${sessionKey}`,
-          label: 'Antigravity response ready',
-          phase: 'complete',
-          status: 'success',
-          completedAt: new Date().toISOString(),
-          agentId: this.opts.agentId,
-        });
         queue.push({ type: 'done', finishReason: calls.length > 0 ? 'tool_calls' : 'stop' });
       } catch (err) {
         queue.push({ type: 'tool_result', id: 'adapter', name: 'adapter.chat', result: null, error: `antigravity_chat_failed: ${(err as Error).message}` });
@@ -587,6 +633,32 @@ function buildAntigravityChatPrompt(messages: ChatMessage[], tools: ToolDefiniti
   ].join('\n');
 }
 
+/**
+ * Return only text that is certainly before an Agentis tool marker. A marker
+ * can be split across stream chunks, so retain any suffix that could still grow
+ * into one instead of briefly leaking protocol text into the transcript.
+ */
+function antigravityOperatorPrefix(text: string): string {
+  const lower = text.toLowerCase();
+  const markers = ['agentis_tool_call', '<agentis_tool_call>'];
+  let safeEnd = text.length;
+  for (const marker of markers) {
+    const completeAt = lower.indexOf(marker);
+    if (completeAt >= 0) {
+      safeEnd = Math.min(safeEnd, completeAt);
+      continue;
+    }
+    const maxPartial = Math.min(marker.length - 1, lower.length);
+    for (let length = maxPartial; length > 0; length -= 1) {
+      if (marker.startsWith(lower.slice(-length))) {
+        safeEnd = Math.min(safeEnd, text.length - length);
+        break;
+      }
+    }
+  }
+  return text.slice(0, safeEnd);
+}
+
 function formatMessagesForAntigravity(messages: ChatMessage[]): string {
   return messages.map((message) => {
     const content = typeof message.content === 'string' ? message.content : safeJson(message.content);
@@ -656,16 +728,18 @@ function parseAntigravityStdoutLine(line: string): ParsedAntigravityStdoutLine {
         const step = typeof update?.step_index === 'number' ? String(update.step_index) : 'runtime';
         const state = String(update?.state ?? '').toLowerCase();
         if (/user_input|checkpoint/.test(stepType)) return parsed;
-        const label = /tool|command|browser|exec|run|function/.test(stepType)
-          ? prettyToolName(stepType)
-          : 'Antigravity runtime step';
+        // A lifecycle state without a concrete operation is not useful chat
+        // narration. Surface only actual tool/command/browser steps.
+        if (!/tool|command|browser|exec|run|function/.test(stepType)) return parsed;
+        const label = prettyToolName(firstString(update?.tool_name, update?.name, update?.title) ?? stepType);
+        const completed = /done|success|complete/.test(state);
         parsed.activity = {
           type: 'activity',
           id: `antigravity-step-${step}`,
-          phase: 'runtime',
-          status: /done|success|complete/.test(state) ? 'success' : 'running',
-          label: `${/done|success|complete/.test(state) ? 'Completed' : 'Running'} ${label}`,
-          ...(state && !/done|success|complete/.test(state) ? { startedAt: new Date().toISOString() } : { completedAt: new Date().toISOString() }),
+          phase: 'tool',
+          status: completed ? 'success' : 'running',
+          label: `${completed ? 'Used' : 'Using'} ${label}`,
+          ...(completed ? { completedAt: new Date().toISOString() } : { startedAt: new Date().toISOString() }),
         };
       }
     } else if (eventName === 'result') {
@@ -677,7 +751,10 @@ function parseAntigravityStdoutLine(line: string): ParsedAntigravityStdoutLine {
       }
       parsed.final = firstString(result?.response, result?.text, result?.content);
     } else {
-      parsed.delta = extractAssistantText(event);
+      const part = antigravityJsonEventToChatPart(event);
+      if (part.kind === 'text') parsed.delta = part.text;
+      else if (part.kind === 'activity') parsed.activity = part.delta;
+      else if (part.kind === 'error') parsed.error = part.message;
     }
     return parsed;
   } catch {
@@ -856,6 +933,9 @@ function extractAntigravityError(event: AntigravityJsonEvent): string | null {
 function formatAntigravityExitError(code: number | null, stderrText: string, stdoutError: string): string {
   const stderr = stripProcessNoise(stderrText).trim();
   const detail = (stdoutError || '').trim() || stderr;
+  if (/\b402\b|requires more credits|add more credits|insufficient(?:[_\s]+\w+)?[_\s]+credits?|out of credits?|no credits?|insufficient[_\s]?(?:quota|funds|balance)|quota exceeded|billing|payment required/i.test(detail)) {
+    return `${detail || 'The provider rejected this request'} — the selected model account is out of credits or quota. Add credits, or choose another model, then retry.`;
+  }
   // Not signed in / no cached session: point at the one-time `agy` sign-in.
   if (/not (signed|logged) in|authenticate|unauthorized|no active session|sign in/i.test(detail)) {
     return 'Antigravity CLI is not signed in on this machine. Run `agy` once and complete the Google sign-in (use a Google Cloud project for paid accounts); the session is cached in the system keyring, then retry.';

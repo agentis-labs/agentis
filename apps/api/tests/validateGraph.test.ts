@@ -297,6 +297,8 @@ describe('validateWorkflowGraph — WORKFLOW-UPDATE node kinds', () => {
     expect(validateWorkflowGraph(single({ kind: 'html_extract', selector: '.x', extractAs: 'text' })).ok).toBe(true);
     expect(validateWorkflowGraph(single({ kind: 'json_schema_validate', schema: '{"type":"object"}', onViolation: 'flag' })).ok).toBe(true);
     expect(validateWorkflowGraph(single({ kind: 'error_trigger', onStatus: ['FAILED'] })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'data_mutate', collection: 'restaurants', operation: 'upsert', records: [{ sourceId: '1' }], matchFields: ['sourceId'] })).ok).toBe(true);
+    expect(validateWorkflowGraph(single({ kind: 'data_mutate', collection: 'restaurants', operation: 'upsert_many', records: [{ sourceId: '1' }], matchKey: 'sourceId' })).ok).toBe(true);
   });
 
   it('rejects invalid new-kind config', () => {
@@ -306,6 +308,9 @@ describe('validateWorkflowGraph — WORKFLOW-UPDATE node kinds', () => {
     expect(() => validateWorkflowGraph(single({ kind: 'json_schema_validate', schema: 'not json', onViolation: 'flag' }))).toThrow(/not valid JSON/);
     expect(() => validateWorkflowGraph(single({ kind: 'graphql', endpoint: '', query: '' }))).toThrow(/graphql/);
     expect(() => validateWorkflowGraph(single({ kind: 'html_extract', selector: '', extractAs: 'text' }))).toThrow(/selector/);
+    expect(() => validateWorkflowGraph(single({ kind: 'data_mutate', collection: 'restaurants', operation: 'upsert', records: [{ sourceId: '1' }] }))).toThrow(/matchFields/);
+    expect(() => validateWorkflowGraph(single({ kind: 'data_mutate', collection: 'restaurants', operation: 'insert_many', records: [], matchKey: 'sourceId' }))).toThrow(/at least 1 element/);
+    expect(() => validateWorkflowGraph(single({ kind: 'data_mutate', collection: 'restaurants', operation: 'insert', record: { sourceId: '1' }, ignoredRecords: [] }))).toThrow(/Unrecognized key/);
   });
 
   it('validates new trigger types', () => {

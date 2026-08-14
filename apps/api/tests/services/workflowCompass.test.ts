@@ -62,6 +62,7 @@ describe('deriveLoopStage', () => {
     expect(deriveLoopStage({ ...withDebug, debugRun: { ...withDebug.debugRun!, status: 'COMPLETED', verdict: 'hollow' } }, hash)).toBe('debug_failed');
     expect(deriveLoopStage({ hardened: { at: 't', graphHash: hash, specHash: 's1' } }, hash)).toBe('hardened');
     expect(deriveLoopStage({ productionRun: { at: 't', runId: 'r2', status: 'COMPLETED', graphHash: hash } }, hash)).toBe('production');
+    expect(deriveLoopStage({ productionRun: { at: 't', runId: 'r3', status: 'COMPLETED_WITH_CONTRACT_VIOLATION', graphHash: hash } }, hash)).not.toBe('production');
   });
 
   it('suite evidence sits between dry-run and debug', () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
-import { AgentisError, REALTIME_EVENTS, REALTIME_ROOMS, configuredAffordances, potentialAffordances, type AdapterType, type AgentAdapter, type AgentisToolContext, type ChatMessage, type NormalizedTask, type RealtimeEventName } from '@agentis/core';
+import { AgentisError, CONSTANTS, REALTIME_EVENTS, REALTIME_ROOMS, configuredAffordances, potentialAffordances, type AdapterType, type AgentAdapter, type AgentisToolContext, type ChatMessage, type NormalizedTask, type RealtimeEventName } from '@agentis/core';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import { publishAgentWorkStep, publishChatDeltaProgress } from '../agent/agentWorkProgress.js';
 import type { ToolHandlerDeps } from './deps.js';
@@ -11,6 +11,16 @@ import { switchRuntime } from '../agent/agentCommission.js';
 import { detectHarnesses, invalidateHarnessProbeCache, type HarnessDetectionResult, type V1HarnessAdapterType } from '../harness/harnessProbe.js';
 
 const V1_ADAPTERS = new Set<AdapterType>(['openclaw', 'hermes_agent', 'claude_code', 'codex', 'cursor', 'antigravity', 'http']);
+
+function inlineAgentDispatchTimeoutMs(): number {
+  const configured = Number(process.env.AGENTIS_INLINE_AGENT_DISPATCH_TIMEOUT_MS);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.max(1_000, Math.min(Math.floor(configured), CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS));
+  }
+  // Inline delegation holds a chat tool round open. Keep it substantially below
+  // the background-task budget; work that needs longer must use async dispatch.
+  return Math.min(120_000, CONSTANTS.AGENT_TASK_RESPONSE_TIMEOUT_MS);
+}
 
 export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHandlerDeps): void {
   registry.registerMany([
@@ -523,6 +533,43 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     },
     {
       definition: {
+        id: 'agentis.agent.consult',
+        mcpExposed: true,
+        family: 'run',
+        description:
+          'Privately consult another workspace agent for expertise, wait for its grounded answer, and continue the current task. ' +
+          'Use targetAgentId when your instructions name a specific colleague; use targetRole or omit the target for capability routing. ' +
+          'Pass consultationId with a follow-up question to continue the same bounded dialogue. The customer never sees this internal transcript.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'A self-contained expert question.' },
+            targetAgentId: { type: 'string', description: 'Preferred exact workspace agent id.' },
+            targetRole: { type: 'string', description: 'Preferred specialist role when no exact agent is required.' },
+            context: { type: 'string', description: 'Optional bounded context needed to answer; do not include unnecessary secrets.' },
+            consultationId: { type: 'string', description: 'Existing consultation id for a follow-up question.' },
+            parentSessionId: { type: 'string', description: 'Owning persistent agent session, when invoked inside a workflow.' },
+          },
+          required: ['question'],
+        },
+        mutating: false,
+        autoExecute: true,
+        approval: { riskLevel: 'low', reversible: true, externalSideEffects: false },
+      },
+      handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
+        if (!deps.consultations) return { ok: false, error: 'agent consultation runtime is not available' };
+        return deps.consultations.consult({
+          question: String(args.question ?? ''),
+          ...(typeof args.targetAgentId === 'string' ? { targetAgentId: args.targetAgentId } : {}),
+          ...(typeof args.targetRole === 'string' ? { targetRole: args.targetRole } : {}),
+          ...(typeof args.context === 'string' ? { context: args.context } : {}),
+          ...(typeof args.consultationId === 'string' ? { consultationId: args.consultationId } : {}),
+          ...(typeof args.parentSessionId === 'string' ? { parentSessionId: args.parentSessionId } : {}),
+        }, ctx);
+      },
+    },
+    {
+      definition: {
         id: 'agentis.agent.dispatch',
         mcpExposed: true,
         family: 'run',
@@ -603,16 +650,53 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
             { role: 'user', content: task },
           ];
           let response = '';
+          let finishReason: 'stop' | 'tool_calls' | 'length' | 'error' | 'max_turns' | 'interrupted' = 'stop';
+          let runtimeError = '';
+          const controller = new AbortController();
+          const abortFromCaller = () => controller.abort(ctx.signal?.reason ?? new Error('agent_dispatch_canceled'));
+          if (ctx.signal?.aborted) abortFromCaller();
+          else ctx.signal?.addEventListener('abort', abortFromCaller, { once: true });
+          const timeoutMs = inlineAgentDispatchTimeoutMs();
+          let timedOut = false;
+          const timeout = setTimeout(() => {
+            timedOut = true;
+            controller.abort(new Error('agent_dispatch_timeout'));
+          }, timeoutMs);
+          timeout.unref?.();
           publishAgentWorkStep(deps.bus, {
             ...workContext,
             phase: 'start',
             description: 'Agent task started',
           });
           try {
-            for await (const delta of registration.adapter.chat(messages, [], preferredModel ? { preferredModel } : undefined)) {
+            for await (const delta of registration.adapter.chat(messages, [], {
+              ...(preferredModel ? { preferredModel } : {}),
+              timeoutMs,
+              signal: controller.signal,
+              sessionKey: ctx.conversationId ? `dispatch:${ctx.conversationId}:${taskId}` : `dispatch:${taskId}`,
+            })) {
               publishChatDeltaProgress(deps.bus, workContext, delta);
               if (delta.type === 'text') response += delta.delta;
-              if (delta.type === 'done') break;
+              if (delta.type === 'tool_result' && delta.error) runtimeError = delta.error;
+              if (delta.type === 'done') {
+                finishReason = delta.finishReason;
+                break;
+              }
+            }
+            if (timedOut) {
+              throw new AgentisError('ADAPTER_TIMEOUT', `Agent ${agent.name} exceeded the bounded ${Math.round(timeoutMs / 1000)} second dispatch window.`);
+            }
+            if (ctx.signal?.aborted || finishReason === 'interrupted') {
+              throw new AgentisError('TURN_CANCELLED', `Dispatch to agent ${agent.name} was canceled.`);
+            }
+            if (finishReason === 'error') {
+              throw new AgentisError('ADAPTER_REJECTED', runtimeError || `Agent ${agent.name} failed without returning a usable result.`);
+            }
+            if (finishReason === 'length' || finishReason === 'max_turns' || finishReason === 'tool_calls') {
+              throw new AgentisError('ADAPTER_TIMEOUT', `Agent ${agent.name} stopped before producing a final result (${finishReason}).`);
+            }
+            if (!response.trim()) {
+              throw new AgentisError('ADAPTER_REJECTED', `Agent ${agent.name} completed without returning a result.`);
             }
             publishAgentWorkStep(deps.bus, {
               ...workContext,
@@ -626,6 +710,9 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
               description: `Agent task failed: ${(err as Error).message}`,
             });
             throw err;
+          } finally {
+            clearTimeout(timeout);
+            ctx.signal?.removeEventListener('abort', abortFromCaller);
           }
           return { dispatched: true, mode: 'chat', agentId, taskId, response, routing };
         }
@@ -677,11 +764,12 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
       handler: async (args: Record<string, unknown>, ctx: AgentisToolContext) => {
         const requestedName = String(args.name).trim();
         const requestedRole = args.role ? String(args.role).trim() : null;
+        const roleIsStableIdentity = requestedRole ? !GENERIC_AGENT_ROLES.has(requestedRole.toLowerCase()) : false;
         const existing = deps.db.select().from(schema.agents)
           .where(eq(schema.agents.workspaceId, ctx.workspaceId))
           .all()
           .find((agent) =>
-            (requestedRole && agent.role === requestedRole)
+            (roleIsStableIdentity && agent.role === requestedRole)
             || agent.name.trim().toLowerCase() === requestedName.toLowerCase());
         if (existing) {
           const set: Record<string, unknown> = { updatedAt: new Date().toISOString() };
@@ -764,6 +852,8 @@ export function registerAgentTools(registry: AgentisToolRegistry, deps: ToolHand
     };
   }
 }
+
+const GENERIC_AGENT_ROLES = new Set(['agent', 'worker', 'specialist', 'manager', 'orchestrator']);
 function normalizeStatus(status: string): string {
   const value = status.toLowerCase();
   if (value === 'idle') return 'online';

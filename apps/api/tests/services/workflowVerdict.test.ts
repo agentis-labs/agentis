@@ -95,8 +95,22 @@ describe('evaluateRunVerdict — outcome taxonomy', () => {
     expect(verdict.outcome).toBe('hollow');
     expect(verdict.sufficiency.floorViolations.join(' ')).toMatch(/"products" requires ≥3 items; got 0/);
     expect(verdict.sufficiency.stubSuspects.join(' ')).toMatch(/advisory/i);
-    expect(verdict.sufficiency.typedEmptyFills).toContain('extra');
+    expect(verdict.sufficiency.typedEmptyFills).toContain('products');
     expect(verdict.deficiencies.length).toBeGreaterThan(0);
+  });
+
+  it('does not mark optional empty output such as warnings as hollow', async () => {
+    const verdict = await evaluateRunVerdict({
+      ...BASE,
+      spec: spec({
+        acceptance: [{ id: 'persisted', claim: 'records persisted', verify: 'expr', expr: 'output.persistedCount == 25' }],
+        sufficiency: [],
+      }),
+      output: { persistedCount: 25, warnings: [] },
+      deps: {},
+    });
+    expect(verdict.outcome).toBe('accomplished');
+    expect(verdict.sufficiency.typedEmptyFills).toEqual([]);
   });
 
   it('PARTIAL: nothing failed but a probe could not run here (browser unwired)', async () => {
@@ -134,6 +148,26 @@ describe('evaluateRunVerdict — probes', () => {
     });
     expect(verdict.outcome).toBe('accomplished');
     expect(calls[0]).toMatchObject({ integration: 'supabase', operation: 'select', params: { table: 'orders', projectUrl: 'https://p.supabase.co' } });
+  });
+
+  it('data_probe: resolves output templates recursively inside filter objects', async () => {
+    const calls: Record<string, unknown>[] = [];
+    const verdict = await evaluateRunVerdict({
+      ...BASE,
+      spec: spec({
+        acceptance: [{
+          id: 'persisted', claim: 'run rows exist', verify: 'data_probe', integration: 'agentis_app', operation: 'query',
+          params: { collection: 'restaurants', filter: { runId: '{output.searchRun.runId}' }, limit: 25 },
+          expr: 'probe.rows.length == 1',
+        }],
+        sufficiency: [],
+      }),
+      output: { searchRun: { runId: 'run-123' } },
+      deps: { runIntegration: async (_integration, _operation, params) => { calls.push(params); return { rows: [{}] }; } },
+    });
+
+    expect(verdict.outcome).toBe('accomplished');
+    expect(calls).toEqual([{ collection: 'restaurants', filter: { runId: 'run-123' }, limit: 25 }]);
   });
 
   it('browser_probe: renders, checks text, persists the screenshot as evidence', async () => {

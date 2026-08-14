@@ -37,7 +37,7 @@ export interface ApprovalCreateArgs {
   taskId: string | null;
   targetId?: string | null;
   gatewayId: string | null;
-  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit' | 'outbound' | 'workflow_revision';
+  source: 'checkpoint' | 'phase_gate' | 'self_heal' | 'openclaw_exec' | 'package_install' | 'credential_access' | 'budget_limit' | 'outbound' | 'workflow_revision' | 'agent_consultation';
   title: string;
   summary: string;
   confidence: number | null;
@@ -82,10 +82,19 @@ export type WorkflowRevisionApprovalHandler = (args: {
   resolvedByUserId: string | null;
 }) => Promise<void>;
 
+export type AgentConsultationApprovalHandler = (args: {
+  approvalId: string;
+  workspaceId: string;
+  userId: string;
+  decision: 'approve' | 'reject';
+  payload: Record<string, unknown>;
+}) => Promise<void>;
+
 export class ApprovalInboxService {
   #onCheckpointResolved: CheckpointResumeHandler | null = null;
   #onOutboundResolved: OutboundApprovalHandler | null = null;
   #onWorkflowRevisionResolved: WorkflowRevisionApprovalHandler | null = null;
+  #onAgentConsultationResolved: AgentConsultationApprovalHandler | null = null;
 
   constructor(
     private readonly db: AgentisSqliteDb,
@@ -103,6 +112,10 @@ export class ApprovalInboxService {
 
   bindWorkflowRevisionHandler(handler: WorkflowRevisionApprovalHandler): void {
     this.#onWorkflowRevisionResolved = handler;
+  }
+
+  bindAgentConsultationHandler(handler: AgentConsultationApprovalHandler): void {
+    this.#onAgentConsultationResolved = handler;
   }
 
   async create(args: ApprovalCreateArgs) {
@@ -273,6 +286,14 @@ export class ApprovalInboxService {
       // `revise` has no meaning for a held one-shot outbound message, so it is a no-op here.
       await this.#onOutboundResolved({
         approvalId: row.id,
+        decision: args.decision,
+        payload: (row.payload ?? {}) as Record<string, unknown>,
+      });
+    } else if (row.source === 'agent_consultation' && this.#onAgentConsultationResolved && args.decision !== 'revise') {
+      await this.#onAgentConsultationResolved({
+        approvalId: row.id,
+        workspaceId: row.workspaceId,
+        userId: row.userId,
         decision: args.decision,
         payload: (row.payload ?? {}) as Record<string, unknown>,
       });

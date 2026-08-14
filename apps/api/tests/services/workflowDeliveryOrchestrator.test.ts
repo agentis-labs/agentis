@@ -157,6 +157,21 @@ describe('deliverWorkflow', () => {
     expect(result.message).toMatch(/VERIFIED against the world/i);
   });
 
+  it('does not deliver a world-accomplished run until its execution proof is clean', async () => {
+    const wfId = seedWorkflow();
+    const { engine, runs } = scriptedEngine([
+      { status: 'COMPLETED_WITH_CONTRACT_VIOLATION', verdict: 'accomplished' },
+      { status: 'COMPLETED', verdict: 'accomplished' },
+    ]);
+
+    const result = await deliverWorkflow(deps(engine), dctx(), { workflowId: wfId, maxIterations: 2 });
+
+    expect(result.delivered).toBe(true);
+    expect(result.iterations).toBe(2);
+    expect(runs).toHaveLength(2);
+    expect(result.timeline).toContainEqual(expect.objectContaining({ stage: 'retry' }));
+  });
+
   it('repairs a deficient run and re-verifies → delivered on the 2nd attempt', async () => {
     const wfId = seedWorkflow();
     const { engine, runs } = scriptedEngine([{ status: 'COMPLETED', verdict: 'hollow' }, { status: 'COMPLETED', verdict: 'accomplished' }]);

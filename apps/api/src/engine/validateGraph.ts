@@ -5,7 +5,7 @@
  */
 
 import type { WorkflowGraph } from '@agentis/core';
-import { AgentisError, schemas } from '@agentis/core';
+import { AgentisError, schemas, SUPPORTED_WORKFLOW_NODE_KINDS } from '@agentis/core';
 import { evalCondition } from './SafeConditionParser.js';
 import { validateGraphReferences } from './validateGraphReferences.js';
 
@@ -25,59 +25,7 @@ export interface ValidateWorkflowGraphOptions {
  *  would die at run time with "unknown op X" can never be persisted or run. */
 const STORE_OPS = new Set(['get', 'set', 'delete', 'increment', 'append', 'get_all']);
 
-export const SUPPORTED_NODE_KINDS = new Set([
-  'trigger',
-  'agent_task',
-  'agent_session',
-  'extension_task',
-  'component_task',
-  'knowledge',
-  'knowledge_ingest',
-  'router',
-  'merge',
-  'checkpoint',
-  'subflow',
-  'scratchpad',
-  'human_input',
-  'agent_swarm',
-  'dynamic_swarm',
-  'planner',
-  'artifact_collect',
-  'wait',
-  'transform',
-  'filter',
-  'integration',
-  'mcp',
-  'channel',
-  'data_query',
-  'data_mutate',
-  'aggregate_window',
-  'http_request',
-  'workflow_store',
-  'workspace_store',
-  'evaluator',
-  'guardrails',
-  'loop',
-  'converge',
-  'pursue',
-  'parallel',
-  'return_output',
-  'artifact_save',
-  'browser',
-  // WORKFLOW-UPDATE — n8n-inspired utility & data primitives
-  'error_trigger',
-  'stop_error',
-  'code',
-  'datetime',
-  'crypto_util',
-  'xml_parse',
-  'markdown',
-  'json_schema_validate',
-  'sticky_note',
-  'spreadsheet',
-  'html_extract',
-  'graphql',
-]);
+export const SUPPORTED_NODE_KINDS = new Set(SUPPORTED_WORKFLOW_NODE_KINDS);
 
 export function validateWorkflowGraph(
   graph: WorkflowGraph,
@@ -319,6 +267,15 @@ export function validateWorkflowGraph(
           fail(`Node ${node.id} (channel) needs channelKind (e.g. "whatsapp") or an explicit connectionId`);
         }
         break;
+      case 'data_mutate': {
+        const parsed = schemas.dataMutateConfigSchema.safeParse(
+          schemas.normalizeLegacyDataMutateConfig(node.config),
+        );
+        if (!parsed.success) {
+          fail(`Node ${node.id} (data_mutate) is invalid: ${parsed.error.issues.map((issue) => issue.message).join('; ')}`);
+        }
+        break;
+      }
       case 'transform':
         if (!node.config.expression) {
           fail(`Node ${node.id} (transform) missing expression`);

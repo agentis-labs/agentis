@@ -24,8 +24,8 @@ import type { Logger } from '../../logger.js';
 import type { RecentLearnings } from '../app/appLearning.js';
 import { resolveCommandScope, type CommandScope } from './commandScope.js';
 
-const TERMINAL_OK = new Set(['COMPLETED', 'COMPLETED_WITH_CONTRACT_VIOLATION']);
-const TERMINAL_FAIL = new Set(['FAILED', 'COMPLETED_WITH_ERRORS']);
+const TERMINAL_OK = new Set(['COMPLETED']);
+const TERMINAL_FAIL = new Set(['FAILED', 'COMPLETED_WITH_ERRORS', 'COMPLETED_WITH_CONTRACT_VIOLATION']);
 const IN_MOTION = new Set(['RUNNING', 'CREATED', 'WAITING', 'PENDING']);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_MS = 7 * DAY_MS;          // 7d — the primary progress window (counts/attention/delta).

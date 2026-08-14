@@ -531,6 +531,24 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    name: 'agentis.agent.consult',
+    description:
+      'Privately ask another Agentis agent for expertise and wait for its answer. ' +
+      'Use targetAgentId for a colleague named in your instructions, targetRole for a functional specialist, or omit both for capability routing. ' +
+      'For a follow-up, pass consultationId from the previous result. The customer sees only your final synthesis.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'Self-contained expert question.' },
+        targetAgentId: { type: 'string', description: 'Exact workspace agent id.' },
+        targetRole: { type: 'string', description: 'Specialist role used for routing.' },
+        context: { type: 'string', description: 'Optional bounded context required by the specialist.' },
+        consultationId: { type: 'string', description: 'Continue an existing consultation.' },
+      },
+      required: ['question'],
+    },
+  },
+  {
     name: 'agentis.agent.dispatch',
     description:
       'Send a concrete task to an existing agent. Use after selecting a real agentId from agentis.agents.list. Never pass an agent name as agentId. Returns either a chat response or a dispatched task id. Example input: {"agentId":"agent_9d2...","task":"Inspect the failing onboarding workflow and summarize the blocker."}.',
@@ -981,6 +999,7 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
     description:
       'Validate, enrich, save, and stream an agent-authored workflow graph or patch. ' +
       'For a new workflow, pass a description alone and Agentis will create a validated, editable baseline when no synthesis runtime is configured; graphDraft is optional for precise authored graphs. ' +
+      'When the operator asks for another/new/second/third workflow inside the open App, pass that App id as appId and newWorkflow:true; this creates an additional persisted workflow instead of modifying the workflow currently on screen. ' +
       'For a precise field-level edit use agentis.workflow.graph.patch; use workflowId plus patchDraft here when the edit should also pass through builder repair and enrichment. A configured fast synthesis runtime may accept description-only calls, but runtime-native agents should author the draft themselves. ' +
       'Every build belongs to an Agentic App: pass appId to add a new workflow to an existing App, or omit it for an App-of-one. The tool returns workflowId AND appId plus runId and emits live canvas build events.',
     examples: [
@@ -1040,6 +1059,10 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         appId: {
           type: 'string',
           description: 'Existing App that should own a newly created workflow. Omit for an App-of-one.',
+        },
+        newWorkflow: {
+          type: 'boolean',
+          description: 'Set true when the operator explicitly asks for an additional/new/another workflow, especially while a different workflow is open. Prevents the conversation build latch from editing the previous workflow.',
         },
         graphDraft: {
           type: 'object',
@@ -1149,6 +1172,34 @@ export const CHAT_TOOL_CATALOG: ToolDefinition[] = [
         permissionsAcknowledged: { type: 'array', items: { type: 'string' } },
       },
       required: ['manifest', 'bundleFiles', 'permissionsAcknowledged'],
+    },
+  },
+  {
+    name: 'agentis.team.spawn',
+    description:
+      'Create a temporary parallel team for two or more independent subproblems in THIS chat. Workers are temporary by default, inherit the current workspace and safety constraints, have no independent delegation, and stream safe progress inline. Use this instead of creating durable agents when the team is only needed for this task. At most 6 workers and 3 concurrent workers are allowed automatically; larger teams need operator approval.',
+    parameters: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string', description: 'One concise objective shared by the team.' },
+        tasks: {
+          type: 'array',
+          minItems: 2,
+          maxItems: 6,
+          description: 'Independent work items. Do not split a sequential task into parallel workers.',
+          items: {
+            type: 'object',
+            properties: {
+              task: { type: 'string', description: 'Concrete, self-contained worker assignment.' },
+              role: { type: 'string', description: 'Optional temporary role label.' },
+              capabilityTags: { type: 'array', items: { type: 'string' }, description: 'Optional capability tags for reusing a compatible live agent.' },
+            },
+            required: ['task'],
+          },
+        },
+        mergeStrategy: { type: 'string', enum: ['collect_all', 'compare', 'best_effort'], description: 'How the lead should use the returned worker evidence.' },
+      },
+      required: ['tasks'],
     },
   },
   {

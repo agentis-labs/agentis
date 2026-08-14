@@ -138,6 +138,86 @@ describe('immutable workflow revision lifecycle', () => {
     })).toThrowError(AgentisError);
   });
 
+  it('requires App delivery authority and exact clean-run proof for semantic publication', () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Delivery-only app' }).id;
+    ctx.db.update(schema.workflows).set({ appId }).where(eq(schema.workflows.id, workflowId)).run();
+    const active = revisions.ensureWorkflow(ctx.workspace.id, workflowId).active;
+    const candidate = revisions.createCandidate({
+      workspaceId: ctx.workspace.id,
+      workflowId,
+      graph: graph('text'),
+      baseRevisionId: active.id,
+      source: 'user_edit',
+      actor: { type: 'user', id: ctx.user.id },
+      reason: 'Semantic App edit',
+    }).revision;
+    for (const gate of ['dry_run', 'regression'] as const) {
+      revisions.recordProof({ workspaceId: ctx.workspace.id, workflowId, revisionId: candidate.id, gate, status: 'passed' });
+    }
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      workflowId,
+      workflowRevisionId: candidate.id,
+      userId: ctx.user.id,
+      status: 'COMPLETED',
+      runState: { verdict: { outcome: 'accomplished' } },
+      graphSnapshot: graph('text'),
+    }).run();
+    for (const gate of ['clean_debug', 'outcome'] as const) {
+      revisions.recordProof({
+        workspaceId: ctx.workspace.id,
+        workflowId,
+        revisionId: candidate.id,
+        gate,
+        status: 'passed',
+        runId,
+        evidence: { delivery: true },
+      });
+    }
+
+    expect(() => revisions.promote({
+      workspaceId: ctx.workspace.id,
+      workflowId,
+      revisionId: candidate.id,
+      expectedActiveRevisionId: active.id,
+      actor: { type: 'user', id: ctx.user.id },
+    })).toThrowError(/agentis\.app\.deliver/);
+
+    const promoted = revisions.promoteFromAppDelivery({
+      workspaceId: ctx.workspace.id,
+      workflowId,
+      revisionId: candidate.id,
+      expectedActiveRevisionId: active.id,
+      actor: { type: 'system', id: 'delivery-test' },
+      deliveryRunId: runId,
+    });
+    expect(promoted.activeRevisionId).toBe(candidate.id);
+  });
+
+  it('rejects an App delivery promotion backed by a contract-violating run', () => {
+    const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Dirty delivery app' }).id;
+    ctx.db.update(schema.workflows).set({ appId }).where(eq(schema.workflows.id, workflowId)).run();
+    const active = revisions.ensureWorkflow(ctx.workspace.id, workflowId).active;
+    const candidate = revisions.createCandidate({
+      workspaceId: ctx.workspace.id, workflowId, graph: graph('text'), baseRevisionId: active.id,
+      source: 'user_edit', actor: { type: 'user', id: ctx.user.id }, reason: 'Dirty candidate',
+    }).revision;
+    const runId = randomUUID();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId,
+      workflowRevisionId: candidate.id, userId: ctx.user.id,
+      status: 'COMPLETED_WITH_CONTRACT_VIOLATION',
+      runState: { verdict: { outcome: 'accomplished' } }, graphSnapshot: graph('text'),
+    }).run();
+    expect(() => revisions.promoteFromAppDelivery({
+      workspaceId: ctx.workspace.id, workflowId, revisionId: candidate.id,
+      expectedActiveRevisionId: active.id, actor: { type: 'system', id: 'delivery-test' }, deliveryRunId: runId,
+    })).toThrowError(/clean delivery run/);
+  });
+
   it('invalidates proof when the acceptance spec drifts and creates a new candidate for the spec', () => {
     const active = revisions.ensureWorkflow(ctx.workspace.id, workflowId).active;
     const graphCandidate = revisions.createCandidate({

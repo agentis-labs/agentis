@@ -282,12 +282,15 @@ function evaluateSufficiency(
     }
   }
 
-  // Typed-empty fills: keys present but hollow ('' / [] / {}). The engine's
-  // contract layer rightly stopped crashes with typed-empty defaults — the
-  // verdict layer refuses to count them as success.
-  const typedEmptyFills = Object.entries(output)
-    .filter(([, v]) => isEmptyValue(v) && v !== undefined && v !== null)
-    .map(([k]) => k);
+  // Typed-empty fills only matter when the spec explicitly demands content.
+  // Optional empties such as `warnings: []` are valid terminal values.
+  const typedEmptyFills = floors
+    .filter((floor) => (
+      floor.nonEmpty
+      || (floor.minItems ?? 0) > 0
+      || (floor.minLength ?? 0) > 0
+    ) && isEmptyValue(output[floor.key]))
+    .map((floor) => floor.key);
 
   // Stub detection over string values (depth 1).
   const stubSuspects: string[] = [];
@@ -447,10 +450,7 @@ async function dataProbe(
 ): Promise<VerdictCheckResult> {
   const run = args.deps.runIntegration;
   if (!run) return { ...base, passed: false, unavailable: true, evidence: 'data probe unavailable in this runtime (no connector runner wired)' };
-  const params: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(check.params ?? {})) {
-    params[k] = typeof v === 'string' ? renderOutputTemplate(v, args.output) : v;
-  }
+  const params = renderProbeParams(check.params ?? {}, args.output) as Record<string, unknown>;
   try {
     const result = await run(check.integration, check.operation, params);
     const passed = evalCondition(check.expr, { probe: result, output: args.output, trigger: args.trigger ?? {}, nodes: args.nodeOutputs ?? {} });
@@ -462,6 +462,24 @@ async function dataProbe(
   } catch (err) {
     return { ...base, passed: false, evidence: `${check.integration}.${check.operation} probe failed: ${(err as Error).message}` };
   }
+}
+
+function renderProbeParams(value: unknown, output: Record<string, unknown>): unknown {
+  if (Array.isArray(value)) return value.map((item) => renderProbeParams(item, output));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .map(([key, child]) => [key, renderProbeParams(child, output)]));
+  }
+  if (typeof value !== 'string') return value;
+  const exact = value.match(/^\{output\.([\w.]+)\}$/u);
+  if (exact) {
+    let resolved: unknown = output;
+    for (const part of exact[1]!.split('.')) {
+      resolved = resolved && typeof resolved === 'object' ? (resolved as Record<string, unknown>)[part] : undefined;
+    }
+    return resolved ?? '';
+  }
+  return renderOutputTemplate(value, output);
 }
 
 async function judgeCheck(

@@ -288,16 +288,6 @@ export function AppEditorPage() {
     }, { replace: true });
   }, [facet, selectedWorkflowId, setSearchParams]);
 
-  // Honour browser back/forward and copied links without allowing a workflow
-  // from another App to be rendered in this editor.
-  useEffect(() => {
-    const requestedWorkflowId = searchParams.get('workflow');
-    if (facet !== 'workflow' || !requestedWorkflowId || requestedWorkflowId === selectedWorkflowId) return;
-    if (workflows.some((workflow) => workflow.id === requestedWorkflowId)) {
-      setSelectedWorkflowId(requestedWorkflowId);
-    }
-  }, [facet, searchParams, selectedWorkflowId, workflows]);
-
   const setFacet = useCallback((value: AppFacet) => {
     setSearchParams((params) => {
       const next = new URLSearchParams(params);

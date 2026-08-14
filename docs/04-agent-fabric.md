@@ -139,7 +139,10 @@ explicitly for harness smoke testing.
   every channel (`auto` remains the API and slash-command identifier for Full access). The web
   always requests automatic task routing; explicit Quick/Deep/Mission overrides remain API
   compatibility inputs rather than permanent composer controls. Model, reasoning effort, and
-  speed live in one runtime menu.
+  speed live in one runtime menu. Plan mode returns clean Markdown directly in the conversation;
+  it does not emit `<proposed_plan>`, `<architecture_canvas>`, private `file://` links, or a
+  second local plan document. `normalizeAgentPlanText()` strips that legacy protocol from cached
+  adapters, streaming presentation, persistence, and external-channel delivery.
 
 ### Execution truth and operator progress
 
@@ -149,6 +152,10 @@ with another model, rather than being presented as a completed answer. An operat
 revokes its execution lease, aborts the adapter and child runs, and fences late results; it is
 recorded as **Response interrupted**, never as a provider failure. CLI adapters share this rule,
 including non-zero child-process exits produced while their process tree is being cancelled.
+The browser addresses Stop by durable turn ID whenever it has one. During the short create-turn
+handoff before that ID reaches the browser, it also cancels by the client turn ID. This means a
+closed SSE reader cannot orphan the server-owned worker: its abort controller is signalled and the
+interactive lease is released by the turn's finalizer.
 
 `conversation_turn_events` is the canonical ordered ledger for Chat, Home, and the technical
 panel. Each versioned event is scoped to workspace, conversation, turn, agent, and optional run,
@@ -157,14 +164,29 @@ reads use this same contract, so reconnecting, reopening Chat, or moving away fr
 one coherent timeline without leaks or duplicates.
 
 The conversation renders safe commentary and a small factual activity set in chronological order.
-The host guarantees a natural-language first update, an update before a material mutation, a
-meaningful heartbeat at most every 45 seconds, and a validation, block, or failure summary even
-when a provider emits no commentary. Provider-designated summaries, assistant preambles, and
-host-authored progress are sanitized before persistence; raw chain-of-thought, prompts, secrets,
-and sensitive tool arguments remain private. The technical panel can additionally show the
-sanitized operation, affected resource, duration, and result. Stable event ids update an existing
-row in place, internal discovery calls are suppressed, and recovered retries remain attached to
-the same turn.
+It never presents generic lifecycle narration as thoughts. A substantive request immediately receives
+a small task-aware start state such as **Starting the interface check**, before the harness produces its
+first event. If no safe provider update follows after eight seconds, one honest waiting row says that the
+turn is still connected and can be stopped; the row disappears as soon as real progress arrives. Provider-designated summaries and the agent's
+own operator-facing preambles are persisted beside real tool/command activity; raw chain-of-thought,
+prompts, secrets, and sensitive tool arguments remain private. CLI assistant-message events preserve
+their provider IDs, so each concrete "found / doing next" update appears immediately and stays in the
+timeline. Streaming chunks for one message update that same row in place. If the latest message is the
+final answer, only its provisional row is atomically promoted into the assistant body without
+duplication; earlier progress remains. Tool start/completion events enter the same stream immediately
+and update one row in place. Confirmation resumes emit the approved operation's running state before
+execution. All harnesses are asked for one short progress sentence before their first substantive action
+and another only when a concrete finding changes the next step. The transport keeps these updates to one
+sentence and 220 characters, so progress cannot become a second answer or a token-heavy log. The technical panel can additionally show the sanitized operation,
+affected resource, duration, and result. Stable event ids update an existing row in place, internal
+discovery calls are suppressed, and recovered retries remain attached to the same turn.
+
+Antigravity's headless runtime writes its model turn to the current conversation transcript while
+it runs. Agentis tails only that new turn and streams the model's operator-facing `content` as
+commentary after stripping tool markers; the transcript's private `thinking` field is never read
+into the chat ledger. Provider failures are preserved beside any partial work rather than hidden by
+a generic failed state. Credit, quota, billing, and HTTP 402 errors explicitly tell the operator to
+add credits or choose another model.
 
 Codex model-catalogue parse failures (including a missing `base_instructions` field) are treated
 as recoverable runtime state. Agentis only quarantines an identified `models-cache.json` or
@@ -187,10 +209,30 @@ anchors; event activity never recalculates topology or animates a stable layout.
 
 ## API surface
 
+## Chat-native temporary teams
+
+Interactive chat can create a bounded temporary team with `agentis.team.spawn` when a request has
+two or more genuinely independent subproblems. A chat swarm is durable (`conversation_swarms` and
+`conversation_swarm_workers`) and linked to its `conversation_turns` record, but its workers are
+not workspace agents unless the operator later promotes work into a durable specialist.
+
+- Automatic fan-out is capped at **6 workers**, with **3 active concurrently**. Larger work is a
+  normal approval decision, not a silent unbounded fan-out.
+- A compatible live workspace agent may be selected, otherwise the coordinator's runtime is used
+  with a temporary worker identity. Every worker inherits workspace and conversation scope but is
+  given an empty tool catalogue and cannot delegate again.
+- Only safe commentary and factual tool lifecycle are emitted. Private reasoning is neither shown
+  nor stored. Worker evidence is returned to the lead for synthesis; a failed or credit-blocked
+  worker is isolated instead of failing the whole team.
+- The chat transcript stores swarm snapshots in the normal turn-event ledger. Reconnect and
+  history replay therefore reconstruct the same compact team row and expanded worker state.
+- Inline controls support pause, resume, stop, worker stop, and lead steering. A chat-wide Stop
+  cascades through active and queued workers before releasing the conversation lease.
+
 - HTTP: `/v1/agents`, `/v1/specialists`, `/v1/adapters`, `/v1/harness`, `/v1/command`,
   `/v1/conversations`, `/v1/terminal`.
 - Tools: `agentis.agents.{list,create}`, `agentis.agent.{spawn,dispatch}`,
-  `agentis.specialist.{create,request}`, `agentis.routing.preview`.
+  `agentis.specialist.{create,request}`, `agentis.team.spawn`, `agentis.routing.preview`.
 
 ---
 

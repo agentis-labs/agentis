@@ -3299,6 +3299,56 @@ CREATE INDEX IF NOT EXISTS idx_conversations_channel_handoff
 `,
   },
   {
+    version: 132,
+    name: 'durable_chat_swarms',
+    sql: `
+CREATE TABLE conversation_swarms (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,
+  coordinator_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL,
+  merge_strategy TEXT NOT NULL DEFAULT 'collect_all',
+  max_workers INTEGER NOT NULL DEFAULT 6,
+  max_parallel INTEGER NOT NULL DEFAULT 3,
+  status TEXT NOT NULL DEFAULT 'queued',
+  steering TEXT NOT NULL DEFAULT '[]',
+  synthesis TEXT,
+  error TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_conversation_swarms_turn ON conversation_swarms(workspace_id, turn_id, created_at);
+CREATE INDEX idx_conversation_swarms_active ON conversation_swarms(workspace_id, conversation_id, status, updated_at);
+CREATE TABLE conversation_swarm_workers (
+  id TEXT PRIMARY KEY,
+  swarm_id TEXT NOT NULL REFERENCES conversation_swarms(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  parent_worker_id TEXT,
+  durable_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  role TEXT NOT NULL DEFAULT 'temporary specialist',
+  task TEXT NOT NULL,
+  capability_tags TEXT NOT NULL DEFAULT '[]',
+  runtime TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  latest_progress TEXT,
+  result TEXT,
+  error TEXT,
+  retry_of_worker_id TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_conversation_swarm_workers_ordinal ON conversation_swarm_workers(swarm_id, ordinal);
+CREATE INDEX idx_conversation_swarm_workers_active ON conversation_swarm_workers(workspace_id, swarm_id, status, updated_at);
+`,
+  },
+  {
     version: 131,
     name: 'extension_browser_checkpoints',
     sql: `
@@ -3316,6 +3366,55 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_browser_checkpoint_owner
   ON extension_browser_checkpoints(workspace_id, extension_id, session_name);
 CREATE INDEX IF NOT EXISTS idx_extension_browser_checkpoint_recent
   ON extension_browser_checkpoints(workspace_id, last_used_at);
+`,
+  },
+  {
+    version: 133,
+    name: 'agent_consultations',
+    sql: `
+CREATE TABLE agent_consultations (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  caller_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  target_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  target_role TEXT,
+  parent_consultation_id TEXT,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  turn_id TEXT,
+  run_id TEXT REFERENCES workflow_runs(id) ON DELETE SET NULL,
+  parent_session_id TEXT,
+  source TEXT NOT NULL DEFAULT 'chat',
+  status TEXT NOT NULL DEFAULT 'active',
+  round_count INTEGER NOT NULL DEFAULT 0,
+  max_rounds INTEGER NOT NULL DEFAULT 3,
+  depth INTEGER NOT NULL DEFAULT 1,
+  substituted INTEGER NOT NULL DEFAULT 0,
+  requested_target_agent_id TEXT,
+  continuation_payload TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  completed_at TEXT
+);
+CREATE INDEX idx_agent_consultations_workspace ON agent_consultations(workspace_id, created_at);
+CREATE INDEX idx_agent_consultations_conversation ON agent_consultations(workspace_id, conversation_id, created_at);
+CREATE INDEX idx_agent_consultations_run ON agent_consultations(workspace_id, run_id, created_at);
+CREATE INDEX idx_agent_consultations_caller ON agent_consultations(workspace_id, caller_agent_id, created_at);
+CREATE INDEX idx_agent_consultations_target ON agent_consultations(workspace_id, target_agent_id, created_at);
+
+CREATE TABLE agent_consultation_messages (
+  id TEXT PRIMARY KEY,
+  consultation_id TEXT NOT NULL REFERENCES agent_consultations(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  sequence_number INTEGER NOT NULL,
+  author_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE UNIQUE INDEX uq_agent_consultation_messages_sequence ON agent_consultation_messages(consultation_id, sequence_number);
+CREATE INDEX idx_agent_consultation_messages_consultation ON agent_consultation_messages(consultation_id, created_at);
 `,
   },
 ];

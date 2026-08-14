@@ -306,5 +306,5 @@ function isTerminal(status: string): boolean {
 }
 
 function isSuccess(status: string): boolean {
-  return status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION';
+  return status === 'COMPLETED';
 }

@@ -242,6 +242,18 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
 
     // 2d. ACCOMPLISHED — verified against the world. Done.
     if (verdict.outcome === 'accomplished') {
+      // Passing world probes does not erase an invalid execution envelope. A
+      // contract-violating/error completion cannot satisfy the clean-debug gate
+      // and therefore cannot be delivered or published.
+      if (settle.status !== 'COMPLETED') {
+        if (i < maxIterations) {
+          mark('retry', `World checks passed but run settled ${settle.status}; retrying for a clean execution proof`);
+          continue;
+        }
+        return fail(timeline, workflowId, 'failed', `World checks passed, but the run never produced a clean execution proof (last status ${settle.status}).`, {
+          appId, runId: settle.runId, verdict, iterations: i,
+        });
+      }
       // The engine records this too. Do it at the delivery boundary so a
       // successful embedded run can always progress through revision gates.
       revisions.recordProof({
@@ -262,7 +274,7 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
         runId: settle.runId,
         evidence: { verdict: verdict.outcome, delivery: true },
       });
-      const publication = await publishVerifiedCandidate(deps, revisions, ctx, workflowId, target.revisionId);
+      const publication = await publishVerifiedCandidate(deps, revisions, ctx, workflowId, target.revisionId, settle.runId);
       mark('accomplished', `Verified: ${verdict.checks.filter((c) => c.passed).length}/${verdict.checks.length} acceptance check(s) passed`);
       if (publication.kind === 'promoted') {
         mark('published', `Promoted verified safe revision ${publication.revisionId}`);
@@ -273,6 +285,10 @@ export async function deliverWorkflow(deps: ToolHandlerDeps, ctx: DeliverCtx, ar
           approvalId: publication.approvalId, timeline, compass: compassOf(deps, ctx, workflowId),
           message: 'The draft is verified, but publishing it requires an operator approval because it can run code or send data outward.',
         };
+      } else if (publication.kind === 'not_ready') {
+        return fail(timeline, workflowId, 'failed', 'The run was clean and accomplished, but immutable revision proof gates did not permit publication.', {
+          appId, runId: settle.runId, verdict, iterations: i,
+        });
       }
       return {
         delivered: true, published: publication.kind === 'promoted' || publication.kind === 'already_active', outcome: 'accomplished', workflowId, appId, runId: settle.runId, iterations, verdict,
@@ -313,6 +329,7 @@ async function publishVerifiedCandidate(
   ctx: DeliverCtx,
   workflowId: string,
   revisionId: string,
+  deliveryRunId: string,
 ): Promise<{ kind: 'promoted'; revisionId: string } | { kind: 'already_active' } | { kind: 'not_ready' } | { kind: 'approval_required'; approvalId: string }> {
   const active = revisions.active(ctx.workspaceId, workflowId);
   if (active.revision.id === revisionId) return { kind: 'already_active' };
@@ -322,13 +339,22 @@ async function publishVerifiedCandidate(
   const missingNonApproval = proof.missing.filter((gate) => gate !== 'operator_approval');
   if (missingNonApproval.length > 0 || !proof.specMatchesCurrent) return { kind: 'not_ready' };
   if (!proof.approvalRequired) {
-    const promoted = revisions.promote({
+    const promoted = active.workflow.appId
+      ? revisions.promoteFromAppDelivery({
+          workspaceId: ctx.workspaceId,
+          workflowId,
+          revisionId,
+          expectedActiveRevisionId: active.revision.id,
+          actor: { type: ctx.agentId ? 'agent' : 'system', id: ctx.agentId ?? null },
+          deliveryRunId,
+        })
+      : revisions.promote({
       workspaceId: ctx.workspaceId,
       workflowId,
       revisionId,
       expectedActiveRevisionId: active.revision.id,
       actor: { type: ctx.agentId ? 'agent' : 'system', id: ctx.agentId ?? null },
-    });
+        });
     return { kind: 'promoted', revisionId: promoted.revisionId };
   }
   const existing = deps.approvals.list(ctx.workspaceId, 'pending').find((approval) =>
@@ -347,7 +373,14 @@ async function publishVerifiedCandidate(
     title: `Approve workflow revision: ${active.workflow.title}`,
     summary: `Promote verified candidate ${revisionId} (${candidate.revision.semanticHash.slice(0, 12)}). It can run code or send data outward.`,
     confidence: null,
-    payload: { workspaceId: ctx.workspaceId, workflowId, revisionId, semanticHash: candidate.revision.semanticHash, expectedActiveRevisionId: active.revision.id },
+    payload: {
+      workspaceId: ctx.workspaceId,
+      workflowId,
+      revisionId,
+      semanticHash: candidate.revision.semanticHash,
+      expectedActiveRevisionId: active.revision.id,
+      ...(active.workflow.appId ? { publicationAuthority: 'app_delivery', deliveryRunId } : {}),
+    },
   });
   return { kind: 'approval_required', approvalId: approval.id };
 }

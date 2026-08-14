@@ -12,6 +12,12 @@ beforeEach(async () => { ctx = await createTestContext(); });
 afterEach(() => ctx.close());
 
 describe('agentis.app.doctor', () => {
+  it('registers the authoritative app delivery paved road', () => {
+    const registry = new AgentisToolRegistry({ logger: ctx.logger });
+    registerAppDoctorTools(registry, { db: ctx.db } as ToolHandlerDeps);
+    expect(registry.get('agentis.app.deliver')).toMatchObject({ family: 'build', mutating: true, mcpExposed: true });
+  });
+
   it('is read-only, workspace-scoped, and returns structured remediation', async () => {
     const appId = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Doctor fixture' }).id;
     const graph: WorkflowGraph = { version: 1, viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], edges: [] };

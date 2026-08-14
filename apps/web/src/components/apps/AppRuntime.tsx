@@ -191,6 +191,7 @@ export function AppRuntime({ appId, surfaceName, hideShellNav = false }: { appId
             uiState,
             allowCustomCode,
             dataRevision,
+            operatorMode: true,
           }
         : null,
     [allowCustomCode, appId, client, dataRevision, surface, uiState],

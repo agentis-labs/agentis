@@ -57,6 +57,7 @@ export function SurfaceCanvas({
       uiState: {},
       allowCustomCode: false,
       dataRevision,
+      operatorMode: true,
     }),
     [appId, client, dataRevision],
   );

@@ -431,6 +431,12 @@ describe('ChatSessionExecutor', () => {
     const resumed = await collect(ChatSessionExecutor.confirm(adapter, confirmation!.turnId, true, ctx));
 
     expect(mutatingToolCalls).toBe(1);
+    const resumedActivity = resumed.filter((delta): delta is Extract<ChatDelta, { type: 'activity' }> =>
+      delta.type === 'activity' && delta.id === 'chat-tool-tool_write');
+    expect(resumedActivity[0]).toEqual(expect.objectContaining({ status: 'running', label: expect.stringMatching(/Using write test/i) }));
+    expect(resumedActivity.at(-1)).toEqual(expect.objectContaining({ status: 'success', label: expect.stringMatching(/Used write test/i) }));
+    expect(resumed.findIndex((delta) => delta.type === 'activity' && delta.status === 'running'))
+      .toBeLessThan(resumed.findIndex((delta) => delta.type === 'tool_result' && delta.name === 'agentis.write_test'));
     expect(resumed.some((delta) => delta.type === 'tool_result' && delta.name === 'agentis.write_test')).toBe(true);
     expect(resumed).toContainEqual({ type: 'text', delta: 'write complete' });
     expect(adapter.calls).toHaveLength(2);
@@ -1359,6 +1365,92 @@ describe('ChatSessionExecutor', () => {
     expect(deltas.some((delta) => delta.type === 'commentary' && delta.text === 'I will inspect the available agents first.')).toBe(true);
     expect(deltas.some((delta) => delta.type === 'commentary' && delta.source === 'assistant_preamble' && delta.text === 'I will inspect the repository first.')).toBe(true);
     expect(deltas.some((delta) => delta.type === 'tool_call' && delta.id === 'inspect-1')).toBe(true);
+  });
+
+  it('does not invent commentary when a runtime emits a bare tool call', async () => {
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'tool_call', id: 'inspect-1', name: 'agentis.list_agents', args: {} };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Inspection complete.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'Inspect it', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_no_fake_commentary',
+    }));
+
+    expect(deltas.some((delta) => delta.type === 'commentary' && delta.source === 'host')).toBe(false);
+    expect(deltas.some((delta) => delta.type === 'activity' && /list agents/i.test(delta.label))).toBe(true);
+  });
+
+  it('streams assistant progress before the tool-call round finishes', async () => {
+    let releaseToolCall!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseToolCall = resolve; });
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'text', delta: 'I found the blocked workflow. ' };
+        await gate;
+        yield { type: 'text', delta: 'I am loading its repair capability now.' };
+        yield { type: 'tool_call', id: 'load-1', name: 'agentis.list_agents', args: {} };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Repair capability loaded.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+    const iterator = ChatSessionExecutor.turn(adapter, [], 'Repair it', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_progressive',
+    })[Symbol.asyncIterator]();
+
+    let firstProgress: Extract<ChatDelta, { type: 'commentary' }> | undefined;
+    for (let index = 0; index < 8; index += 1) {
+      const next = await iterator.next();
+      if (next.done) break;
+      if (next.value.type === 'commentary' && next.value.text.includes('blocked workflow')) {
+        firstProgress = next.value;
+        break;
+      }
+    }
+
+    expect(firstProgress?.text).toBe('I found the blocked workflow.');
+    releaseToolCall();
+    const remaining: ChatDelta[] = [];
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) break;
+      remaining.push(next.value);
+    }
+    expect(remaining).toContainEqual(expect.objectContaining({
+      type: 'commentary',
+      id: firstProgress?.id,
+      text: 'I found the blocked workflow.',
+    }));
+  });
+
+  it('keeps public progress to one bounded sentence', async () => {
+    const longFollowUp = 'I am now describing routine implementation details that should not become a second answer in the live work transcript. '.repeat(4);
+    const adapter = new FakeChatAdapter(async function* (_messages, _tools, callIndex) {
+      if (callIndex === 0) {
+        yield { type: 'commentary', id: 'compact-progress', text: `I found the cause. ${longFollowUp}`, source: 'reasoning_summary', createdAt: new Date().toISOString() };
+        yield { type: 'tool_call', id: 'inspect-compact', name: 'agentis.list_agents', args: {} };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      yield { type: 'text', delta: 'Done.' };
+      yield { type: 'done', finishReason: 'stop' };
+    });
+
+    const deltas = await collect(ChatSessionExecutor.turn(adapter, [], 'Inspect it', {
+      workspaceId: 'ws_1', agentId: 'agent_1', userId: 'user_1', conversationId: 'conv_compact_progress',
+    }));
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'commentary',
+      id: 'compact-progress',
+      text: 'I found the cause.',
+    }));
   });
 
   it('streams runtime activity before the model turn completes', async () => {

@@ -764,15 +764,20 @@ export interface DataQueryNodeConfig {
 /** Write to an Agentic App datastore collection from a workflow (insert/update/upsert/delete). */
 export interface DataMutateNodeConfig {
   kind: 'data_mutate';
-  appId: string;
+  /** Omitted = resolve the App that owns the running workflow. */
+  appId?: string;
   collection: string;
   operation: 'insert' | 'update' | 'upsert' | 'delete';
   /** Record body for insert/update/upsert (may contain `{{variable}}` templates). */
   record?: Record<string, unknown>;
+  /** Transactional batch body for insert/upsert. Maximum 1,000 records. */
+  records?: Array<Record<string, unknown>>;
   /** Target record id for update/delete. */
   recordId?: string;
   /** Match filter for upsert. */
   match?: Record<string, unknown>;
+  /** Fields copied from each batch record to form its upsert match filter. */
+  matchFields?: string[];
   outputKey?: string;
 }
 

@@ -2,7 +2,7 @@
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { normalizeToolInvocation, REALTIME_EVENTS, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
+import { initialTurnActivityLabel, normalizeAgentPlanText, normalizeToolInvocation, REALTIME_EVENTS, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatSwarm, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { PermissionModePicker } from './PermissionModePicker';
 import { api, apiErrorMessage, streamSse } from '../../lib/api';
 import { useViewportAwareness } from '../../lib/viewportContext';
@@ -16,6 +16,7 @@ import type { ProactiveCardData } from './ProactiveCard';
 import { ChatMarkdown } from './ChatMarkdown';
 import { useChatPanelStore } from './ChatPanelStore';
 import { AgentTurnTrace } from './AgentTurnTrace';
+import { ChatSwarmTrace } from './ChatSwarmTrace';
 import { dedupeMessages, mergeMessage, prependUnique, sortMessages, upsertMessage } from './messageModel';
 import { useAutoScroll } from '../../hooks/useAutoScroll';
 import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachments';
@@ -94,7 +95,10 @@ interface MessageMeta {
   plan?: ChatPlan;
   executionEnvelope?: ChatExecutionEnvelope;
   contextManifest?: ChatContextManifest;
+  swarms?: ChatSwarm[];
   durableTurnId?: string;
+  /** Concrete runtime failure preserved even when partial work already exists. */
+  failureMessage?: string;
 }
 
 type ConfirmationStatus = 'pending' | 'approving' | 'approved' | 'cancelled' | 'failed';
@@ -158,10 +162,25 @@ const PAGE_SIZE = 50;
 function streamErrorMessage(data: unknown): string {
   if (data && typeof data === 'object') {
     const message = (data as { message?: unknown }).message;
-    if (typeof message === 'string' && message.trim()) return message.trim();
+    if (typeof message === 'string' && message.trim()) return explainChatFailure(message.trim());
   }
-  if (typeof data === 'string' && data.trim()) return data.trim();
+  if (typeof data === 'string' && data.trim()) return explainChatFailure(data.trim());
   return 'The agent runtime reported an error. Check the runtime settings and try again.';
+}
+
+function explainChatFailure(message: string): string {
+  if (/\b402\b|requires more credits|add more credits|insufficient(?:[_\s]+\w+)?[_\s]+credits?|out of credits?|no credits?|insufficient[_\s]?(?:quota|funds|balance)|quota exceeded|exceeded your current quota|billing|payment required/i.test(message)) {
+    return `${message} The selected model provider is out of credits or quota. Add credits or choose another model, then retry.`;
+  }
+  return message;
+}
+
+function withChatFailure(message: ChatMessage, failureMessage: string): ChatMessage {
+  return {
+    ...message,
+    deliveryStatus: 'failed',
+    metadata: { ...(message.metadata ?? {}), failureMessage },
+  };
 }
 
 function taskLabel(message: string): string {
@@ -169,6 +188,21 @@ function taskLabel(message: string): string {
   const clean = firstLine.replace(/\s+/g, ' ').trim();
   if (!clean) return 'Working…';
   return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean;
+}
+
+function immediateTurnActivity(clientTurnId: string, agentId: string, message: string, startedAt: string): Extract<ChatDelta, { type: 'activity' }>[] {
+  const label = initialTurnActivityLabel(message);
+  if (label === 'Request received') return [];
+  return [{
+    type: 'activity',
+    id: `activity-${clientTurnId}-received`,
+    phase: 'received',
+    status: 'running',
+    label,
+    clientTurnId,
+    agentId,
+    startedAt,
+  }];
 }
 
 /** Fallback body text when a message carries attachments but no caption — the backend requires a non-empty body. */
@@ -260,18 +294,6 @@ function firstString(source: Record<string, unknown>, keys: string[]): string | 
   return undefined;
 }
 
-function roomWaitingActivity(agentId: string, name: string, startedAt: string): ChatActivity {
-  return {
-    type: 'activity',
-    id: `room-waiting-${agentId}-${startedAt}`,
-    phase: 'runtime',
-    status: 'running',
-    label: `Starting ${name}`,
-    startedAt,
-    agentId,
-  };
-}
-
 export function roomRealtimeActivity(event: string, payload: Record<string, unknown>): ChatActivity | null {
   const agentId = firstString(payload, ['agentId']);
   if (!agentId) return null;
@@ -337,12 +359,26 @@ function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
         text = `**@${target}** ${unquoted}`;
       }
     }
+  } else if (event.kind === 'consultation' && event.consultation) {
+    const dialogue = event.consultation.messages
+      .filter((message) => message.kind === 'question' || message.kind === 'answer')
+      .map((message) => {
+        const speaker = message.authorAgentId === event.consultation!.caller.id
+          ? event.consultation!.caller.name
+          : event.consultation!.target.name;
+        return `**${speaker}:** ${message.body}`;
+      })
+      .join('\n\n');
+    const fallback = event.consultation.substituted
+      ? '\n\n_The requested agent was unavailable; a compatible specialist was substituted._'
+      : '';
+    text = `**${event.summary}**${fallback}${dialogue ? `\n\n${dialogue}` : ''}`;
   }
 
   return {
     id: `interaction-${event.id}`,
     authorId: event.actor.id ?? 'system',
-    authorName: event.actor.id ?? 'System',
+    authorName: event.consultation?.caller.name ?? event.actor.id ?? 'System',
     authorKind: event.actor.type === 'agent' ? 'agent' : 'system',
     text,
     createdAt: event.at,
@@ -441,6 +477,8 @@ export function ThreadView({
   const [permissionMode, setPermissionModeState] = useState<ChatPermissionMode>('ask');
   const [activeDurableTurn, setActiveDurableTurn] = useState<DurableConversationTurn | null>(null);
   const activeDurableTurnIdRef = useRef<string | null>(null);
+  const activeClientTurnIdRef = useRef<string | null>(null);
+  const stopRequestedClientTurnsRef = useRef(new Set<string>());
   const resumedTurnIdsRef = useRef(new Set<string>());
   useEffect(() => {
     if (kind !== 'agent') return;
@@ -543,7 +581,7 @@ export function ThreadView({
       // message isn't rendered a SECOND time; keep interactions from other rooms.
       const roomMsgIds = new Set((data.messages ?? []).map((m) => m.id));
       const interactionMessages = (interactions.events ?? [])
-        .filter((e) => e.kind === 'message' && !roomMsgIds.has(e.id))
+        .filter((e) => e.kind === 'consultation' || (e.kind === 'message' && !roomMsgIds.has(e.id)))
         .map(normalizeInteractionMessage);
       return sortMessages([...roomMessages, ...interactionMessages]);
     }
@@ -569,6 +607,7 @@ export function ThreadView({
     const targetConversationId = loadedConversationId ?? conversationId;
     setActiveDurableTurn(null);
     activeDurableTurnIdRef.current = null;
+    activeClientTurnIdRef.current = null;
     if (kind !== 'agent' || readOnly || !targetConversationId) return;
     let cancelled = false;
     void api<{ turns: DurableConversationTurn[] }>(`/v1/conversations/${id}/turns/active?conversationId=${encodeURIComponent(targetConversationId)}`)
@@ -592,7 +631,7 @@ export function ThreadView({
       `/v1/conversations/${id}/turns?conversationId=${encodeURIComponent(targetConversationId)}&limit=${PAGE_SIZE}`,
     ).then(({ history }) => {
       if (cancelled) return;
-      setMessages((current) => hydrateDurableTurnHistory(current, history));
+      setMessages((current) => hydrateDurableTurnHistory(current, history ?? []));
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [conversationId, id, kind, loadedConversationId]);
@@ -617,6 +656,7 @@ export function ThreadView({
     const toolStartedAt = new Map<string, number>();
     let streamedBody = '';
     const clientTurnId = createClientTurnId();
+    activeClientTurnIdRef.current = clientTurnId;
     const createdAt = new Date().toISOString();
     const streamId = `stream-${clientTurnId}`;
 
@@ -649,6 +689,16 @@ export function ThreadView({
           startedAt: createdAt,
           status: 'running',
         },
+        activity: [{
+          type: 'activity',
+          id: `activity-${clientTurnId}-confirmation`,
+          phase: 'tool',
+          status: 'running',
+          label: confirmed ? confirmation.confirmLabel : confirmation.cancelLabel,
+          clientTurnId,
+          agentId: id,
+          startedAt: createdAt,
+        }],
       },
     };
     setMessages((current) => dedupeMessages([...current, streamingMessage]));
@@ -673,7 +723,7 @@ export function ThreadView({
                     }
                   : message
               )));
-            } else if (delta.type === 'activity' || delta.type === 'commentary') {
+            } else if (delta.type === 'activity' || delta.type === 'commentary' || delta.type === 'swarm') {
               setMessages((current) => current.map((message) => (
                 message.id === streamId ? withTurnProgress(message, delta) : message
               )));
@@ -974,7 +1024,7 @@ export function ThreadView({
   // REFETCH the room's own messages (the agent replies the broadcast dispatcher
   // posts) plus the latest interaction events, and merge. This guarantees a reply
   // appears without depending on live event-payload matching.
-  useRealtime(['activity.created', REALTIME_EVENTS.ROOM_MESSAGE_SENT, REALTIME_EVENTS.ROOM_MESSAGE_RECEIVED], () => {
+  useRealtime(['activity.created', 'agent.consultation.updated', REALTIME_EVENTS.ROOM_MESSAGE_SENT, REALTIME_EVENTS.ROOM_MESSAGE_RECEIVED], () => {
     if (id !== '__broadcast__') return;
     void Promise.all([
       api<{ messages: RoomMsg[] }>(`/v1/rooms/__broadcast__/messages?limit=${PAGE_SIZE}`)
@@ -1002,7 +1052,7 @@ export function ThreadView({
         for (const event of events) {
           // Skip interaction 'message' events that ARE these room messages (same
           // id) — they'd render a duplicate bubble. Keep agent chatter elsewhere.
-          if (event.kind === 'message' && !roomMsgIds.has(event.id)) {
+          if (event.kind === 'consultation' || (event.kind === 'message' && !roomMsgIds.has(event.id))) {
             updated = mergeMessage(updated, normalizeInteractionMessage(event));
           }
         }
@@ -1030,9 +1080,7 @@ export function ThreadView({
     const activity = roomRealtimeActivity(env.event, payload);
     if (!activity?.agentId || !pendingResponders.includes(activity.agentId)) return;
     setRoomResponderActivities((prev) => {
-      const current = prev[activity.agentId!] ?? [
-        roomWaitingActivity(activity.agentId!, agentMap[activity.agentId!]?.name ?? 'Agent', activity.startedAt ?? new Date().toISOString()),
-      ];
+      const current = prev[activity.agentId!] ?? [];
       const deduped = current.filter((entry) => entry.id !== activity.id);
       return { ...prev, [activity.agentId!]: [...deduped, activity].slice(-40) };
     });
@@ -1214,7 +1262,7 @@ export function ThreadView({
           setRoomResponderActivities(Object.fromEntries(
             responders.map((agentId) => [
               agentId,
-              [roomWaitingActivity(agentId, agentMap[agentId]?.name ?? 'Agent', postAt)],
+              [],
             ]),
           ));
           if (broadcastPendingTimerRef.current) window.clearTimeout(broadcastPendingTimerRef.current);
@@ -1253,16 +1301,7 @@ export function ThreadView({
         source: 'chat_loop',
         clientTurnId,
         turn: { clientTurnId, startedAt: createdAt, status: 'running' },
-        activity: [{
-          type: 'activity',
-          id: `activity-${clientTurnId}-local-start`,
-          phase: 'runtime',
-          status: 'running',
-          label: `Starting ${name}`,
-          startedAt: createdAt,
-          agentId: id,
-          clientTurnId,
-        }],
+        activity: immediateTurnActivity(clientTurnId, id, bodyText, createdAt),
       },
     };
 
@@ -1300,6 +1339,12 @@ export function ThreadView({
       if (created.message) {
         setMessages((current) => mergeMessage(current, normalizeAgentMessage(created.message!)));
       }
+      // If Stop was clicked while POST /turns was in flight, this is the first
+      // moment an id exists. Cancel server work before opening the event stream.
+      if (stopRequestedClientTurnsRef.current.has(clientTurnId)) {
+        await api(`/v1/conversations/${id}/turns/${created.turn.id}/cancel`, { method: 'POST' });
+        throw new DOMException('operator_stop', 'AbortError');
+      }
       await streamSse(`/v1/conversations/${id}/turns/${created.turn.id}/events?after=0`, {
         method: 'GET',
         signal: controller.signal,
@@ -1314,7 +1359,7 @@ export function ThreadView({
                   ? { ...message, text: streamedBody, deliveryStatus: 'sending' }
                   : message
               )));
-            } else if (delta.type === 'activity' || delta.type === 'commentary') {
+            } else if (delta.type === 'activity' || delta.type === 'commentary' || delta.type === 'swarm') {
               if (delta.type === 'activity') updateActiveTask({ label: delta.label });
               setMessages((current) => current.map((message) => (
                 message.id === streamId ? withTurnProgress(message, delta) : message
@@ -1378,17 +1423,17 @@ export function ThreadView({
               return mergeMessage(delivered, incoming);
             });
           } else if (event === 'error') {
-            const message = streamErrorMessage(data);
+            const failureMessage = streamErrorMessage(data);
             setAgentTyping(false);
             setActiveTask(null);
-            setMessages((current) => current.map((message) => (
-              message.id === streamId
-                ? { ...message, text: message.text || streamErrorMessage(data), deliveryStatus: 'failed' }
-                : message.id === operatorMessage.id
-                  ? { ...message, deliveryStatus: 'delivered' }
-                  : message
+            setMessages((current) => current.map((item) => (
+              item.id === streamId
+                ? withChatFailure({ ...item, text: item.text || failureMessage }, failureMessage)
+                : item.id === operatorMessage.id
+                  ? { ...item, deliveryStatus: 'delivered' }
+                  : item
             )));
-            toast.error('Agent could not reply', message);
+            toast.error('Agent could not reply', failureMessage);
           }
         },
       });
@@ -1427,14 +1472,22 @@ export function ThreadView({
       }));
       if (!stopped) toast.error('Failed to send', apiErrorMessage(error));
     } finally {
-      activeChatAbortRef.current = null;
-      activeDurableTurnIdRef.current = null;
+      if (activeClientTurnIdRef.current === clientTurnId) {
+        activeChatAbortRef.current = null;
+        activeDurableTurnIdRef.current = null;
+        activeClientTurnIdRef.current = null;
+        stopRequestedClientTurnsRef.current.delete(clientTurnId);
+      }
     }
   }
 
   function stopActiveTurn() {
+    const clientTurnId = activeClientTurnIdRef.current;
+    if (clientTurnId) stopRequestedClientTurnsRef.current.add(clientTurnId);
     activeChatAbortRef.current?.abort();
     const durableTurnId = activeDurableTurnIdRef.current ?? activeDurableTurn?.id;
+    setAgentTyping(false);
+    setActiveTask(null);
     if (durableTurnId && kind === 'agent') {
       void api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${durableTurnId}/cancel`, { method: 'POST' })
         .then(() => {
@@ -1442,6 +1495,13 @@ export function ThreadView({
           setAgentTyping(false);
           setActiveTask(null);
         })
+        .catch((error) => toast.error('Could not stop mission', apiErrorMessage(error)));
+      return;
+    }
+    if (clientTurnId && kind === 'agent') {
+      // A null response simply means POST /turns has not committed yet; the
+      // post-create guard above repeats cancellation as soon as it has.
+      void api(`/v1/conversations/${id}/turns/by-client/${clientTurnId}/cancel`, { method: 'POST' })
         .catch((error) => toast.error('Could not stop mission', apiErrorMessage(error)));
       return;
     }
@@ -1512,6 +1572,7 @@ export function ThreadView({
     });
     setActiveDurableTurn(turn);
     activeDurableTurnIdRef.current = turn.id;
+    activeClientTurnIdRef.current = turn.clientTurnId;
     setAgentTyping(turn.status === 'running' || turn.status === 'queued');
     const controller = new AbortController();
     activeChatAbortRef.current?.abort();
@@ -1525,7 +1586,7 @@ export function ThreadView({
           if (delta.type === 'text') {
             streamedBody += delta.delta;
             setMessages((current) => current.map((message) => message.id === streamId ? { ...message, text: streamedBody } : message));
-          } else if (delta.type === 'activity' || delta.type === 'commentary') {
+          } else if (delta.type === 'activity' || delta.type === 'commentary' || delta.type === 'swarm') {
             if (delta.type === 'activity') updateActiveTask({ label: delta.label });
             setMessages((current) => current.map((message) => (
               message.id === streamId ? withTurnProgress(message, delta) : message
@@ -1554,16 +1615,20 @@ export function ThreadView({
           setMessages((current) => mergeMessage(current, persisted));
         } else if (event === 'error') {
           setAgentTyping(false);
-          setMessages((current) => current.map((message) => message.id === streamId
-            ? { ...message, text: message.text || streamErrorMessage(data), deliveryStatus: 'failed' }
-            : message));
+          const message = streamErrorMessage(data);
+          setMessages((current) => current.map((item) => item.id === streamId
+            ? withChatFailure({ ...item, text: item.text || message }, message)
+            : item));
         }
       },
     }).then(() => api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${turn.id}`))
       .then(({ turn: latest }) => {
         const terminal = latest.status === 'completed' || latest.status === 'failed' || latest.status === 'cancelled';
         setActiveDurableTurn(terminal ? null : latest);
-        if (terminal) activeDurableTurnIdRef.current = null;
+        if (terminal) {
+          activeDurableTurnIdRef.current = null;
+          if (activeClientTurnIdRef.current === turn.clientTurnId) activeClientTurnIdRef.current = null;
+        }
       })
       .catch((error) => {
         if (!(error instanceof DOMException && error.name === 'AbortError')) toast.error('Could not reconnect to mission', apiErrorMessage(error));
@@ -1640,16 +1705,7 @@ export function ThreadView({
         source: 'chat_loop',
         clientTurnId,
         turn: { clientTurnId, startedAt: createdAt, status: 'running' },
-        activity: [{
-          type: 'activity',
-          id: `activity-${clientTurnId}-local-rewrite`,
-          phase: 'runtime',
-          status: 'running',
-          label: `Starting ${name}`,
-          startedAt: new Date().toISOString(),
-          agentId: id,
-          clientTurnId,
-        }],
+        activity: immediateTurnActivity(clientTurnId, id, value, createdAt),
       },
     };
 
@@ -1693,7 +1749,7 @@ export function ThreadView({
                   ? { ...item, text: streamedBody, deliveryStatus: 'sending' }
                   : item
               )));
-            } else if (delta.type === 'activity' || delta.type === 'commentary') {
+            } else if (delta.type === 'activity' || delta.type === 'commentary' || delta.type === 'swarm') {
               if (delta.type === 'activity') updateActiveTask({ label: delta.label });
               setMessages((current) => current.map((item) => (
                 item.id === streamId ? withTurnProgress(item, delta) : item
@@ -1744,7 +1800,7 @@ export function ThreadView({
             setActiveTask(null);
             setMessages((current) => current.map((item) => (
               item.id === streamId
-                ? { ...item, text: item.text || errorMessage, deliveryStatus: 'failed' }
+                ? withChatFailure({ ...item, text: item.text || errorMessage }, errorMessage)
                 : item
             )));
             toast.error('Agent could not reply', errorMessage);
@@ -1859,7 +1915,7 @@ export function ThreadView({
                 </button>
               </li>
             )}
-            {messages.filter((message) => message.metadata?.source !== 'proactive' && !(message.metadata?.card && !message.text.trim())).map((message) => (
+            {messages.filter((message) => message.metadata?.source !== 'proactive' && message.metadata?.source !== 'workflow' && !(message.metadata?.card && !message.text.trim())).map((message) => (
               <MessageBubble
                 key={message.id}
                 msg={message}
@@ -1872,6 +1928,7 @@ export function ThreadView({
                 onSaveEdit={(text) => void handleEditSave(message, text)}
                 onCancelEdit={() => setEditingId(null)}
                 onConfirmAction={(confirmation, approved) => void handleConfirmationAction(message.id, confirmation, approved)}
+                chatAgentId={kind === 'agent' ? id : undefined}
               />
             ))}
             {kind === 'agent' && pendingQueue.map((item) => (
@@ -1893,9 +1950,7 @@ export function ThreadView({
           <div className="mt-2 space-y-2 px-1">
             {pendingResponders.map((agentId) => {
               const responderName = agentMap[agentId]?.name ?? 'Agent';
-              const activities = roomResponderActivities[agentId] ?? [
-                roomWaitingActivity(agentId, responderName, broadcastPostAtRef.current ?? new Date().toISOString()),
-              ];
+              const activities = roomResponderActivities[agentId] ?? [];
               return (
                 <div key={agentId} className="rounded-lg border border-line/55 bg-surface-2/45 px-2.5 py-2">
                   <div className="mb-1.5 flex items-center gap-2 text-[11px] italic text-text-muted">
@@ -1993,10 +2048,14 @@ function upsertStable<T extends { id: string }>(items: T[], next: T, limit = 80)
   return copy.slice(-limit);
 }
 
-function withTurnProgress(message: ChatMessage, delta: Extract<ChatDelta, { type: 'activity' | 'commentary' }>): ChatMessage {
+function withTurnProgress(message: ChatMessage, delta: Extract<ChatDelta, { type: 'activity' | 'commentary' | 'swarm' }>): ChatMessage {
   const metadata = { ...(message.metadata ?? {}), source: message.metadata?.source ?? 'chat_loop' as const };
-  if (delta.type === 'commentary') {
-    metadata.commentary = upsertStable(message.metadata?.commentary ?? [], delta);
+  if (delta.type === 'swarm') {
+    metadata.swarms = upsertStable(message.metadata?.swarms ?? [], delta.swarm, 12);
+  } else if (delta.type === 'commentary') {
+    metadata.commentary = delta.text.trim()
+      ? upsertStable(message.metadata?.commentary ?? [], delta)
+      : (message.metadata?.commentary ?? []).filter((entry) => entry.id !== delta.id);
   } else {
     metadata.activity = upsertStable(message.metadata?.activity ?? [], delta);
   }
@@ -2030,8 +2089,8 @@ function hydrateDurableTurnHistory(
     for (const event of entry.events) {
       if (event.visibility === 'technical') continue;
       const delta = event.data as Partial<ChatDelta> | null;
-      if (delta?.type === 'commentary' || delta?.type === 'activity') {
-        hydrated = withTurnProgress(hydrated, delta as Extract<ChatDelta, { type: 'activity' | 'commentary' }>);
+      if (delta?.type === 'commentary' || delta?.type === 'activity' || delta?.type === 'swarm') {
+        hydrated = withTurnProgress(hydrated, delta as Extract<ChatDelta, { type: 'activity' | 'commentary' | 'swarm' }>);
       }
     }
     return hydrated;
@@ -2097,6 +2156,7 @@ function MessageBubble({
   onCancelEdit,
   onConfirmAction,
   showAuthor,
+  chatAgentId,
 }: {
   msg: ChatMessage;
   onCopy: () => void;
@@ -2108,13 +2168,17 @@ function MessageBubble({
   onConfirmAction: (confirmation: ConfirmationCardData, approved: boolean) => void;
   showAuthor?: boolean;
   agentData?: { name: string; role?: string | null; colorHex?: string | null };
+  chatAgentId?: string;
 }) {
   const isOperator = msg.authorKind === 'operator';
   const [editDraft, setEditDraft] = useState(msg.text);
   const streaming = msg.deliveryStatus === 'sending';
-  const body = msg.text;
+  // Render old/cached Plan-mode protocol as ordinary Markdown even while the
+  // message is streaming. Architecture JSON is internal data, never chat copy.
+  const body = isOperator ? msg.text : normalizeAgentPlanText(msg.text);
   const toolCalls = msg.metadata?.toolCalls ?? [];
   const activities = msg.metadata?.activity ?? [];
+  const swarms = msg.metadata?.swarms ?? [];
   const artifactIds = useMemo(() => {
     const ids = new Set(msg.artifactIds ?? []);
     toolCalls.forEach((call) => collectArtifactIds(call.result, ids));
@@ -2166,6 +2230,13 @@ function MessageBubble({
             />
           )}
           <ChatArtifactAttachments artifactIds={artifactIds} />
+          {!isOperator && msg.metadata?.failureMessage && (
+            <div role="alert" className="mb-3 flex max-w-[760px] items-start gap-2 rounded-lg border border-danger/35 bg-danger/8 px-3 py-2 text-[12px] leading-5 text-danger">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              <span>{msg.metadata.failureMessage}</span>
+            </div>
+          )}
+          {!isOperator && swarms.map((swarm) => <ChatSwarmTrace key={swarm.id} swarm={swarm} agentId={chatAgentId} />)}
           {!isEditing && body && (
             isOperator ? (
               <div className="mb-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{body}</div>

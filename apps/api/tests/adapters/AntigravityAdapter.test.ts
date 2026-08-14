@@ -191,7 +191,7 @@ describe('AntigravityAdapter', () => {
     expect(deltas.filter((delta) => delta.type === 'text')).toHaveLength(1);
   });
 
-  it('does not use an unrelated transcript as this turn\'s answer', async () => {
+  it('streams the new turn\'s safe transcript progress without exposing private thinking', async () => {
     const child = fakeChildProcess();
     spawnMock.mockReturnValue(child);
     const home = mkdtempSync(join(tmpdir(), 'agy-home-'));
@@ -211,12 +211,17 @@ describe('AntigravityAdapter', () => {
     mkdirSync(logsDir, { recursive: true });
     writeFileSync(join(logsDir, 'transcript_full.jsonl'),
       `${JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'write a poem' })}\n`
-      + `${JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', thinking: 'Planning the poem structure and imagery.', content: 'Here is a short poem about the sea.' })}\n`,
+      + `${JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'RUNNING', thinking: 'Planning the poem structure and imagery.', content: 'Here is a short poem about the sea.' })}\n`,
       'utf8');
 
     child.emit('exit', 0);
     await consume;
     expect(deltas.some((d) => d.type === 'text')).toBe(false);
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'commentary',
+      text: 'Here is a short poem about the sea.',
+    }));
+    expect(deltas.some((d) => d.type === 'commentary' && String(d.text).includes('Planning the poem structure'))).toBe(false);
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_result', error: expect.stringContaining('without a structured response') }));
   }, 10_000);
 
@@ -254,12 +259,40 @@ describe('AntigravityAdapter', () => {
       }])) deltas.push(delta);
     })();
 
-    child.stdout.write('{"type":"message","role":"assistant","content":"AGENTIS_TOOL_CALL {\\"name\\":\\"agentis.build_workflow\\",\\"arguments\\":{\\"description\\":\\"Hello World\\"}}"}\n');
+    child.stdout.write('{"type":"message","role":"assistant","content":"I found the workflow builder and will create the requested graph now.\\nAGENTIS_TOOL_CALL {\\"name\\":\\"agentis.build_workflow\\",\\"arguments\\":{\\"description\\":\\"Hello World\\"}}"}\n');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(deltas.filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text').map((delta) => delta.delta).join('')).toBe(
+      'I found the workflow builder and will create the requested graph now.\n',
+    );
     child.emit('exit', 0);
     await consume;
 
+    expect(deltas.filter((delta): delta is Extract<ChatDelta, { type: 'text' }> => delta.type === 'text').map((delta) => delta.delta).join('').trim()).toBe(
+      'I found the workflow builder and will create the requested graph now.',
+    );
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_call', name: 'agentis.build_workflow', args: { description: 'Hello World' } }));
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
+    expect(String((spawnMock.mock.calls[0]![1] as string[]).at(-1))).toContain('one short operator-facing progress sentence');
+  });
+
+  it('streams real native tool events without runtime lifecycle filler', async () => {
+    const child = fakeChildProcess();
+    spawnMock.mockReturnValue(child);
+    const adapter = new AntigravityAdapter({ agentId: 'agent-1', logger, binaryPath: 'agy-test' });
+    const deltas: ChatDelta[] = [];
+    const consume = (async () => {
+      for await (const delta of adapter.chat([{ role: 'user', content: 'inspect it' }], [])) deltas.push(delta);
+    })();
+
+    child.stdout.write('{"type":"tool_use","tool_name":"shell","tool_id":"native-1"}\n');
+    child.stdout.write('{"type":"tool_result","tool_name":"shell","tool_id":"native-1","status":"success","output":"done"}\n');
+    child.stdout.write('{"type":"message","role":"assistant","content":"Inspection complete."}\n');
+    child.emit('exit', 0);
+    await consume;
+
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', status: 'running', label: 'Using shell' }));
+    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', status: 'success', label: 'Used shell' }));
+    expect(deltas.some((delta) => delta.type === 'activity' && /starting antigravity|response ready/i.test(delta.label))).toBe(false);
   });
 
   it('emits task.failed when spawning fails', async () => {

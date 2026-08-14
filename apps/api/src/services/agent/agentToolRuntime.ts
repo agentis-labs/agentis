@@ -101,6 +101,7 @@ export interface PlatformToolCallContext {
   runId?: string;
   appId?: string;
   artifactPolicy?: ArtifactRetentionPolicy | null;
+  allowedToolIds?: string[];
 }
 
 export interface PlatformToolBridge {
@@ -195,7 +196,7 @@ export class AgentToolRuntime {
     workspaceId: string,
     toolId: string,
     args: Record<string, unknown>,
-    context: { userId?: string; agentId?: string; workflowId?: string; runId?: string; artifactPolicy?: ArtifactRetentionPolicy | null } = {},
+    context: { userId?: string; agentId?: string; workflowId?: string; runId?: string; artifactPolicy?: ArtifactRetentionPolicy | null; allowedToolIds?: string[] } = {},
   ): Promise<AgentToolResult> {
     if (this.deps.platformTools?.has(toolId)) {
       const appId = context.workflowId
@@ -209,6 +210,7 @@ export class AgentToolRuntime {
         runId: context.runId,
         appId,
         artifactPolicy: context.artifactPolicy,
+        allowedToolIds: context.allowedToolIds,
       });
     }
     if (!this.deps.mcpBridge) return { ok: false, error: 'MCP tool bridge is not wired in this runtime' };

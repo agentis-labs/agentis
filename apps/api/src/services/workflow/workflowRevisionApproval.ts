@@ -36,13 +36,18 @@ export function bindWorkflowRevisionApproval(args: {
       });
       return;
     }
-    args.revisions.promote({
+    const promotion = {
       workspaceId,
       workflowId,
       revisionId,
       expectedActiveRevisionId,
       actor: { type: 'user', id: resolvedByUserId },
       operatorApproval: true,
-    });
+    } as const;
+    if (payload.publicationAuthority === 'app_delivery' && typeof payload.deliveryRunId === 'string') {
+      args.revisions.promoteFromAppDelivery({ ...promotion, deliveryRunId: payload.deliveryRunId });
+    } else {
+      args.revisions.promote(promotion);
+    }
   });
 }

@@ -467,7 +467,9 @@ function renderEmphasis(text: string, keyPrefix: string): ReactNode[] {
             {match[2]}
           </a>
         ) : (
-          <Fragment key={`${keyPrefix}-a${n}`}>{match[0]}</Fragment>
+          // Unsupported/private schemes (notably file:// paths produced by a
+          // local runtime) are readable labels, not broken protocol links.
+          <Fragment key={`${keyPrefix}-a${n}`}>{match[2]}</Fragment>
         ),
       );
     } else if (match[4] !== undefined || match[5] !== undefined) {

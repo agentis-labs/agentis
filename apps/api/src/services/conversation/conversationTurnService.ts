@@ -57,7 +57,6 @@ export interface DurableTurnEventSink {
 const TERMINAL_STATUSES: ConversationTurnStatus[] = ['completed', 'failed', 'cancelled'];
 const CLAIMABLE_STATUSES: ConversationTurnStatus[] = ['queued', 'interrupted'];
 const LEASE_MS = 30_000;
-const NARRATION_HEARTBEAT_MS = 45_000;
 
 export class ConversationTurnService {
   readonly #running = new Map<string, AbortController>();
@@ -106,13 +105,6 @@ export class ConversationTurnService {
       envelope: input.executionEnvelope,
       context: input.contextManifest,
     });
-    // Host narration is persisted synchronously with acceptance, so a queued
-    // turn still acknowledges its next action within the two-second UX budget.
-    this.appendEvent(row.id, row.workspaceId, 'delta', hostCommentary(
-      row,
-      'starting',
-      `host-${row.clientTurnId}-starting`,
-    ));
     queueMicrotask(() => void this.start(row.id));
     return row;
   }
@@ -154,6 +146,19 @@ export class ConversationTurnService {
     }
   }
 
+  resumeAfterApproval(turnId: string): void {
+    const turn = this.getById(turnId);
+    if (!turn || turn.status !== 'awaiting_approval') return;
+    this.deps.db.update(schema.conversationTurns).set({
+      status: 'queued',
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      error: null,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(schema.conversationTurns.id, turnId)).run();
+    queueMicrotask(() => void this.start(turnId));
+  }
+
   async start(turnId: string): Promise<void> {
     if (this.#running.has(turnId)) return;
     const turn = this.getById(turnId);
@@ -192,27 +197,10 @@ export class ConversationTurnService {
       )).run();
     }, 10_000);
     heartbeat.unref?.();
-    let lastNarrationAt = Date.now();
-    const narrationHeartbeat = setInterval(() => {
-      if (Date.now() - lastNarrationAt < NARRATION_HEARTBEAT_MS) return;
-      lastNarrationAt = Date.now();
-      const latest = this.getById(turnId);
-      if (!latest || latest.status !== 'running') return;
-      this.appendEvent(turnId, turn.workspaceId, 'delta', hostCommentary(
-        latest,
-        'working',
-        `host-${turn.clientTurnId}-working-${Math.floor(lastNarrationAt / NARRATION_HEARTBEAT_MS)}`,
-      ));
-    }, 5_000);
-    narrationHeartbeat.unref?.();
-
     const sink: DurableTurnEventSink = {
       writeSSE: async ({ event = 'message', data }) => {
         let parsed: unknown = data;
         try { parsed = JSON.parse(data); } catch { /* retain transport text */ }
-        if (parsed && typeof parsed === 'object' && (parsed as { type?: unknown }).type === 'commentary') {
-          lastNarrationAt = Date.now();
-        }
         this.appendEvent(turnId, turn.workspaceId, event, parsed);
       },
     };
@@ -227,11 +215,6 @@ export class ConversationTurnService {
       const latest = this.getById(turnId);
       if (latest?.status === 'paused' || latest?.status === 'cancelled') return;
       const message = (error as Error).message || 'Durable conversation turn failed.';
-      this.appendEvent(turnId, turn.workspaceId, 'delta', hostCommentary(
-        turn,
-        'failed',
-        `host-${turn.clientTurnId}-failed`,
-      ));
       this.appendEvent(turnId, turn.workspaceId, 'error', { code: 'DURABLE_TURN_FAILED', message });
       this.finish(turnId, controller.signal.aborted
         ? 'interrupted'
@@ -239,7 +222,6 @@ export class ConversationTurnService {
       this.deps.logger.error('chat.turn_worker_failed', { turnId, conversationId: turn.conversationId, error: message });
     } finally {
       clearInterval(heartbeat);
-      clearInterval(narrationHeartbeat);
       this.#running.delete(turnId);
     }
   }
@@ -325,6 +307,19 @@ export class ConversationTurnService {
       eq(schema.conversationTurns.conversationId, conversationId),
       inArray(schema.conversationTurns.status, ['queued', 'running', 'awaiting_approval', 'blocked', 'paused', 'interrupted']),
     )).orderBy(asc(schema.conversationTurns.createdAt)).all();
+  }
+
+  /**
+   * Resolve a just-created durable turn even when the browser has not yet
+   * received its server id. This makes Stop reliable during the create/stream
+   * handoff, where cancelling only the SSE reader would otherwise orphan work.
+   */
+  findByClientTurnId(workspaceId: string, agentId: string, clientTurnId: string): ConversationTurnRow | null {
+    return this.deps.db.select().from(schema.conversationTurns).where(and(
+      eq(schema.conversationTurns.workspaceId, workspaceId),
+      eq(schema.conversationTurns.agentId, agentId),
+      eq(schema.conversationTurns.clientTurnId, clientTurnId),
+    )).get() ?? null;
   }
 
   listRecent(workspaceId: string, conversationId: string, limit = 50): ConversationTurnRow[] {
@@ -421,33 +416,7 @@ export class ConversationTurnService {
 }
 
 function isRecoverableRuntimeBlock(message: string): boolean {
-  return /\b(?:capacity|overloaded|rate.?limit|quota|temporarily unavailable|try again|no healthy runtime)\b/i.test(message);
-}
-
-function hostCommentary(
-  turn: Pick<ConversationTurnRow, 'clientTurnId' | 'prompt'>,
-  phase: 'starting' | 'working' | 'failed',
-  id: string,
-) {
-  const portuguese = /\b(?:vou|você|voce|preciso|faça|faca|implemente|corrija|crie|workflow|agente)\b/i.test(turn.prompt);
-  const text = portuguese
-    ? phase === 'starting'
-      ? 'Vou revisar o contexto e confirmar o que precisa ser feito antes de alterar os recursos.'
-      : phase === 'working'
-        ? 'Continuo executando e verificando o trabalho; vou informar a próxima descoberta ou resultado concreto.'
-        : 'A execução foi interrompida por uma falha; vou preservar o diagnóstico para que o trabalho possa ser retomado.'
-    : phase === 'starting'
-      ? 'I’ll review the context and confirm what must be done before changing any resources.'
-      : phase === 'working'
-        ? 'I’m still executing and verifying the work; I’ll report the next concrete finding or result.'
-        : 'Execution stopped because of a failure; I’ll preserve the diagnosis so the work can be resumed.';
-  return {
-    type: 'commentary' as const,
-    id,
-    text,
-    source: 'host' as const,
-    createdAt: new Date().toISOString(),
-  };
+  return /\b(?:capacity|overloaded|rate.?limit|quota|credits?|billing|payment required|temporarily unavailable|try again|no healthy runtime)\b/i.test(message);
 }
 
 export function projectTurnEvent(turn: ConversationTurnRow, event: ConversationTurnEventRow): TurnEventV2 {
@@ -456,7 +425,7 @@ export function projectTurnEvent(turn: ConversationTurnRow, event: ConversationT
   const runId = typeof value.runId === 'string' ? value.runId : undefined;
   const category: TurnEventV2['category'] = type === 'commentary'
     ? 'narration'
-    : type === 'activity' || type === 'tool_call' || type === 'tool_result'
+    : type === 'activity' || type === 'agent_consultation' || type === 'tool_call' || type === 'tool_result'
       ? 'operation'
       : type === 'plan'
         ? 'verification'
@@ -489,6 +458,7 @@ function safeEventSummary(type: string, value: Record<string, unknown>, fallback
     const detail = typeof value.detail === 'string' && value.detail.trim() ? ` — ${value.detail.trim()}` : '';
     return sanitizeSafeText(`${value.label}${detail}`);
   }
+  if (type === 'agent_consultation') return sanitizeSafeText(String(value.summary ?? 'Agent consultation updated'));
   if (type === 'tool_call') return `Started ${typeof value.name === 'string' ? value.name : 'an operation'}`;
   if (type === 'tool_result') return `${value.error ? 'Failed' : 'Completed'} ${typeof value.name === 'string' ? value.name : 'an operation'}`;
   if (type === 'turn_status' && typeof value.status === 'string') return `Turn ${value.status}`;
@@ -515,6 +485,20 @@ function safeReplayData(type: string, value: Record<string, unknown>): unknown {
     agentId: value.agentId,
     startedAt: value.startedAt,
   };
+  if (type === 'agent_consultation') return {
+    type,
+    consultationId: value.consultationId,
+    phase: value.phase,
+    callerAgentId: value.callerAgentId,
+    targetAgentId: value.targetAgentId,
+    callerName: typeof value.callerName === 'string' ? sanitizeSafeText(value.callerName) : value.callerName,
+    targetName: typeof value.targetName === 'string' ? sanitizeSafeText(value.targetName) : value.targetName,
+    round: value.round,
+    maxRounds: value.maxRounds,
+    summary: typeof value.summary === 'string' ? sanitizeSafeText(value.summary) : value.summary,
+    status: value.status,
+    createdAt: value.createdAt,
+  };
   if (type === 'error') return { type, code: value.code, message: typeof value.message === 'string' ? sanitizeSafeText(value.message) : undefined };
   return value;
 }
@@ -528,11 +512,27 @@ function sanitizeSafeText(input: string): string {
 
 export function classifyConversationExecutionMode(
   requested: ConversationExecutionMode,
-  input: { body: string; attachmentCount: number; permissionMode: ChatPermissionMode },
+  input: {
+    body: string;
+    attachmentCount: number;
+    permissionMode: ChatPermissionMode;
+    previousMode?: EffectiveConversationExecutionMode | null;
+    hasActiveBuildSession?: boolean;
+  },
 ): { mode: EffectiveConversationExecutionMode; reason: string } {
   if (requested !== 'auto') return { mode: requested, reason: 'Selected explicitly by the operator.' };
   const text = input.body.trim();
   const lower = text.toLowerCase();
+  const continuation = /^(?:please\s+)?(?:proceed|continue|resume|keep going|go ahead|do it|fix it|try again|finish it)(?:\s+now)?[.!\s]*$/i.test(text);
+  if (continuation && input.hasActiveBuildSession) {
+    return { mode: 'mission', reason: 'This continues an unfinished App build session and inherits durable mission execution.' };
+  }
+  if (continuation && input.previousMode === 'mission') {
+    return { mode: 'mission', reason: 'This is a continuation of the previous mission turn.' };
+  }
+  if (continuation && input.previousMode === 'deep') {
+    return { mode: 'deep', reason: 'This is a continuation of the previous deep turn.' };
+  }
   const missionSignals = [
     /\b(?:build|implement|create|migrate|redesign|refactor|ship|deliver|deploy|audit and fix)\b/,
     /\b(?:from start to finish|end[- ]to[- ]end|production[- ]ready|do not stop|until (?:it|this) (?:is|works)|acceptance criteria)\b/,

@@ -58,6 +58,7 @@ import { CapabilityRegistry } from './services/capability/capabilityRegistry.js'
 import { registerAllTools } from './services/agentisToolHandlers/index.js';
 import { ChatToolExecutor } from './services/chat/chatToolExecutor.js';
 import { ChatSessionExecutor } from './services/chat/chatSessionExecutor.js';
+import { ChatSwarmService } from './services/chat/chatSwarmService.js';
 import { RuntimeProfileService } from './services/runtime/runtimeProfileService.js';
 import { OrchestratorEventBridge } from './services/orchestrator/orchestratorEventBridge.js';
 import { SelectiveWakeSupervisor } from './services/orchestrator/selectiveWakeSupervisor.js';
@@ -68,7 +69,7 @@ import { AdapterManager } from './adapters/AdapterManager.js';
 import { WorktreeManager } from './services/worktreeManager.js';
 import { OrchestratorModelRouter, type ModelProfile } from './services/orchestrator/orchestratorModelRouter.js';
 import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from './services/workspace/workspaceHarnessRuntime.js';
-import { ChannelTurnDispatcher } from './services/conversation/channelTurnDispatcher.js';
+import { ChannelTurnDispatcher, type ChannelTurnInput } from './services/conversation/channelTurnDispatcher.js';
 import { ConversationService } from './services/conversation/conversationService.js';
 import { MediaService, openAiImageProvider } from './services/mediaService.js';
 import { resolveSynthesisCompleter } from './services/agentisToolHandlers/build.js';
@@ -154,6 +155,7 @@ import { AgentLibraryService } from './services/agent/agentLibrary.js';
 import { AgentToolRuntime, type AgentToolRuntimeDeps, type PlatformToolBridge } from './services/agent/agentToolRuntime.js';
 import { AgentSessionService } from './services/agent/agentSession.js';
 import { AgentSessionRuntime } from './services/agent/agentSessionRuntime.js';
+import { AgentConsultationService } from './services/agent/agentConsultationService.js';
 import { PlanService } from './services/planService.js';
 import { BuildSessionService } from './services/buildSessionService.js';
 import { LlmSessionAdapter } from './services/llmSessionAdapter.js';
@@ -684,7 +686,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   // PAVED-ROAD P3 — late-bound registry bridge so in-run sessions can walk the
   // same build loop (dry_run_workflow / check_run) the chat/MCP surfaces get.
   let platformToolFn:
-    | ((toolId: string, args: Record<string, unknown>, ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: { mode?: 'intentional' | 'all' | 'none'; saveScreenshots?: boolean; saveGeneratedAssets?: boolean } | null }) => Promise<{ ok: boolean; output?: unknown; error?: string }>)
+    | ((toolId: string, args: Record<string, unknown>, ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: { mode?: 'intentional' | 'all' | 'none'; saveScreenshots?: boolean; saveGeneratedAssets?: boolean } | null; allowedToolIds?: string[] }) => Promise<{ ok: boolean; output?: unknown; error?: string }>)
     | undefined;
   // Late-bound so in-run session steps stream through the engine's activity
   // spine (run room + replayable tail) instead of a live-only bus publish.
@@ -1120,6 +1122,28 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
   const experiments = new ExperimentService(sqlite, (evt) => {
     void strategies.recordExperimentOutcome(evt);
   });
+  const consultations = new AgentConsultationService({
+    db: sqlite,
+    adapters,
+    bus,
+    logger,
+    activity,
+    approvals,
+    specialistRouter,
+    resolveAgentRuntime: (workspaceId, agentId, task, explicitModel) =>
+      modelAssistedRuntimeEnabled(workspaceId) ? agentRuntimeResolver?.(workspaceId, agentId, task, explicitModel) : undefined,
+    runTurn: (adapter, history, userMessage, context, options) =>
+      ChatSessionExecutor.turn(adapter, history, userMessage, context, options),
+    confirmTurn: (adapter, turnId, confirmed, guard) =>
+      ChatSessionExecutor.confirm(adapter, turnId, confirmed, guard),
+  });
+  const consultationTerminalRunEvents = new Set<string>([REALTIME_EVENTS.RUN_CANCELLED, REALTIME_EVENTS.RUN_FAILED, REALTIME_EVENTS.RUN_COMPLETED]);
+  bus.subscribe((message) => {
+    if (!consultationTerminalRunEvents.has(message.envelope.event)) return;
+    const payload = message.envelope.payload as { workspaceId?: string; runId?: string };
+    if (!payload.workspaceId || !payload.runId || message.room !== REALTIME_ROOMS.workspace(payload.workspaceId)) return;
+    consultations.cancelByRun(payload.workspaceId, payload.runId, `parent run ${message.envelope.event.replace('run.', '')}`);
+  });
   const toolHandlerDeps = {
     db: sqlite,
     logger,
@@ -1141,6 +1165,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     scratchpad,
     approvals,
     activity,
+    consultations,
     replay,
     knowledgeBases: knowledgeBaseService,
     memory: memoryStore,
@@ -1319,6 +1344,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
         ...(ctx.runId ? { runId: ctx.runId } : {}),
         ...(ctx.appId ? { appId: ctx.appId } : {}),
         ...(ctx.artifactPolicy ? { artifactPolicy: ctx.artifactPolicy } : {}),
+        ...(ctx.allowedToolIds ? { allowedToolIds: ctx.allowedToolIds } : {}),
         caller: 'workflow',
       },
     );
@@ -1418,6 +1444,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     models: orchestratorModelRouter.describe(),
   });
   const runtimeProfiles = new RuntimeProfileService(sqlite, adapters, logger);
+  const chatSwarms = new ChatSwarmService({ db: sqlite, adapters, logger });
   ChatSessionExecutor.configure({
     db: sqlite,
     logger,
@@ -1439,6 +1466,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     runtimeProfiles,
     audit: auditTrail,
     budget: budgetService,
+    chatSwarms,
   });
   const mcpHarness = McpHarnessSessionService.fromEnv(env as unknown as NodeJS.ProcessEnv, sqlite, logger);
 
@@ -1623,6 +1651,9 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     compileAttachments: (args) => compileChannelAttachments
       ? compileChannelAttachments(args)
       : Promise.resolve({ prompt: args.body }),
+  });
+  consultations.bindChannelTurnResume(async (payload) => {
+    await channelTurnDispatcher.runQueued(payload as unknown as ChannelTurnInput);
   });
   channelBridge.setTurnDispatcher(channelTurnDispatcher);
 
@@ -2033,6 +2064,7 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
     conversationHandoffs,
     conversationParticipants,
     conversationSimulator,
+    consultations,
     defaultCognitiveCompleter,
     embeddingBackfill,
     engine,
@@ -2324,6 +2356,7 @@ function makeWorkflowPlatformToolBridge(registry: AgentisToolRegistry): Platform
           runId: c.runId,
           appId: c.appId ?? null,
           artifactPolicy: c.artifactPolicy ?? null,
+          ...(c.allowedToolIds ? { allowedToolIds: c.allowedToolIds } : {}),
           caller: 'workflow',
           executionMode: 'chat',
         },

@@ -854,7 +854,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         const refreshed = deps.revisions.proofState(ctx.workspaceId, String(args.workflowId), candidate.revision.id);
         const active = deps.revisions.active(ctx.workspaceId, String(args.workflowId));
         const alreadyActive = active.revision.id === candidate.revision.id;
-        const autoPromotion = refreshed.readyForPromotion && !refreshed.approvalRequired && !alreadyActive
+        const appDeliveryRequired = Boolean(active.workflow.appId && !alreadyActive);
+        const autoPromotion = refreshed.readyForPromotion && !refreshed.approvalRequired && !alreadyActive && !appDeliveryRequired
           ? deps.revisions.promote({
               workspaceId: ctx.workspaceId,
               workflowId: String(args.workflowId),
@@ -869,10 +870,13 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           run: result.output,
           revisionState: autoPromotion || alreadyActive
             ? 'active'
+            : appDeliveryRequired && refreshed.readyForPromotion
+              ? 'awaiting_app_delivery'
             : refreshed.approvalRequired && refreshed.missing.every((gate) => gate === 'operator_approval')
               ? 'awaiting_approval'
               : refreshed.failed.length > 0 ? 'needs_attention' : 'verifying',
           ...(autoPromotion || alreadyActive ? { autoPromoted: true, ...(autoPromotion ? { promotion: autoPromotion } : {}) } : {}),
+          ...(appDeliveryRequired ? { appId: active.workflow.appId, next: { tool: 'agentis.app.deliver', args: { appId: active.workflow.appId } } } : {}),
           proof: refreshed,
         };
       },
@@ -881,7 +885,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
       definition: {
         id: 'agentis.workflow.revision.promote',
         family: 'build',
-        description: 'Promote the exact proven candidate with compare-and-swap protection. Safe candidates promote immediately; risky/code/outward candidates create an administrator Approval Inbox request and return blocked_on_human.',
+        description: 'Promote the exact proven candidate with compare-and-swap protection for standalone workflows. App-owned workflows must use agentis.app.deliver, the sole App production publication authority.',
         inputSchema: { type: 'object', properties: { workflowId: { type: 'string' }, revisionId: { type: 'string' } }, required: ['workflowId'] },
         mutating: true,
         mcpExposed: true,
@@ -890,6 +894,12 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
         if (!deps.revisions) throw new AgentisError('WORKFLOW_DRAFT_INVALID', 'Immutable workflow revision service is unavailable.');
         const workflowId = String(args.workflowId);
         const active = deps.revisions.active(ctx.workspaceId, workflowId);
+        if (active.workflow.appId) {
+          throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'App-owned workflow revisions can only be published by agentis.app.deliver.', {
+            httpStatus: 409,
+            details: { code: 'APP_DELIVERY_REQUIRED', appId: active.workflow.appId, workflowId },
+          });
+        }
         const candidate = deps.revisions.candidate(ctx.workspaceId, workflowId);
         if (!candidate) throw new AgentisError('RESOURCE_NOT_FOUND', 'No candidate revision is available to promote.');
         if (args.revisionId && String(args.revisionId) !== candidate.revision.id) {
@@ -1798,8 +1808,8 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
           unmet.push({ predicate: 'Suite must include ≥1 happy AND ≥1 non-happy (edge/adversarial/regression) kept case.', clearWith: { tool: 'agentis.workflow.test', args: { workflowId: wf.id, action: 'generate' } } });
         }
         const debug = loop.debugRun && loop.debugRun.graphHash === hash ? loop.debugRun : undefined;
-        if (!debug || !(debug.status === 'COMPLETED' || debug.status === 'COMPLETED_WITH_CONTRACT_VIOLATION')) {
-          unmet.push({ predicate: 'No completed debug run at this graph.', clearWith: { tool: 'agentis.workflow.run', args: { workflowId: wf.id, debugRun: true } } });
+        if (!debug || debug.status !== 'COMPLETED') {
+          unmet.push({ predicate: 'No clean completed debug run at this graph.', clearWith: { tool: 'agentis.workflow.run', args: { workflowId: wf.id, debugRun: true } } });
         } else if (debug.verdict !== 'accomplished') {
           unmet.push({
             predicate: debug.verdict
@@ -1882,7 +1892,7 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
             evidence: { graphHash: hash, suite: loop.suite },
           });
           proofState = deps.revisions!.proofState(ctx.workspaceId, wf.id, candidateRevision.revision.id);
-          if (proofState.readyForPromotion && !proofState.approvalRequired) {
+          if (proofState.readyForPromotion && !proofState.approvalRequired && !wf.appId) {
             promotion = deps.revisions!.promote({
               workspaceId: ctx.workspaceId,
               workflowId: wf.id,
@@ -1919,6 +1929,13 @@ export function registerBuildTools(registry: AgentisToolRegistry, deps: ToolHand
               tool: 'agentis.workflow.revision.promote',
               args: { workflowId: wf.id, revisionId: candidateRevision?.revision.id },
               why: 'Create an administrator approval request for this exact proven outward/code candidate.',
+            },
+          } : {}),
+          ...(wf.appId && candidateRevision && !promotion ? {
+            next: {
+              tool: 'agentis.app.deliver',
+              args: { appId: wf.appId },
+              why: 'App-owned revisions publish only through the authoritative App delivery gate.',
             },
           } : {}),
           ...(exportRef ? { exportRef } : {}),

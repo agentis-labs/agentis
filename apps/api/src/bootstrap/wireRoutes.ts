@@ -137,6 +137,7 @@ import type { ConnectionGrantService } from '../services/connectionGrants.js';
 import type { ConversationParticipantService } from '../services/conversation/conversationParticipants.js';
 import type { ConversationHandoffService } from '../services/conversation/conversationHandoffService.js';
 import type { ConversationSimulatorService } from '../services/conversation/conversationSimulator.js';
+import type { AgentConsultationService } from '../services/agent/agentConsultationService.js';
 import type { EmbeddingBackfillService } from '../services/embedding/embeddingBackfill.js';
 import type { EpisodicMemoryStore } from '../services/episodicMemoryStore.js';
 import type { HarnessMemoryIngestionService } from '../services/harness/harnessMemoryIngestion.js';
@@ -201,6 +202,7 @@ type WireRoutesDeps = Awaited<ReturnType<typeof wireFoundation>> & {
   conversationParticipants: ConversationParticipantService;
   conversationHandoffs: ConversationHandoffService;
   conversationSimulator: ConversationSimulatorService;
+  consultations: AgentConsultationService;
   defaultCognitiveCompleter: StructuredCompleter;
   embeddingBackfill: EmbeddingBackfillService;
   engine: WorkflowEngine;
@@ -283,6 +285,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     conversationHandoffs,
     conversationSimulator,
     conversations,
+    consultations,
     credentialVault,
     db,
     defaultCognitiveCompleter,
@@ -626,6 +629,7 @@ export function wireRoutes(deps: WireRoutesDeps) {
     transcription,
     runtimeProfiles,
     handoffs: conversationHandoffs,
+    consultations,
   }));
   const broadcastDispatcher = new BroadcastDispatcher({ db: sqlite, adapters, conversations, bus, logger });
   app.route('/v1/rooms', buildRoomRoutes({ db: sqlite, auth, bus, broadcast: broadcastDispatcher }));

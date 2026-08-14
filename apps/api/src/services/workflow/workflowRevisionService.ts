@@ -80,6 +80,16 @@ export interface PromotionResult {
   overriddenGates: WorkflowProofGate[];
 }
 
+export interface PromoteWorkflowRevisionInput {
+  workspaceId: string;
+  workflowId: string;
+  revisionId: string;
+  expectedActiveRevisionId: string;
+  actor: WorkflowRevisionActor;
+  operatorApproval?: boolean;
+  overrideReason?: string;
+}
+
 const STANDARD_GATES: readonly WorkflowProofGate[] = [
   'static',
   'capability',
@@ -457,16 +467,83 @@ export class WorkflowRevisionService {
     };
   }
 
-  promote(input: {
-    workspaceId: string;
-    workflowId: string;
-    revisionId: string;
-    expectedActiveRevisionId: string;
-    actor: WorkflowRevisionActor;
-    operatorApproval?: boolean;
-    overrideReason?: string;
-  }): PromotionResult {
+  /**
+   * Promote a standalone workflow revision. App-owned semantic revisions are
+   * intentionally rejected here: their only production authority is the App
+   * delivery orchestrator, which must bind publication to an accomplished,
+   * clean run of the exact immutable revision.
+   */
+  promote(input: PromoteWorkflowRevisionInput): PromotionResult {
+    return this.promoteWithAuthority(input, null);
+  }
+
+  /** The sole semantic publication path for App-owned workflow revisions. */
+  promoteFromAppDelivery(input: PromoteWorkflowRevisionInput & { deliveryRunId: string }): PromotionResult {
+    const run = this.db.select({
+      status: schema.workflowRuns.status,
+      workflowRevisionId: schema.workflowRuns.workflowRevisionId,
+      runState: schema.workflowRuns.runState,
+    }).from(schema.workflowRuns).where(and(
+      eq(schema.workflowRuns.id, input.deliveryRunId),
+      eq(schema.workflowRuns.workspaceId, input.workspaceId),
+      eq(schema.workflowRuns.workflowId, input.workflowId),
+    )).get();
+    const verdict = (run?.runState as WorkflowRunState & { verdict?: { outcome?: string } } | null)?.verdict;
+    if (!run
+      || run.status !== 'COMPLETED'
+      || run.workflowRevisionId !== input.revisionId
+      || verdict?.outcome !== 'accomplished') {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'App publication requires an accomplished, clean delivery run of the exact candidate revision.',
+        { httpStatus: 409, details: { code: 'APP_DELIVERY_PROOF_REQUIRED', deliveryRunId: input.deliveryRunId } },
+      );
+    }
+    const deliveryProofs = this.db.select().from(schema.workflowRevisionProofs).where(and(
+      eq(schema.workflowRevisionProofs.revisionId, input.revisionId),
+      eq(schema.workflowRevisionProofs.runId, input.deliveryRunId),
+    )).all();
+    const delivered = (gate: 'clean_debug' | 'outcome') => deliveryProofs.some((proof) => {
+      const evidence = proof.evidenceJson && typeof proof.evidenceJson === 'object'
+        ? proof.evidenceJson as Record<string, unknown>
+        : {};
+      return proof.gate === gate && proof.status === 'passed' && evidence.delivery === true;
+    });
+    if (!delivered('clean_debug') || !delivered('outcome')) {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'App publication requires delivery-bound clean_debug and outcome proofs.',
+        { httpStatus: 409, details: { code: 'APP_DELIVERY_GATE_REQUIRED', deliveryRunId: input.deliveryRunId } },
+      );
+    }
+    return this.promoteWithAuthority(input, { kind: 'app_delivery', runId: input.deliveryRunId });
+  }
+
+  private promoteWithAuthority(
+    input: PromoteWorkflowRevisionInput,
+    authority: { kind: 'app_delivery'; runId: string } | null,
+  ): PromotionResult {
     const revision = this.requireRevision(input.workspaceId, input.workflowId, input.revisionId);
+    const workflowAtRequest = this.workflow(input.workspaceId, input.workflowId);
+    const activeAtRequest = workflowAtRequest.activeRevisionId
+      ? this.revision(input.workspaceId, input.workflowId, workflowAtRequest.activeRevisionId)
+      : null;
+    const presentationOnly = Boolean(activeAtRequest && activeAtRequest.semanticHash === revision.semanticHash);
+    if (workflowAtRequest.appId && !presentationOnly && authority?.kind !== 'app_delivery') {
+      throw new AgentisError(
+        'WORKFLOW_GRAPH_INVALID',
+        'App-owned workflow revisions can only be published by agentis.app.deliver.',
+        {
+          httpStatus: 409,
+          details: {
+            code: 'APP_DELIVERY_REQUIRED',
+            appId: workflowAtRequest.appId,
+            workflowId: input.workflowId,
+            revisionId: input.revisionId,
+          },
+        },
+      );
+    }
     if (input.operatorApproval) {
       this.recordProof({
         workspaceId: input.workspaceId,
@@ -664,10 +741,16 @@ export class WorkflowRevisionService {
     const accomplished = runs.find((run) => {
       const verdict = (run.runState as WorkflowRunState & { verdict?: { outcome?: string } }).verdict;
       return Boolean(run.graphSnapshot)
-        && (run.status === 'COMPLETED' || run.status === 'COMPLETED_WITH_CONTRACT_VIOLATION')
+        && run.status === 'COMPLETED'
         && verdict?.outcome === 'accomplished';
     });
     if (!accomplished?.graphSnapshot) return { changed: false, activeRevisionId: active.id };
+    // App production bytes are governed exclusively by app.deliver. Legacy
+    // reconciliation may classify their evidence, but it must never replace an
+    // App-owned active graph behind the delivery gate.
+    if (workflow.appId) {
+      return { changed: false, activeRevisionId: active.id, appDeliveryRequired: true as const };
+    }
     const provenGraph = accomplished.graphSnapshot as WorkflowGraph;
     const provenHash = hashWorkflowGraph(provenGraph);
     if (provenHash === this.currentHash(active)) {

@@ -28,6 +28,7 @@ import { useRealtime, type RealtimeEnvelope } from '../../lib/realtime';
 import { tokens } from '../../lib/api';
 import { displayLabel } from '../../lib/prettyRef';
 import { ErrorBoundary } from '../shared/ErrorBoundary';
+import { AgentInteractionFeed } from '../agents/AgentInteractionFeed';
 import { appsApi, type AppConversation, type AppConversationMessage } from '../../lib/appsApi';
 import { pathsEqual, pathKey } from './viewTree';
 import { CHART_PALETTE, ThemeProvider, accentColor, resolveTheme, useTheme, type ResolvedTheme } from './theme';
@@ -53,6 +54,8 @@ interface RuntimeCtx {
   uiState: Record<string, unknown>;
   allowCustomCode: boolean;
   dataRevision: number;
+  /** Operator-only diagnostics must never render on a public/customer surface. */
+  operatorMode?: boolean;
 }
 
 const Ctx = createContext<RuntimeCtx | null>(null);
@@ -2430,7 +2433,7 @@ function LiveChatThread({ node }: { node: Extract<ViewNode, { type: 'ChatThread'
 }
 
 function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
-  const { appId } = useRuntime();
+  const { appId, operatorMode } = useRuntime();
   const { rows, loading, reload } = useLiveConversations(appId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selId = selectedId ?? rows[0]?.id ?? null;
@@ -2502,6 +2505,11 @@ function LiveInbox({ node }: { node: Extract<ViewNode, { type: 'Inbox' }> }) {
               {msgLoading ? <SkeletonRows /> : messages.length === 0 ? <div className="m-auto text-[12px] text-text-muted">No messages</div> : messages.map((m) => (
                 <ChatBubble key={m.id} role={m.role} content={m.content} />
               ))}
+              {operatorMode ? (
+                <div className="mt-2 border-t border-line pt-3">
+                  <AgentInteractionFeed conversationId={selId} limit={20} compact />
+                </div>
+              ) : null}
             </div>
             <AgentActivityLine state={activity} />
             {driving ? <Composer label="Send" onSend={sendOperator} /> : null}

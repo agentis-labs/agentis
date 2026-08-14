@@ -38,6 +38,7 @@ function resolvedDuration(turn: ChatTurnTrace | undefined, now: number): number 
 function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): TimelineEntry[] {
   const comments: TimelineEntry[] = commentary
     .filter((entry) => entry.text.trim())
+    .filter((entry) => !isGenericHostCommentary(entry.text))
     .filter((entry, index, entries) => entries.findIndex((candidate) => normalizeText(candidate.text) === normalizeText(entry.text)) === index)
     .map((entry, index) => ({
       id: entry.id,
@@ -46,11 +47,18 @@ function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): Tim
       at: entry.createdAt,
       order: index * 2,
     }));
-  const prepared = activities
+  const visibleActivities = activities
     .map((activity, index) => ({ activity, label: compactActivityLabel(activity), index }))
     .filter((entry): entry is { activity: ChatActivity; label: string; index: number } => Boolean(entry.label))
     .filter((entry) => !isInternalActivity(entry.label))
-    .filter((entry) => commentary.length === 0 || !isGenericRuntimeActivity(entry.label));
+    .filter((entry) => !isGenericRuntimeActivity(entry.label, entry.activity));
+  // The waiting heartbeat is a temporary honesty signal, not permanent log
+  // history. As soon as real commentary or a real operation arrives, replace it
+  // visually so the live transcript stays as clean as the Codex reference.
+  const hasRealProgress = comments.length > 0
+    || visibleActivities.some((entry) => entry.activity.phase !== 'waiting');
+  const prepared = visibleActivities.filter((entry) =>
+    !(hasRealProgress && entry.activity.phase === 'waiting'));
   const latestByMeaning = new Map<string, number>();
   prepared.forEach((entry, index) => latestByMeaning.set(activityMeaning(entry.label), index));
   const actions: TimelineEntry[] = prepared
@@ -85,11 +93,16 @@ function activityMeaning(label: string): string {
 }
 
 function isInternalActivity(label: string): boolean {
-  return /agentis\s+(?:tools\s+(?:search|describe)|task\s+set\s+steps|canvas\s+context|app\s+goal)/i.test(label);
+  return /(?:agentis\s+(?:orient|tools\s+(?:search|describe)|task\s+set\s+steps|canvas\s+context|app\s+goal|workflow\s+loop\s+status|run\s+query|data\s+query)|^run\s+(?:completed|failed)(?::|$)|^used\s+(?:agentis\s+)?(?:orient|workflow\s+loop\s+status|run\s+query|data\s+query)|^failed\s+(?:agentis\s+)?(?:orient|workflow\s+loop\s+status|run\s+query|data\s+query))/i.test(label);
 }
 
-function isGenericRuntimeActivity(label: string): boolean {
-  return /(?:is working|is reasoning|waiting for model output|reading context|starting up|writing the reply)/i.test(label);
+function isGenericRuntimeActivity(label: string, activity?: ChatActivity): boolean {
+  if (activity && /(?:local-start|local-rewrite|room-waiting|antigravity-runtime)/i.test(activity.id)) return true;
+  return /(?:^request received$|^response ready$|^starting (?:antigravity|hermes(?: runtime)?|openclaw|agy|agent)$|response ready|runtime step|is working|is reasoning|waiting for (?:model|runtime) output|waiting for runtime|reading context|starting up|writing the reply)/i.test(label);
+}
+
+function isGenericHostCommentary(text: string): boolean {
+  return /(?:review the context and confirm what must be done|still executing and verifying the work|report the next concrete finding or result|revisar o contexto e confirmar o que precisa ser feito|continuo executando e verificando o trabalho|informar a pr[oó]xima descoberta ou resultado concreto|run .* now, inspect the observed result)/i.test(text);
 }
 
 export function AgentTurnTrace({
@@ -166,21 +179,14 @@ export function AgentTurnTrace({
 }
 
 function Timeline({ entries, live = false }: { entries: TimelineEntry[]; live?: boolean }) {
-  if (entries.length === 0) {
-    return (
-      <div className="flex items-center gap-2 py-2 text-[12px] text-text-muted">
-        <Loader2 size={12} className="animate-spin" />
-        <span>Thinking…</span>
-      </div>
-    );
-  }
+  if (entries.length === 0) return null;
   return (
     <div className="space-y-3 py-3">
       {entries.map((entry, index) => {
         const latest = live && index === entries.length - 1;
         if (entry.kind === 'commentary') {
           return (
-            <p key={entry.id} className={clsx('max-w-[760px] whitespace-pre-wrap text-[13px] leading-6 text-text-secondary', !latest && live && 'text-text-secondary/80')}>
+            <p key={entry.id} className={clsx('max-w-[720px] whitespace-pre-wrap text-[13px] leading-5 text-text-secondary', !latest && live && 'text-text-secondary/80')}>
               {entry.text}
             </p>
           );

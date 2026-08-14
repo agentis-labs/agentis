@@ -21,7 +21,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo 'ok'",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "migrate:app-reliability": "tsx scripts/migrate-app-reliability.ts"
   },
   "dependencies": {
     "@agentis/app": "workspace:*",

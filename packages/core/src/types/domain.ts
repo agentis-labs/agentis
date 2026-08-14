@@ -7,7 +7,8 @@ export type ApprovalSource =
   | 'phase_gate'
   | 'openclaw_exec'
   | 'package_install'
-  | 'credential_access';
+  | 'credential_access'
+  | 'agent_consultation';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled';
 

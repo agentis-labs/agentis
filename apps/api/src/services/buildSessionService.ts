@@ -342,6 +342,8 @@ export class BuildSessionService {
     payload?: unknown;
     /** True only when verification actually ran the bounded deterministic repair pass. */
     repairAttempted?: boolean;
+    /** Debug/preflight proof advances the session but does not complete it. */
+    complete?: boolean;
   }): BuildSession | null {
     const current = this.latestForApp(input.workspaceId, input.appId);
     if (!current || current.status === 'completed') return current;
@@ -370,19 +372,20 @@ export class BuildSessionService {
         ? 'Apply the deterministic repair plan once, then verify the App again.'
         : 'The bounded repair attempt is exhausted. Operator input is required.',
     };
-    const status: BuildSessionStatus = input.passed ? 'completed' : 'blocked';
+    const complete = input.passed && input.complete !== false;
+    const status: BuildSessionStatus = complete ? 'completed' : input.passed ? 'running' : 'blocked';
     this.db.transaction((tx) => {
       tx.update(schema.buildSessions).set({
-        stage: input.passed ? 'deliver' : 'repair',
+        stage: complete ? 'deliver' : input.passed ? 'execute' : 'repair',
         status,
         evidence,
         diagnostic,
-        completedAt: input.passed ? now : null,
+        completedAt: complete ? now : null,
         repairAttempts,
         updatedAt: now,
       }).where(and(eq(schema.buildSessions.id, current.id), eq(schema.buildSessions.workspaceId, input.workspaceId))).run();
       tx.update(schema.appBlueprints).set({
-        status: input.passed ? 'verified' : 'materializing',
+        status: complete ? 'verified' : 'materializing',
         updatedAt: now,
       }).where(eq(schema.appBlueprints.id, current.blueprintId)).run();
     });

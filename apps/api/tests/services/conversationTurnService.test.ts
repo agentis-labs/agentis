@@ -69,25 +69,19 @@ describe('ConversationTurnService', () => {
     });
 
     expect(ctx.db.select().from(schema.conversationTurns).where(eq(schema.conversationTurns.id, turn.id)).get()).toMatchObject({ status: 'queued' });
-    expect(service.events(ctx.workspace.id, turn.id, 0)).toHaveLength(2);
-    expect(service.events(ctx.workspace.id, turn.id, 0)[1]?.data).toMatchObject({ type: 'commentary', source: 'host' });
+    expect(service.events(ctx.workspace.id, turn.id, 0)).toHaveLength(1);
+    expect(service.events(ctx.workspace.id, turn.id, 0)[0]?.data).toMatchObject({ type: 'execution' });
     release();
     await expect.poll(() => service.require(ctx.workspace.id, turn.id).status).toBe('completed');
     const events = service.events(ctx.workspace.id, turn.id, 0);
-    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
-    expect(events.map((event) => event.event)).toEqual(['delta', 'delta', 'delta', 'done', 'turn']);
-    expect(events[1]?.data).toMatchObject({ type: 'commentary', source: 'host' });
-    expect(service.events(ctx.workspace.id, turn.id, 1).map((event) => event.seq)).toEqual([2, 3, 4, 5]);
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
+    expect(events.map((event) => event.event)).toEqual(['delta', 'delta', 'done', 'turn']);
+    expect(service.events(ctx.workspace.id, turn.id, 1).map((event) => event.seq)).toEqual([2, 3, 4]);
     const history = service.history(ctx.workspace.id, conversation.id);
     expect(history).toHaveLength(1);
-    expect(history[0]?.events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5]);
-    expect(history[0]?.events.find((event) => event.category === 'narration')).toMatchObject({ visibility: 'both' });
-    expect(realtimeEvents).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        event: REALTIME_EVENTS.CONVERSATION_TURN_EVENT,
-        payload: expect.objectContaining({ category: 'narration', visibility: 'both' }),
-      }),
-    ]));
+    expect(history[0]?.events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
+    expect(history[0]?.events.some((event) => event.category === 'narration')).toBe(false);
+    expect(realtimeEvents.some((event) => event.event === REALTIME_EVENTS.CONVERSATION_TURN_EVENT)).toBe(true);
     unsubscribe();
   });
 
@@ -239,5 +233,17 @@ describe('classifyConversationExecutionMode', () => {
   it('honors explicit mode and promotes attachment analysis out of Quick', () => {
     expect(classifyConversationExecutionMode('quick', { body: 'Build everything', attachmentCount: 1, permissionMode: 'auto' }).mode).toBe('quick');
     expect(classifyConversationExecutionMode('auto', { body: 'Please review this', attachmentCount: 1, permissionMode: 'ask' }).mode).toBe('deep');
+  });
+
+  it('keeps short continuation turns on the unfinished mission path', () => {
+    const classified = classifyConversationExecutionMode('auto', {
+      body: 'Proceed',
+      attachmentCount: 0,
+      permissionMode: 'auto',
+      previousMode: 'mission',
+      hasActiveBuildSession: true,
+    });
+    expect(classified.mode).toBe('mission');
+    expect(classified.reason).toMatch(/unfinished App build/i);
   });
 });

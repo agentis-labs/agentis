@@ -149,6 +149,47 @@ export class AppDatastore {
     return this.insert(workspaceId, appId, collection, { ...match, ...record }, userId);
   }
 
+  /**
+   * Validate and apply an insert/upsert batch atomically. The batch is rejected
+   * before the transaction starts when any row is invalid, so callers never
+   * receive a partial-success receipt for a deterministic datastore mutation.
+   */
+  mutateMany(
+    workspaceId: string,
+    appId: string,
+    collection: string,
+    operation: 'insert' | 'upsert',
+    records: Record<string, unknown>[],
+    matchFields: string[] = [],
+    userId?: string,
+  ): CollectionRecord[] {
+    if (records.length < 1 || records.length > 1000) {
+      throw new AgentisError('VALIDATION_FAILED', 'data mutation batch must contain between 1 and 1000 records');
+    }
+    const col = this.requireCollection(workspaceId, appId, collection);
+    const validate = this.recordValidator(col.schema);
+    const prepared = records.map((record) => validate.parse(record));
+    const normalizedMatchFields = [...new Set(matchFields.map((field) => field.trim()).filter(Boolean))];
+    if (operation === 'upsert' && normalizedMatchFields.length === 0) {
+      throw new AgentisError('VALIDATION_FAILED', 'batch upsert requires at least one match field');
+    }
+    if (operation === 'upsert') {
+      for (let index = 0; index < prepared.length; index += 1) {
+        for (const field of normalizedMatchFields) {
+          if (!(field in prepared[index]!)) {
+            throw new AgentisError('VALIDATION_FAILED', `batch upsert record ${index} is missing match field '${field}'`);
+          }
+        }
+      }
+    }
+
+    return this.db.transaction(() => prepared.map((record) => {
+      if (operation === 'insert') return this.insert(workspaceId, appId, collection, record, userId);
+      const match = Object.fromEntries(normalizedMatchFields.map((field) => [field, record[field]]));
+      return this.upsert(workspaceId, appId, collection, match, record, userId);
+    }));
+  }
+
   delete(workspaceId: string, appId: string, collection: string, id: string): void {
     const col = this.requireCollection(workspaceId, appId, collection);
     this.deleteIndexEntries(col.id, id);

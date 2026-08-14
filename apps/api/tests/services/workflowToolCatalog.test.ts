@@ -14,6 +14,16 @@ describe('buildWorkspaceToolCatalog', () => {
     expect(names).toContain('agentis.ability.create');
     expect(names).toContain('agentis.extension.create');
     expect(names).toContain('agentis.component.install');
+    expect(names).toContain('agentis.agent.consult');
+  });
+
+  it('exposes deliberate additional-workflow creation to chat models', () => {
+    const tool = CHAT_TOOL_CATALOG.find((entry) => entry.name === 'agentis.build_workflow');
+    expect(tool).toBeDefined();
+    const properties = tool!.parameters.properties as Record<string, { type?: string }>;
+    expect(properties.appId?.type).toBe('string');
+    expect(properties.newWorkflow?.type).toBe('boolean');
+    expect(tool!.description).toContain('newWorkflow:true');
   });
 
   it('includes the static catalog plus one tool per workflow', () => {

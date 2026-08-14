@@ -91,6 +91,7 @@ export const MAX_TEAM_FANOUT = 8;
 export type SessionOutcome =
   | { kind: 'completed'; output: Record<string, unknown> }
   | { kind: 'failed'; error: string }
+  | { kind: 'cancelled' }
   | { kind: 'suspended'; yield: SessionYield }
   | { kind: 'max_steps'; output: Record<string, unknown> };
 
@@ -137,6 +138,8 @@ export interface SessionRunContext {
   grant?: DelegationGrant;
   /** Override the engine-wide step ceiling for this session. */
   maxSteps?: number;
+  /** Run-scoped cancellation signal, forwarded to the underlying model request. */
+  signal?: AbortSignal;
 }
 
 /** Summarize evicted turns into a compact paragraph for the observations block. */
@@ -187,7 +190,7 @@ export interface AgentSessionRuntimeDeps {
   platformTool?: (
     toolId: string,
     args: Record<string, unknown>,
-    ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: ArtifactRetentionPolicy | null },
+    ctx: { workspaceId: string; userId?: string; agentId?: string; runId?: string; appId?: string | null; artifactPolicy?: ArtifactRetentionPolicy | null; allowedToolIds?: string[] },
   ) => Promise<{ ok: boolean; output?: unknown; error?: string }>;
   /**
    * Late-bound bridge to `WorkflowEngine.notifyAgentActivity` — the ONE spine
@@ -223,6 +226,7 @@ const TOOL = {
   runInspect: 'run_inspect',
   flagDeviation: 'flag_deviation',
   recordDecision: 'record_decision',
+  consultAgent: 'consult_agent',
   delegateTask: 'delegate_task',
   spawnTeam: 'spawn_team',
   runWorkflow: 'run_workflow',
@@ -336,6 +340,7 @@ export class AgentSessionRuntime {
    * responsible for what happens next (wake registration, node completion).
    */
   async advance(sessionId: string, runCtx: SessionRunContext): Promise<SessionOutcome> {
+    if (runCtx.signal?.aborted) return { kind: 'cancelled' };
     const maxSteps = Math.max(1, Math.min(runCtx.maxSteps ?? CONSTANTS.SESSION_MAX_STEPS, CONSTANTS.SESSION_MAX_STEPS));
     // Phase 2/3A — a persistent session gets the same external MCP reach as the
     // in-process loop: operator-mounted servers + the built-in computer-use
@@ -348,6 +353,7 @@ export class AgentSessionRuntime {
     }
 
     for (let i = 0; i < maxSteps; i += 1) {
+      if (runCtx.signal?.aborted) return { kind: 'cancelled' };
       const session = this.deps.sessions.get(sessionId);
       if (!session) return { kind: 'failed', error: `session ${sessionId} vanished mid-run` };
       if (session.status === 'completed') return { kind: 'completed', output: session.output ?? {} };
@@ -379,12 +385,17 @@ export class AgentSessionRuntime {
 
       let result;
       try {
-        result = await adapter.executeStep({ messages, tools });
+        result = await adapter.executeStep({ messages, tools, ...(runCtx.signal ? { signal: runCtx.signal } : {}) });
       } catch (err) {
+        if (runCtx.signal?.aborted) return { kind: 'cancelled' };
         const error = (err as Error).message;
         this.deps.logger.warn('session.step.failed', { sessionId, step: session.totalSteps, error });
         return { kind: 'failed', error };
       }
+
+      // A late adapter response must never get written to a cancelled session or
+      // trigger another tool call after its owning workflow has stopped.
+      if (runCtx.signal?.aborted) return { kind: 'cancelled' };
 
       const stepNumber = session.totalSteps + 1;
       this.deps.sessions.incrementStats(sessionId, {
@@ -411,6 +422,7 @@ export class AgentSessionRuntime {
       }
 
       const dispatch = await this.#runToolCalls(sessionId, stepNumber, runCtx, result.toolCalls);
+      if (runCtx.signal?.aborted) return { kind: 'cancelled' };
       if (dispatch.kind !== 'continue') return dispatch.outcome;
     }
 
@@ -714,6 +726,15 @@ export class AgentSessionRuntime {
         }
         return { ok: true, recorded: true };
       }
+      case TOOL.consultAgent:
+        return this.#execPlatformLoopTool('agentis.agent.consult', {
+          question: String(args.question ?? ''),
+          ...(typeof args.target_agent_id === 'string' ? { targetAgentId: args.target_agent_id } : {}),
+          ...(typeof args.target_role === 'string' ? { targetRole: args.target_role } : {}),
+          ...(typeof args.context === 'string' ? { context: args.context } : {}),
+          ...(typeof args.consultation_id === 'string' ? { consultationId: args.consultation_id } : {}),
+          parentSessionId: sessionId,
+        }, runCtx);
       case TOOL.evolvePlan:
         return this.#execEvolvePlan(args, runCtx);
       case TOOL.dryRunWorkflow: {
@@ -797,6 +818,7 @@ export class AgentSessionRuntime {
         runId: runCtx.runId,
         appId: runCtx.appId ?? null,
         artifactPolicy: runCtx.artifactPolicy ?? null,
+        ...(runCtx.grant?.allowedTools ? { allowedToolIds: runCtx.grant.allowedTools } : {}),
       });
       return res.ok ? { ok: true, result: res.output } : { ok: false, error: res.error ?? 'tool failed' };
     } catch (err) {
@@ -820,6 +842,7 @@ export class AgentSessionRuntime {
       workflowId: runCtx.workflowId,
       runId: runCtx.runId,
       artifactPolicy: runCtx.artifactPolicy ?? null,
+      allowedToolIds: runCtx.grant?.allowedTools,
     });
     return res.ok ? { ok: true, result: res.result } : { ok: false, error: res.error };
   }
@@ -1121,6 +1144,24 @@ const CONTROL_TOOLS: ToolDefinition[] = [
         rationale: { type: 'string', description: 'Why this decision was made, grounded in observed evidence.' },
       },
       required: ['summary'],
+    },
+  },
+  {
+    name: TOOL.consultAgent,
+    description:
+      'Privately consult another workspace agent for expertise and WAIT for its answer. ' +
+      'Use target_agent_id for a colleague named in your instructions, target_role for a specialist role, ' +
+      'or omit both for capability routing. Continue a bounded dialogue with consultation_id.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'Self-contained expert question.' },
+        target_agent_id: { type: 'string', description: 'Exact workspace agent id.' },
+        target_role: { type: 'string', description: 'Specialist role for routing.' },
+        context: { type: 'string', description: 'Optional bounded task context.' },
+        consultation_id: { type: 'string', description: 'Existing consultation id for a follow-up.' },
+      },
+      required: ['question'],
     },
   },
   {

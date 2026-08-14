@@ -36,6 +36,10 @@ import type { CommandModelService } from '../command/commandModel.js';
 import type { ConversationTurnLeaseRegistry } from '../conversation/conversationTurnLease.js';
 import type { ConversationTurnExperience } from '../conversation/conversationTurnLease.js';
 import type { RuntimeProfileService } from '../runtime/runtimeProfileService.js';
+import type { TurnToolObservation } from '../conversation/conversationTurnLease.js';
+import { guardCompletionClaims, resultProvidesCompletionEvidence } from './completionEvidence.js';
+import type { ChatSwarmService } from './chatSwarmService.js';
+import { compactPublicProgress } from '../../adapters/publicProgress.js';
 
 export interface ChatSessionExecutorDeps {
   db?: AgentisSqliteDb;
@@ -95,6 +99,8 @@ export interface ChatSessionExecutorDeps {
   }): void };
   /** Agent monthly-spend ledger. Called only for provider-reported monetary cost. */
   budget?: { recordSpend(args: { workspaceId: string; agentId: string; runId?: string | null; amountCents: number }): unknown };
+  /** Durable temporary-team runner for interactive chat. */
+  chatSwarms?: ChatSwarmService;
 }
 
 export interface ChannelTurnContext {
@@ -159,6 +165,11 @@ export class ChatSessionExecutor {
 
   static setTurnLeaseRegistry(turnLeases: ConversationTurnLeaseRegistry): void {
     this.#deps.turnLeases = turnLeases;
+  }
+
+  /** Shared chat-swarm control plane used by the conversation HTTP surface. */
+  static chatSwarms(): ChatSwarmService | undefined {
+    return this.#deps.chatSwarms;
   }
 
   /** Issue a revocable capability for adapters whose own MCP loop runs tools. */
@@ -452,7 +463,7 @@ export class ChatSessionExecutor {
   static #filterToRegistered(tools: ToolDefinition[]): ToolDefinition[] {
     const registered = ChatToolExecutor.registeredIds();
     if (registered.size === 0) return tools;
-    const kept = tools.filter((tool) => tool.name.startsWith('workflow.') || registered.has(tool.name));
+    const kept = tools.filter((tool) => tool.name === 'agentis.team.spawn' || tool.name.startsWith('workflow.') || registered.has(tool.name));
     const present = new Set(kept.map((tool) => tool.name));
     for (const definition of ChatToolExecutor.registeredDefinitions()) {
       if (present.has(definition.id)) continue;
@@ -463,7 +474,7 @@ export class ChatSessionExecutor {
       });
       present.add(definition.id);
     }
-    const dropped = tools.length - tools.filter((tool) => tool.name.startsWith('workflow.') || registered.has(tool.name)).length;
+    const dropped = tools.length - tools.filter((tool) => tool.name === 'agentis.team.spawn' || tool.name.startsWith('workflow.') || registered.has(tool.name)).length;
     if (dropped > 0) {
       this.#deps.logger?.debug?.('chat.catalog.filtered_unregistered', { dropped });
     }
@@ -513,7 +524,10 @@ export class ChatSessionExecutor {
     // Social turns cannot need platform actions. Leaving the catalog empty also
     // lets CLI harnesses skip MCP startup, removing its process/handshake cost.
     const lightweightConversation = isLightweightConversation(userMessage);
-    const tools = options.tools ?? (lightweightConversation ? [] : this.#buildCatalog({ ...ctx, viewport }));
+    const availableTools = options.tools ?? (lightweightConversation ? [] : this.#buildCatalog({ ...ctx, viewport }));
+    const tools = ctx.allowedToolIds
+      ? availableTools.filter((tool) => ctx.allowedToolIds!.includes(tool.name))
+      : availableTools;
     let effectiveUserMessage = expandedUserMessage;
     let brainSystemInjection: string | null = null;
 
@@ -922,7 +936,7 @@ export class ChatSessionExecutor {
     yield this.#activity(ctx, 'runtime', 'Invoking agent runtime', 'Streaming the turn through the selected chat harness.', 'runtime');
     // Context is fully assembled here; everything after is model + tools. This is
     // the boundary the CLB trace measures as `contextMs` (Phase A instrumentation).
-    yield* this.#executeLoop(adapter, messages, { ...ctx, viewport }, {
+    yield* this.#executeLoop(adapter, messages, { ...ctx, viewport, allowedToolIds: ctx.allowedToolIds ?? tools.map((tool) => tool.name) }, {
       tools,
       maxTurns,
       maxToolCalls,
@@ -998,8 +1012,34 @@ export class ChatSessionExecutor {
       ...(guard.channelOrigin ? { channelOrigin: guard.channelOrigin } : {}),
     };
 
+    const resumedIntent = chatToolIntentCommentary(pending.call.name);
+    if (resumedIntent) {
+      yield {
+        type: 'commentary',
+        id: `chat-tool-intent-${pending.call.id}`,
+        text: resumedIntent,
+        source: 'host',
+        createdAt: new Date().toISOString(),
+      };
+    }
+    yield {
+      type: 'activity',
+      id: `chat-tool-${pending.call.id}`,
+      phase: 'tool',
+      status: 'running',
+      label: chatToolProgressLabel('Using', pending.call.name, pending.call.arguments),
+      startedAt: new Date().toISOString(),
+    };
     yield { type: 'tool_call', id: pending.call.id, name: pending.call.name, args: pending.call.arguments };
     const executed = await this.#executeToolCall(pending.call, resumeCtx);
+    yield {
+      type: 'activity',
+      id: `chat-tool-${pending.call.id}`,
+      phase: 'tool',
+      status: executed.result.error ? 'error' : 'success',
+      label: chatToolProgressLabel(executed.result.error ? 'Failed' : 'Used', pending.call.name, pending.call.arguments),
+      completedAt: new Date().toISOString(),
+    };
     yield executed.delta;
 
     const messages = [
@@ -1053,6 +1093,8 @@ export class ChatSessionExecutor {
     },
   ): AsyncIterable<ChatDelta> {
     let toolCallCount = options.toolCallCount;
+    const requestedWork = latestUserText(messages);
+    const localObservations: TurnToolObservation[] = [];
     // CLB stage timers (Phase A). firstTokenMs is the perceived latency; modelMs
     // and toolMs accumulate wall-clock across rounds so the trace shows exactly
     // where an N-round turn spends its time.
@@ -1130,6 +1172,8 @@ export class ChatSessionExecutor {
       let assistantText = '';
       let reasoningSeg = '';
       let surfacedReasoning = false;
+      const progressiveCommentaryId = `assistant-progress-${ctx.clientTurnId ?? ctx.conversationId}-${turn + 1}`;
+      let progressiveCommentaryVisible = false;
       const bufferedDeltas: ChatDelta[] = [];
       let surfacedConfirmation = false;
       let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
@@ -1175,6 +1219,17 @@ export class ChatSessionExecutor {
         for await (const delta of adapter.chat!(messages, options.tools, Object.keys(chatOptions).length > 0 ? chatOptions : undefined)) {
           if (delta.type === 'text') {
             assistantText += delta.delta;
+            const progressiveText = compactPublicProgress(assistantText);
+            if (progressiveText) {
+              progressiveCommentaryVisible = true;
+              yield {
+                type: 'commentary',
+                id: progressiveCommentaryId,
+                text: progressiveText,
+                source: 'assistant_preamble',
+                createdAt: new Date().toISOString(),
+              };
+            }
           }
           if (delta.type === 'thinking' && delta.delta) producedThinking = true;
           if ((delta.type === 'text' && delta.delta) || delta.type === 'tool_call') {
@@ -1191,8 +1246,10 @@ export class ChatSessionExecutor {
           // tool-round narration cannot leak into the final answer, but stream
           // factual activity immediately so the operator never stares at a dead
           // "Waiting for runtime" card while the harness is actively working.
-          if (delta.type === 'activity' || delta.type === 'commentary') {
+          if (delta.type === 'activity') {
             yield delta;
+          } else if (delta.type === 'commentary') {
+            yield { ...delta, text: compactPublicProgress(delta.text) };
           } else if (delta.type === 'thinking') {
             // Surface harness reasoning as a streaming, replace-in-place reasoning
             // row (the SAME `activity` shape adapters like Codex already emit)
@@ -1255,9 +1312,42 @@ export class ChatSessionExecutor {
       }
 
       if (toolCalls.length === 0 || finishReason !== 'tool_calls') {
+        // The provisional row made the answer readable while chunks arrived.
+        // Clear it before promoting the same text into the final assistant body.
+        if (progressiveCommentaryVisible) {
+          yield {
+            type: 'commentary',
+            id: progressiveCommentaryId,
+            text: '',
+            source: 'assistant_preamble',
+            createdAt: new Date().toISOString(),
+          };
+        }
+        const leaseObservations = ctx.turnLease
+          ? this.turnExperience(ctx.workspaceId, ctx.conversationId, ctx.turnLease)?.observations ?? []
+          : [];
+        const evidenceVerdict = finishReason === 'stop'
+          ? guardCompletionClaims({
+              userMessage: requestedWork,
+              assistantText,
+              observations: leaseObservations.length > 0 ? leaseObservations : localObservations,
+            })
+          : { allowed: true, claimed: [], missing: [] };
         for (const delta of bufferedDeltas) {
           if (delta.type === 'text' && delta.delta) producedText = true;
           yield delta;
+        }
+        if (!evidenceVerdict.allowed) {
+          // Evidence enforcement remains durable/auditable, but an internal
+          // ledger dump is not a chat answer. Keep the model's useful response
+          // readable and let the normal run/history surfaces carry the receipts.
+          this.#deps.logger?.warn('chat.completion_claim.withheld', {
+            workspaceId: ctx.workspaceId,
+            agentId: ctx.agentId,
+            conversationId: ctx.conversationId,
+            claimed: evidenceVerdict.claimed,
+            missing: evidenceVerdict.missing,
+          });
         }
         const noOutput = !assistantText.trim() && !surfacedConfirmation && finishReason !== 'error';
         // Empty-turn recovery. A turn can end with zero answer text in three ways:
@@ -1313,8 +1403,8 @@ export class ChatSessionExecutor {
       if (assistantPreamble) {
         yield {
           type: 'commentary',
-          id: `assistant-preamble-${ctx.clientTurnId ?? ctx.conversationId}-${turn + 1}`,
-          text: assistantPreamble.slice(0, 1_200),
+          id: progressiveCommentaryId,
+          text: compactPublicProgress(assistantPreamble),
           source: 'assistant_preamble',
           createdAt: new Date().toISOString(),
         };
@@ -1337,22 +1427,6 @@ export class ChatSessionExecutor {
         if (!producedText) yield { type: 'text', delta: TURN_LIMIT_MESSAGE };
         yield { type: 'done', finishReason: 'max_turns' };
         return;
-      }
-
-      if (!assistantPreamble) {
-        const labels = batch.slice(0, 2).map((call) => prettyToolLabel(call.name));
-        const operation = labels.length === 1
-          ? labels[0]!
-          : labels.length === 2
-            ? `${labels[0]} and ${labels[1]}`
-            : 'the requested operations';
-        yield {
-          type: 'commentary',
-          id: `host-tool-preamble-${ctx.clientTurnId ?? ctx.conversationId}-${turn + 1}`,
-          text: `I’ll run ${operation} now, inspect the observed result, and adjust the work if it does not match the objective.`,
-          source: 'host',
-          createdAt: new Date().toISOString(),
-        };
       }
 
       const confirmationCall = batch.find((call) =>
@@ -1391,9 +1465,6 @@ export class ChatSessionExecutor {
       }
 
       toolCallCount += batch.length;
-      for (const call of batch) {
-        yield this.#activity(ctx, 'tool', `Executing ${call.name}`, 'Running an Agentis tool for this turn.', `tool-${call.id}`);
-      }
 
       // Don't kick off tools (some spend model credits — e.g. build_workflow) if
       // the turn was canceled while the model round was streaming.
@@ -1413,14 +1484,28 @@ export class ChatSessionExecutor {
       // any marker-protocol runtime) is legible while it works instead of a silent
       // "Waiting for model output". `build_workflow` is skipped: it streams its own
       // richer backend narration via #streamBuildNarration below.
-      const carded = batch.filter((call) => call.name !== 'agentis.build_workflow');
+      const carded = batch.filter((call) => call.name !== 'agentis.build_workflow' && call.name !== 'agentis.team.spawn' && !isBackgroundChatTool(call.name));
+      // Some CLI runtimes legitimately provide no pre-tool prose. In that case
+      // emit one factual intent derived from the operation itself: it is live,
+      // useful and auditable, without manufacturing a fake inner monologue.
+      for (const call of batch) {
+        const commentary = chatToolIntentCommentary(call.name);
+        if (!commentary) continue;
+        yield {
+          type: 'commentary',
+          id: `chat-tool-intent-${call.id}`,
+          text: commentary,
+          source: 'host',
+          createdAt: new Date().toISOString(),
+        };
+      }
       for (const call of carded) {
         yield {
           type: 'activity',
           id: `chat-tool-${call.id}`,
           phase: 'tool',
           status: 'running',
-          label: toolActivityLabel('Using', prettyToolLabel(call.name), call.arguments),
+          label: chatToolProgressLabel('Using', call.name, call.arguments),
           startedAt: new Date().toISOString(),
         };
       }
@@ -1428,29 +1513,97 @@ export class ChatSessionExecutor {
       // Execute all tool calls in parallel — SQLite builtins are sub-ms, HTTP
       // tools can take hundreds of ms. Parallel execution is the spec §6.2 design.
       const toolRoundStart = Date.now();
-      const runBatch = () => Promise.all(batch.map((call) => this.#executeToolCall(call, execCtx)));
-      let settled: Awaited<ReturnType<typeof runBatch>>;
+      const swarmCalls = batch.filter((call) => call.name === 'agentis.team.spawn');
+      const standardCalls = batch.filter((call) => call.name !== 'agentis.team.spawn');
+      const runBatch = () => Promise.all(standardCalls.map((call) => this.#executeToolCall(call, execCtx)));
+      let settled: Awaited<ReturnType<typeof runBatch>> = [];
+      // A chat team is a streaming tool, not a background black box. Drain its
+      // safe state snapshots before giving the lead the consolidated tool result.
+      for (const call of swarmCalls) {
+        const startedAt = Date.now();
+        let result: { data?: unknown; error?: string } = { error: 'The chat swarm runner is not configured.' };
+        if (this.#deps.chatSwarms) {
+          for await (const delta of this.#deps.chatSwarms.run(call.arguments as Parameters<ChatSwarmService['run']>[0], execCtx, call.id)) {
+            if (delta.type === 'tool_result') {
+              result = delta.error ? { error: delta.error } : { data: delta.result };
+            } else {
+              yield delta;
+            }
+          }
+        }
+        const durationMs = Date.now() - startedAt;
+        const summarized = summarizeToolResult(result.data ?? result.error ?? null);
+        settled.push({
+          call,
+          result,
+          summarized,
+          durationMs,
+          delta: { type: 'tool_result', id: call.id, name: call.name, result: summarized, ...(result.error ? { error: result.error } : {}) },
+        });
+      }
       if (buildRunId) {
         const holder: { result?: Awaited<ReturnType<typeof runBatch>> } = {};
         yield* this.#streamBuildNarration(execCtx, buildRunId, holder, runBatch);
-        settled = holder.result!;
+        settled.push(...holder.result!);
       } else {
-        settled = await runBatch();
+        settled.push(...await runBatch());
       }
       timings.toolMs += Date.now() - toolRoundStart;
 
-      for (const { call, result, summarized, delta } of settled) {
+      let consultationAwaitingApproval = false;
+      for (const { call, result, summarized, delta, durationMs } of settled) {
+        localObservations.push({
+          index: localObservations.length + 1,
+          name: call.name,
+          args: call.arguments,
+          result: result.data ?? result.error ?? null,
+          ok: !result.error,
+          mutating: ChatToolExecutor.isMutating(call.name),
+          repeats: 1,
+          durationMs,
+        });
         // Close out the live card (replace-in-place by id) before its result.
-        if (call.name !== 'agentis.build_workflow') {
+        if (call.name !== 'agentis.build_workflow' && call.name !== 'agentis.team.spawn' && !isBackgroundChatTool(call.name)) {
           const failed = Boolean(result.error);
           yield {
             type: 'activity',
             id: `chat-tool-${call.id}`,
             phase: 'tool',
             status: failed ? 'error' : 'success',
-            label: toolActivityLabel(failed ? 'Failed' : 'Used', prettyToolLabel(call.name), call.arguments),
+            label: chatToolProgressLabel(failed ? 'Failed' : 'Used', call.name, call.arguments),
             completedAt: new Date().toISOString(),
           };
+        }
+        if (call.name === 'agentis.agent.consult' && result.data && typeof result.data === 'object') {
+          const consultation = result.data as {
+            agentConsultation?: boolean;
+            consultationId?: string;
+            caller?: { id?: string; name?: string };
+            target?: { id?: string; name?: string };
+            round?: number;
+            maxRounds?: number;
+            status?: string;
+          };
+          if (consultation.agentConsultation && consultation.consultationId && consultation.caller?.id && consultation.target?.id) {
+            const awaiting = consultation.status === 'awaiting_approval';
+            consultationAwaitingApproval ||= awaiting;
+            yield {
+              type: 'agent_consultation',
+              consultationId: consultation.consultationId,
+              phase: awaiting ? 'awaiting_approval' : 'completed',
+              callerAgentId: consultation.caller.id,
+              targetAgentId: consultation.target.id,
+              callerName: consultation.caller.name,
+              targetName: consultation.target.name,
+              round: consultation.round ?? 1,
+              maxRounds: consultation.maxRounds ?? 3,
+              summary: awaiting
+                ? `${consultation.target.name ?? 'Specialist'} is awaiting operator approval.`
+                : `${consultation.target.name ?? 'Specialist'} answered ${consultation.caller.name ?? 'the calling agent'}.`,
+              status: awaiting ? 'running' : 'success',
+              createdAt: new Date().toISOString(),
+            };
+          }
         }
         yield delta;
         let toolContent = result.error
@@ -1477,6 +1630,12 @@ export class ChatSessionExecutor {
           }
         }
         messages.push({ role: 'tool', toolCallId: call.id, content: toolContent });
+      }
+
+      if (consultationAwaitingApproval) {
+        this.#logTurn(ctx, options.startedAt, toolCallCount, 'consultation_awaiting_approval', timings);
+        yield { type: 'done', finishReason: 'stop' };
+        return;
       }
 
       // Intelligent stop: feed this round to the progress monitor. A round counts
@@ -1514,7 +1673,7 @@ export class ChatSessionExecutor {
     const result = await ChatToolExecutor.run(call.name, call.arguments, ctx);
     const durationMs = Date.now() - toolStartedAt;
     const summarized = summarizeToolResult(result.data ?? result.error ?? null);
-    const ok = !result.error;
+    const ok = !result.error && resultProvidesCompletionEvidence(result.data);
     if (ctx.turnLease && this.#deps.turnLeases) {
       try {
         this.#deps.turnLeases.recordToolResult({
@@ -1953,6 +2112,11 @@ function absoluteMaxRounds(): number {
   return 2000;
 }
 
+function latestUserText(messages: ChatMessage[]): string {
+  const message = [...messages].reverse().find((entry) => entry.role === 'user');
+  return message ? stringifyChatContent(message.content) : '';
+}
+
 const REASONING_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 
 function reasoningFloor(current: string | undefined, floor: string): string {
@@ -2222,6 +2386,53 @@ function expandUserMessage(message: string): string {
 function prettyToolLabel(name: string): string {
   if (name.startsWith('workflow.')) return 'run workflow';
   return name.replace(/^agentis\./, '').replace(/[._]/g, ' ').trim() || name;
+}
+
+/**
+ * The chat transcript is a narrative, not a terminal. Keep routine discovery
+ * calls out of it and give consequential actions a concrete operator-facing
+ * label. The raw tool identity remains available in the durable event ledger.
+ */
+function isBackgroundChatTool(name: string): boolean {
+  return [
+    'agentis.orient',
+    'agentis.command.review',
+    'agentis.run.query',
+    'agentis.workflow.loop.status',
+    'agentis.data.query',
+    'agentis.canvas.context',
+  ].includes(name);
+}
+
+function chatToolIntentCommentary(name: string): string | null {
+  const intent: Record<string, string> = {
+    'agentis.workflow.loop.status': 'Checking the latest workflow state to locate where new results stop appearing.',
+    'agentis.run.query': 'Reviewing recent runs to identify the concrete failure or stale result.',
+    'agentis.data.query': 'Checking the saved records before deciding whether the issue is data or workflow logic.',
+    'agentis.command.review': 'Reviewing the current workspace state before changing anything.',
+    'agentis.capability.search': 'Finding the exact workspace capability needed for the next step.',
+    'agentis.capability.load': 'Loading the selected capability details before using it.',
+    'agentis.capability.invoke': 'Handing the focused subtask to the selected specialist.',
+    'agentis.workflow.run': 'Starting the selected workflow and following its result.',
+  };
+  return intent[name] ?? null;
+}
+
+function chatToolProgressLabel(verb: 'Using' | 'Used' | 'Failed', name: string, args: unknown): string {
+  const done = verb === 'Used';
+  const failed = verb === 'Failed';
+  const labels: Record<string, { running: string; done: string; failed: string }> = {
+    'agentis.capability.search': { running: 'Searching the workspace for the right capability', done: 'Found matching workspace capabilities', failed: 'Could not search workspace capabilities' },
+    'agentis.capability.load': { running: 'Loading the selected capability details', done: 'Loaded capability details', failed: 'Could not load capability details' },
+    'agentis.capability.invoke': { running: 'Handing the focused task to the selected specialist', done: 'Specialist work returned', failed: 'Specialist work could not start' },
+    'agentis.workflow.run': { running: 'Starting the selected workflow', done: 'Workflow started', failed: 'Workflow could not start' },
+    'agentis.run.cancel': { running: 'Stopping the selected run', done: 'Run stopped', failed: 'Run could not be stopped' },
+    'agentis.build_workflow': { running: 'Building the workflow', done: 'Workflow build finished', failed: 'Workflow build failed' },
+    'agentis.team.spawn': { running: 'Starting the temporary team', done: 'Team work returned', failed: 'Team could not start' },
+  };
+  const mapped = labels[name];
+  if (mapped) return failed ? mapped.failed : done ? mapped.done : mapped.running;
+  return toolActivityLabel(verb, prettyToolLabel(name), args);
 }
 
 function summarizeToolResult(value: unknown): unknown {

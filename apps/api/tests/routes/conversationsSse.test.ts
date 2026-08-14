@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import type { AgentAdapter, AdapterHealthStatus, ChatDelta, ChatMessage, NormalizedAgentEvent, NormalizedTask, ToolDefinition } from '@agentis/core';
+import { initialTurnActivityLabel, type AgentAdapter, type AdapterHealthStatus, type ChatDelta, type ChatMessage, type NormalizedAgentEvent, type NormalizedTask, type ToolDefinition } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { AdapterManager } from '../../src/adapters/AdapterManager.js';
 import { buildConversationRoutes } from '../../src/routes/conversations.js';
@@ -26,6 +26,18 @@ class StreamingAdapter implements AgentAdapter {
     yield { type: 'done', finishReason: 'stop' };
   }
 }
+
+describe('initialTurnActivityLabel', () => {
+  it('gives substantive turns an immediate contextual status', () => {
+    expect(initialTurnActivityLabel('do a quick check on the interface')).toBe('Starting the interface check');
+    expect(initialTurnActivityLabel('review our current workspace health')).toBe('Starting the workspace check');
+    expect(initialTurnActivityLabel('fix the failed workflow')).toBe('Starting the diagnosis');
+  });
+
+  it('keeps trivial social replies out of the work transcript', () => {
+    expect(initialTurnActivityLabel('hello')).toBe('Request received');
+  });
+});
 
 class FailingChatAdapter extends StreamingAdapter {
   override async *chat(_messages: ChatMessage[], _tools: ToolDefinition[]): AsyncIterable<ChatDelta> {

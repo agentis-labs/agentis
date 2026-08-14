@@ -55,6 +55,19 @@ export interface NodeCapabilityManifest {
   summary: string;
 }
 
+export type WorkflowNodeProofStrategy = 'static' | 'transactional' | 'live' | 'human';
+
+/** Core-owned contract consumed by runtime validation, authoring, UI and release gates. */
+export interface WorkflowNodeDefinition {
+  kind: string;
+  lifecycle: 'supported' | 'experimental' | 'disabled';
+  configVersion: 2;
+  runtimeExecutor: string;
+  proofStrategy: WorkflowNodeProofStrategy;
+  authoringSummary: string;
+  capability: NodeCapabilityManifest;
+}
+
 const LLM_CRED = ['model_provider'];
 
 /** A purely-local node: touches only the run/workspace state, nothing external. */
@@ -95,9 +108,13 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
   wait: local('wait', 'Sleeps for a delay; no external access.'),
   return_output: local('return_output', 'Marks final output; no external access.'),
   checkpoint: local('checkpoint', 'Human approval gate; no external network.'),
+  human_input: local('human_input', 'Collects operator input; no external network.'),
   scratchpad: local('scratchpad', 'Reads/writes run-local scratch state.'),
   workflow_store: local('workflow_store', 'Run-scoped key/value store (local DB).'),
   workspace_store: local('workspace_store', 'Workspace-scoped key/value store (local DB).'),
+  data_query: local('data_query', 'Reads an Agentic App datastore collection (local DB).'),
+  data_mutate: local('data_mutate', 'Writes and verifies an Agentic App datastore collection (local DB).'),
+  aggregate_window: local('aggregate_window', 'Buffers workflow events in the local workflow store.'),
   transform: local('transform', 'Evaluates a guarded expression (no arbitrary code).'),
   filter: local('filter', 'Evaluates a guarded condition (no arbitrary code).'),
   artifact_collect: local('artifact_collect', 'Gathers run artifacts.', 'workspace-read'),
@@ -162,6 +179,25 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
     codeExecution: true,
     codeExecutionSandbox: 'process',
     summary: 'Runs an extension operation (executes extension code).',
+  },
+  mcp: {
+    nodeKind: 'mcp',
+    networkAccess: 'unrestricted',
+    filesystemAccess: 'none',
+    credentialTypes: ['mcp_server'],
+    externalDataSent: 'declared',
+    codeExecution: false,
+    summary: 'Calls a tool exposed by a configured MCP server.',
+  },
+  channel: {
+    nodeKind: 'channel',
+    networkAccess: 'declared',
+    declaredHosts: [],
+    filesystemAccess: 'none',
+    credentialTypes: ['channel_connection'],
+    externalDataSent: 'declared',
+    codeExecution: false,
+    summary: 'Sends data through an authorized external channel connection.',
   },
   component_task: {
     nodeKind: 'component_task',
@@ -258,7 +294,39 @@ export const NODE_CAPABILITY_CATALOG: Record<string, NodeCapabilityManifest> = {
     codeExecution: false,
     summary: 'Fans out to branches; its capabilities are the branches’.',
   },
+  converge: local('converge', 'Repeatedly delegates to a child workflow until its continuation condition settles.'),
+  pursue: local('pursue', 'Pursues an objective by repeatedly delegating to a child workflow.'),
 };
+
+/**
+ * Authoritative list of workflow node kinds enabled by this platform build.
+ * Runtime validation derives from this list, so an executable node cannot be
+ * added without a capability declaration.
+ */
+function proofStrategy(kind: string, capability: NodeCapabilityManifest): WorkflowNodeProofStrategy {
+  if (kind === 'checkpoint' || kind === 'human_input') return 'human';
+  if (kind === 'data_query' || kind === 'data_mutate' || kind === 'workflow_store' || kind === 'workspace_store' || kind === 'aggregate_window') return 'transactional';
+  if (capability.networkAccess !== 'none' || capability.externalDataSent !== 'none' || capability.codeExecution) return 'live';
+  return 'static';
+}
+
+export const NODE_DEFINITIONS: Readonly<Record<string, WorkflowNodeDefinition>> = Object.freeze(
+  Object.fromEntries(Object.entries(NODE_CAPABILITY_CATALOG).map(([kind, capability]) => [kind, Object.freeze({
+    kind,
+    lifecycle: 'supported' as const,
+    configVersion: 2 as const,
+    runtimeExecutor: kind,
+    proofStrategy: proofStrategy(kind, capability),
+    authoringSummary: capability.summary,
+    capability,
+  })])),
+);
+
+export const SUPPORTED_WORKFLOW_NODE_KINDS = Object.freeze(
+  Object.values(NODE_DEFINITIONS)
+    .filter((definition) => definition.lifecycle === 'supported')
+    .map((definition) => definition.kind),
+) as readonly string[];
 
 /**
  * Classify a graph change for recovery approval. This deliberately derives from

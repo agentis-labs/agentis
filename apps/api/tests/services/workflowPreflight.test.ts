@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { ExtensionManifest, WorkflowGraph } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
+import { eq } from 'drizzle-orm';
 import { preflightWorkflow } from '../../src/services/workflow/workflowPreflight.js';
 import { createTestContext } from '../_helpers/createTestContext.js';
 
 /** Insert a node_worker extension row and return its id. */
-function seedExtension(db: AgentisSqliteDb, workspaceId: string, userId: string, source: string): string {
+function seedExtension(db: AgentisSqliteDb, workspaceId: string, userId: string, source: string, outputSchema: Record<string, unknown> = {}): string {
   const id = randomUUID();
   const now = new Date().toISOString();
   const manifest: ExtensionManifest = {
@@ -17,7 +18,7 @@ function seedExtension(db: AgentisSqliteDb, workspaceId: string, userId: string,
     runtime: 'node_worker',
     entrypoint: 'scraper.js',
     source,
-    operations: [{ name: 'execute', inputSchema: {}, outputSchema: {} }],
+    operations: [{ name: 'execute', inputSchema: {}, outputSchema }],
     permissions: ['network'],
     capabilityTags: [],
   };
@@ -248,6 +249,75 @@ describe('preflightWorkflow', () => {
     });
     expect(report.status).toBe('unverified');
     expect(report.nodes.ext?.status).toBe('mocked');
+  });
+
+  it('synthesizes extension mock output from the declared operation schema', async () => {
+    const ctx = await createTestContext();
+    const extId = seedExtension(
+      ctx.db, ctx.workspace.id, ctx.user.id,
+      'export async function execute() { return { restaurants: [] }; }',
+      {
+        type: 'object',
+        properties: {
+          restaurants: {
+            type: 'array',
+            items: { type: 'object', properties: { name: { type: 'string' }, latitude: { type: 'number' }, longitude: { type: 'number' } } },
+          },
+          fetchedCount: { type: 'number' },
+        },
+      },
+    );
+    const report = preflightWorkflow({
+      db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'wf-ext-schema', graph: extensionGraph(extId),
+    });
+
+    expect(report.nodes.ext?.output).toMatchObject({
+      restaurants: [{ name: 'sample_name', latitude: 1, longitude: 1 }],
+      fetchedCount: 1,
+    });
+
+    const row = ctx.db.select().from(schema.extensions).where(eq(schema.extensions.id, extId)).get()!;
+    const manifest = structuredClone(row.manifest as ExtensionManifest);
+    manifest.operations[0]!.outputSchema = {
+      type: 'object', properties: { fetchedCount: { type: 'number', default: 7 } },
+    };
+    ctx.db.update(schema.extensions).set({ manifest, updatedAt: new Date(Date.now() + 1_000).toISOString() })
+      .where(eq(schema.extensions.id, extId)).run();
+    const refreshed = preflightWorkflow({
+      db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'wf-ext-schema', graph: extensionGraph(extId),
+    });
+    expect(refreshed.cacheHit).toBe(false);
+    expect(refreshed.nodes.ext?.output).toMatchObject({ fetchedCount: 7 });
+  });
+
+  it('mocks data_mutate with the same receipt shape downstream nodes use at runtime', async () => {
+    const ctx = await createTestContext();
+    const graph: WorkflowGraph = {
+      version: 1,
+      nodes: [
+        { id: 'trigger', type: 'trigger', title: 'Input', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        {
+          id: 'persist', type: 'data_mutate', title: 'Persist', position: { x: 200, y: 0 },
+          config: { kind: 'data_mutate', operation: 'upsert', collection: 'rows', records: '{{= [trigger] }}', matchFields: ['id'], outputKey: 'stored' },
+        },
+        {
+          id: 'summary', type: 'transform', title: 'Summary', position: { x: 400, y: 0 },
+          config: { kind: 'transform', expression: '({ persistedCount: nodes.persist.mutationReceipt.succeeded })' },
+        },
+      ],
+      edges: [
+        { id: 'a', source: 'trigger', target: 'persist' },
+        { id: 'b', source: 'persist', target: 'summary' },
+      ],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const report = preflightWorkflow({
+      db: ctx.db, workspaceId: ctx.workspace.id, workflowId: 'wf-data-receipt', graph, inputs: { id: 'row-1' },
+    });
+
+    expect(report.status).not.toBe('blocked');
+    expect(report.nodes.persist?.output).toMatchObject({ mutationReceipt: { attempted: 1, succeeded: 1, failed: 0 } });
+    expect(report.nodes.summary?.output).toEqual({ persistedCount: 1 });
   });
 
   it('blocks an extension operation that is absent from the installed manifest', async () => {

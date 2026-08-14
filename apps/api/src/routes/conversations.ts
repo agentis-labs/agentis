@@ -17,11 +17,13 @@
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   AgentisError,
   CONSTANTS,
+  initialTurnActivityLabel,
+  normalizeAgentPlanText,
   REALTIME_EVENTS,
   REALTIME_ROOMS,
   type ChatDelta,
@@ -41,7 +43,7 @@ import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
 import type { AuthService } from '../services/auth.js';
 import type { ConversationStore } from '../services/conversation/conversationStore.js';
-import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from '../services/chat/chatPermissionMode.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from '../services/chat/chatPermissionMode.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import { OpenClawAdapter } from '../adapters/OpenClawAdapter.js';
 import { ChatSessionExecutor } from '../services/chat/chatSessionExecutor.js';
@@ -65,6 +67,7 @@ import type { VisionService } from '../services/visionService.js';
 import type { TranscriptionService } from '../services/transcriptionService.js';
 import type { RuntimeProfileService } from '../services/runtime/runtimeProfileService.js';
 import type { ConversationHandoffService } from '../services/conversation/conversationHandoffService.js';
+import type { AgentConsultationService } from '../services/agent/agentConsultationService.js';
 import { channelModelRole } from '../services/conversation/channelConversationRole.js';
 import { ConversationAttachmentContextService } from '../services/conversation/conversationAttachmentContext.js';
 import {
@@ -114,6 +117,7 @@ const editSchema = z.object({ text: z.string().min(1).max(CONSTANTS.CONVERSATION
 const rewriteSchema = sendSchema.omit({ body: true }).extend({
   text: z.string().min(1).max(CONSTANTS.CONVERSATION_MESSAGE_MAX_LENGTH),
 });
+const swarmSteerSchema = z.object({ instruction: z.string().min(1).max(2_000) });
 type ConversationRouteDeps = {
   db: AgentisSqliteDb;
   auth: AuthService;
@@ -135,6 +139,7 @@ type ConversationRouteDeps = {
   transcription?: TranscriptionService;
   runtimeProfiles?: RuntimeProfileService;
   handoffs?: ConversationHandoffService;
+  consultations?: AgentConsultationService;
   memoryCapture?: {
     captureImmediateCorrection?(args: {
       workspaceId: string;
@@ -209,6 +214,12 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     bus: deps.bus,
     execute: (turn, sink, signal) => executeDurableConversationTurn(deps, turn, sink, signal),
     onCancel: async (turn) => {
+      // The durable worker owns this controller, not the SSE reader. Abort it
+      // explicitly as well as the service-owned controller so a Stop always
+      // reaches the active model loop even after the browser has disconnected.
+      activeConversationTurns.get(turn.conversationId)?.abort(new Error('operator_cancel'));
+      deps.consultations?.cancelByParentTurn(turn.workspaceId, turn.id);
+      await ChatSessionExecutor.chatSwarms()?.stopForConversation(turn.workspaceId, turn.conversationId);
       deps.turnLeases?.revoke(turn.workspaceId, turn.conversationId);
       if (!deps.engine) return;
       const runs = deps.db.select({ id: schema.workflowRuns.id }).from(schema.workflowRuns).where(and(
@@ -218,6 +229,43 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       )).all();
       await Promise.allSettled(runs.map((run) => deps.engine!.cancelRun(run.id)));
     },
+  });
+  deps.consultations?.bindParentTurnResume((turnId) => durableTurns.resumeAfterApproval(turnId));
+
+  // Chat-native temporary-team recovery and controls. The state comes from the
+  // same durable records that stream into the turn ledger, so refresh does not
+  // turn a live team into an unreadable orphan.
+  app.get('/:agentId/swarms/:swarmId', async (c) => {
+    const ws = getWorkspace(c);
+    const swarm = await ChatSessionExecutor.chatSwarms()?.get(ws.workspaceId, c.req.param('swarmId'));
+    if (!swarm) return c.json({ error: 'Chat swarm service is unavailable.' }, 503);
+    return c.json(swarm);
+  });
+  app.post('/:agentId/swarms/:swarmId/pause', async (c) => swarmControl(c, 'pause'));
+  app.post('/:agentId/swarms/:swarmId/resume', async (c) => swarmControl(c, 'resume'));
+  app.post('/:agentId/swarms/:swarmId/stop', async (c) => swarmControl(c, 'stop'));
+  app.post('/:agentId/swarms/:swarmId/workers/:workerId/stop', async (c) => {
+    const ws = getWorkspace(c);
+    const service = ChatSessionExecutor.chatSwarms();
+    if (!service) return c.json({ error: 'Chat swarm service is unavailable.' }, 503);
+    try { return c.json(await service.stopWorker(ws.workspaceId, c.req.param('swarmId'), c.req.param('workerId'))); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Unable to stop worker.' }, 400); }
+  });
+  app.post('/:agentId/swarms/:swarmId/workers/:workerId/retry', async (c) => {
+    const ws = getWorkspace(c);
+    const service = ChatSessionExecutor.chatSwarms();
+    if (!service) return c.json({ error: 'Chat swarm service is unavailable.' }, 503);
+    try { return c.json(await service.retryWorker(ws.workspaceId, c.req.param('swarmId'), c.req.param('workerId'))); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Unable to retry worker.' }, 400); }
+  });
+  app.post('/:agentId/swarms/:swarmId/steer', async (c) => {
+    const ws = getWorkspace(c);
+    const parsed = swarmSteerSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: 'A short lead instruction is required.' }, 400);
+    const service = ChatSessionExecutor.chatSwarms();
+    if (!service) return c.json({ error: 'Chat swarm service is unavailable.' }, 503);
+    try { return c.json(await service.steer(ws.workspaceId, c.req.param('swarmId'), parsed.data.instruction)); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Unable to steer lead.' }, 400); }
   });
   queueMicrotask(() => durableTurns.recover());
 
@@ -444,10 +492,28 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       attachmentIds: body.attachments,
       historyMessages: conversationHistoryForTurn(deps, conversation.id, message.id).length,
     });
+    const previousTurn = deps.db.select({ effectiveMode: schema.conversationTurns.effectiveMode })
+      .from(schema.conversationTurns)
+      .where(and(
+        eq(schema.conversationTurns.workspaceId, ws.workspaceId),
+        eq(schema.conversationTurns.conversationId, conversation.id),
+      ))
+      .orderBy(desc(schema.conversationTurns.createdAt))
+      .get();
+    const activeBuildSession = deps.db.select({ status: schema.buildSessions.status })
+      .from(schema.buildSessions)
+      .where(and(
+        eq(schema.buildSessions.workspaceId, ws.workspaceId),
+        eq(schema.buildSessions.conversationId, conversation.id),
+      ))
+      .orderBy(desc(schema.buildSessions.updatedAt))
+      .get();
     const classified = classifyConversationExecutionMode(requestedMode, {
       body: body.body,
       attachmentCount: body.attachments?.length ?? 0,
       permissionMode,
+      previousMode: previousTurn?.effectiveMode as EffectiveConversationExecutionMode | undefined,
+      hasActiveBuildSession: Boolean(activeBuildSession && !['completed', 'failed'].includes(activeBuildSession.status)),
     });
     const envelope = await buildChatExecutionEnvelope(deps, agent, requestedMode, classified.mode, classified.reason);
     const activeViewport = body.useViewportContext
@@ -564,6 +630,18 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     if (before.agentId !== c.req.param('agentId')) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation turn not found');
     const turn = await durableTurns.cancel(ws.workspaceId, before.id);
     return c.json({ turn: serializeDurableTurn(turn) });
+  });
+
+  // Stop may arrive before the POST /turns response gives the browser a durable
+  // turn id. Client turn ids are generated before that POST, so they provide a
+  // stable cancellation handle across the create → event-stream handoff.
+  app.post('/:agentId/turns/by-client/:clientTurnId/cancel', async (c) => {
+    const ws = getWorkspace(c);
+    const agentId = c.req.param('agentId');
+    const turn = durableTurns.findByClientTurnId(ws.workspaceId, agentId, c.req.param('clientTurnId'));
+    if (!turn) return c.json({ turn: null });
+    const cancelled = await durableTurns.cancel(ws.workspaceId, turn.id);
+    return c.json({ turn: serializeDurableTurn(cancelled) });
   });
 
   // Queue-then-auto-continue composer: still-pending messages queued while a
@@ -1008,7 +1086,7 @@ async function* withChatHeartbeats(
 ): AsyncIterable<ChatDelta> {
   const iterator = source[Symbol.asyncIterator]();
   const startedAt = Date.now();
-  let nextHeartbeatAt = 15_000;
+  let nextHeartbeatAt = 8_000;
   let next = iterator.next();
   let lastActivity: Extract<ChatDelta, { type: 'activity' }> | undefined;
 
@@ -1025,12 +1103,16 @@ async function* withChatHeartbeats(
         agentId: args.agentId,
         workflowId: args.workflowId,
         phase: 'waiting',
-        label: lastActivity?.label ?? 'Waiting for runtime',
-        detail: `Still working after ${Math.round(raced.threshold / 1000)}s.`,
+        label: lastActivity && !/waiting for (?:model|runtime) output|invoking agent runtime/i.test(lastActivity.label)
+          ? lastActivity.label
+          : 'Waiting for the agent\'s first progress update',
+        detail: `No operator-visible update has arrived after ${Math.round(raced.threshold / 1000)}s; the turn remains connected and can be stopped.`,
         suffix: 'waiting',
       });
-      nextHeartbeatAt = raced.threshold < 60_000
-        ? 60_000
+      nextHeartbeatAt = raced.threshold < 30_000
+        ? 30_000
+        : raced.threshold < 60_000
+          ? 60_000
         : raced.threshold < 120_000
           ? 120_000
           : raced.threshold + 60_000;
@@ -1125,6 +1207,7 @@ async function executeDurableConversationTurn(
         try {
           const delta = JSON.parse(event.data) as ChatDelta;
           if (delta.type === 'confirmation_required') awaitingApproval = true;
+          if (delta.type === 'agent_consultation' && delta.phase === 'awaiting_approval') awaitingApproval = true;
           if (delta.type === 'done') finishReason = delta.finishReason;
         } catch { /* persisted transport still receives the original event */ }
       } else if (event.event === 'done') {
@@ -1147,6 +1230,7 @@ async function executeDurableConversationTurn(
       agentId: turn.agentId,
       conversation,
       clientTurnId: turn.clientTurnId,
+      durableTurnId: turn.id,
       currentMessageId: turn.messageId,
       userMessage: turn.prompt,
       useViewportContext: false,
@@ -1179,7 +1263,7 @@ async function executeDurableConversationTurn(
   const terminalReason = finishReason as ChatFinishReason;
   if (controller.signal.aborted || terminalReason === 'interrupted') return { status: 'interrupted' as const };
   if (sawError || terminalReason === 'error') {
-    const blocked = /\b(?:capacity|overloaded|rate.?limit|quota|temporarily unavailable|try again|no healthy runtime)\b/i.test(runtimeError || finalMessageText);
+    const blocked = /\b(?:capacity|overloaded|rate.?limit|quota|credits?|billing|payment required|temporarily unavailable|try again|no healthy runtime)\b/i.test(runtimeError || finalMessageText);
     if (turn.planId && deps.plans) deps.plans.setStatus(turn.workspaceId, turn.userId, turn.planId, blocked ? 'blocked' : 'failed');
     return {
       status: blocked ? 'blocked' as const : 'failed' as const,
@@ -1272,6 +1356,24 @@ function missionTitle(body: string): string {
   return first.replace(/^#+\s*/, '').slice(0, 96);
 }
 
+async function swarmControl(c: Context, action: 'pause' | 'resume' | 'stop') {
+  const ws = getWorkspace(c);
+  const service = ChatSessionExecutor.chatSwarms();
+  if (!service) return c.json({ error: 'Chat swarm service is unavailable.' }, 503);
+  try {
+    const swarmId = c.req.param('swarmId');
+    if (!swarmId) return c.json({ error: 'Chat swarm id is required.' }, 400);
+    const swarm = action === 'pause'
+      ? await service.pause(ws.workspaceId, swarmId)
+      : action === 'resume'
+        ? await service.resume(ws.workspaceId, swarmId)
+        : await service.stop(ws.workspaceId, swarmId);
+    return c.json(swarm);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : `Unable to ${action} team.` }, 400);
+  }
+}
+
 const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 function reasoningEffortFloor(current: string | null, floor: string): string {
   const currentIndex = current ? REASONING_EFFORTS.indexOf(current) : -1;
@@ -1292,6 +1394,7 @@ function streamConversationTurnReply(
     useViewportContext: boolean;
     viewportOverride?: ViewportContext | null;
     contextManifest?: ChatContextManifest | null;
+    durableTurnId?: string;
   },
 ) {
   const reg = deps.adapters.get(args.agentId);
@@ -1353,6 +1456,7 @@ async function runConversationTurn(
     qualityMode?: EffectiveConversationExecutionMode;
     executionEnvelope?: ChatExecutionEnvelope | null;
     contextManifest?: ChatContextManifest | null;
+    durableTurnId?: string;
   },
   reg: ReturnType<AdapterManager['get']>,
 ) {
@@ -1360,6 +1464,7 @@ async function runConversationTurn(
     const turnStartedAtMs = Date.now();
     const turnStartedAt = new Date(turnStartedAtMs).toISOString();
     let finalText = '';
+    let consultationAwaitingApproval = false;
     let finishReason: Extract<ChatDelta, { type: 'done' }>['finishReason'] = 'stop';
     let adapterError: string | null = null;
     let operatorStopped = false;
@@ -1398,8 +1503,7 @@ async function runConversationTurn(
       agentId: args.agentId,
       workflowId: viewportWorkflowId,
       phase: 'received',
-      label: 'Request received',
-      detail: 'The agent accepted the chat turn.',
+      label: initialTurnActivityLabel(runtimeUserMessage),
       suffix: 'received',
       startedAt: turnStartedAt,
     }), streamedMetadata);
@@ -1419,6 +1523,7 @@ async function runConversationTurn(
         userId: ws.user.id,
         conversationId: args.conversation.id,
         clientTurnId: args.clientTurnId,
+        ...(args.durableTurnId ? { durableTurnId: args.durableTurnId } : {}),
         executionMode: permissionMode === 'plan' ? 'plan' : 'chat',
         permissionMode,
         approvalSensitivity: (args.conversation.approvalSensitivity as ApprovalSensitivity | null) ?? 'balanced',
@@ -1465,6 +1570,9 @@ async function runConversationTurn(
             finishReason = delta.finishReason;
             break;
           }
+          if (delta.type === 'agent_consultation' && delta.phase === 'awaiting_approval') {
+            consultationAwaitingApproval = true;
+          }
           await writeChatDelta(stream, deps, ws, args.agentId, args.conversation.id, args.clientTurnId, delta, streamedMetadata);
           if (delta.type === 'text') finalText += delta.delta;
         }
@@ -1508,7 +1616,7 @@ async function runConversationTurn(
     operatorStopped ||= args.turnSignal.aborted || hardStoppedConversations.has(args.conversation.id);
     if (operatorStopped) finishReason = 'max_turns';
 
-    if (!finalText.trim() && !streamedMetadata.confirmation) {
+    if (!finalText.trim() && !streamedMetadata.confirmation && !consultationAwaitingApproval) {
       if (finishReason === 'interrupted' || operatorStopped) {
         finalText = 'Stopped by operator.';
       } else if (finishReason === 'error') {
@@ -1519,12 +1627,9 @@ async function runConversationTurn(
       }
     }
 
-    // Backstop: a plan-mode turn that wrote a plan but skipped/malformed the
-    // architecture_canvas on a design-shaped request gets one cheap repair
-    // completion so ChatPlanCanvas still renders the visual graph, not just text.
-    if (permissionMode === 'plan' && finishReason !== 'error' && finishReason !== 'interrupted' && reg?.adapter) {
-      finalText = await repairArchitectureCanvas(reg.adapter, finalText, runtimeUserMessage, args.turnSignal).catch(() => finalText);
-    }
+    // Never persist internal plan transport markup. The prompt now requests
+    // clean Markdown, while this remains a backstop for cached/older adapters.
+    finalText = normalizeAgentPlanText(finalText);
 
     // A model's prose is not the release gate. When it claims that the App in
     // the active viewport is done/ready, reconcile that claim against the live
@@ -1574,7 +1679,7 @@ async function runConversationTurn(
       });
     }
 
-    const hasContentToSave = finalText.trim() || streamedMetadata.confirmation || failed;
+    const hasContentToSave = !consultationAwaitingApproval && (finalText.trim() || streamedMetadata.confirmation || failed);
     if (hasContentToSave) {
       const bodyToSave = finalText.trim() || streamedMetadata.confirmation?.title || 'Confirmation required';
       const persisted = deps.conversations.appendMirrored({

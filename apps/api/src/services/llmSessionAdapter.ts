@@ -81,11 +81,14 @@ export class LlmSessionAdapter implements SessionAdapter {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), input.timeoutMs ?? this.#timeoutMs);
+    const signal = input.signal
+      ? AbortSignal.any([controller.signal, input.signal])
+      : controller.signal;
     try {
       const res = await this.#fetch(url, {
         method: 'POST',
         headers,
-        signal: controller.signal,
+        signal,
         body: JSON.stringify(body),
       });
       if (!res.ok) {
@@ -99,7 +102,9 @@ export class LlmSessionAdapter implements SessionAdapter {
       return normalizeResponse(parsed);
     } catch (err) {
       if (err instanceof AgentisError) throw err;
-      const message = (err as Error)?.name === 'AbortError' ? 'session step timed out' : (err as Error).message;
+      const message = (err as Error)?.name === 'AbortError'
+        ? input.signal?.aborted ? 'session step cancelled' : 'session step timed out'
+        : (err as Error).message;
       throw new AgentisError('INTEGRATION_OPERATION_FAILED', `session step failed: ${message}`);
     } finally {
       clearTimeout(timer);

@@ -111,7 +111,28 @@ export function compileAppReadiness(
   now = new Date(),
   focus?: AppCompileFocus,
 ): AppCompileReport {
-  const snapshot = collectAppDoctorSnapshot(db, workspaceId, appId);
+  let snapshot = collectAppDoctorSnapshot(db, workspaceId, appId);
+  if (focus) {
+    const revision = db.select({ spec: schema.workflowGraphRevisions.specJson })
+      .from(schema.workflowGraphRevisions)
+      .where(and(
+        eq(schema.workflowGraphRevisions.workspaceId, workspaceId),
+        eq(schema.workflowGraphRevisions.workflowId, focus.workflowId),
+        eq(schema.workflowGraphRevisions.id, focus.revisionId),
+      )).get();
+    snapshot = {
+      ...snapshot,
+      workflows: snapshot.workflows.map((workflow) => workflow.id === focus.workflowId
+        ? {
+            ...workflow,
+            graph: focus.graph,
+            settings: revision?.spec
+              ? { ...record(workflow.settings), spec: revision.spec }
+              : workflow.settings,
+          }
+        : workflow),
+    };
+  }
   const doctor = validateAppConformance(snapshot, now);
   // App Doctor findings remain visible during a focused proof run, but App-wide
   // release defects cannot block execution of an unrelated immutable revision.
@@ -160,7 +181,7 @@ export function compileAppReadiness(
     const suiteGreen = Boolean(loop.suite?.graphHash === hash && loop.suite.ok);
     const debugAccomplished = Boolean(
       loop.debugRun?.graphHash === hash
-      && (loop.debugRun.status === 'COMPLETED' || loop.debugRun.status === 'COMPLETED_WITH_CONTRACT_VIOLATION')
+      && loop.debugRun.status === 'COMPLETED'
       && loop.debugRun.verdict === 'accomplished',
     );
     const hardened = Boolean(loop.hardened?.graphHash === hash);

@@ -65,6 +65,82 @@ describe('AgentTurnTrace', () => {
     expect(screen.getByText('Used agentis app plan')).toBeInTheDocument();
   });
 
+  it('never renders fabricated lifecycle narration, even in an older persisted turn', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        commentary={[
+          { id: 'host-1', text: 'I’ll review the context and confirm what must be done before changing any resources.', source: 'host', createdAt: new Date().toISOString() },
+          { id: 'host-2', text: 'I’m still executing and verifying the work; I’ll report the next concrete finding or result.', source: 'host', createdAt: new Date().toISOString() },
+        ]}
+        activities={[
+          activity(1, { phase: 'runtime', label: 'Starting Antigravity' }),
+          activity(2, { phase: 'received', status: 'success', label: 'Request received' }),
+          activity(3, { status: 'success', label: 'Ran pnpm test' }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/review the context/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/still executing/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Starting Antigravity')).not.toBeInTheDocument();
+    expect(screen.queryByText('Request received')).not.toBeInTheDocument();
+    expect(screen.getByText('Ran pnpm test')).toBeInTheDocument();
+  });
+
+  it('shows an honest waiting state when a harness has not emitted safe progress yet', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        activities={[activity(1, {
+          phase: 'waiting',
+          label: "Waiting for the agent's first progress update",
+          detail: 'No operator-visible update has arrived after 8s; the turn remains connected and can be stopped.',
+        })]}
+      />,
+    );
+
+    expect(screen.getByText("Waiting for the agent's first progress update")).toBeInTheDocument();
+    expect(screen.getByText(/turn remains connected and can be stopped/i)).toBeInTheDocument();
+  });
+
+  it('shows a contextual start state before the harness emits progress', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        activities={[activity(1, {
+          phase: 'received',
+          status: 'running',
+          label: 'Starting the interface check',
+        })]}
+      />,
+    );
+
+    expect(screen.getByText('Starting the interface check')).toBeInTheDocument();
+    expect(screen.queryByText('Request received')).not.toBeInTheDocument();
+  });
+
+  it('replaces the waiting heartbeat when real harness commentary arrives', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        commentary={[{
+          id: 'codex-progress-1',
+          text: 'I found the active interface and I am checking its persisted bindings now.',
+          source: 'assistant_preamble',
+          createdAt: new Date().toISOString(),
+        }]}
+        activities={[activity(1, {
+          phase: 'waiting',
+          label: "Waiting for the agent's first progress update",
+        })]}
+      />,
+    );
+
+    expect(screen.queryByText("Waiting for the agent's first progress update")).not.toBeInTheDocument();
+    expect(screen.getByText(/I found the active interface/i)).toBeInTheDocument();
+  });
+
   it('collapses a finished turn into one pill and expands the timeline on click', () => {
     const toolCalls: ToolCallData[] = [
       { id: 't1', name: 'agentis.list_agents', status: 'success', result: { agents: [] } },

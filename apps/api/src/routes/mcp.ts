@@ -42,6 +42,7 @@ import { getWorkspace, requireWorkspace } from '../middleware/workspace.js';
 import type { ConversationTurnLeaseRegistry } from '../services/conversation/conversationTurnLease.js';
 import { APPROVAL_SENSITIVITY_HEADER, CONVERSATION_ID_HEADER, TURN_LEASE_HEADER } from '../services/mcp/mcpHarnessSession.js';
 import { decideToolApproval, resolveToolApprovalPolicy } from '../services/chat/chatApprovalPolicy.js';
+import { resultProvidesCompletionEvidence } from '../services/chat/completionEvidence.js';
 
 interface McpSettings { published?: boolean; slug?: string }
 
@@ -238,7 +239,7 @@ export function buildMcpRoutes(deps: McpRoutesDeps) {
               name: gatewayTarget,
               toolArgs: gatewayArguments,
               result: experiencePayload(result),
-              ok: result.isError !== true,
+              ok: result.isError !== true && resultProvidesCompletionEvidence(experiencePayload(result)),
               mutating,
               durationMs: Date.now() - startedAt,
             });

@@ -129,7 +129,7 @@ export function buildA2aRoutes(deps: A2aRoutesDeps) {
     });
 
     // A2A Task shape: id, status.state, artifacts[].
-    const state = run.status === 'COMPLETED' || run.status === 'COMPLETED_WITH_CONTRACT_VIOLATION'
+    const state = run.status === 'COMPLETED'
       ? 'completed'
       : run.terminal ? 'failed' : 'working';
     return c.json({

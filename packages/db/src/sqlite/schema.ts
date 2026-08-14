@@ -1273,6 +1273,65 @@ export const conversationMessages = sqliteTable('conversation_messages', {
   createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
 });
 
+// Durable, operator-private agent consultations. Unlike room messages these
+// records are never projected into a customer transcript; they correlate the
+// internal question/answer thread back to the chat turn, workflow run, or
+// persistent agent session that requested the expertise.
+export const agentConsultations = sqliteTable(
+  'agent_consultations',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    callerAgentId: text('caller_agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    targetAgentId: text('target_agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    targetRole: text('target_role'),
+    parentConsultationId: text('parent_consultation_id'),
+    conversationId: text('conversation_id').references((): AnySQLiteColumn => conversations.id, { onDelete: 'set null' }),
+    turnId: text('turn_id'),
+    runId: text('run_id').references((): AnySQLiteColumn => workflowRuns.id, { onDelete: 'set null' }),
+    parentSessionId: text('parent_session_id'),
+    source: text('source').notNull().default('chat'),
+    status: text('status').notNull().default('active'),
+    roundCount: integer('round_count').notNull().default(0),
+    maxRounds: integer('max_rounds').notNull().default(3),
+    depth: integer('depth').notNull().default(1),
+    substituted: integer('substituted', { mode: 'boolean' }).notNull().default(false),
+    requestedTargetAgentId: text('requested_target_agent_id'),
+    /** Private restart payload for channel-originated parent turns. Never returned by interaction APIs. */
+    continuationPayload: text('continuation_payload', { mode: 'json' }).$type<Record<string, unknown> | null>(),
+    error: text('error'),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+    updatedAt: text('updated_at').notNull().default(isoNow() as unknown as string),
+    completedAt: text('completed_at'),
+  },
+  (table) => ({
+    byWorkspaceTime: index('idx_agent_consultations_workspace').on(table.workspaceId, table.createdAt),
+    byConversation: index('idx_agent_consultations_conversation').on(table.workspaceId, table.conversationId, table.createdAt),
+    byRun: index('idx_agent_consultations_run').on(table.workspaceId, table.runId, table.createdAt),
+    byCaller: index('idx_agent_consultations_caller').on(table.workspaceId, table.callerAgentId, table.createdAt),
+    byTarget: index('idx_agent_consultations_target').on(table.workspaceId, table.targetAgentId, table.createdAt),
+  }),
+);
+
+export const agentConsultationMessages = sqliteTable(
+  'agent_consultation_messages',
+  {
+    id: text('id').primaryKey(),
+    consultationId: text('consultation_id').notNull().references(() => agentConsultations.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    sequenceNumber: integer('sequence_number').notNull(),
+    authorAgentId: text('author_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    kind: text('kind').notNull(),
+    body: text('body').notNull(),
+    metadata: text('metadata', { mode: 'json' }).notNull().default(sql`'{}'`),
+    createdAt: text('created_at').notNull().default(isoNow() as unknown as string),
+  },
+  (table) => ({
+    sequence: uniqueIndex('uq_agent_consultation_messages_sequence').on(table.consultationId, table.sequenceNumber),
+    byConsultation: index('idx_agent_consultation_messages_consultation').on(table.consultationId, table.createdAt),
+  }),
+);
+
 /** Durable, request-independent operator turns (Chat V2). */
 export const conversationTurns = sqliteTable(
   'conversation_turns',
@@ -1324,6 +1383,62 @@ export const conversationTurnEvents = sqliteTable(
   (table) => ({
     turnSequence: uniqueIndex('uq_conversation_turn_events_sequence').on(table.turnId, table.seq),
     workspaceTurn: index('idx_conversation_turn_events_turn').on(table.workspaceId, table.turnId, table.seq),
+  }),
+);
+
+/** Temporary parallel workers created by one durable chat turn. They are audit
+ * records, not entries in the workspace agent roster. */
+export const conversationSwarms = sqliteTable(
+  'conversation_swarms',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    conversationId: text('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+    turnId: text('turn_id').notNull().references(() => conversationTurns.id, { onDelete: 'cascade' }),
+    coordinatorAgentId: text('coordinator_agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+    objective: text('objective').notNull(),
+    mergeStrategy: text('merge_strategy').notNull().default('collect_all'),
+    maxWorkers: integer('max_workers').notNull().default(6),
+    maxParallel: integer('max_parallel').notNull().default(3),
+    status: text('status').notNull().default('queued'),
+    steering: text('steering', { mode: 'json' }).notNull().default(sql`'[]'`),
+    synthesis: text('synthesis'),
+    error: text('error'),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    byTurn: index('idx_conversation_swarms_turn').on(table.workspaceId, table.turnId, table.createdAt),
+    active: index('idx_conversation_swarms_active').on(table.workspaceId, table.conversationId, table.status, table.updatedAt),
+  }),
+);
+
+export const conversationSwarmWorkers = sqliteTable(
+  'conversation_swarm_workers',
+  {
+    id: text('id').primaryKey(),
+    swarmId: text('swarm_id').notNull().references(() => conversationSwarms.id, { onDelete: 'cascade' }),
+    workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    parentWorkerId: text('parent_worker_id'),
+    durableAgentId: text('durable_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    role: text('role').notNull().default('temporary specialist'),
+    task: text('task').notNull(),
+    capabilityTags: text('capability_tags', { mode: 'json' }).notNull().default(sql`'[]'`),
+    runtime: text('runtime'),
+    status: text('status').notNull().default('queued'),
+    latestProgress: text('latest_progress'),
+    result: text('result', { mode: 'json' }),
+    error: text('error'),
+    retryOfWorkerId: text('retry_of_worker_id'),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    ...baseTimestamps(),
+  },
+  (table) => ({
+    swarmOrdinal: uniqueIndex('uq_conversation_swarm_workers_ordinal').on(table.swarmId, table.ordinal),
+    active: index('idx_conversation_swarm_workers_active').on(table.workspaceId, table.swarmId, table.status, table.updatedAt),
   }),
 );
 

@@ -16,9 +16,30 @@ export function collectAppDoctorSnapshot(db: AgentisSqliteDb, workspaceId: strin
     graph: schema.workflows.graph,
     settings: schema.workflows.settings,
     contentHash: schema.workflows.contentHash,
+    activeRevisionId: schema.workflows.activeRevisionId,
+    candidateRevisionId: schema.workflows.candidateRevisionId,
   }).from(schema.workflows)
     .where(and(eq(schema.workflows.workspaceId, workspaceId), eq(schema.workflows.appId, appId))).all();
   const workflowIds = workflowRows.map((workflow) => workflow.id);
+
+  // The workflow row is a compatibility mirror of the active graph. During
+  // authoring, however, every build/proof tool operates on the candidate head.
+  // App Doctor must inspect that same head or it reports defects that do not
+  // exist in the revision the operator is actually trying to deliver.
+  const revisionIds = workflowRows
+    .map((workflow) => workflow.candidateRevisionId ?? workflow.activeRevisionId)
+    .filter((id): id is string => Boolean(id));
+  const revisionRows = revisionIds.length === 0 ? [] : db.select({
+    id: schema.workflowGraphRevisions.id,
+    graph: schema.workflowGraphRevisions.graphJson,
+    spec: schema.workflowGraphRevisions.specJson,
+    semanticHash: schema.workflowGraphRevisions.semanticHash,
+  }).from(schema.workflowGraphRevisions)
+    .where(and(
+      eq(schema.workflowGraphRevisions.workspaceId, workspaceId),
+      inArray(schema.workflowGraphRevisions.id, revisionIds),
+    )).all();
+  const revisionsById = new Map(revisionRows.map((revision) => [revision.id, revision]));
 
   const triggerRows = workflowIds.length === 0 ? [] : db.select({
     id: schema.triggers.id,
@@ -74,11 +95,22 @@ export function collectAppDoctorSnapshot(db: AgentisSqliteDb, workspaceId: strin
 
   return {
     app,
-    workflows: workflowRows.map((workflow) => ({
-      ...workflow,
-      graph: workflow.graph as WorkflowGraph,
-      triggers: (triggersByWorkflow.get(workflow.id) ?? []).map(({ id, triggerType, status }) => ({ id, triggerType, status })),
-    })),
+    workflows: workflowRows.map((workflow) => {
+      const revision = revisionsById.get(workflow.candidateRevisionId ?? workflow.activeRevisionId ?? '');
+      const persistedSettings = workflow.settings && typeof workflow.settings === 'object'
+        ? workflow.settings as Record<string, unknown>
+        : {};
+      return {
+        id: workflow.id,
+        title: workflow.title,
+        graph: (revision?.graph ?? workflow.graph) as WorkflowGraph,
+        settings: revision?.spec
+          ? { ...persistedSettings, spec: revision.spec }
+          : persistedSettings,
+        contentHash: revision?.semanticHash ?? workflow.contentHash,
+        triggers: (triggersByWorkflow.get(workflow.id) ?? []).map(({ id, triggerType, status }) => ({ id, triggerType, status })),
+      };
+    }),
     subscriptions: subscriptionRows.map((subscription) => ({
       id: subscription.id,
       sourceWorkflowId: subscription.sourceWorkflowId,
@@ -109,4 +141,3 @@ function parseActions(value: unknown): SurfaceAction[] {
   const parsed = surfaceActionSchema.array().safeParse(value);
   return parsed.success ? parsed.data : [];
 }
-

@@ -478,7 +478,7 @@ export class CodexAdapter implements AgentAdapter {
           parts.push({ kind: 'commentary', id: interp.id, text: interp.text, source: 'reasoning_summary' });
           break;
         case 'text':
-          parts.push({ kind: 'text', text: interp.text });
+          parts.push({ kind: 'text', text: interp.text, ...(interp.id ? { id: interp.id } : {}) });
           break;
         case 'final':
           parts.push({ kind: 'final', text: interp.text });
@@ -759,7 +759,7 @@ function extractText(event: CodexJsonEvent): string {
 }
 
 type CodexChatInterpretation =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; id?: string }
   | { kind: 'final'; text: string }
   | { kind: 'commentary'; id: string; text: string }
   | { kind: 'tool'; tool: string; input: unknown }
@@ -813,7 +813,7 @@ function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation
     if (itemType === 'agent_message' || itemType === 'assistant_message' || itemType === 'message') {
       if (!completed) return { kind: 'ignore' };
       const text = firstString(item.text, item.message, item.content) ?? '';
-      return text ? { kind: 'text', text } : { kind: 'ignore' };
+      return text ? { kind: 'text', text, id: String(item.id ?? randomUUID()) } : { kind: 'ignore' };
     }
     if (itemType.includes('command') || itemType.includes('shell') || itemType.includes('exec')) {
       // Codex's OWN shell command (it runs autonomously under sandbox bypass).
@@ -834,7 +834,11 @@ function interpretCodexChatEvent(event: CodexJsonEvent): CodexChatInterpretation
   if (msg) {
     const type = String(msg.type ?? '').toLowerCase();
     if (type === 'agent_message' || type === 'agent_message_complete') {
-      return { kind: 'text', text: firstString(msg.message, msg.text, msg.content) ?? '' };
+      return {
+        kind: 'text',
+        text: firstString(msg.message, msg.text, msg.content) ?? '',
+        id: firstString((event as unknown as Record<string, unknown>).id, msg.id) ?? randomUUID(),
+      };
     }
     if (type === 'task_complete') {
       return { kind: 'final', text: firstString(msg.last_agent_message, msg.message) ?? '' };

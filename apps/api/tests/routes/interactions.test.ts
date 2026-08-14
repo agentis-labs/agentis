@@ -39,6 +39,19 @@ function seedActivity(agentId: string, eventType: string, summary: string, at: s
   }).run();
 }
 
+function seedAgent(id: string, name: string, role: string): void {
+  ctx.db.insert(schema.agents).values({
+    id,
+    workspaceId: ctx.workspace.id,
+    ambientId: ctx.ambient.id,
+    userId: ctx.user.id,
+    name,
+    role,
+    adapterType: 'http',
+    status: 'online',
+  }).run();
+}
+
 describe('/v1/interactions', () => {
   it('merges agent messages and agent activity into one newest-first timeline', async () => {
     const roomId = seedRoom();
@@ -76,5 +89,51 @@ describe('/v1/interactions', () => {
     const res = await app().request('/v1/interactions', { headers: ctx.authHeaders });
     const body = await res.json() as { events: unknown[] };
     expect(body.events).toHaveLength(0);
+  });
+
+  it('returns one expandable durable consultation for its conversation and either participant', async () => {
+    seedAgent('support-agent', 'Support Agent', 'manager');
+    seedAgent('technical-agent', 'Technical Specialist', 'specialist');
+    const conversationId = randomUUID();
+    ctx.db.insert(schema.conversations).values({
+      id: conversationId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId: 'support-agent',
+      title: 'Customer issue',
+    }).run();
+    const consultationId = randomUUID();
+    ctx.db.insert(schema.agentConsultations).values({
+      id: consultationId,
+      workspaceId: ctx.workspace.id,
+      callerAgentId: 'support-agent',
+      targetAgentId: 'technical-agent',
+      targetRole: 'specialist',
+      conversationId,
+      status: 'completed',
+      roundCount: 2,
+      maxRounds: 3,
+      depth: 1,
+      source: 'chat',
+      substituted: false,
+      createdAt: '2026-05-31T10:00:00.000Z',
+      updatedAt: '2026-05-31T10:00:02.000Z',
+      completedAt: '2026-05-31T10:00:02.000Z',
+    }).run();
+    ctx.db.insert(schema.agentConsultationMessages).values([
+      { id: randomUUID(), consultationId, workspaceId: ctx.workspace.id, sequenceNumber: 1, authorAgentId: 'support-agent', kind: 'question', body: 'Why is the API timing out?' },
+      { id: randomUUID(), consultationId, workspaceId: ctx.workspace.id, sequenceNumber: 2, authorAgentId: 'technical-agent', kind: 'answer', body: 'The upstream retry budget is exhausted.' },
+    ]).run();
+
+    const res = await app().request(`/v1/interactions?conversationId=${conversationId}&agentId=technical-agent`, { headers: ctx.authHeaders });
+    const body = await res.json() as { events: Array<{ kind: string; summary: string; consultation: { messages: Array<{ body: string }> } }> };
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0]!.kind).toBe('consultation');
+    expect(body.events[0]!.summary).toBe('Support Agent consulted Technical Specialist · 2 rounds');
+    expect(body.events[0]!.consultation.messages.map((message) => message.body)).toEqual([
+      'Why is the API timing out?',
+      'The upstream retry budget is exhausted.',
+    ]);
   });
 });

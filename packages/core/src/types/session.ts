@@ -32,6 +32,8 @@ export interface SessionStepInput {
   temperature?: number;
   /** Abort the inference if it outruns this budget. */
   timeoutMs?: number;
+  /** Abort an in-flight inference when its owning workflow run is stopped. */
+  signal?: AbortSignal;
 }
 
 export interface SessionStepResult {

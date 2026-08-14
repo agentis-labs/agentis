@@ -790,6 +790,27 @@ describe('WorkflowEngine — output contract enforcement', () => {
     const row = loadRun(runId);
     expect(row.status).toBe('COMPLETED');
   });
+
+  it('validates the payload inside a return_output viewer envelope', async () => {
+    const graph: WorkflowGraph = {
+      version: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'T', type: 'trigger', title: 'Manual', position: { x: 0, y: 0 }, config: { kind: 'trigger', triggerType: 'manual' } },
+        { id: 'X', type: 'transform', title: 'Build output', position: { x: 200, y: 0 }, config: { kind: 'transform', expression: '({ name: "alice", score: 87 })' } },
+        { id: 'R', type: 'return_output', title: 'Return', position: { x: 400, y: 0 }, config: { kind: 'return_output', renderAs: 'json', valuePath: 'nodes.X' } },
+      ],
+      edges: [{ id: 'e1', source: 'T', target: 'X' }, { id: 'e2', source: 'X', target: 'R' }],
+      outputContract: { fields: [
+        { key: 'name', type: 'string', required: true },
+        { key: 'score', type: 'number', required: true },
+      ] },
+    } as WorkflowGraph;
+
+    const wfId = seedWorkflow(graph);
+    const runId = await startAndWait(wfId, graph, {});
+    expect(loadRun(runId).status).toBe('COMPLETED');
+  });
 });
 
 describe('WorkflowEngine — error edge routing', () => {

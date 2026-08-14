@@ -194,7 +194,7 @@ export function stampBuildLoop(
 // ─── Stage derivation + next steps ───────────────────────────────────────────
 
 function isCompleted(status: string): boolean {
-  return status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION';
+  return status === 'COMPLETED';
 }
 
 /** Derive the loop stage from persisted evidence vs the CURRENT graph hash.

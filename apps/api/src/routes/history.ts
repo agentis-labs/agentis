@@ -264,8 +264,8 @@ function isAuditEvent(event: ActivityEventRow): boolean {
 function mapRunStatus(status: string): 'running' | 'completed' | 'failed' | 'pending' | 'cancelled' {
   switch (status) {
     case 'COMPLETED':
-    case 'COMPLETED_WITH_CONTRACT_VIOLATION':
       return 'completed';
+    case 'COMPLETED_WITH_CONTRACT_VIOLATION':
     case 'COMPLETED_WITH_ERRORS':
     case 'FAILED':
       return 'failed';

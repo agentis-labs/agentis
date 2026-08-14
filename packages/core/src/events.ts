@@ -128,6 +128,8 @@ export const REALTIME_EVENTS = {
   AGENT_TERMINAL_MESSAGE: 'agent.terminal.message',
   AGENT_TERMINAL_TOOL_CALL: 'agent.terminal.tool_call',
   AGENT_TASK_COMPLETED: 'agent.task.completed',
+  /** Durable operator-private consultation lifecycle/message update. */
+  AGENT_CONSULTATION_UPDATED: 'agent.consultation.updated',
 
   // Activity / approvals
   ACTIVITY_CREATED: 'activity.created',

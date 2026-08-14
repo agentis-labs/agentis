@@ -104,4 +104,28 @@ describe('BuildSessionService', () => {
     expect(completed?.stage).toBe('deliver');
     expect(completed?.evidence.at(-1)?.label).toBe('Compiler gates passed.');
   });
+
+  it('keeps a debug-preflight session resumable until live delivery completes', () => {
+    const service = new BuildSessionService(ctx.db, ctx.bus);
+    const created = service.create({
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      name: 'Audit Operations',
+      intent: 'Audit arbitrary workspace resources',
+      topology,
+      acceptanceCriteria: ['Every finding is traceable to evidence.'],
+    });
+    const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Audit Operations' });
+    service.bindApp(ctx.workspace.id, created.session.id, app.id);
+    const preflight = service.settleAppVerification({
+      workspaceId: ctx.workspace.id,
+      appId: app.id,
+      passed: true,
+      complete: false,
+      summary: 'Static and transactional preflight passed.',
+    });
+    expect(preflight?.status).toBe('running');
+    expect(preflight?.stage).toBe('execute');
+    expect(preflight?.completedAt).toBeNull();
+  });
 });

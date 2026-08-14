@@ -97,7 +97,8 @@ export function preflightWorkflow(args: {
   const mode: WorkflowHealthMode = args.mode ?? 'canvas';
   const graphHash = hashWorkflowGraph(args.graph);
   const scenario = selectScenario(args.graph.inputContract, args.inputs, mode);
-  const cacheKey = `${args.workspaceId}:${args.workflowId}:${graphHash}:${mode}:${stableHash(scenario.input)}`;
+  const dependencyHash = preflightDependencyHash(args.db, args.workspaceId, args.graph);
+  const cacheKey = `${args.workspaceId}:${args.workflowId}:${graphHash}:${dependencyHash}:${mode}:${stableHash(scenario.input)}`;
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return { ...cached.report, cacheHit: true, durationMs: roundMs(performance.now() - startedAt) };
@@ -214,7 +215,7 @@ function simulateGraph(
         resolveTemplateDeep(node.config, tctx);
         const check = verifyExtensionSource(deps, node.config as ExtensionTaskNodeConfig);
         if (!check.ok) throw new PreflightNodeError(check.message, check.code, check.remediation);
-        output = mockOutput(node, effectiveInput);
+        output = mockOutput(node, effectiveInput, check.outputSchema);
         status = 'mocked';
       } else if (node.config.kind === 'integration') {
         // Truthful integration check: resolve the node config against real
@@ -238,8 +239,8 @@ function simulateGraph(
         output = mockOutput(node, effectiveInput);
         status = 'mocked';
       } else {
-        resolveTemplateDeep(node.config, tctx);
-        output = mockOutput(node, effectiveInput);
+        const resolved = resolveTemplateDeep(node.config, tctx);
+        output = mockOutput(node, effectiveInput, undefined, resolved);
         status = isDeterministicMock(node) ? 'mocked' : 'unverified';
       }
       outputs[node.id] = output;
@@ -327,7 +328,7 @@ function selectScenario(
 function verifyExtensionSource(
   deps: { db: AgentisSqliteDb; workspaceId: string },
   config: ExtensionTaskNodeConfig,
-): { ok: true } | { ok: false; code: string; message: string; remediation: string } {
+): { ok: true; outputSchema?: unknown } | { ok: false; code: string; message: string; remediation: string } {
   const row = config.extensionId
     ? deps.db.select().from(schema.extensions).where(eq(schema.extensions.id, config.extensionId)).get()
     : config.extensionSlug
@@ -353,7 +354,8 @@ function verifyExtensionSource(
     };
   }
   // Only node_worker extensions carry inline source we can statically check.
-  if (!manifest || manifest.runtime !== 'node_worker') return { ok: true };
+  const operation = manifest?.operations.find((candidate) => candidate.name === config.operationName);
+  if (!manifest || manifest.runtime !== 'node_worker') return { ok: true, outputSchema: operation?.outputSchema };
   const source = typeof manifest.source === 'string' ? manifest.source : '';
   if (!source) {
     return {
@@ -364,7 +366,7 @@ function verifyExtensionSource(
     };
   }
   const result = validateExtensionSource(source, operationNames);
-  if (result.ok) return { ok: true };
+  if (result.ok) return { ok: true, outputSchema: operation?.outputSchema };
   return { ok: false, code: result.issue.code, message: result.issue.message, remediation: result.issue.remediation };
 }
 
@@ -597,8 +599,43 @@ function mockValueForKey(key: string): unknown {
   return `sample_${key}`;
 }
 
-function mockOutput(node: WorkflowNode, input: Record<string, unknown>): Record<string, unknown> {
+function mockOutput(
+  node: WorkflowNode,
+  input: Record<string, unknown>,
+  outputSchema?: unknown,
+  resolvedConfig?: unknown,
+): Record<string, unknown> {
   const config = node.config as unknown as Record<string, unknown>;
+  if (node.config.kind === 'data_mutate') {
+    const resolved = isRecord(resolvedConfig) ? resolvedConfig : config;
+    const records = Array.isArray(resolved.records) ? resolved.records : null;
+    const attempted = records ? records.length : 1;
+    const outputKey = typeof resolved.outputKey === 'string'
+      ? resolved.outputKey
+      : records ? 'records' : resolved.operation === 'delete' ? 'deleted' : 'record';
+    const value = records ?? (isRecord(resolved.record) ? resolved.record : input);
+    return {
+      [outputKey]: value,
+      mutationReceipt: {
+        attempted,
+        succeeded: attempted,
+        failed: 0,
+        skipped: 0,
+        idempotencyKey: `preflight:${node.id}`,
+        items: Array.from({ length: attempted }, (_, index) => ({ id: `preflight:${node.id}:${index}`, status: 'succeeded' })),
+        verification: { performed: false, passed: true, detail: 'Dry-run receipt; no datastore mutation was executed.' },
+        evidence: { source: 'preflight', collection: resolved.collection },
+      },
+      _preflight: { nodeId: node.id, kind: node.config.kind, mocked: true },
+    };
+  }
+  const schemaSample = sampleFromJsonSchema(outputSchema);
+  if (isRecord(schemaSample)) {
+    return {
+      ...schemaSample,
+      _preflight: { nodeId: node.id, kind: node.config.kind, mocked: true, source: 'output_schema' },
+    };
+  }
   const outputKeys = Array.isArray(config.outputKeys) ? config.outputKeys.filter((key): key is string => typeof key === 'string') : [];
   if (outputKeys.length > 0) {
     return {
@@ -614,6 +651,23 @@ function mockOutput(node: WorkflowNode, input: Record<string, unknown>): Record<
   return { ...input, _preflight: { nodeId: node.id, kind: node.config.kind, mocked: true } };
 }
 
+function sampleFromJsonSchema(schema: unknown, key = 'value'): unknown {
+  if (!isRecord(schema)) return undefined;
+  if ('example' in schema) return schema.example;
+  if ('default' in schema) return schema.default;
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
+  const type = typeof schema.type === 'string' ? schema.type : undefined;
+  if (type === 'object' || isRecord(schema.properties)) {
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    return Object.fromEntries(Object.entries(properties).map(([childKey, childSchema]) => [childKey, sampleFromJsonSchema(childSchema, childKey)]));
+  }
+  if (type === 'array') return [sampleFromJsonSchema(schema.items, key.replace(/s$/u, '') || 'item') ?? {}];
+  if (type === 'number' || type === 'integer') return 1;
+  if (type === 'boolean') return true;
+  if (type === 'null') return null;
+  return `sample_${key}`;
+}
+
 function mergeInputs(inputs: Record<string, unknown>[]): Record<string, unknown> {
   return Object.assign({}, ...inputs);
 }
@@ -624,6 +678,22 @@ function compactOutput(output: Record<string, unknown>): Record<string, unknown>
 
 function stableHash(value: unknown): string {
   return createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+function preflightDependencyHash(db: AgentisSqliteDb, workspaceId: string, graph: WorkflowGraph): string {
+  const dependencies = graph.nodes.flatMap((node) => {
+    if (node.config.kind !== 'extension_task') return [];
+    const config = node.config as ExtensionTaskNodeConfig;
+    const row = config.extensionId
+      ? db.select({ id: schema.extensions.id, updatedAt: schema.extensions.updatedAt })
+          .from(schema.extensions).where(and(eq(schema.extensions.workspaceId, workspaceId), eq(schema.extensions.id, config.extensionId))).get()
+      : config.extensionSlug
+        ? db.select({ id: schema.extensions.id, updatedAt: schema.extensions.updatedAt })
+            .from(schema.extensions).where(and(eq(schema.extensions.workspaceId, workspaceId), eq(schema.extensions.slug, config.extensionSlug))).get()
+        : undefined;
+    return [{ nodeId: node.id, extensionId: row?.id ?? config.extensionId ?? config.extensionSlug ?? null, updatedAt: row?.updatedAt ?? null }];
+  });
+  return stableHash(dependencies);
 }
 
 function stableJson(value: unknown): string {

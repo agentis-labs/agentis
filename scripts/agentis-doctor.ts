@@ -97,6 +97,11 @@ async function checkSqlite(): Promise<CheckResult> {
   let Database: typeof import('better-sqlite3');
   try {
     Database = requireFromDb('better-sqlite3') as typeof import('better-sqlite3');
+    // The JS wrapper can import while its native `.node` binding is absent.
+    // Construct and query a database because that is when the binding loads.
+    const probe = new Database(':memory:');
+    probe.prepare('SELECT 1').get();
+    probe.close();
   } catch (err) {
     return {
       name: 'better-sqlite3',

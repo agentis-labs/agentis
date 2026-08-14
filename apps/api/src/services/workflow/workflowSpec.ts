@@ -101,6 +101,13 @@ function templatedOutputKeys(template: string): string[] {
   return [...template.matchAll(/\{output\.([\w.]+)\}/gu)].map((m) => m[1]!.split('.')[0]!);
 }
 
+function templateStringsDeep(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(templateStringsDeep);
+  if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>).flatMap(templateStringsDeep);
+  return [];
+}
+
 /** Top-level canonical terminal keys referenced by an expression. */
 function expressionOutputKeys(expr: string): string[] {
   return [...new Set([...expr.matchAll(/\boutput\.([A-Za-z_$][\w$]*)/gu)].map((match) => match[1]!))];
@@ -156,14 +163,29 @@ export function validateWorkflowSpec(spec: WorkflowSpec, args: SpecValidationArg
       }
       case 'data_probe': {
         if (!check.integration?.trim()) errors.push(`${label}: integration is required.`);
-        else if (args.knownServices && !args.knownServices.includes(check.integration)) {
+        else if (check.integration !== 'agentis_app' && args.knownServices && !args.knownServices.includes(check.integration)) {
           errors.push(`${label}: integration "${check.integration}" is not a runnable service in this workspace.`);
         }
         if (!check.operation?.trim()) errors.push(`${label}: operation is required.`);
+        if (check.integration === 'agentis_app' && check.operation !== 'query') {
+          errors.push(`${label}: agentis_app supports only the query operation.`);
+        }
+        if (check.integration === 'agentis_app' && typeof check.params?.collection !== 'string') {
+          errors.push(`${label}: agentis_app query requires params.collection.`);
+        }
+        const nativeLimit = check.integration === 'agentis_app' ? check.params?.limit : undefined;
+        if (typeof nativeLimit === 'number' && (!Number.isInteger(nativeLimit) || nativeLimit < 1 || nativeLimit > 500)) {
+          errors.push(`${label}: agentis_app query params.limit must be an integer from 1 to 500.`);
+        }
         if (!exprParses(check.expr)) errors.push(`${label}: expr does not parse ("${check.expr}").`);
         if (declaredKeys.size > 0) {
           for (const key of expressionOutputKeys(check.expr ?? '')) {
             if (!declaredKeys.has(key)) errors.push(`${label}: expr references output.${key} but the graph outputContract declares no "${key}" key.`);
+          }
+          for (const template of templateStringsDeep(check.params ?? {})) {
+            for (const key of templatedOutputKeys(template)) {
+              if (!declaredKeys.has(key)) errors.push(`${label}: params reference {output.${key}} but the graph outputContract declares no "${key}" key.`);
+            }
           }
         }
         break;

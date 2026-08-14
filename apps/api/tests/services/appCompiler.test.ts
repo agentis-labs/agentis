@@ -56,6 +56,29 @@ function provenSettings() {
 }
 
 describe('compileAppReadiness', () => {
+  it('compiles the candidate head instead of the stale active compatibility mirror', () => {
+    const fixture = app();
+    const settings = provenSettings();
+    const staleGraph: WorkflowGraph = { version: 1, viewport: { x: 0, y: 0, zoom: 1 }, nodes: [], edges: [] };
+    insertWorkflow(fixture.id, settings);
+    ctx.db.insert(schema.workflowGraphRevisions).values({
+      id: 'candidate-head', workspaceId: ctx.workspace.id, workflowId: 'wf-1',
+      graphJson: graph, semanticHash: graphContentHash(graph), presentationHash: 'presentation',
+      source: 'agent', reason: 'candidate truth fixture', specJson: settings.spec,
+    }).run();
+    ctx.db.update(schema.workflows).set({ graph: staleGraph, candidateRevisionId: 'candidate-head' })
+      .where(eq(schema.workflows.id, 'wf-1')).run();
+
+    const report = compileAppReadiness(ctx.db, ctx.workspace.id, fixture.id, 'debug');
+
+    expect(report.readyForExecution).toBe(true);
+    expect(report.workflowProofs).toContainEqual(expect.objectContaining({
+      workflowId: 'wf-1', graphHash: graphContentHash(graph), dryRunGreen: true, suiteGreen: true,
+    }));
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: 'graph:wf-1', status: 'pass' }));
+    expect(report.checks.some((check) => check.id === 'doctor:ACTIVATION_NO_TRIGGER_NODE:wf-1')).toBe(false);
+  });
+
   it('focuses debug admission on the selected workflow and ignores unrelated App release blockers', () => {
     const fixture = app();
     insertWorkflow(fixture.id, provenSettings(), 'wf-target');
@@ -114,6 +137,24 @@ describe('compileAppReadiness', () => {
     expect(production.evidencePendingCount).toBe(1);
     expect(production.checks).toContainEqual(expect.objectContaining({ id: 'debug-proof:wf-1', status: 'block', blocksExecution: false }));
     expect(production.next).toContainEqual(expect.objectContaining({ tool: 'agentis.workflow.run', args: { workflowId: 'wf-1', debugRun: true } }));
+  });
+
+  it('does not treat a contract-violating run as production proof even when world checks passed', () => {
+    const fixture = app();
+    const settings = provenSettings();
+    settings.buildLoop = {
+      ...settings.buildLoop,
+      debugRun: {
+        at: new Date().toISOString(), graphHash: graphContentHash(graph),
+        status: 'COMPLETED_WITH_CONTRACT_VIOLATION', verdict: 'accomplished', runId: 'dirty-run',
+      },
+    };
+    insertWorkflow(fixture.id, settings);
+
+    const report = compileAppReadiness(ctx.db, ctx.workspace.id, fixture.id, 'production');
+
+    expect(report.ready).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({ id: 'debug-proof:wf-1', status: 'block' }));
   });
 
   it('blocks guessed acceptance paths that do not exist in the terminal output contract', () => {

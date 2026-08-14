@@ -54,6 +54,7 @@ import type { SkillMaterializer } from '../skillMaterializer.js';
 import type { WorkflowRevisionService } from '../workflow/workflowRevisionService.js';
 import type { WorkflowExperienceService } from '../workflow/workflowExperienceService.js';
 import type { BuildSessionService } from '../buildSessionService.js';
+import type { AgentConsultationService } from '../agent/agentConsultationService.js';
 
 export interface ToolHandlerDeps {
   db: AgentisSqliteDb;
@@ -69,6 +70,7 @@ export interface ToolHandlerDeps {
   scratchpad: ScratchpadService;
   approvals: ApprovalInboxService;
   activity: ActivityFeedService;
+  consultations?: AgentConsultationService;
   replay: PartialReplayService;
   knowledgeBases?: KnowledgeBaseService;
   /** §B4 — typed workspace memory facade over the unified episode substrate. */

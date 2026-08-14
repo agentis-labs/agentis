@@ -98,6 +98,17 @@ describe('aggregateRunAnalytics', () => {
     expect(a.totalCostCents).toBe(0);
   });
 
+  it('counts contract-violating terminal runs as failures, never successes', () => {
+    const wf = seedWorkflow(ctx, 'Contract gate', 'n1');
+    seedRun(ctx, wf, 'COMPLETED');
+    seedRun(ctx, wf, 'COMPLETED_WITH_CONTRACT_VIOLATION');
+    const analytics = aggregateRunAnalytics(ctx.db, ctx.workspace.id, [
+      { id: wf, title: 'Contract gate', graph: { nodes: [], edges: [] } },
+    ]);
+    expect(analytics.runs).toBe(2);
+    expect(analytics.successRate).toBe(0.5);
+  });
+
   it('flags metered when real cost is recorded', () => {
     const wf = seedWorkflow(ctx, 'Metered flow', 'n1');
     const r1 = seedRun(ctx, wf, 'COMPLETED');

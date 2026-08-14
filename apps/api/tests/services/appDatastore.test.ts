@@ -78,6 +78,29 @@ describe('AppDatastore', () => {
     expect(data.query(ctx.workspace.id, appId, 'leads', { filter: { name: 'Unique' }, limit: 50 }).rows).toHaveLength(1);
   });
 
+  it('applies batch upserts atomically and idempotently', () => {
+    const records = [{ name: 'A', score: 1 }, { name: 'B', score: 2 }];
+    const first = data.mutateMany(ctx.workspace.id, appId, 'leads', 'upsert', records, ['name']);
+    const second = data.mutateMany(
+      ctx.workspace.id,
+      appId,
+      'leads',
+      'upsert',
+      records.map((row) => ({ ...row, score: row.score + 10 })),
+      ['name'],
+    );
+    expect(second.map((row) => row.id)).toEqual(first.map((row) => row.id));
+    expect(data.query(ctx.workspace.id, appId, 'leads', { limit: 50 }).rows).toHaveLength(2);
+  });
+
+  it('rejects an invalid batch without persisting a partial prefix', () => {
+    expect(() => data.mutateMany(ctx.workspace.id, appId, 'leads', 'insert', [
+      { name: 'Valid' },
+      { score: 2 },
+    ])).toThrowError();
+    expect(data.query(ctx.workspace.id, appId, 'leads', { limit: 50 }).rows).toHaveLength(0);
+  });
+
   it('redefining a collection updates its schema in place', () => {
     const before = data.listCollections(ctx.workspace.id, appId);
     expect(before).toHaveLength(1);

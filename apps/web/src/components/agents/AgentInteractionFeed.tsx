@@ -15,9 +15,23 @@ import { Skeleton } from '../shared/Skeleton';
 
 // Agent-to-agent interaction is driven by activity events + room messages; a
 // new one of either should refresh the timeline live.
-const LIVE_EVENTS = ['activity.created', 'room.message.sent', 'room.message.received'];
+const LIVE_EVENTS = ['activity.created', 'room.message.sent', 'room.message.received', 'agent.consultation.updated'];
 
-export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?: string; roomId?: string; limit?: number }) {
+export function AgentInteractionFeed({
+  agentId,
+  roomId,
+  conversationId,
+  runId,
+  limit = 50,
+  compact = false,
+}: {
+  agentId?: string;
+  roomId?: string;
+  conversationId?: string;
+  runId?: string;
+  limit?: number;
+  compact?: boolean;
+}) {
   const [events, setEvents] = useState<InteractionEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -38,15 +52,15 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
 
   const load = useCallback(async () => {
     try {
-      const res = await listInteractions({ agentId, roomId, limit });
-      setEvents(res.events);
+      const res = await listInteractions({ agentId, roomId, conversationId, runId, limit });
+      setEvents(compact ? res.events.filter((event) => event.kind === 'consultation') : res.events);
       setError(null);
     } catch (e) {
       setError(apiErrorMessage(e));
     } finally {
       setLoading(false);
     }
-  }, [agentId, roomId, limit]);
+  }, [agentId, roomId, conversationId, runId, limit, compact]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -59,14 +73,16 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-subheading text-text-primary">Agent interactions</h3>
+        <h3 className="text-subheading text-text-primary">{compact ? 'Internal consultations' : 'Agent interactions'}</h3>
         <button className="flex items-center gap-1 text-[12px] text-text-secondary hover:text-text-primary" onClick={() => void load()} aria-label="Refresh interactions">
           <RefreshCw size={13} /> Refresh
         </button>
       </div>
 
       {events.length === 0 ? (
-        <p className="text-[13px] text-text-muted">No agent-to-agent interactions yet. They appear here as agents delegate, hand off, and message each other.</p>
+        <p className="text-[13px] text-text-muted">{compact
+          ? 'No internal agent consultations for this task.'
+          : 'No agent-to-agent interactions yet. They appear here as agents consult, delegate, hand off, and message each other.'}</p>
       ) : (
         <ol className="space-y-2" aria-label="interaction timeline">
           {events.map((e) => {
@@ -89,10 +105,38 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
                       <span className="ml-auto">{formatTime(e.at)}</span>
                     </div>
                     <div className={`mt-0.5 text-[13px] text-text-secondary ${expanded ? 'whitespace-pre-wrap break-words' : 'truncate'}`}>{e.summary}</div>
+                    {e.kind === 'consultation' && !expanded ? (
+                      <div className="mt-1 text-[11px] capitalize text-text-muted">{e.consultation?.status.replaceAll('_', ' ')}</div>
+                    ) : null}
                   </div>
                   <ChevronRight size={14} className={`mt-0.5 shrink-0 text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`} />
                 </button>
-                {expanded && (
+                {expanded && e.kind === 'consultation' && e.consultation ? (
+                  <div className="space-y-2 border-t border-line/70 px-3 py-2.5">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
+                      <span className="rounded bg-bg px-1.5 py-0.5 capitalize">{e.consultation.status.replaceAll('_', ' ')}</span>
+                      <span>{e.consultation.roundCount}/{e.consultation.maxRounds} rounds used</span>
+                      {e.consultation.substituted ? (
+                        <span className="rounded bg-warning/10 px-1.5 py-0.5 text-warning">Requested agent unavailable · compatible fallback used</span>
+                      ) : null}
+                    </div>
+                    <ol className="space-y-2" aria-label="sanitized consultation dialogue">
+                      {e.consultation.messages.map((message) => {
+                        const fromCaller = message.authorAgentId === e.consultation!.caller.id;
+                        const isTool = message.kind === 'tool_summary';
+                        return (
+                          <li key={message.id} className={`rounded-md px-2.5 py-2 text-[12px] ${isTool ? 'bg-bg text-text-muted' : fromCaller ? 'bg-info/5' : 'bg-accent/5'}`}>
+                            <div className="mb-0.5 flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-text-muted">
+                              <span>{isTool ? 'Tool summary' : fromCaller ? e.consultation!.caller.name : e.consultation!.target.name}</span>
+                              <span className="ml-auto normal-case font-normal">{formatTime(message.createdAt)}</span>
+                            </div>
+                            <div className="whitespace-pre-wrap break-words text-text-secondary">{message.body}</div>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  </div>
+                ) : expanded ? (
                   <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line/70 px-2.5 py-2 text-[11px]">
                     <dt className="text-text-muted">Kind</dt><dd className="text-text-secondary">{e.kind}</dd>
                     <dt className="text-text-muted">Event</dt><dd className="font-mono text-text-secondary">{e.eventType}</dd>
@@ -101,7 +145,7 @@ export function AgentInteractionFeed({ agentId, roomId, limit = 50 }: { agentId?
                     {e.roomId ? (<><dt className="text-text-muted">Room</dt><dd className="text-text-secondary">{nameFor(e.roomId)}</dd></>) : null}
                     <dt className="text-text-muted">When</dt><dd className="text-text-secondary">{new Date(e.at).toLocaleString()}</dd>
                   </dl>
-                )}
+                ) : null}
               </li>
             );
           })}

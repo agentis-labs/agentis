@@ -27,6 +27,7 @@ import { createRequire } from 'node:module';
 import { availableParallelism, cpus, homedir } from 'node:os';
 import type { AppTestOptions, AppManifestEnvelope } from '@agentis/sdk';
 import { runBootstrapCmd, runGenerateConfigCmd } from './commands/bootstrap.js';
+import { requiredChecksPassed, runHostDoctor, type DoctorCheck } from './doctor.js';
 
 // ── libuv threadpool headroom ────────────────────────────────────────────────
 // DNS resolution (`getaddrinfo`) runs on libuv's threadpool, which defaults to
@@ -96,7 +97,7 @@ Usage:
   agentis warmup --transcription [--repair]
                                           Prepare verified local speech-to-text (~76 MB q8).
                                           --repair preserves the old cache before rebuilding it.
-  agentis doctor [--json]                 Report embedding runtime/cache health.
+  agentis doctor [--json]                 Verify host, database, and model runtime health.
   agentis backup [--out <dir>]            Snapshot the data dir into <dir>.
                                           Default <dir>: <data-dir>/backups/<timestamp>.
   agentis restore <dir> [--force]         Restore a backup directory into the data dir.
@@ -297,6 +298,8 @@ async function runDoctorCmd(argv: string[]): Promise<number> {
   const { flags } = parseFlags(argv);
   const dir = await dataDir();
   process.env.AGENTIS_DATA_DIR ??= dir;
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const hostChecks = await runHostDoctor({ dataDir: dir, packageRoot });
   const [{ configuredDtype, embeddingCacheDir, embeddingRuntimeState }, transcription] = await Promise.all([
     import('@agentis/api/embeddingProvider'),
     import('@agentis/api/transcriptionRuntime'),
@@ -306,13 +309,23 @@ async function runDoctorCmd(argv: string[]): Promise<number> {
   const transcriptionCache = transcription.transcriptionCacheDir(dir);
   const transcriptionState = new transcription.LocalTranscriptionService({ dataDir: dir }).runtimeState();
   const report = {
-    ok: runtime.status === 'ready' || (runtime.status === 'uninitialized' && runtime.readyAt != null),
+    ok: requiredChecksPassed(hostChecks)
+      && (runtime.status === 'ready' || (runtime.status === 'uninitialized' && runtime.readyAt != null)),
+    system: {
+      node: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+      abi: process.versions.modules,
+      checks: hostChecks,
+    },
     embedding: { ...runtime, cacheDir, configuredDtype: configuredDtype() ?? 'fp32' },
     transcription: { ...transcriptionState, cacheDir: transcriptionCache, optional: true },
   };
   if (flags.json) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {
+    process.stdout.write('Host runtime:\n');
+    for (const check of hostChecks) printDoctorCheck(check);
     process.stdout.write(`Embedding runtime: ${runtime.status}\n`);
     process.stdout.write(`  model: ${runtime.model}@${runtime.revision ?? 'library-default'} (${runtime.dtype})\n`);
     process.stdout.write(`  cache: ${cacheDir}\n`);
@@ -324,8 +337,14 @@ async function runDoctorCmd(argv: string[]): Promise<number> {
     process.stdout.write(`  cache: ${transcriptionCache}\n`);
     process.stdout.write(`  progress: ${transcriptionState.progress}%\n`);
     if (transcriptionState.error) process.stdout.write(`  failure: ${transcriptionState.errorCode ?? 'unknown'} - ${transcriptionState.error}\n`);
+    process.stdout.write(`\nDoctor result: ${report.ok ? 'ready' : 'not ready'}\n`);
   }
   return report.ok ? 0 : 1;
+}
+
+function printDoctorCheck(check: DoctorCheck): void {
+  process.stdout.write(`  [${check.ok ? 'OK' : 'FAIL'}] ${check.label}: ${check.detail}\n`);
+  for (const step of check.remediation ?? []) process.stdout.write(`         fix: ${step}\n`);
 }
 
 type PlaywrightRuntime = {

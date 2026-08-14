@@ -166,6 +166,12 @@ export interface OperatorProgressEvent {
 
 export interface ChatTurnTrace {
   clientTurnId?: string;
+  /** Durable conversation_turns identity when this chat is executing through the turn ledger. */
+  durableTurnId?: string;
+  /** Bounded nested-consultation lineage, used by chat tool handlers. */
+  consultationId?: string;
+  consultationDepth?: number;
+  consultationAncestors?: string[];
   startedAt: string;
   completedAt?: string;
   durationMs?: number;
@@ -176,13 +182,53 @@ export interface ChatTurnTrace {
 /**
  * Provider-designated, operator-safe commentary emitted while a turn is
  * running. This is never raw chain-of-thought: adapters may only promote
- * explicit reasoning summaries, assistant preambles, or host-authored progress.
+ * explicit reasoning summaries or assistant preambles. `host` remains in the
+ * source union only for replay compatibility with older persisted turns; new
+ * turns do not manufacture host narration to fill runtime silence.
  */
 export interface ChatCommentary {
   id: string;
   text: string;
   source: 'reasoning_summary' | 'assistant_preamble' | 'host';
   createdAt: string;
+}
+
+/** A replay-safe projection of a temporary team created from an interactive chat. */
+export type ChatSwarmStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'blocked' | 'cancelled';
+export type ChatSwarmWorkerStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'blocked' | 'cancelled';
+
+export interface ChatSwarmWorker {
+  id: string;
+  role: string;
+  task: string;
+  status: ChatSwarmWorkerStatus;
+  capabilityTags: string[];
+  runtime?: string | null;
+  latestProgress?: string | null;
+  result?: unknown;
+  error?: string | null;
+  retryOfWorkerId?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
+/**
+ * Operator-safe team state. It deliberately excludes private model reasoning;
+ * progress is only explicit commentary, tool lifecycle or a short host status.
+ */
+export interface ChatSwarm {
+  id: string;
+  objective: string;
+  status: ChatSwarmStatus;
+  mergeStrategy: string;
+  maxWorkers: number;
+  maxParallel: number;
+  steering: string[];
+  synthesis?: string | null;
+  error?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  workers: ChatSwarmWorker[];
 }
 
 /**
@@ -217,6 +263,21 @@ export interface TurnEventV2 {
 export type ChatDelta =
   | { type: 'execution'; envelope: ChatExecutionEnvelope; context: ChatContextManifest }
   | ({ type: 'commentary' } & ChatCommentary)
+  | { type: 'swarm'; swarm: ChatSwarm }
+  | {
+      type: 'agent_consultation';
+      consultationId: string;
+      phase: 'requested' | 'responding' | 'answered' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled';
+      callerAgentId: string;
+      targetAgentId: string;
+      callerName?: string;
+      targetName?: string;
+      round: number;
+      maxRounds: number;
+      summary: string;
+      status: 'running' | 'success' | 'error';
+      createdAt: string;
+    }
   | {
       type: 'activity';
       id: string;
@@ -309,6 +370,16 @@ export interface ChatTurnContext {
    */
   recallScopeIds?: string[];
   clientTurnId?: string;
+  /** Durable conversation turn owning this runtime invocation, when available. */
+  durableTurnId?: string;
+  /** Internal A2A lineage. Never exposed to the customer transcript. */
+  consultationId?: string;
+  consultationDepth?: number;
+  consultationAncestors?: string[];
+  /** Attenuated tool surface inherited by a private consultant. */
+  allowedToolIds?: string[];
+  /** Private server-owned channel restart data; never serialized to customer messages. */
+  channelContinuation?: Record<string, unknown>;
   /** Opaque server-issued capability for MCP calls made by this exact turn. */
   turnLease?: string;
   executionMode?: 'chat' | 'plan';
@@ -448,6 +519,15 @@ export interface AgentisToolContext {
   agentId?: string;
   runId?: string;
   conversationId?: string;
+  durableTurnId?: string;
+  consultationId?: string;
+  consultationDepth?: number;
+  consultationAncestors?: string[];
+  /** Attenuated tool surface inherited by a private consultant. */
+  allowedToolIds?: string[];
+  /** Private server-owned channel restart data; never serialized to customer messages. */
+  channelContinuation?: Record<string, unknown>;
+  permissionMode?: ChatPermissionMode;
   executionMode?: 'chat' | 'plan' | 'ask';
   /** Ask-mode threshold propagated across native MCP tool loops. */
   approvalSensitivity?: ApprovalSensitivity;
@@ -485,6 +565,11 @@ export interface ChannelToolOrigin {
   chatId: string;
   /** Durable channel conversation whose ownership fences this tool-capable turn. */
   conversationId?: string;
+  durableTurnId?: string;
+  consultationId?: string;
+  consultationDepth?: number;
+  consultationAncestors?: string[];
+  permissionMode?: ChatPermissionMode;
   /** Ownership epoch captured before the turn began; mismatches cancel stale sends. */
   automationEpoch?: number;
   /** True only when this exact channel identity is explicitly linked to the owner. */

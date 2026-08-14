@@ -528,7 +528,11 @@ describe('CodexAdapter', () => {
     // chain-of-thought is never emitted through the private thinking channel.
     expect(deltas.some((d) => d.type === 'thinking')).toBe(false);
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'commentary', id: 'codex-commentary-1', text: 'Greeting the user.' }));
-    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', phase: 'runtime' }));
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'commentary',
+      source: 'assistant_preamble',
+      text: 'Hi!',
+    }));
     // The MCP tool it ran is surfaced as an informational step.
     expect(deltas).toContainEqual(expect.objectContaining({ type: 'tool_call', name: 'agentis.status' }));
     expect(deltas.at(-1)).toEqual({ type: 'done', finishReason: 'tool_calls' });
@@ -584,6 +588,17 @@ describe('CodexAdapter', () => {
 
     child.stdout.write('{"id":"1","msg":{"type":"agent_message","message":"I’ll inspect the failed run first."}}\n');
     child.stdout.write('{"id":"2","msg":{"type":"agent_message","message":"The extension uses CommonJS, so I’m correcting it."}}\n');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'commentary',
+      text: 'I’ll inspect the failed run first.',
+      source: 'assistant_preamble',
+    }));
+    expect(deltas).toContainEqual(expect.objectContaining({
+      type: 'commentary',
+      text: 'The extension uses CommonJS, so I’m correcting it.',
+      source: 'assistant_preamble',
+    }));
     child.stdout.write('{"id":"3","msg":{"type":"task_complete","last_agent_message":"Fixed the extension and verified the workflow."}}\n');
     child.emit('exit', 0);
     await consume;
@@ -594,7 +609,7 @@ describe('CodexAdapter', () => {
       .join('');
     expect(answer).toBe('Fixed the extension and verified the workflow.');
     expect(answer).not.toContain('I’ll inspect');
-    expect(deltas).toContainEqual(expect.objectContaining({ type: 'activity', label: 'Codex is working' }));
+    expect(deltas.some((delta) => delta.type === 'activity' && delta.label === 'Codex is working')).toBe(false);
   });
 
   it('resumes the native Codex thread only for the same Agentis conversation', async () => {

@@ -385,6 +385,7 @@ export interface AppDataPort {
   insert(workspaceId: string, appId: string, collection: string, record: Record<string, unknown>): { id: string };
   update(workspaceId: string, appId: string, collection: string, id: string, patch: Record<string, unknown>): { id: string };
   upsert(workspaceId: string, appId: string, collection: string, match: Record<string, unknown>, record: Record<string, unknown>): { id: string };
+  mutateMany(workspaceId: string, appId: string, collection: string, operation: 'insert' | 'upsert', records: Record<string, unknown>[], matchFields?: string[]): Array<{ id: string; data?: Record<string, unknown> }>;
   delete(workspaceId: string, appId: string, collection: string, id: string): void;
   getRecord(workspaceId: string, appId: string, collection: string, id: string): { id: string; data?: Record<string, unknown> };
 }
@@ -1565,7 +1566,7 @@ export class WorkflowEngine {
     // Stop in-flight work that honors the run signal (e.g. outbound HTTP, agent
     // model calls) rather than letting it run to completion after cancellation
     // (NATIVE-ADVANCEMENT Proposal 7, Agentis-native run-scoped cancellation).
-    await this.#interruptActiveWork(ctx);
+    await this.#interruptActiveWork(ctx, { cancelSessions: true });
     // Don't leave the active node stuck "running": mark open nodes skipped so the
     // UI reflects a stopped run, not a frozen one (same as the persisted path).
     markOpenNodesSkipped(ctx.state, 'Run cancelled');
@@ -1602,8 +1603,12 @@ export class WorkflowEngine {
   }
 
   /** Never let a non-cooperative adapter make the operator wait forever. */
-  async #interruptActiveWork(ctx: RunningContext): Promise<void> {
+  async #interruptActiveWork(ctx: RunningContext, options: { cancelSessions?: boolean } = {}): Promise<void> {
     try { ctx.abortController?.abort(); } catch { /* best-effort */ }
+    // agent_task nodes commonly execute as persistent sessions. They are not
+    // AdapterManager tasks, so aborting adapters alone left those model loops
+    // running (and parked sessions eligible to wake) after a run was stopped.
+    if (options.cancelSessions) this.deps.sessions?.failRunSessions(ctx.runId, 'Run cancelled');
     await Promise.all(Object.values(ctx.state.activeExecutions).map(async (exec) => {
       if (!exec?.taskId || exec.executorType !== 'agent' || !exec.executorRef) return;
       await Promise.race([
@@ -3964,6 +3969,7 @@ export class WorkflowEngine {
       role,
       runContextBlock,
       maxSteps: config.maxSteps,
+      ...(ctx.abortController ? { signal: ctx.abortController.signal } : {}),
     };
     if (ctx.planId && this.deps.plans) {
       this.deps.plans.bindSession(ctx.workspaceId, ctx.userId, ctx.planId, session.id);
@@ -3990,8 +3996,10 @@ export class WorkflowEngine {
   async #driveSession(ctx: RunningContext, node: WorkflowNode, sessionId: string, runCtx: SessionRunContext): Promise<void> {
     try {
       const outcome = await this.#advanceSessionLoop(ctx, node, sessionId, runCtx);
+      if (ctx.cancellationRequested || ctx.abortController?.signal.aborted) return;
       await this.#onSessionOutcome(ctx, node, sessionId, runCtx, outcome);
     } catch (err) {
+      if (ctx.cancellationRequested || ctx.abortController?.signal.aborted) return;
       this.deps.sessions?.fail(sessionId, (err as Error).message);
       await this.#failNode(ctx, node.id, (err as Error).message);
       void this.#tick(ctx);
@@ -4005,6 +4013,7 @@ export class WorkflowEngine {
    */
   async #advanceSessionLoop(ctx: RunningContext, node: WorkflowNode, sessionId: string, runCtx: SessionRunContext): Promise<SessionOutcome> {
     let outcome = await this.deps.sessionRuntime!.advance(sessionId, runCtx);
+    if (runCtx.signal?.aborted) return { kind: 'cancelled' };
     while (outcome.kind === 'suspended' && (outcome.yield.kind === 'delegate' || outcome.yield.kind === 'delegate_team')) {
       const y = outcome.yield;
       const payload = y.kind === 'delegate'
@@ -4012,6 +4021,7 @@ export class WorkflowEngine {
         : await this.#runDelegateTeam(ctx, node, sessionId, runCtx, y);
       this.deps.sessionRuntime!.injectWake(sessionId, y.toolCallId, payload);
       outcome = await this.deps.sessionRuntime!.advance(sessionId, runCtx);
+      if (runCtx.signal?.aborted) return { kind: 'cancelled' };
     }
     return outcome;
   }
@@ -4128,6 +4138,7 @@ export class WorkflowEngine {
       role: y.role,
       runContextBlock: childRunContext.prompt,
       ...(grant ? { grant } : {}),
+      ...(parentRunCtx.signal ? { signal: parentRunCtx.signal } : {}),
     };
     // Specialist run telemetry — record the delegation as a specialist run and
     // advance it planned → running → completed/failed. Before this, delegation
@@ -4270,6 +4281,8 @@ export class WorkflowEngine {
       case 'failed':
         await this.#failNode(ctx, node.id, outcome.error);
         void this.#tick(ctx);
+        return;
+      case 'cancelled':
         return;
       case 'suspended':
         await this.#parkSession(ctx, node, sessionId, runCtx, outcome.yield);
@@ -5277,7 +5290,7 @@ export class WorkflowEngine {
       }
 
       const proof = this.deps.revisions.proofState(ctx.workspaceId, ctx.workflowId, ctx.workflowRevisionId);
-      if (proof.readyForPromotion && !proof.approvalRequired && workflow.activeRevisionId) {
+      if (proof.readyForPromotion && !proof.approvalRequired && workflow.activeRevisionId && !workflow.appId) {
         this.deps.revisions.promote({
           workspaceId: ctx.workspaceId,
           workflowId: ctx.workflowId,
@@ -8020,6 +8033,10 @@ export class WorkflowEngine {
       .get();
     if (!run || isTerminalRunStatus(run.status)) return;
 
+    // A waiting session can outlive this engine process. Cancelling its durable
+    // run must fence that row too, otherwise restart recovery can wake it later.
+    this.deps.sessions?.failRunSessions(runId, 'Run cancelled');
+
     const state = run.runState as unknown as WorkflowRunState | null;
     if (state) {
       state.status = 'CANCELLED';
@@ -8270,7 +8287,7 @@ export class WorkflowEngine {
     if (status === 'COMPLETED') {
       const contract = (ctx.graph as { outputContract?: { fields?: Array<{ key: string; type: string; required?: boolean }> } }).outputContract;
       if (contract?.fields && contract.fields.length > 0) {
-        const finalOutput = this.#collectFinalOutput(ctx);
+        const finalOutput = unwrapReturnEnvelope(this.#collectFinalOutput(ctx));
         const violations = validateAgainstContract(finalOutput, contract.fields);
         if (violations.length > 0) {
           this.deps.bus.publish(REALTIME_ROOMS.run(ctx.runId), REALTIME_EVENTS.CONTRACT_VIOLATION, {
@@ -8563,7 +8580,7 @@ export class WorkflowEngine {
     const blockedReason = Object.values(ctx.state.nodeStates ?? {})
       .find((n) => n?.status === 'WAITING' && n?.blockedReason)?.blockedReason;
     const eventName =
-      status === 'COMPLETED' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION'
+      status === 'COMPLETED'
         ? REALTIME_EVENTS.RUN_COMPLETED
         // COMPLETED_WITH_ERRORS is surfaced as a FAILURE: it triggers the
         // proactive auto-diagnosis and shows red in the UI, matching the user's
@@ -8572,7 +8589,7 @@ export class WorkflowEngine {
           ? REALTIME_EVENTS.RUN_CANCELLED
           : status === 'PAUSED' || (status === 'WAITING' && blockedReason)
             ? REALTIME_EVENTS.RUN_PAUSED
-            : status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS'
+            : status === 'FAILED' || status === 'COMPLETED_WITH_ERRORS' || status === 'COMPLETED_WITH_CONTRACT_VIOLATION'
           ? REALTIME_EVENTS.RUN_FAILED
           : REALTIME_EVENTS.RUN_RUNNING;
     // workspaceId lets the workspace-level SSE fallback forward this run-status
@@ -8870,8 +8887,25 @@ export class WorkflowEngine {
             },
           }
         : {}),
-      runIntegration: async (integration, operation, params) =>
-        this.runIntegrationOperation(ctx.workspaceId, integration, operation, params),
+      runIntegration: async (integration, operation, params) => {
+        if (integration === 'agentis_app') {
+          if (operation !== 'query') throw new AgentisError('VALIDATION_FAILED', `agentis_app data probe does not support '${operation}'`);
+          if (!this.deps.appData) throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'agentis_app data probe requires the App datastore');
+          const collection = typeof params.collection === 'string' ? params.collection : '';
+          if (!collection) throw new AgentisError('VALIDATION_FAILED', 'agentis_app data probe requires collection');
+          const appId = typeof params.appId === 'string' && params.appId
+            ? params.appId
+            : this.#appScopeId(ctx.workspaceId, ctx.workflowId);
+          if (!appId) throw new AgentisError('VALIDATION_FAILED', 'agentis_app data probe could not resolve the owning App');
+          return this.deps.appData.query(ctx.workspaceId, appId, collection, {
+            ...(params.filter && typeof params.filter === 'object' && !Array.isArray(params.filter)
+              ? { filter: params.filter as Record<string, unknown> }
+              : {}),
+            limit: typeof params.limit === 'number' ? Math.min(Math.max(Math.trunc(params.limit), 1), 1000) : 1000,
+          }) as unknown as Record<string, unknown>;
+        }
+        return this.runIntegrationOperation(ctx.workspaceId, integration, operation, params);
+      },
       ...(evaluator
         ? {
             judge: async (a: { target: unknown; criteria: string }) => {
@@ -9019,48 +9053,11 @@ export class WorkflowEngine {
   }
 
   async #appendTerminalConversationMessage(ctx: RunningContext, status: WorkflowRunStatus): Promise<void> {
-    if (!this.deps.conversations) return;
-    const run = this.deps.db
-      .select()
-      .from(schema.workflowRuns)
-      .where(eq(schema.workflowRuns.id, ctx.runId))
-      .get();
-    const conversationId = run?.conversationId ?? ctx.conversationId ?? null;
-    if (!conversationId) return;
-
-    const workflow = run?.workflowId
-      ? this.deps.db
-          .select({ title: schema.workflows.title })
-          .from(schema.workflows)
-          .where(eq(schema.workflows.id, run.workflowId))
-          .get()
-      : null;
-    const title = run?.ephemeralTitle ?? workflow?.title ?? 'Workflow run';
-    const statusLabel = status === 'COMPLETED' ? 'completed' : status === 'FAILED' ? 'failed' : 'cancelled';
-
-    try {
-      this.deps.conversations.appendSystem({
-        workspaceId: ctx.workspaceId,
-        conversationId,
-        sessionMessageId: `run-terminal:${ctx.runId}`,
-        body: `Run ${statusLabel}: ${title}`,
-        metadata: {
-          source: 'workflow',
-          runId: ctx.runId,
-          workflowId: run?.workflowId ?? null,
-          runStatus: status,
-          runTitle: title,
-          isEphemeral: Boolean(run?.isEphemeral),
-        },
-      });
-    } catch (error) {
-      this.deps.logger.warn('engine.conversation_run_bridge.failed', {
-        workspaceId: ctx.workspaceId,
-        runId: ctx.runId,
-        conversationId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    // Workflow state belongs to the Run surface and the compact chat work
+    // trace, not as a sequence of system messages underneath an answer. The
+    // lead agent synthesizes meaningful outcomes into its normal reply.
+    void ctx;
+    void status;
   }
 }
 

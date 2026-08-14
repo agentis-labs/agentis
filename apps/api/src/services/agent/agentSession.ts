@@ -375,6 +375,19 @@ export class AgentSessionService {
       .run();
   }
 
+  /** Stop every non-terminal session owned by a workflow run. */
+  failRunSessions(runId: string, error: string): void {
+    const sessions = this.db
+      .select({ id: schema.agentSessions.id, status: schema.agentSessions.status })
+      .from(schema.agentSessions)
+      .where(eq(schema.agentSessions.runId, runId))
+      .all();
+    for (const session of sessions) {
+      if (session.status === 'completed' || session.status === 'failed') continue;
+      this.fail(session.id, error);
+    }
+  }
+
   incrementStats(sessionId: string, delta: { steps?: number; tokensIn?: number; tokensOut?: number }): void {
     this.db
       .update(schema.agentSessions)

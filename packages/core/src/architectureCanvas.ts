@@ -1,11 +1,10 @@
 /**
- * The `<proposed_plan>` / `<architecture_canvas>` plan-mode protocol.
+ * Legacy `<proposed_plan>` / `<architecture_canvas>` plan-mode protocol.
  *
  * A plan-mode turn's raw text may embed a readable plan and, for design-shaped
  * requests, a compact JSON architecture preview. Shared between the web chat
- * UI (renders `ChatPlanCanvas`) and the API (repairs a turn that emitted a
- * plan but skipped or malformed the architecture JSON) so both sides agree on
- * exactly one grammar.
+ * Kept for backwards compatibility with messages produced before Plan mode
+ * moved to clean Markdown. New turns must not emit this protocol.
  */
 
 export type ArchitectureCanvasKind = 'workflow' | 'extension' | 'app' | 'system';
@@ -45,6 +44,25 @@ export interface ParsedAgentPlan {
 }
 
 const ARCHITECTURE_KINDS = new Set<ArchitectureCanvasKind>(['workflow', 'extension', 'app', 'system']);
+
+/**
+ * Convert a legacy structured plan response into ordinary chat Markdown.
+ *
+ * This is intentionally safe to call while text is still streaming: an open
+ * architecture block is hidden immediately, while an open proposed-plan block
+ * is simply unwrapped so the readable plan remains visible. It also protects
+ * every presentation surface from adapters that cached the old Plan prompt.
+ */
+export function normalizeAgentPlanText(text: string): string {
+  return text
+    .replace(/<architecture_canvas\b[^>]*>[\s\S]*?<\/architecture_canvas\s*>/gi, '')
+    .replace(/<architecture_canvas\b[^>]*>[\s\S]*$/gi, '')
+    .replace(/<\/?architecture_canvas\b[^>]*>/gi, '')
+    .replace(/<\/?proposed_plan\b[^>]*>/gi, '')
+    .replace(/\n[ \t]+\n/g, '\n\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 export function extractAgentPlan(text: string): ParsedAgentPlan | null {
   const planMatch = findTaggedBlock(text, 'proposed_plan');

@@ -25,6 +25,25 @@ class DurableAdapter implements AgentAdapter {
   }
 }
 
+class StopAwareDurableAdapter implements AgentAdapter {
+  readonly adapterType = 'http' as const;
+  aborted = false;
+  async connect(): Promise<void> {}
+  async disconnect(): Promise<void> {}
+  async healthCheck(): Promise<AdapterHealthStatus> { return { isHealthy: true, checkedAt: new Date().toISOString() }; }
+  onEvent(_handler: (event: NormalizedAgentEvent) => void): void {}
+  async dispatchTask(_task: NormalizedTask): Promise<void> {}
+  async cancelTask(_taskId: string): Promise<void> {}
+  async *chat(_messages: ChatMessage[], _tools: ToolDefinition[], options?: ChatInvocationOptions): AsyncIterable<ChatDelta> {
+    await new Promise<void>((resolve) => {
+      if (options?.signal?.aborted) return resolve();
+      options?.signal?.addEventListener('abort', resolve, { once: true });
+    });
+    this.aborted = true;
+    yield { type: 'done', finishReason: 'interrupted' };
+  }
+}
+
 describe('durable conversation turn routes', () => {
   let ctx: TestContext;
   beforeEach(async () => { ctx = await createTestContext(); });
@@ -88,5 +107,49 @@ describe('durable conversation turn routes', () => {
     expect(history.history[0]?.events.map((event) => event.seq)).toEqual([...history.history[0]!.events.map((event) => event.seq)].sort((a, b) => a - b));
 
     expect(adapter.seenOptions).toMatchObject({ latencyClass: 'deliberate', reasoningEffort: 'high', fastMode: false });
+  });
+
+  it('cancels an in-flight turn by client id and releases its interactive lease', async () => {
+    const agentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: agentId,
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      name: 'Stop-aware Agent',
+      adapterType: 'http',
+    }).run();
+    const adapter = new StopAwareDurableAdapter();
+    const adapters = new AdapterManager(ctx.logger);
+    adapters.register(agentId, adapter);
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const app = ctx.buildApp([{ path: '/v1/conversations', app: buildConversationRoutes({
+      db: ctx.db,
+      auth: ctx.auth,
+      conversations,
+      adapters,
+      logger: ctx.logger,
+      bus: ctx.bus,
+    }) }]);
+    const clientTurnId = randomUUID();
+    const create = await app.request(`/v1/conversations/${agentId}/turns`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({ body: 'Start a long-running task', clientTurnId, executionMode: 'mission', permissionMode: 'auto' }),
+    });
+    expect(create.status).toBe(202);
+    const created = await create.json() as { turn: { id: string } };
+    await expect.poll(() => adapters.interactiveLease(agentId)).not.toBeNull();
+
+    const cancel = await app.request(`/v1/conversations/${agentId}/turns/by-client/${clientTurnId}/cancel`, {
+      method: 'POST',
+      headers: ctx.authHeaders,
+    });
+    expect(cancel.status).toBe(200);
+    expect((await cancel.json()) as { turn: { id: string; status: string } | null }).toMatchObject({
+      turn: { id: created.turn.id, status: 'cancelled' },
+    });
+    await expect.poll(() => adapter.aborted).toBe(true);
+    await expect.poll(() => adapters.interactiveLease(agentId)).toBeNull();
   });
 });

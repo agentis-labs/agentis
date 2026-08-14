@@ -108,4 +108,28 @@ describe('WorkflowEngine — data_mutate node', () => {
     expect(rows).toHaveLength(1);
     expect((rows[0]!.data as { name: string }).name).toBe('FromWorkflow');
   });
+
+  it('persists an entire batch and reports authoritative cardinality', async () => {
+    const records = Array.from({ length: 25 }, (_, index) => ({ name: `Restaurant ${index + 1}` }));
+    const out = await runMutate({ operation: 'insert', records });
+    expect(out.records).toHaveLength(25);
+    expect(out.mutationReceipt).toEqual(expect.objectContaining({
+      attempted: 25,
+      succeeded: 25,
+      failed: 0,
+      evidence: expect.objectContaining({ source: 'app_datastore', appId, collection: 'leads' }),
+    }));
+    expect(ds.query(ctx.workspace.id, appId, 'leads', { limit: 50 }).rows).toHaveLength(25);
+  });
+
+  it('normalizes legacy batch operations and stays idempotent across runs', async () => {
+    const legacy = {
+      operation: 'upsert_many',
+      matchKey: 'name',
+      records: [{ name: 'A' }, { name: 'B' }],
+    };
+    await runMutate(legacy);
+    await runMutate(legacy);
+    expect(ds.query(ctx.workspace.id, appId, 'leads', { limit: 50 }).rows).toHaveLength(2);
+  });
 });

@@ -5,7 +5,7 @@
  * plus the turn value-types. Framework-free (no HTTP/request state), so they
  * live in the conversation domain and the route stays a thin transport shell.
  */
-import { normalizeToolInvocation, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatFinishReason, type ChatPlan, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
+import { normalizeToolInvocation, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatFinishReason, type ChatPlan, type ChatSwarm, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { randomUUID } from 'node:crypto';
 
@@ -34,6 +34,7 @@ export interface StreamedChatMetadata {
   plan: ChatPlan | null;
   executionEnvelope: ChatExecutionEnvelope | null;
   contextManifest: ChatContextManifest | null;
+  swarms: ChatSwarm[];
 }
 
 export function serializeConversationMessage(message: ConversationMessageRow) {
@@ -114,6 +115,7 @@ export function createStreamedChatMetadata(
     plan: null,
     executionEnvelope: null,
     contextManifest: null,
+    swarms: [],
   };
 }
 
@@ -144,9 +146,18 @@ export function relevantTurnError(state: StreamedChatMetadata, adapterError: str
     .find((call) => call.status === 'error' && call.name !== 'adapter.chat')
     ?.error
     ?.trim();
-  return toolError
+  return explainRuntimeFailure(toolError
     || adapterError?.trim()
-    || 'The agent runtime failed before it could complete the chat turn.';
+    || 'The agent runtime failed before it could complete the chat turn.');
+}
+
+/** Keep provider failures concrete and actionable in the conversation itself. */
+export function explainRuntimeFailure(message: string): string {
+  const detail = message.trim();
+  if (/\b402\b|requires more credits|add more credits|insufficient(?:[_\s]+\w+)?[_\s]+credits?|out of credits?|no credits?|insufficient[_\s]?(?:quota|funds|balance)|quota exceeded|exceeded your current quota|billing|payment required/i.test(detail)) {
+    return `${detail} The selected model provider is out of credits or quota. Add credits or choose another model, then retry.`;
+  }
+  return detail;
 }
 
 export function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: ChatDelta): void {
@@ -162,12 +173,18 @@ export function captureChatDeltaMetadata(state: StreamedChatMetadata, delta: Cha
     return;
   }
   if (delta.type === 'thinking') return;
+  if (delta.type === 'swarm') {
+    state.swarms = upsertStable(state.swarms, delta.swarm, 12);
+    return;
+  }
   if (delta.type === 'plan') {
     state.plan = delta.plan;
     return;
   }
   if (delta.type === 'commentary') {
-    state.commentary = upsertStable(state.commentary, delta, 80);
+    state.commentary = delta.text.trim()
+      ? upsertStable(state.commentary, delta, 80)
+      : state.commentary.filter((entry) => entry.id !== delta.id);
     return;
   }
   if (delta.type === 'tool_call') {
@@ -242,6 +259,7 @@ export function buildPersistedChatMetadata(
     ...(state.plan ? { plan: state.plan } : {}),
     ...(state.executionEnvelope ? { executionEnvelope: state.executionEnvelope } : {}),
     ...(state.contextManifest ? { contextManifest: state.contextManifest } : {}),
+    ...(state.swarms.length > 0 ? { swarms: state.swarms } : {}),
   };
 }
 

@@ -22,11 +22,11 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import type { AgentisSqliteDb } from '@agentis/db/sqlite';
-import { AgentisError, type AgentAdapter, type ApprovalSensitivity, type ChannelToolOrigin, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
+import { AgentisError, normalizeAgentPlanText, type AgentAdapter, type ApprovalSensitivity, type ChannelToolOrigin, type ChatDelta, type ChatMessage, type ChatPermissionMode, type ChatTurnContext, type RuntimeInputAttachment } from '@agentis/core';
 import type { AdapterManager } from '../../adapters/AdapterManager.js';
 import type { ConversationStore } from './conversationStore.js';
 import { ChatSessionExecutor } from '../chat/chatSessionExecutor.js';
-import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM, repairArchitectureCanvas } from '../chat/chatPermissionMode.js';
+import { parseModeCommand, MODE_SWITCH_ACK, defaultTaskForMode, PLAN_MODE_SYSTEM_ADDENDUM } from '../chat/chatPermissionMode.js';
 import { resolveChannelAccess, buildAccessAddendum, normalizeHandle, UNKNOWN_SENDER_DECLINE, type AccessDecision, type ChannelAccess } from './channelAccess.js';
 import type { ChannelIdentityService } from './channelIdentityService.js';
 import type { AppContactService } from '../app/appContacts.js';
@@ -611,6 +611,8 @@ export class ChannelTurnDispatcher {
           agentId: responderAgentId,
           userId: input.userId,
           conversationId: input.conversationId,
+          durableTurnId: `channel:${input.inboundMessageId ?? `${input.conversationId}:${input.turnGeneration ?? 0}`}`,
+          channelContinuation: { ...input, runtimeInputAttachments: undefined },
           ...(input.appId ? { appId: input.appId } : {}),
           ...(recallScopeIds ? { recallScopeIds } : {}),
           clientTurnId,
@@ -708,12 +710,9 @@ export class ChannelTurnDispatcher {
 
       if (!this.#isActive(input, active)) return { replied: false, reason: 'superseded' };
 
-      // Backstop: a plan-mode turn that wrote a plan but skipped/malformed the
-      // architecture_canvas on a design-shaped request gets one cheap repair
-      // completion, same as the web chat path, so the plan renders visually there too.
-      if (permissionMode === 'plan' && finishReason !== 'error' && !confirmation && adapter) {
-        finalText = await repairArchitectureCanvas(adapter, finalText, runtimeText).catch(() => finalText);
-      }
+      // Strip legacy plan protocol before confirmations, persistence, policy
+      // checks, and delivery to any external channel.
+      finalText = normalizeAgentPlanText(finalText);
 
       // A tool needs confirmation: register it and ask the channel to reply yes/no.
       if (confirmation) {
@@ -813,6 +812,8 @@ export class ChannelTurnDispatcher {
         this.deps.logger.info('channel.turn.superseded', {
           connectionId: input.connectionId,
           conversationId: input.conversationId,
+          durableTurnId: `channel:${input.inboundMessageId ?? `${input.conversationId}:${input.turnGeneration ?? 0}`}`,
+          channelContinuation: { ...input, runtimeInputAttachments: undefined },
         });
         return { replied: false, reason: 'superseded' };
       }

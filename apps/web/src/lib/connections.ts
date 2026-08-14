@@ -130,18 +130,40 @@ export function getGovernanceSummary() {
 export interface InteractionEvent {
   id: string;
   at: string;
-  kind: 'message' | 'activity';
+  kind: 'message' | 'activity' | 'consultation';
   eventType: string;
   actor: { type: string; id: string | null };
   summary: string;
   roomId?: string;
   entity?: { type: string; id: string };
+  metadata?: Record<string, unknown>;
+  consultation?: {
+    id: string;
+    status: string;
+    caller: { id: string; name: string };
+    target: { id: string; name: string; role: string | null };
+    roundCount: number;
+    maxRounds: number;
+    substituted: boolean;
+    requestedTargetAgentId: string | null;
+    messages: Array<{
+      id: string;
+      sequenceNumber: number;
+      kind: string;
+      authorAgentId: string | null;
+      body: string;
+      metadata?: Record<string, unknown>;
+      createdAt: string;
+    }>;
+  };
 }
 
-export function listInteractions(params: { agentId?: string; roomId?: string; limit?: number; before?: string } = {}) {
+export function listInteractions(params: { agentId?: string; roomId?: string; conversationId?: string; runId?: string; limit?: number; before?: string } = {}) {
   const q = new URLSearchParams();
   if (params.agentId) q.set('agentId', params.agentId);
   if (params.roomId) q.set('roomId', params.roomId);
+  if (params.conversationId) q.set('conversationId', params.conversationId);
+  if (params.runId) q.set('runId', params.runId);
   if (params.limit) q.set('limit', String(params.limit));
   if (params.before) q.set('before', params.before);
   const qs = q.toString();

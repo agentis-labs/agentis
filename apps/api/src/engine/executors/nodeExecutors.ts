@@ -18,7 +18,7 @@ import { evalCondition } from '../SafeConditionParser.js';
 import { readDotPath } from '../dotPath.js';
 import { evaluateExpression } from '../safeExpression.js';
 import { resolveTemplate, type TemplateContext } from '../templateResolver.js';
-import { AgentisError, type AggregateWindowNodeConfig, type BrowserNodeConfig, type ChannelSendNodeConfig, type CodeNodeConfig, type DataMutateNodeConfig, type DataQueryNodeConfig, type GraphQlNodeConfig, type GuardrailsNodeConfig, type HttpRequestNodeConfig, type IntegrationNodeConfig, type McpNodeConfig, type RouterNodeConfig, type SpreadsheetNodeConfig, type WorkflowNode, type WorkflowStoreNodeConfig, type WorkspaceStoreNodeConfig } from '@agentis/core';
+import { AgentisError, schemas, type AggregateWindowNodeConfig, type BrowserNodeConfig, type ChannelSendNodeConfig, type CodeNodeConfig, type DataMutateNodeConfig, type DataQueryNodeConfig, type GraphQlNodeConfig, type GuardrailsNodeConfig, type HttpRequestNodeConfig, type IntegrationNodeConfig, type McpNodeConfig, type RouterNodeConfig, type SpreadsheetNodeConfig, type WorkflowNode, type WorkflowStoreNodeConfig, type WorkspaceStoreNodeConfig } from '@agentis/core';
 import { schema } from '@agentis/db/sqlite';
 import { manifestHttpConnector, type ConnectorRegistry } from '@agentis/integrations';
 import { and, eq } from 'drizzle-orm';
@@ -449,52 +449,67 @@ export class NodeExecutorController {
     if (!this.host.deps.appData) {
       throw new AgentisError('WORKFLOW_GRAPH_INVALID', 'data_mutate node present but app datastore not wired');
     }
-    if (!config.collection) {
-      throw new AgentisError('VALIDATION_FAILED', 'data_mutate node requires a collection');
-    }
+    const normalized = schemas.dataMutateConfigSchema.parse(
+      schemas.normalizeLegacyDataMutateConfig(config),
+    ) as DataMutateNodeConfig;
     const { workspaceId } = ctx;
-    const appId = this.#resolveDataAppId(ctx, config.appId);
-    const receipt = (id: string, verification: { passed: boolean; detail: string }) => ({
-      attempted: 1,
-      succeeded: verification.passed ? 1 : 0,
-      failed: verification.passed ? 0 : 1,
+    const appId = this.#resolveDataAppId(ctx, normalized.appId);
+    const receipt = (ids: string[], verification: { passed: boolean; detail: string }) => ({
+      attempted: ids.length,
+      succeeded: verification.passed ? ids.length : 0,
+      failed: verification.passed ? 0 : ids.length,
       skipped: 0,
-      idempotencyKey: `${ctx.runId}:${config.collection}:${config.operation}:${id}`,
-      items: [{ id, status: verification.passed ? 'succeeded' as const : 'failed' as const, detail: verification.detail }],
+      idempotencyKey: `${ctx.runId}:${normalized.collection}:${normalized.operation}`,
+      items: ids.map((id) => ({ id, status: verification.passed ? 'succeeded' as const : 'failed' as const, detail: verification.detail })),
       verification: { performed: true, ...verification },
+      evidence: { source: 'app_datastore', workspaceId, appId, collection: normalized.collection, runId: ctx.runId },
     });
     const verifyPresent = (id: string) => {
-      const stored = this.host.deps.appData!.getRecord(workspaceId, appId, config.collection, id);
+      const stored = this.host.deps.appData!.getRecord(workspaceId, appId, normalized.collection, id);
       if (!stored?.id) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `data_mutate could not verify persisted record ${id}`);
-      return receipt(id, { passed: true, detail: `Authoritative datastore read confirmed record ${id}.` });
+      return receipt([id], { passed: true, detail: `Authoritative datastore read confirmed record ${id}.` });
     };
-    switch (config.operation) {
+    switch (normalized.operation) {
       case 'insert': {
-        const record = this.host.deps.appData.insert(workspaceId, appId, config.collection, config.record ?? {});
-        return { [config.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
+        if (normalized.records) {
+          const records = this.host.deps.appData.mutateMany(workspaceId, appId, normalized.collection, 'insert', normalized.records);
+          const ids = records.map((record) => record.id);
+          return {
+            [normalized.outputKey ?? 'records']: records,
+            mutationReceipt: receipt(ids, { passed: true, detail: `Authoritative datastore transaction and read-after-write verification confirmed ${ids.length} records.` }),
+          };
+        }
+        const record = this.host.deps.appData.insert(workspaceId, appId, normalized.collection, normalized.record ?? {});
+        return { [normalized.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
       }
       case 'update': {
-        if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate update requires recordId');
-        const record = this.host.deps.appData.update(workspaceId, appId, config.collection, config.recordId, config.record ?? {});
-        return { [config.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
+        const record = this.host.deps.appData.update(workspaceId, appId, normalized.collection, normalized.recordId!, normalized.record ?? {});
+        return { [normalized.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
       }
       case 'upsert': {
-        const record = this.host.deps.appData.upsert(workspaceId, appId, config.collection, config.match ?? {}, config.record ?? {});
-        return { [config.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
+        if (normalized.records) {
+          const records = this.host.deps.appData.mutateMany(workspaceId, appId, normalized.collection, 'upsert', normalized.records, normalized.matchFields);
+          const ids = records.map((record) => record.id);
+          return {
+            [normalized.outputKey ?? 'records']: records,
+            mutationReceipt: receipt(ids, { passed: true, detail: `Authoritative datastore transaction and read-after-write verification confirmed ${ids.length} records.` }),
+          };
+        }
+        const record = this.host.deps.appData.upsert(workspaceId, appId, normalized.collection, normalized.match ?? {}, normalized.record ?? {});
+        return { [normalized.outputKey ?? 'record']: record, mutationReceipt: verifyPresent(record.id) };
       }
       case 'delete': {
-        if (!config.recordId) throw new AgentisError('VALIDATION_FAILED', 'data_mutate delete requires recordId');
-        this.host.deps.appData.delete(workspaceId, appId, config.collection, config.recordId);
+        this.host.deps.appData.delete(workspaceId, appId, normalized.collection, normalized.recordId!);
         let absent = false;
-        try { this.host.deps.appData.getRecord(workspaceId, appId, config.collection, config.recordId); } catch { absent = true; }
-        if (!absent) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `data_mutate delete could not verify removal of ${config.recordId}`);
+        try { this.host.deps.appData.getRecord(workspaceId, appId, normalized.collection, normalized.recordId!); } catch { absent = true; }
+        if (!absent) throw new AgentisError('INTEGRATION_OPERATION_FAILED', `data_mutate delete could not verify removal of ${normalized.recordId}`);
         return {
-          [config.outputKey ?? 'deleted']: config.recordId,
-          mutationReceipt: receipt(config.recordId, { passed: true, detail: `Authoritative datastore read confirmed record ${config.recordId} is absent.` }),
+          [normalized.outputKey ?? 'deleted']: normalized.recordId,
+          mutationReceipt: receipt([normalized.recordId!], { passed: true, detail: `Authoritative datastore read confirmed record ${normalized.recordId} is absent.` }),
         };
       }
       default:
-        throw new AgentisError('VALIDATION_FAILED', `data_mutate: unknown operation ${String(config.operation)}`);
+        throw new AgentisError('VALIDATION_FAILED', `data_mutate: unknown operation ${String(normalized.operation)}`);
     }
   }
 

@@ -33,6 +33,7 @@ import { resolveSpawnCwd, resolveSpawnTarget, withExpandedPath } from '../servic
 import { extractMarkerToolCalls, isProcessNoiseLine, stripProcessNoise } from './markerToolProtocol.js';
 import { linkAbortSignal } from './abort.js';
 import { runtimeProgressActivity } from './runtimeProgress.js';
+import { compactPublicProgress } from './publicProgress.js';
 
 /** Default safety cap for one chat turn when no explicit timeout is configured. */
 export const DEFAULT_CHAT_TURN_TIMEOUT_MS = 180_000;
@@ -103,7 +104,7 @@ export function chatHardCeilingMs(idleTimeoutMs: number, envVar?: string): numbe
 /** One interpreted contribution from a parsed CLI stdout event. */
 export type CliChatPart =
   /** Assistant text candidate. Only the latest/final candidate becomes the answer. */
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; id?: string }
   /** A fallback final answer, used only when no streamed `text` arrived. */
   | { kind: 'final'; text: string }
   /** Reasoning signal. Its raw contents are never exposed or persisted. */
@@ -276,6 +277,8 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
   let buffer = '';
   let transcript = '';
   let latestAssistantText = '';
+  let activeAssistantProgressId: string | null = null;
+  let assistantProgressSequence = 0;
   // The runtime's reported final answer, used only when no streamed text arrived
   // (so we never duplicate the answer when both a stream and a final event come).
   let lastAgentMessage = '';
@@ -354,12 +357,35 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
         switch (part.kind) {
           case 'text':
             transcript += part.text;
-            latestAssistantText += part.text;
-            queue.push(runtimeProgressActivity({
-              id: `runtime-progress-${cfg.logTag.replace(/[^a-z0-9]+/gi, '-')}`,
-              runtimeName: cfg.displayName,
-              text: latestAssistantText,
-            }));
+            // CLI harnesses commonly use assistant-message events for the same
+            // public progress prose their native chat UI shows ("I found X; I am
+            // checking Y next").  Treat that as operator-safe commentary while
+            // the process is running instead of collapsing it into a generic
+            // "runtime is working" row.  A stable provider id lets streaming
+            // chunks update in place; id-less streams receive one id per natural
+            // tool/activity segment.
+            const providerProgressId = part.id
+              ? `runtime-commentary-${cfg.logTag.replace(/[^a-z0-9]+/gi, '-')}-${part.id}`
+              : null;
+            if (providerProgressId && providerProgressId !== activeAssistantProgressId) {
+              activeAssistantProgressId = providerProgressId;
+              latestAssistantText = part.text;
+            } else {
+              if (!activeAssistantProgressId) {
+                assistantProgressSequence += 1;
+                activeAssistantProgressId = `runtime-commentary-${cfg.logTag.replace(/[^a-z0-9]+/gi, '-')}-${assistantProgressSequence}`;
+              }
+              latestAssistantText += part.text;
+            }
+            if (latestAssistantText.trim()) {
+              queue.push({
+                type: 'commentary',
+                id: activeAssistantProgressId,
+                text: compactPublicProgress(latestAssistantText),
+                source: 'assistant_preamble',
+                createdAt: new Date().toISOString(),
+              });
+            }
             break;
           case 'final':
             if (part.text) lastAgentMessage = part.text;
@@ -367,6 +393,7 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
           case 'thinking':
             if (part.text) {
               latestAssistantText = '';
+              activeAssistantProgressId = null;
               queue.push(runtimeProgressActivity({
                 id: `runtime-progress-${cfg.logTag.replace(/[^a-z0-9]+/gi, '-')}`,
                 runtimeName: cfg.displayName,
@@ -378,10 +405,11 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
           case 'commentary':
             if (part.text.trim()) {
               latestAssistantText = '';
+              activeAssistantProgressId = null;
               queue.push({
                 type: 'commentary',
                 id: part.id,
-                text: part.text.replace(/\s+/g, ' ').trim().slice(0, 1_200),
+                text: compactPublicProgress(part.text),
                 source: part.source ?? 'reasoning_summary',
                 createdAt: new Date().toISOString(),
               });
@@ -389,10 +417,12 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
             break;
           case 'activity':
             latestAssistantText = '';
+            activeAssistantProgressId = null;
             queue.push(part.delta);
             break;
           case 'tool':
             latestAssistantText = '';
+            activeAssistantProgressId = null;
             pendingToolCalls.push({ type: 'tool_call', id: randomUUID(), name: part.name, args: part.args });
             break;
           case 'error':
@@ -494,6 +524,18 @@ export async function* runCliChatTurn(cfg: CliChatRuntimeConfig): AsyncIterable<
     const markerSource = `${transcript}\n${lastAgentMessage}`.trim();
     const { calls: markerCalls } = extractMarkerToolCalls(markerSource);
     const { cleaned } = extractMarkerToolCalls(source);
+    // The latest public assistant message becomes the final answer on runtimes
+    // without a distinct completion payload. Remove only that provisional row;
+    // earlier progress updates remain as an auditable, Codex-like work trace.
+    if (cleaned && activeAssistantProgressId) {
+      queue.push({
+        type: 'commentary',
+        id: activeAssistantProgressId,
+        text: '',
+        source: 'assistant_preamble',
+        createdAt: new Date().toISOString(),
+      });
+    }
     if (cleaned) queue.push({ type: 'text', delta: cleaned });
     const allToolCalls: ChatDelta[] = [
       ...pendingToolCalls,

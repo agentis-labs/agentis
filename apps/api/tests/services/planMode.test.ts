@@ -55,14 +55,15 @@ describe('Plan mode', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('asks plan-mode turns for a separate architecture canvas payload', () => {
+  it('asks plan-mode turns for clean inline Markdown', () => {
     expect(parseModeCommand('/plan build a workflow for ad research')).toEqual({
       mode: 'plan',
       rest: 'build a workflow for ad research',
     });
-    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('<proposed_plan>');
-    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('<architecture_canvas>');
-    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('"kind":"workflow|extension|app|system"');
-    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('Do not create or save the real workflow/app/extension in Plan mode');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('directly in the conversation as clean Markdown');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('Do not save the plan to a local runtime file');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('Never emit XML-like protocol tags');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).not.toContain('<proposed_plan>');
+    expect(PLAN_MODE_SYSTEM_ADDENDUM).not.toContain('<architecture_canvas>');
   });
 });

@@ -228,6 +228,54 @@ describe('WorkflowEngine — agent_session', () => {
     expect(nodeOutput(runId)?.result).toBe('all done, here is the answer');
   });
 
+  it('cancels an in-flight session-backed agent task and prevents its late result from reviving the run', async () => {
+    let stepStarted!: () => void;
+    const started = new Promise<void>((resolve) => { stepStarted = resolve; });
+    let signalAborted = false;
+    const adapter: SessionAdapter = {
+      id: 'blocking-session',
+      async executeStep(input): Promise<SessionStepResult> {
+        stepStarted();
+        await new Promise<void>((resolve) => {
+          const stop = () => { signalAborted = true; resolve(); };
+          if (input.signal?.aborted) stop();
+          else input.signal?.addEventListener('abort', stop, { once: true });
+        });
+        // Simulate a backend that flushes a response after accepting the abort.
+        return { text: 'late answer', toolCalls: [], finishReason: 'stop' };
+      },
+    };
+    const engine = buildEngine(adapter);
+    const graph = sessionGraph();
+    const workflowId = randomUUID();
+    const runId = randomUUID();
+    const initialState = buildInitialRunState({ runId, workflowId, graph, inputs: {} });
+    ctx.db.insert(schema.workflows).values({
+      id: workflowId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      title: 'cancel-session', graph, settings: {},
+    }).run();
+    ctx.db.insert(schema.workflowRuns).values({
+      id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id,
+      status: 'CREATED', runState: initialState,
+    }).run();
+
+    await engine.startRun({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId, userId: ctx.user.id,
+      triggerId: null, inputs: {}, initialState, graph,
+    });
+    await Promise.race([started, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('session did not start')), 5_000))]);
+    await engine.cancelRun(runId);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const run = ctx.db.select().from(schema.workflowRuns).where(eq(schema.workflowRuns.id, runId)).get()!;
+    const session = ctx.db.select().from(schema.agentSessions).where(eq(schema.agentSessions.runId, runId)).get()!;
+    expect(signalAborted).toBe(true);
+    expect(session.status).toBe('failed');
+    expect(session.error).toBe('Run cancelled');
+    expect(run.status).toBe('CANCELLED');
+    expect(nodeOutput(runId)).toBeUndefined();
+  });
+
   /**
    * A session step's reasoning used to go out as a raw AGENT_WORK_STEP published
    * straight to the bus — live-only, bypassing the engine's activity spine, so it

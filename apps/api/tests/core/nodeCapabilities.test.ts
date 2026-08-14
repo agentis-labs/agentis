@@ -5,20 +5,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   NODE_CAPABILITY_CATALOG,
+  NODE_DEFINITIONS,
+  SUPPORTED_WORKFLOW_NODE_KINDS,
   summarizeGraphCapabilities,
   canonicalizeGraph,
   type WorkflowGraph,
 } from '@agentis/core';
 import { hashWorkflowGraph } from '../../src/services/graphHash.js';
-
-// Node kinds the engine supports (engine/validateGraph.ts SUPPORTED_NODE_KINDS).
-const SUPPORTED_KINDS = [
-  'trigger', 'agent_task', 'agent_session', 'extension_task', 'knowledge',
-  'router', 'merge', 'checkpoint', 'subflow', 'scratchpad', 'agent_swarm',
-  'dynamic_swarm', 'planner', 'artifact_collect', 'wait', 'transform', 'filter',
-  'integration', 'http_request', 'workflow_store', 'workspace_store', 'evaluator',
-  'guardrails', 'loop', 'parallel', 'return_output', 'artifact_save', 'browser',
-];
 
 function node(id: string, config: Record<string, unknown>) {
   return {
@@ -41,8 +34,16 @@ function graph(nodes: ReturnType<typeof node>[]): WorkflowGraph {
 
 describe('NODE_CAPABILITY_CATALOG', () => {
   it('covers every supported node kind (no catalog gaps)', () => {
-    const missing = SUPPORTED_KINDS.filter((k) => !NODE_CAPABILITY_CATALOG[k]);
+    const missing = SUPPORTED_WORKFLOW_NODE_KINDS.filter((k) => !NODE_CAPABILITY_CATALOG[k]);
     expect(missing).toEqual([]);
+    expect(new Set(SUPPORTED_WORKFLOW_NODE_KINDS).size).toBe(SUPPORTED_WORKFLOW_NODE_KINDS.length);
+    expect(Object.keys(NODE_DEFINITIONS).sort()).toEqual(Object.keys(NODE_CAPABILITY_CATALOG).sort());
+    for (const definition of Object.values(NODE_DEFINITIONS)) {
+      expect(definition.lifecycle).toBe('supported');
+      expect(definition.configVersion).toBe(2);
+      expect(definition.runtimeExecutor).toBe(definition.kind);
+      expect(definition.authoringSummary.length).toBeGreaterThan(0);
+    }
   });
 
   it('keeps the manifest nodeKind in sync with its catalog key', () => {

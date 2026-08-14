@@ -273,17 +273,64 @@ const dataQueryConfigSchema = z.object({
   outputKey: z.string().optional(),
 }).passthrough();
 
-const dataMutateConfigSchema = z.object({
+/** Normalize legacy batch authoring without keeping invented operations alive. */
+export function normalizeLegacyDataMutateConfig(input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const source = input as Record<string, unknown>;
+  const operation = source.operation === 'insert_many'
+    ? 'insert'
+    : source.operation === 'upsert_many'
+      ? 'upsert'
+      : source.operation;
+  const { matchKey, ...rest } = source;
+  return {
+    ...rest,
+    operation,
+    ...(rest.matchFields === undefined && typeof matchKey === 'string' && matchKey.trim()
+      ? { matchFields: [matchKey.trim()] }
+      : {}),
+  };
+}
+
+const dataMutateConfigObjectSchema = z.object({
   ...outputConfigFields,
   kind: z.literal('data_mutate'),
-  appId: z.string().min(1),
+  appId: z.string().min(1).optional(),
   collection: z.string().min(1),
   operation: z.enum(['insert', 'update', 'upsert', 'delete']),
-  record: z.record(z.string(), z.unknown()).optional(),
+  record: z.union([z.record(z.string(), z.unknown()), z.string().min(1)]).optional(),
+  records: z.union([z.array(z.record(z.string(), z.unknown())).min(1).max(1000), z.string().min(1)]).optional(),
   recordId: z.string().optional(),
   match: z.record(z.string(), z.unknown()).optional(),
+  matchFields: z.array(z.string().trim().min(1)).min(1).optional(),
   outputKey: z.string().optional(),
-}).passthrough();
+}).strict();
+
+export const dataMutateConfigSchema = dataMutateConfigObjectSchema.superRefine((config, ctx) => {
+  if (config.record && config.records) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'data_mutate accepts record or records, never both' });
+  }
+  if (config.operation === 'insert' && !config.record && !config.records) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'data_mutate insert requires record or records' });
+  }
+  if (config.operation === 'upsert') {
+    if (!config.record && !config.records) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'data_mutate upsert requires record or records' });
+    }
+    if (config.records && !config.matchFields) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'data_mutate batch upsert requires matchFields' });
+    }
+    if (config.record && !config.match) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'data_mutate single upsert requires match' });
+    }
+  }
+  if ((config.operation === 'update' || config.operation === 'delete') && !config.recordId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `data_mutate ${config.operation} requires recordId` });
+  }
+  if ((config.operation === 'update' || config.operation === 'delete') && config.records) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `data_mutate ${config.operation} does not support records` });
+  }
+});
 
 const aggregateWindowConfigSchema = z.object({
   ...outputConfigFields,
@@ -418,7 +465,7 @@ const graphqlConfigSchema = z.object({
  */
 export const genericFormNodeConfigSchemas = {
   data_query: dataQueryConfigSchema,
-  data_mutate: dataMutateConfigSchema,
+  data_mutate: dataMutateConfigObjectSchema,
   aggregate_window: aggregateWindowConfigSchema,
   error_trigger: errorTriggerConfigSchema,
   stop_error: stopErrorConfigSchema,
