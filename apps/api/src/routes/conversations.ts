@@ -457,7 +457,15 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
         });
     if (conversation.agentId !== agentId) throw new AgentisError('RESOURCE_NOT_FOUND', 'conversation not found for agent');
 
-    const permissionMode = body.permissionMode ?? (conversation.permissionMode as ChatPermissionMode | null) ?? 'ask';
+    // Resolve slash mode before compiling or classifying the turn. Previously
+    // `/plan` was parsed only inside the runtime, after a Full Access build
+    // request had already created a Mission plan and acceptance gate.
+    const modeCommand = parseModeCommand(body.body);
+    const runtimeBody = modeCommand?.rest || (modeCommand ? defaultTaskForMode(modeCommand.mode) : body.body);
+    const permissionMode = modeCommand?.mode
+      ?? body.permissionMode
+      ?? (conversation.permissionMode as ChatPermissionMode | null)
+      ?? 'ask';
     const approvalSensitivity = body.approvalSensitivity
       ?? (conversation.approvalSensitivity as ApprovalSensitivity | null)
       ?? 'balanced';
@@ -488,7 +496,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
     });
     const compiled = await attachmentContext.compile({
       workspaceId: ws.workspaceId,
-      body: body.body,
+      body: runtimeBody,
       attachmentIds: body.attachments,
       historyMessages: conversationHistoryForTurn(deps, conversation.id, message.id).length,
     });
@@ -509,7 +517,7 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       .orderBy(desc(schema.buildSessions.updatedAt))
       .get();
     const classified = classifyConversationExecutionMode(requestedMode, {
-      body: body.body,
+      body: runtimeBody,
       attachmentCount: body.attachments?.length ?? 0,
       permissionMode,
       previousMode: previousTurn?.effectiveMode as EffectiveConversationExecutionMode | undefined,
@@ -523,10 +531,10 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       ? deps.plans.createTask({
           workspaceId: ws.workspaceId,
           userId: ws.user.id,
-          objective: body.body,
+          objective: runtimeBody,
           conversationId: conversation.id,
           ownerAgentId: agentId,
-          title: missionTitle(body.body),
+          title: missionTitle(runtimeBody),
           acceptanceCriteria: ['All requested deliverables are persisted.', 'Verification passes before completion.', 'The final response cites concrete evidence.'],
         })
       : null;

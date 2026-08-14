@@ -520,6 +520,16 @@ export function classifyConversationExecutionMode(
     hasActiveBuildSession?: boolean;
   },
 ): { mode: EffectiveConversationExecutionMode; reason: string } {
+  // Plan is a permission posture, not merely prompt guidance. It must never be
+  // promoted into a durable Mission (and therefore Mission acceptance) even if
+  // the request contains strong build language or a stale client sends an
+  // explicit execution mode.
+  if (input.permissionMode === 'plan') {
+    return {
+      mode: requested === 'quick' ? 'quick' : 'deep',
+      reason: 'Plan mode requires deliberate, read-only execution without Mission acceptance.',
+    };
+  }
   if (requested !== 'auto') return { mode: requested, reason: 'Selected explicitly by the operator.' };
   const text = input.body.trim();
   const lower = text.toLowerCase();

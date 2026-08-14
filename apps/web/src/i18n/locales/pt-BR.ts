@@ -38,6 +38,16 @@ const ptBR: LocaleShape<typeof en> = {
   },
   settings: {
     title: 'Configurações',
+    navigationLabel: 'Seções das configurações',
+    destinations: {
+      account: { title: 'Conta', description: 'Seu perfil, preferências e dados pessoais.' },
+      workspace: { title: 'Espaço de trabalho', description: 'Identidade, gastos e como sua equipe opera.' },
+      connections: { title: 'Conexões', description: 'Canais, integrações, credenciais e acesso à API.' },
+      intelligence: { title: 'Inteligência', description: 'Escolha os modelos e a memória dos seus agentes.' },
+      advanced: { title: 'Avançado', description: 'Governança, recuperação, navegador e diagnósticos.' },
+    },
+    mobileSection: 'Seção das configurações',
+    closeLabel: 'Fechar configurações',
     tabs: {
       profile: 'Perfil',
       data: 'Seus dados',

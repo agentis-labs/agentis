@@ -27,11 +27,6 @@ import {
   User,
   Briefcase,
   Link as LinkIcon,
-  DollarSign,
-  Cpu,
-  Scale,
-  Boxes,
-  Database,
   Loader2,
   CheckCircle2,
   Users,
@@ -39,6 +34,8 @@ import {
   ChevronUp,
   Clock,
   RefreshCcw,
+  BrainCircuit,
+  ShieldCheck,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import clsx from 'clsx';
@@ -62,70 +59,121 @@ import { AutonomyPanel } from './AutonomyPanel';
 import { IntegrationsPanel } from './IntegrationsPanel';
 import { DataOwnershipPanel } from './DataOwnershipPanel';
 import { StartupPanel } from './StartupPanel';
-import { useAgentisStore, SettingsTab } from '../../store/agentisStore';
+import {
+  useAgentisStore,
+  type SettingsDestination,
+  type SettingsSubsection,
+} from '../../store/agentisStore';
 import { normalizeLocale, setLocale, supportedLocales, type SupportedLocale } from '../../i18n';
 import type en from '../../i18n/locales/en';
 
-type SettingsTabLabelKey = {
-  [Key in keyof typeof en.settings.tabs]: `settings.tabs.${Key}`;
-}[keyof typeof en.settings.tabs];
-
-const TABS: { value: SettingsTab; labelKey: SettingsTabLabelKey; icon: React.ReactNode }[] = [
-  { value: 'profile', labelKey: 'settings.tabs.profile', icon: <User size={16} /> },
-  { value: 'data', labelKey: 'settings.tabs.data', icon: <Database size={16} /> },
-  { value: 'workspace', labelKey: 'settings.tabs.workspace', icon: <Briefcase size={16} /> },
-  { value: 'channels', labelKey: 'settings.tabs.channels', icon: <MessageSquare size={16} /> },
-  { value: 'mcp', labelKey: 'settings.tabs.mcp', icon: <Boxes size={16} /> },
-  { value: 'integrations', labelKey: 'settings.tabs.integrations', icon: <LinkIcon size={16} /> },
-  { value: 'governance', labelKey: 'settings.tabs.governance', icon: <Scale size={16} /> },
-  { value: 'apiKeys', labelKey: 'settings.tabs.apiKeys', icon: <Key size={16} /> },
-  { value: 'budget', labelKey: 'settings.tabs.budget', icon: <DollarSign size={16} /> },
-  { value: 'runtimes', labelKey: 'settings.tabs.runtimes', icon: <Cpu size={16} /> },
+type DestinationKey = keyof typeof en.settings.destinations;
+const DESTINATIONS: { value: SettingsDestination; key: DestinationKey; icon: React.ReactNode }[] = [
+  { value: 'account', key: 'account', icon: <User size={17} /> },
+  { value: 'workspace', key: 'workspace', icon: <Briefcase size={17} /> },
+  { value: 'connections', key: 'connections', icon: <Plug size={17} /> },
+  { value: 'intelligence', key: 'intelligence', icon: <BrainCircuit size={17} /> },
+  { value: 'advanced', key: 'advanced', icon: <ShieldCheck size={17} /> },
 ];
+
+function SettingsSection({ id, children }: { id: SettingsSubsection; children: React.ReactNode }) {
+  return <section id={`settings-${id}`} className="scroll-mt-8 border-b border-line/70 pb-10 last:border-0 last:pb-2">{children}</section>;
+}
 
 export function SettingsModal() {
   const { t } = useTranslation();
-  const { settingsOpen, settingsTab, setSettingsOpen, closeSettings } = useAgentisStore();
+  const {
+    settingsOpen, settingsDestination, settingsSubsection, setSettingsOpen, closeSettings,
+  } = useAgentisStore();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  function hasUnsavedChanges() {
+    return Boolean(dialogRef.current?.querySelector('[data-settings-dirty="true"]'));
+  }
+
+  function confirmDiscard() {
+    return !hasUnsavedChanges() || window.confirm('Discard your unsaved changes?');
+  }
+
+  function attemptClose() {
+    if (confirmDiscard()) closeSettings();
+  }
+
+  function navigateTo(destination: SettingsDestination) {
+    if (destination === settingsDestination || confirmDiscard()) setSettingsOpen(true, destination);
+  }
 
   useEffect(() => {
+    if (!settingsOpen) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && settingsOpen) {
-        closeSettings();
+      if (e.key === 'Escape') {
+        attemptClose();
       }
+      if (e.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => !element.hasAttribute('hidden') && element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      previousFocusRef.current?.focus();
+    };
   }, [settingsOpen, closeSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    requestAnimationFrame(() => {
+      const target = document.getElementById(`settings-${settingsSubsection}`);
+      if (target && contentRef.current?.contains(target)) target.scrollIntoView?.({ block: 'start' });
+      else contentRef.current?.scrollTo?.({ top: 0 });
+    });
+  }, [settingsOpen, settingsDestination, settingsSubsection]);
 
   if (!settingsOpen) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm animate-fade-in">
-      <div className="flex h-full max-h-[800px] w-full max-w-[1000px] flex-col overflow-hidden rounded-[16px] border border-line bg-surface shadow-2xl animate-slide-up">
-        <div className="flex flex-1 overflow-hidden">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-canvas/80 p-0 backdrop-blur-sm animate-fade-in sm:p-4">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+        tabIndex={-1}
+        className="flex h-full w-full max-w-[1120px] flex-col overflow-hidden bg-surface shadow-2xl outline-none animate-slide-up sm:max-h-[860px] sm:rounded-[20px] sm:border sm:border-line"
+      >
+        <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Sidebar */}
-          <div className="w-64 shrink-0 border-r border-line bg-surface-2 flex flex-col">
-            <div className="px-6 py-6 pb-4">
-              <h2 className="text-[16px] font-semibold text-text-primary">{t('settings.title')}</h2>
+          <div className="hidden w-[238px] shrink-0 border-r border-line bg-surface-2/65 md:flex md:flex-col">
+            <div className="px-7 pb-5 pt-7">
+              <h2 id="settings-dialog-title" className="text-[17px] font-semibold tracking-tight text-text-primary">{t('settings.title')}</h2>
             </div>
-            <nav className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
-              {TABS.map((tab) => {
-                const isActive = settingsTab === tab.value;
+            <nav aria-label={t('settings.navigationLabel')} className="flex-1 space-y-1 overflow-y-auto px-3">
+              {DESTINATIONS.map((item) => {
+                const isActive = settingsDestination === item.value;
                 return (
                   <button
-                    key={tab.value}
-                    onClick={() => setSettingsOpen(true, tab.value)}
+                    key={item.value}
+                    onClick={() => navigateTo(item.value)}
+                    aria-current={isActive ? 'page' : undefined}
                     className={clsx(
-                      'flex w-full items-center gap-3 rounded-btn px-3 py-2 text-[14px] transition-colors',
+                      'group flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-[13px] transition-colors',
                       isActive
-                        ? 'bg-surface-3 text-text-primary font-medium shadow-sm border border-line/50'
-                        : 'text-text-secondary hover:bg-surface-3/50 hover:text-text-primary border border-transparent',
+                        ? 'bg-surface text-text-primary font-medium shadow-sm ring-1 ring-line/80'
+                        : 'text-text-secondary hover:bg-surface/70 hover:text-text-primary',
                     )}
                   >
-                    <span className={isActive ? 'text-text-primary' : 'text-text-muted'}>
-                      {tab.icon}
-                    </span>
-                    {t(tab.labelKey)}
+                    <span className={isActive ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}>{item.icon}</span>
+                    {t(`settings.destinations.${item.key}.title`)}
                   </button>
                 );
               })}
@@ -133,60 +181,59 @@ export function SettingsModal() {
           </div>
 
           {/* Content Area */}
-          <div className="relative flex flex-1 flex-col bg-surface overflow-hidden">
-            <div className="absolute right-6 top-6 z-10">
+          <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
+            <div className="flex items-center gap-3 border-b border-line px-4 py-3 md:hidden">
+              <label htmlFor="settings-mobile-section" className="sr-only">{t('settings.mobileSection')}</label>
+              <select
+                id="settings-mobile-section"
+                value={settingsDestination}
+                onChange={(event) => navigateTo(event.target.value as SettingsDestination)}
+                className="h-10 min-w-0 flex-1 rounded-input border border-line bg-surface-2 px-3 text-[14px] font-medium text-text-primary outline-none focus:border-accent"
+              >
+                {DESTINATIONS.map((item) => <option key={item.value} value={item.value}>{t(`settings.destinations.${item.key}.title`)}</option>)}
+              </select>
+            </div>
+            <div className="absolute right-4 top-[70px] z-10 md:right-6 md:top-6">
               <button
-                onClick={closeSettings}
+                onClick={attemptClose}
+                aria-label={t('settings.closeLabel')}
                 className="flex h-8 w-8 items-center justify-center rounded-full text-text-muted hover:bg-surface-3 hover:text-text-primary transition-colors"
               >
                 <X size={18} />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto px-10 py-8">
-              <h1 className="mb-6 text-[24px] font-semibold tracking-tight text-text-primary">
-                {(() => {
-                  const tab = TABS.find((item) => item.value === settingsTab);
-                  return tab ? t(tab.labelKey) : '';
-                })()}
-              </h1>
-              {settingsTab === 'profile' && <ProfileTab />}
-              {settingsTab === 'data' && <DataOwnershipPanel />}
-              {settingsTab === 'workspace' && (
-                <div className="space-y-10">
-                  <WorkspaceTab />
-                  <SelfHealingPanel />
-                  <AutonomyPanel />
-                </div>
-              )}
-              {settingsTab === 'channels' && (
-                <div className="space-y-10">
-                  <ConnectionsTab />
-                  <ChannelIdentitiesPanel />
-                </div>
-              )}
-              {settingsTab === 'mcp' && <McpConnectionsPanel />}
-              {settingsTab === 'integrations' && (
-                <>
-                  <IntegrationsPanel />
-                  <CustomOAuthProvidersPanel />
-                </>
-              )}
-              {settingsTab === 'governance' && (
-                <div className="space-y-6">
-                  <GovernancePanel />
-                  <BrowserControlPanel />
-                </div>
-              )}
-              {settingsTab === 'apiKeys' && <ApiKeysTab />}
-              {settingsTab === 'budget' && <BudgetTab />}
-              {settingsTab === 'runtimes' && (
-                <div className="space-y-10">
-                  <OrchestratorModelsPanel />
-                  <MediaModelsPanel />
-                  <BrainMemoryTierPanel />
-                  <RuntimesTab />
-                </div>
-              )}
+            <div ref={contentRef} className="flex-1 overflow-y-auto px-5 pb-12 pt-8 sm:px-8 md:px-12 md:pt-10">
+              <header className="mb-10 max-w-2xl pr-10">
+                <h1 className="text-[26px] font-semibold tracking-[-0.025em] text-text-primary">{t(`settings.destinations.${settingsDestination}.title`)}</h1>
+                <p className="mt-1.5 text-[13px] leading-relaxed text-text-muted">{t(`settings.destinations.${settingsDestination}.description`)}</p>
+              </header>
+              <div className="mx-auto max-w-3xl space-y-10">
+                {settingsDestination === 'account' && <>
+                  <SettingsSection id="profile"><ProfileTab /></SettingsSection>
+                  <SettingsSection id="data"><DataOwnershipPanel /></SettingsSection>
+                </>}
+                {settingsDestination === 'workspace' && <>
+                  <SettingsSection id="workspace"><WorkspaceTab /></SettingsSection>
+                  <SettingsSection id="budget"><BudgetTab /></SettingsSection>
+                  <SettingsSection id="models"><AutonomyPanel /></SettingsSection>
+                </>}
+                {settingsDestination === 'connections' && <>
+                  <SettingsSection id="channels"><div className="space-y-10"><ConnectionsTab /><ChannelIdentitiesPanel /></div></SettingsSection>
+                  <SettingsSection id="integrations"><div className="space-y-8"><IntegrationsPanel /><CustomOAuthProvidersPanel /></div></SettingsSection>
+                  <SettingsSection id="mcp"><McpConnectionsPanel /></SettingsSection>
+                  <SettingsSection id="apiKeys"><ApiKeysTab /></SettingsSection>
+                </>}
+                {settingsDestination === 'intelligence' && <SettingsSection id="models"><div className="space-y-10"><OrchestratorModelsPanel /><MediaModelsPanel /><BrainMemoryTierPanel /></div></SettingsSection>}
+                {settingsDestination === 'advanced' && <>
+                  <SettingsSection id="governance"><div className="space-y-8"><GovernancePanel /><BrowserControlPanel /><SelfHealingPanel /></div></SettingsSection>
+                  <SettingsSection id="runtimes">
+                    <details className="group rounded-card border border-line bg-surface-2/40">
+                      <summary className="cursor-pointer list-none px-5 py-4 text-[13px] font-medium text-text-primary marker:hidden">Runtime diagnostics <span className="float-right text-text-muted group-open:rotate-180">⌄</span></summary>
+                      <div className="border-t border-line px-5 py-5"><RuntimesTab /></div>
+                    </details>
+                  </SettingsSection>
+                </>}
+              </div>
             </div>
           </div>
         </div>
@@ -342,6 +389,7 @@ function ProfileTab() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -370,7 +418,8 @@ function ProfileTab() {
       await api('/v1/auth/me', { method: 'PATCH', body: JSON.stringify({ name, email }) });
       toast.success('Profile updated');
       setMe((prev) => (prev ? { ...prev, name, email } : null));
-      setTimeout(() => window.location.reload(), 800);
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2_000);
     } catch (e) {
       toast.error('Failed to update', apiErrorMessage(e));
     } finally {
@@ -379,17 +428,19 @@ function ProfileTab() {
   }
 
   if (loading) return <Skeleton height={200} />;
+  const profileDirty = Boolean(me && (name !== me.name || email !== me.email));
 
   return (
-    <div className="max-w-xl space-y-5">
+    <div className="max-w-xl space-y-5" data-settings-dirty={profileDirty}>
       <div>
         <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
           Profile
         </h2>
         <div className="space-y-4 rounded-card border border-line bg-surface p-5">
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Display name</label>
+            <label htmlFor="settings-display-name" className="text-[12px] font-medium text-text-secondary">Display name</label>
             <input
+              id="settings-display-name"
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -397,23 +448,27 @@ function ProfileTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">Email</label>
+            <label htmlFor="settings-email" className="text-[12px] font-medium text-text-secondary">Email</label>
             <input
+              id="settings-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="h-10 w-full rounded-input border border-line bg-surface-2 px-3 text-[14px] text-text-primary focus:border-accent focus:outline-none"
             />
           </div>
-          <Button
-            variant="primary"
-            size="md"
-            iconLeft={<Save size={12} />}
-            disabled={saving}
-            onClick={() => void save()}
-          >
-            Save changes
-          </Button>
+          <div className="flex min-h-8 items-center gap-3">
+            {profileDirty && <Button
+              variant="primary"
+              size="md"
+              iconLeft={<Save size={12} />}
+              disabled={saving}
+              onClick={() => void save()}
+            >
+              {saving ? 'Saving…' : 'Save changes'}
+            </Button>}
+            {saved && <span role="status" className="inline-flex items-center gap-1.5 text-[12px] text-success"><CheckCircle2 size={13} /> Saved</span>}
+          </div>
         </div>
       </div>
 
@@ -483,6 +538,7 @@ function WorkspaceTab() {
   const [description, setDescription] = useState('');
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -516,9 +572,10 @@ function WorkspaceTab() {
         }),
       });
       toast.success(t('settings.workspace.updated'));
+      setWs((prev) => (prev ? { ...prev, name, slug, description, imageUrl: imageDataUrl ?? prev.imageUrl } : null));
       setImageDataUrl(null);
-      setWs((prev) => (prev ? { ...prev, name, slug, description } : null));
-      setTimeout(() => window.location.reload(), 800);
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2_000);
     } catch (e) {
       toast.error(t('settings.workspace.updateFailed'), apiErrorMessage(e));
     } finally {
@@ -557,9 +614,10 @@ function WorkspaceTab() {
   if (!ws) return <div className="text-[13px] text-text-muted">{t('settings.workspace.noWorkspace')}</div>;
 
   const previewImage = imageDataUrl ?? ws.imageUrl;
+  const workspaceDirty = name !== ws.name || slug !== ws.slug || description !== (ws.description ?? '') || Boolean(imageDataUrl);
 
   return (
-    <div className="max-w-xl space-y-5">
+    <div className="max-w-xl space-y-5" data-settings-dirty={workspaceDirty}>
       <div>
         <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
           {t('settings.workspace.title')}
@@ -594,8 +652,9 @@ function WorkspaceTab() {
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.name')}</label>
+            <label htmlFor="settings-workspace-name" className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.name')}</label>
             <input
+              id="settings-workspace-name"
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -603,8 +662,9 @@ function WorkspaceTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.slug')}</label>
+            <label htmlFor="settings-workspace-slug" className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.slug')}</label>
             <input
+              id="settings-workspace-slug"
               type="text"
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
@@ -612,23 +672,27 @@ function WorkspaceTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.description')}</label>
+            <label htmlFor="settings-workspace-description" className="text-[12px] font-medium text-text-secondary">{t('settings.workspace.description')}</label>
             <textarea
+              id="settings-workspace-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
               className="w-full resize-none rounded-input border border-line bg-surface-2 px-3 py-2 text-[14px] text-text-primary focus:border-accent focus:outline-none"
             />
           </div>
-          <Button
-            variant="primary"
-            size="md"
-            iconLeft={<Save size={12} />}
-            disabled={saving}
-            onClick={() => void save()}
-          >
-            {t('settings.workspace.saveChanges')}
-          </Button>
+          <div className="flex min-h-8 items-center gap-3">
+            {workspaceDirty && <Button
+              variant="primary"
+              size="md"
+              iconLeft={<Save size={12} />}
+              disabled={saving}
+              onClick={() => void save()}
+            >
+              {saving ? 'Saving…' : t('settings.workspace.saveChanges')}
+            </Button>}
+            {saved && <span role="status" className="inline-flex items-center gap-1.5 text-[12px] text-success"><CheckCircle2 size={13} /> Saved</span>}
+          </div>
         </div>
       </div>
 

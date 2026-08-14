@@ -17,6 +17,15 @@ import { z } from 'zod';
 import type { AgentisToolRegistry } from '../agentisToolRegistry.js';
 import type { ToolHandlerDeps } from './deps.js';
 
+export function normalizePolicyHour(value: unknown): unknown {
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'string') return value;
+  const match = value.trim().match(/^(\d{1,2})(?::00)?$/);
+  return match ? Number(match[1]) : value;
+}
+
+const policyHourSchema = z.preprocess(normalizePolicyHour, z.number().int().min(0).max(23));
+
 const planWorkflowSchema = z.object({
   key: z.string().min(1),
   title: z.string().min(1),
@@ -95,7 +104,9 @@ const appPlanSchema = z.object({
   policy: z
     .object({
       maxPerHour: z.number().int().positive().optional(),
-      quietHours: z.object({ start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(23) }).optional(),
+      // Harnesses naturally express business hours as either 9 or "09:00".
+      // Normalize both instead of wasting a model/tool retry on formatting.
+      quietHours: z.object({ start: policyHourSchema, end: policyHourSchema }).optional(),
     })
     .optional(),
 }).superRefine((plan, ctx) => {
@@ -179,7 +190,7 @@ export function registerAppPlanTools(registry: AgentisToolRegistry, deps: ToolHa
             swarms: { type: 'array', description: 'Bounded temporary workers: [{ key, purpose, workerRole, maxWorkers, runtime?, skillIds?, brainIds?, persist:"evidence_only" }].', items: { type: 'object' } },
             interfaces: { type: 'array', description: 'Operator/App surfaces: [{ key, title, purpose }].', items: { type: 'object' } },
             acceptanceCriteria: { type: 'array', minItems: 1, description: 'App-level evidence-checkable completion criteria. At least one is required by the blueprint gate.', items: { type: 'string' } },
-            policy: { type: 'object', description: 'Outbound safety envelope: { maxPerHour?, quietHours?: { start, end } }.' },
+            policy: { type: 'object', description: 'Outbound safety envelope: { maxPerHour?, quietHours?: { start, end } }. Quiet-hour endpoints accept an hour integer or HH:MM string.' },
           },
           required: ['intent', 'acceptanceCriteria'],
           anyOf: [{ required: ['appId'] }, { required: ['name'] }],

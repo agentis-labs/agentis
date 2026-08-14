@@ -120,6 +120,36 @@ describe('AgentTurnTrace', () => {
     expect(screen.queryByText('Request received')).not.toBeInTheDocument();
   });
 
+  it('shows a tool as running before its result arrives and updates it in place', () => {
+    const { rerender } = render(
+      <AgentTurnTrace
+        streaming
+        toolCalls={[{ id: 'call-1', name: 'agentis.app.plan', status: 'running' }]}
+      />,
+    );
+    expect(screen.getByText('Running agentis.app.plan')).toBeInTheDocument();
+
+    rerender(
+      <AgentTurnTrace
+        streaming
+        toolCalls={[{ id: 'call-1', name: 'agentis.app.plan', status: 'success', result: { appId: 'app-1' } }]}
+      />,
+    );
+    expect(screen.queryByText('Running agentis.app.plan')).not.toBeInTheDocument();
+    expect(screen.getByText('Used agentis.app.plan')).toBeInTheDocument();
+  });
+
+  it('treats a live tool error as a retry, not a terminal failure', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        activities={[activity(1, { status: 'error', label: 'Failed agentis app plan' })]}
+      />,
+    );
+    expect(screen.getByText('Retrying agentis app plan')).toBeInTheDocument();
+    expect(screen.queryByText('Failed agentis app plan')).not.toBeInTheDocument();
+  });
+
   it('replaces the waiting heartbeat when real harness commentary arrives', () => {
     render(
       <AgentTurnTrace

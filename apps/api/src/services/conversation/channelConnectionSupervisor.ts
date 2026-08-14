@@ -42,6 +42,7 @@ import { chunkText, sleep, typingDelayMs, type HumanizeConfig } from './humanize
 import type { ConversationHandoffService } from './conversationHandoffService.js';
 import type { ConversationSummaryService } from './conversationSummaryService.js';
 import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
+import { normalizeHandle } from './channelAccess.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
 
@@ -673,12 +674,18 @@ export class ChannelConnectionSupervisor {
       channelChatId: msg.chatId,
       appId: row.appId ?? null,
     });
-    const profile = resolveWhatsAppConnectionProfile(
-      row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
-        ? (row.settings as { whatsappProfile?: unknown }).whatsappProfile
-        : undefined,
-    );
-    if (profile.manualOutboundTakeover === 'until_handback') {
+    const settings = row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+      ? row.settings as { whatsappProfile?: unknown; ownerChatId?: unknown }
+      : {};
+    const profile = resolveWhatsAppConnectionProfile(settings.whatsappProfile);
+    // `defaultChatId` is intentionally not used here: it can be auto-populated
+    // by the first inbound message and is a routing convenience only. The owner
+    // exception requires an explicit saved owner/operator chat.
+    const ownerChatId = typeof settings.ownerChatId === 'string' ? settings.ownerChatId : null;
+    const isOwnerChat = Boolean(ownerChatId && normalizeHandle(ownerChatId) === normalizeHandle(msg.chatId));
+    const shouldClaimHuman = profile.manualOutboundTakeover === 'until_handback'
+      && (!isOwnerChat || profile.ownerManualOutboundTakeover === 'until_handback');
+    if (shouldClaimHuman) {
       this.deps.handoffs?.claimHuman({
         workspaceId: row.workspaceId,
         conversationId: conversation.id,
@@ -909,7 +916,7 @@ function isChannelHealth(value: unknown): value is ChannelHealth {
   return Boolean(value && typeof value === 'object' && Array.isArray((value as ChannelHealth).checks));
 }
 
-function reconcileTransportHealth(
+export function reconcileTransportHealth(
   health: ChannelHealth,
   status: ChannelStatus,
   transportStatus: string,
@@ -928,11 +935,12 @@ function reconcileTransportHealth(
   const checks = health.checks.some((check) => check.name === 'transport')
     ? health.checks.map((check) => check.name === 'transport' ? transport : check)
     : [...health.checks, transport];
+  const failed = checks.filter((check) => !check.ok && check.code !== 'not_checked');
   const effectiveStatus: ChannelStatus = status !== 'active'
     ? status
-    : checks.some((check) => !check.ok && (check.name === 'credential' || check.name === 'transport'))
+    : failed.some((check) => check.name === 'credential' || check.name === 'transport')
       ? 'error'
-      : checks.some((check) => !check.ok)
+      : failed.length > 0
         ? 'degraded'
         : 'active';
   return { ...health, status: effectiveStatus, checks };

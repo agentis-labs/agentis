@@ -142,7 +142,10 @@ explicitly for harness smoke testing.
   speed live in one runtime menu. Plan mode returns clean Markdown directly in the conversation;
   it does not emit `<proposed_plan>`, `<architecture_canvas>`, private `file://` links, or a
   second local plan document. `normalizeAgentPlanText()` strips that legacy protocol from cached
-  adapters, streaming presentation, persistence, and external-channel delivery.
+  adapters, streaming presentation, persistence, and external-channel delivery. Permission slash
+  commands are recognized either before the task or as a final standalone line. The web selector
+  updates immediately, and the API resolves the directive before execution classification: Plan
+  turns can never be promoted into Mission acceptance, even when the task contains build language.
 
 ### Execution truth and operator progress
 
@@ -174,8 +177,11 @@ their provider IDs, so each concrete "found / doing next" update appears immedia
 timeline. Streaming chunks for one message update that same row in place. If the latest message is the
 final answer, only its provisional row is atomically promoted into the assistant body without
 duplication; earlier progress remains. Tool start/completion events enter the same stream immediately
-and update one row in place. Confirmation resumes emit the approved operation's running state before
-execution. All harnesses are asked for one short progress sentence before their first substantive action
+and update one row in place. The live transcript consumes the pre-execution tool event, so the row is
+visible while the call is running rather than appearing only with its result. A recoverable failure is
+shown as a soft **Retrying** state and removed when the agent moves on; red is reserved for an unresolved
+terminal failure. Confirmation resumes emit the approved operation's running state before execution.
+All harnesses are asked for one short progress sentence before their first substantive action
 and another only when a concrete finding changes the next step. The transport keeps these updates to one
 sentence and 220 characters, so progress cannot become a second answer or a token-heavy log. The technical panel can additionally show the sanitized operation,
 affected resource, duration, and result. Stable event ids update an existing row in place, internal

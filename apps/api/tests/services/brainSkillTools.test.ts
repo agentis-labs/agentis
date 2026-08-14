@@ -68,6 +68,7 @@ describe('agentis.skill.load', () => {
     const res = await registry.execute({ toolId: 'agentis.skill.load', arguments: { skill: 'nope' } }, toolCtx());
     expect(res.ok).toBe(false);
     expect(res.errorCode).toBe('RESOURCE_NOT_FOUND');
+    expect(res.errorMessage).toMatch(/kind:"skill"/i);
   });
 });
 

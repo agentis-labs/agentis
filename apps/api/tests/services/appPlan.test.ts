@@ -4,7 +4,17 @@
  * dependsOn, so the returned checklist is executable top-to-bottom.
  */
 import { describe, expect, it } from 'vitest';
-import { buildChecklist, orderByDependsOn } from '../../src/services/agentisToolHandlers/appPlan.js';
+import { buildChecklist, normalizePolicyHour, orderByDependsOn } from '../../src/services/agentisToolHandlers/appPlan.js';
+
+describe('normalizePolicyHour', () => {
+  it('accepts the common hour formats produced by chat harnesses', () => {
+    expect(normalizePolicyHour(9)).toBe(9);
+    expect(normalizePolicyHour('09:00')).toBe(9);
+    expect(normalizePolicyHour('18')).toBe(18);
+    expect(normalizePolicyHour('18:30')).toBe('18:30');
+    expect(normalizePolicyHour('tomorrow')).toBe('tomorrow');
+  });
+});
 
 const wf = (key: string, dependsOn: string[] = []) => ({ key, title: key, purpose: key, dependsOn });
 

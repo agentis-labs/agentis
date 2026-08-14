@@ -102,14 +102,35 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
 
     const updated = bridge.updateBehavior(ctx.workspace.id, connection.id, { ownerReasoningVisibility: 'indicator' });
     expect(updated.whatsappProfile).toMatchObject({
-      version: 2,
+      version: 3,
       ownerReasoningVisibility: 'indicator',
       manualOutboundTakeover: 'until_handback',
+      ownerManualOutboundTakeover: 'off',
       historyReconciliation: 'recent',
     });
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect((row.settings as { whatsappProfile?: { version?: number; ownerReasoningVisibility?: string } }).whatsappProfile)
-      .toMatchObject({ version: 2, ownerReasoningVisibility: 'indicator' });
+      .toMatchObject({ version: 3, ownerReasoningVisibility: 'indicator' });
+  });
+
+  it('persists an explicit owner/operator chat separately from the routing default', () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA', defaultChatId: '+55 31 7000-0000',
+    });
+
+    expect(bridge.get(ctx.workspace.id, connection.id).ownerChatId).toBeNull();
+    const updated = bridge.updateTargets(ctx.workspace.id, connection.id, {
+      ownerChatId: '+55 31 7000-0000',
+      ownerName: 'Robson',
+    });
+    expect(updated.ownerChatId).toBe('553170000000@s.whatsapp.net');
+    expect(updated.ownerName).toBe('Robson');
+    expect(updated.defaultChatId).toBe('553170000000@s.whatsapp.net');
   });
 
   it('rejects a non-persistent kind without a token', () => {

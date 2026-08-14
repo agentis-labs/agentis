@@ -4,7 +4,7 @@
  * etc.). Keeping the slash grammar and acknowledgements in one place means a
  * channel and the web composer interpret `/ask` `/plan` `/auto` identically.
  */
-import type { ChatPermissionMode } from '@agentis/core';
+import { parseChatPermissionDirective, type ChatPermissionMode } from '@agentis/core';
 
 /**
  * System guidance injected on a Plan-mode turn. The hard guarantee is the
@@ -35,16 +35,7 @@ export const PLAN_MODE_SYSTEM_ADDENDUM = [
  * not a mode command.
  */
 export function parseModeCommand(message: string): { mode: ChatPermissionMode; rest: string } | null {
-  const m = message.match(/^\/(ask|plan|auto|bypass|act|chat)\b\s*([\s\S]*)$/i);
-  if (!m) return null;
-  const cmd = (m[1] ?? '').toLowerCase();
-  const rest = (m[2] ?? '').trim();
-  const mode: ChatPermissionMode = cmd === 'plan'
-    ? 'plan'
-    : cmd === 'auto' || cmd === 'bypass'
-      ? 'auto'
-      : 'ask';
-  return { mode, rest };
+  return parseChatPermissionDirective(message);
 }
 
 /** Operator-facing acknowledgement when a slash command switches mode with no task. */

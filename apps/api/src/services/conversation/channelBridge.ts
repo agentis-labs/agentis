@@ -76,6 +76,10 @@ export interface CreateConnectionInput {
   token?: string;
   /** Optional outbound chat id default (e.g. Telegram numeric id). */
   defaultChatId?: string;
+  /** Explicit owner/operator chat. This never grants identity or tool authority. */
+  ownerChatId?: string;
+  /** Optional human name for the configured owner/operator chat. */
+  ownerName?: string;
   /** WhatsApp Cloud uses the same address as defaultChatId but labels it for setup. */
   defaultRecipient?: string;
   /** Persistent transport: Telegram 'polling' or Discord 'gateway' (no public webhook). */
@@ -96,6 +100,9 @@ export interface CreateConnectionInput {
 
 export interface UpdateConnectionTargetsInput {
   defaultChatId?: string | null;
+  /** Explicit owner/operator chat used only for WhatsApp handoff behavior. */
+  ownerChatId?: string | null;
+  ownerName?: string | null;
   targetAliases?: Record<string, string | null>;
   /** Who the agent replies to, and the per-recipient/anyone rules (CHANNEL-ACCESS-10x). */
   access?: ChannelAccess | null;
@@ -116,7 +123,7 @@ export type OwnerReasoningVisibility = 'off' | 'indicator';
  * migration. Socket/browser knobs intentionally do not belong here.
  */
 export interface WhatsAppConnectionProfile {
-  version: 2;
+  version: 3;
   reliability: {
     sessionRecovery: true;
     classifiedReconnect: true;
@@ -136,12 +143,15 @@ export interface WhatsAppConnectionProfile {
     chatSocketLogs: false;
   };
   ownerReasoningVisibility: OwnerReasoningVisibility;
+  /** Applies to ordinary conversations. */
   manualOutboundTakeover: 'until_handback' | 'off';
+  /** Applies only to the explicitly configured owner/operator chat. */
+  ownerManualOutboundTakeover: 'until_handback' | 'off';
   historyReconciliation: 'recent' | 'off';
 }
 
 export const DEFAULT_WHATSAPP_CONNECTION_PROFILE: WhatsAppConnectionProfile = {
-  version: 2,
+  version: 3,
   reliability: {
     sessionRecovery: true,
     classifiedReconnect: true,
@@ -159,6 +169,10 @@ export const DEFAULT_WHATSAPP_CONNECTION_PROFILE: WhatsAppConnectionProfile = {
   observability: { structuredDiagnostics: true, chatSocketLogs: false },
   ownerReasoningVisibility: 'off',
   manualOutboundTakeover: 'until_handback',
+  // The owner/operator can keep using their own chat with the agent. This is
+  // deliberately opt-in because an explicit owner chat is a convenience, not
+  // an authority boundary.
+  ownerManualOutboundTakeover: 'off',
   historyReconciliation: 'recent',
 };
 
@@ -171,6 +185,7 @@ export function resolveWhatsAppConnectionProfile(value: unknown): WhatsAppConnec
     ...DEFAULT_WHATSAPP_CONNECTION_PROFILE,
     ownerReasoningVisibility: candidate?.ownerReasoningVisibility === 'indicator' ? 'indicator' : 'off',
     manualOutboundTakeover: candidate?.manualOutboundTakeover === 'off' ? 'off' : 'until_handback',
+    ownerManualOutboundTakeover: candidate?.ownerManualOutboundTakeover === 'until_handback' ? 'until_handback' : 'off',
     historyReconciliation: candidate?.historyReconciliation === 'off' ? 'off' : 'recent',
   };
 }
@@ -187,6 +202,10 @@ export interface PublicConnection {
   name: string;
   status: string;
   defaultChatId: string | null;
+  /** Explicit owner/operator chat for WhatsApp handoff behavior; never auto-derived. */
+  ownerChatId: string | null;
+  /** Optional display name supplied by the operator for model conversation context. */
+  ownerName: string | null;
   targetAliases: Record<string, string>;
   access: ChannelAccess | null;
   transport: string | null;
@@ -248,6 +267,9 @@ export interface PersistentChannelTransport {
 type ChannelConnectionRow = typeof schema.channelConnections.$inferSelect;
 type ChannelSettings = {
   defaultChatId?: string;
+  /** Explicit owner/operator chat for WhatsApp handoff behavior only. */
+  ownerChatId?: string;
+  ownerName?: string;
   targetAliases?: Record<string, string>;
   access?: ChannelAccess;
   transport?: 'polling' | 'webhook' | 'gateway';
@@ -675,6 +697,8 @@ export class ChannelBridge {
     const settings: ChannelSettings = {};
     const defaultTarget = input.defaultChatId ?? input.defaultRecipient;
     if (defaultTarget) settings.defaultChatId = this.#normalizeTargetForKind(input.kind, defaultTarget);
+    if (input.ownerChatId) settings.ownerChatId = this.#normalizeTargetForKind(input.kind, input.ownerChatId);
+    if (input.ownerName?.trim()) settings.ownerName = input.ownerName.trim().slice(0, 120);
     if (input.transport) settings.transport = input.transport;
     if (input.kind === 'telegram' && !settings.transport && !this.#publicWebhookUrl(id)) settings.transport = 'polling';
     if (input.kind === 'whatsapp') {
@@ -803,12 +827,22 @@ export class ChannelBridge {
   updateTargets(workspaceId: string, id: string, input: UpdateConnectionTargetsInput): PublicConnection {
     const row = this.#row(workspaceId, id);
     const settings = { ...this.#settings(row) };
-    // Any behavior save upgrades legacy WhatsApp rows to the explicit v2 profile.
+    // Any behavior save upgrades legacy WhatsApp rows to the explicit v3 profile.
     if (row.kind === 'whatsapp') settings.whatsappProfile = resolveWhatsAppConnectionProfile(settings.whatsappProfile);
     if ('defaultChatId' in input) {
       const target = input.defaultChatId?.trim();
       if (target) settings.defaultChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, target);
       else delete settings.defaultChatId;
+    }
+    if ('ownerChatId' in input) {
+      const ownerTarget = input.ownerChatId?.trim();
+      if (ownerTarget) settings.ownerChatId = this.#normalizeTargetForKind(row.kind as ChannelKind, ownerTarget);
+      else delete settings.ownerChatId;
+    }
+    if ('ownerName' in input) {
+      const ownerName = input.ownerName?.trim();
+      if (ownerName) settings.ownerName = ownerName.slice(0, 120);
+      else delete settings.ownerName;
     }
     if (input.targetAliases) {
       const targetAliases = { ...(settings.targetAliases ?? {}) };
@@ -860,6 +894,7 @@ export class ChannelBridge {
     startWarmup?: boolean;
     ownerReasoningVisibility?: OwnerReasoningVisibility;
     manualOutboundTakeover?: 'until_handback' | 'off';
+    ownerManualOutboundTakeover?: 'until_handback' | 'off';
     historyReconciliation?: 'recent' | 'off';
   }): PublicConnection {
     const row = this.#row(workspaceId, id);
@@ -876,7 +911,7 @@ export class ChannelBridge {
     if (typeof input.requireOptIn === 'boolean') settings.requireOptIn = input.requireOptIn;
     if (input.startWarmup === true) settings.warmupStartedAt = new Date().toISOString();
     else if (input.startWarmup === false) delete settings.warmupStartedAt;
-    if (input.ownerReasoningVisibility !== undefined || input.manualOutboundTakeover !== undefined || input.historyReconciliation !== undefined) {
+    if (input.ownerReasoningVisibility !== undefined || input.manualOutboundTakeover !== undefined || input.ownerManualOutboundTakeover !== undefined || input.historyReconciliation !== undefined) {
       if (row.kind !== 'whatsapp') {
         throw new AgentisError('VALIDATION_FAILED', 'WhatsApp profile behavior is available only for WhatsApp');
       }
@@ -884,6 +919,7 @@ export class ChannelBridge {
         ...resolveWhatsAppConnectionProfile(settings.whatsappProfile),
         ...(input.ownerReasoningVisibility !== undefined ? { ownerReasoningVisibility: input.ownerReasoningVisibility } : {}),
         ...(input.manualOutboundTakeover !== undefined ? { manualOutboundTakeover: input.manualOutboundTakeover } : {}),
+        ...(input.ownerManualOutboundTakeover !== undefined ? { ownerManualOutboundTakeover: input.ownerManualOutboundTakeover } : {}),
         ...(input.historyReconciliation !== undefined ? { historyReconciliation: input.historyReconciliation } : {}),
       };
     }
@@ -1662,8 +1698,13 @@ export class ChannelBridge {
 
   #statusFromChecks(checks: ChannelHealthCheck[]): ChannelStatus {
     if (checks.length === 0) return 'verifying';
-    if (checks.every((check) => check.ok)) return 'active';
-    const failed = checks.filter((check) => !check.ok);
+    // `not_checked` is absence of evidence, not a failed capability. A live
+    // persistent socket must not become degraded merely because an operator has
+    // not run the optional, read-only full diagnostic yet.
+    const failed = checks.filter((check) => !check.ok && check.code !== 'not_checked');
+    if (failed.length === 0) {
+      return checks.some((check) => check.ok) ? 'active' : 'verifying';
+    }
     if (failed.some((check) => check.code.includes('missing') || check.code.includes('needs') || check.code.includes('not_open'))) {
       return 'needs_action';
     }
@@ -2079,6 +2120,8 @@ export class ChannelBridge {
       name: row.name,
       status: row.status,
       defaultChatId: settings.defaultChatId ?? null,
+      ownerChatId: settings.ownerChatId ?? null,
+      ownerName: settings.ownerName ?? null,
       targetAliases: settings.targetAliases ?? {},
       access: settings.access ?? null,
       transport: settings.transport ?? null,

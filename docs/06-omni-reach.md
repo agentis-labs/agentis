@@ -20,6 +20,10 @@ projections share one registry so there is no protocol drift between channels, M
 Channel health checks are read-only: pressing **Test connection** validates credentials,
 transport, routing, inbound readiness, and runtime availability without sending a message.
 An actual outbound test is an explicit channel send.
+An unchecked diagnostic is shown as **not yet verified**, not a connection failure. A live
+persistent transport is healthy on its own evidence; credential, inbound, outbound, and runtime
+checks remain neutral until their optional read-only test runs. Only an observed failed check
+degrades or errors the connection.
 
 For WhatsApp QR sessions, the id returned by `sendMessage()` is initially only a client
 correlation id. Agentis records that attempt as `queued` and does not report `sent:true`
@@ -55,10 +59,14 @@ the responsible agent/subject.
   and provider receipts remain Agentis telemetry. Channel users receive the natural response;
   the only optional external status is the generic, identity-verified owner reasoning indicator.
 - A newly observed, uncorrelated WhatsApp `fromMe` event from the primary phone or another
-  companion claims that conversation for the human until an explicit **Hand back**. The claim is
-  durable and conversation-local: Agentis aborts the active turn and companion lane, revokes the
-  tool lease, clears typing, cancels pending durable turn jobs, and fences every automated provider
-  send with a monotonic `automationEpoch`. Agentis-originated provider echoes never claim ownership.
+  companion normally claims that conversation for the human until an explicit **Hand back**. The
+  exception is an explicitly saved owner/operator chat: it keeps automation available by default so
+  the owner can talk to their agent naturally. Operators can enable the same takeover rule for that
+  chat or disable manual-message takeover entirely. `defaultChatId` never creates this exception;
+  it can be auto-populated and is routing only. The claim is durable and conversation-local:
+  Agentis aborts the active turn and companion lane, revokes the tool lease, clears typing, cancels
+  pending durable turn jobs, and fences every automated provider send with a monotonic
+  `automationEpoch`. Agentis-originated provider echoes never claim ownership.
 - Operator messages are business-side conversation context and compile as model role `assistant`;
   customer messages compile as `user`. Platform-chat actor semantics are unchanged. This prevents
   a manual promise such as “I will send the proposal” from being interpreted as a new customer
@@ -73,10 +81,14 @@ the responsible agent/subject.
   advanced by message watermark. History import invalidates and rebuilds that local summary in the
   background without delaying the first live reply.
 
-The allow-listed WhatsApp behavior profile is version 2. Existing version 1 settings resolve lazily
-with safe defaults: `manualOutboundTakeover:"until_handback"` and
-`historyReconciliation:"recent"`. Operators may disable either behavior without exposing arbitrary
-Baileys socket options or browser-identity knobs. Generic clients can transfer ownership with
+The allow-listed WhatsApp behavior profile is version 3. Existing settings resolve lazily with safe
+defaults: `manualOutboundTakeover:"until_handback"`,
+`ownerManualOutboundTakeover:"off"`, and `historyReconciliation:"recent"`. The explicit
+`ownerChatId` and optional `ownerName` let the agent recognize its configured owner/operator in
+that conversation. They are a handoff and conversation-context setting only; owner privileges
+still require a linked peer identity.
+Operators may configure these behaviors without exposing arbitrary Baileys socket options or
+browser-identity knobs. Generic clients can transfer ownership with
 `PATCH /v1/conversations/:conversationId/handoff` and `{ "state": "human" | "agent" }`; the App
 takeover route delegates to the same service.
 

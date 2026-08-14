@@ -114,10 +114,48 @@ describe('<AgentChannelsTab />', () => {
     await waitFor(() => expect(screen.getByText(/Orchy WhatsApp/)).toBeInTheDocument());
 
     await userEvent.type(screen.getByPlaceholderText(/\+12345678901/i), '+1 234 567-8901');
+    await userEvent.click(screen.getByLabelText(/This is my owner\/operator chat/i));
+    await userEvent.type(screen.getByPlaceholderText(/e\.g\. Robson/i), 'Robson');
     await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
 
     await waitFor(() => expect(calls.some((call) => call.url === '/v1/channels/wa1/targets' && call.method === 'PATCH')).toBe(true));
     const targetCall = calls.find((call) => call.url === '/v1/channels/wa1/targets');
     expect(targetCall?.body).toContain('+1 234 567-8901');
+    expect(targetCall?.body).toContain('ownerChatId');
+    expect(targetCall?.body).toContain('ownerName');
+  });
+
+  it('exposes manual handoff controls and keeps the owner/operator exception configurable', async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const connection = {
+      id: 'wa-owner', agentId: 'a1', kind: 'whatsapp', name: 'Owner WhatsApp', status: 'active', mode: 'qr_local',
+      defaultChatId: '553171443148@s.whatsapp.net', ownerChatId: '553171443148@s.whatsapp.net', targetAliases: {},
+      whatsappProfile: {
+        version: 3, ownerReasoningVisibility: 'off', manualOutboundTakeover: 'until_handback',
+        ownerManualOutboundTakeover: 'off', historyReconciliation: 'recent',
+      },
+      health: { status: 'active', checks: [] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : undefined });
+      if (url === '/v1/channels' && method === 'GET') return jsonResponse({ connections: [connection] });
+      if (url === '/v1/channels/wa-owner/behavior' && method === 'PATCH') return jsonResponse({ connection });
+      return jsonResponse({});
+    }));
+
+    render(<AgentChannelsTab agentId="a1" agentName="Orchestrator" />);
+    await waitFor(() => expect(screen.getByDisplayValue('553171443148@s.whatsapp.net')).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /Behavior & safety/i }));
+    expect(screen.getByLabelText(/Pause automation in a conversation/i)).toBeChecked();
+    const ownerControl = screen.getByLabelText(/Also pause automation for the owner\/operator chat/i);
+    expect(ownerControl).not.toBeDisabled();
+    await userEvent.click(ownerControl);
+
+    await waitFor(() => expect(calls.some((call) => call.url === '/v1/channels/wa-owner/behavior')).toBe(true));
+    const handoffCall = calls.find((call) => call.url === '/v1/channels/wa-owner/behavior');
+    expect(handoffCall?.body).toContain('ownerManualOutboundTakeover');
+    expect(handoffCall?.body).toContain('until_handback');
   });
 });

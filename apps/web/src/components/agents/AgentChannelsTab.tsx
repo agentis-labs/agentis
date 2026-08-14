@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2, Plug, Plus, RefreshCcw, Trash2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CircleHelp, Loader2, Plug, Plus, RefreshCcw, Trash2, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
@@ -67,6 +67,8 @@ interface ChannelConnection {
   name: string;
   status: ChannelStatus;
   defaultChatId: string | null;
+  ownerChatId: string | null;
+  ownerName: string | null;
   access?: ChannelAccess | null;
   targetAliases?: Record<string, string>;
   transport?: string | null;
@@ -76,7 +78,13 @@ interface ChannelConnection {
   rateLimit?: { perMinute?: number; perDay?: number } | null;
   requireOptIn?: boolean;
   warmupStartedAt?: string | null;
-  whatsappProfile?: { version: 2; ownerReasoningVisibility: 'off' | 'indicator'; manualOutboundTakeover: 'until_handback' | 'off'; historyReconciliation: 'recent' | 'off' } | null;
+  whatsappProfile?: {
+    version: 3;
+    ownerReasoningVisibility: 'off' | 'indicator';
+    manualOutboundTakeover: 'until_handback' | 'off';
+    ownerManualOutboundTakeover: 'until_handback' | 'off';
+    historyReconciliation: 'recent' | 'off';
+  } | null;
   capabilities?: ChannelCapabilities;
   health: ChannelHealth;
   lastError?: string | null;
@@ -223,6 +231,8 @@ function ProviderCard({
   const [name, setName] = useState(`${agentName} ${provider.label}`);
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState('');
+  const [defaultIsOwner, setDefaultIsOwner] = useState(false);
+  const [ownerName, setOwnerName] = useState('');
   const [usePersistent, setUsePersistent] = useState(provider.kind === 'telegram');
   const [whatsappMode, setWhatsappMode] = useState<WhatsAppMode>('qr_local');
   const [signingSecret, setSigningSecret] = useState('');
@@ -245,8 +255,10 @@ function ProviderCard({
   useEffect(() => {
     setLastHealth(null);
     setChatId(connection?.defaultChatId ?? '');
+    setDefaultIsOwner(Boolean(connection?.ownerChatId && connection.ownerChatId === connection.defaultChatId));
+    setOwnerName(connection?.ownerName ?? '');
     setAccess(connection?.access ?? { recipients: [], answerAnyone: false });
-  }, [connection?.id, connection?.status, connection?.defaultChatId]);
+  }, [connection?.id, connection?.status, connection?.defaultChatId, connection?.ownerChatId, connection?.ownerName]);
 
   useEffect(() => {
     if (!qrConnId || linked) {
@@ -306,6 +318,8 @@ function ProviderCard({
           agentId,
           ...(needsToken ? { token: token.trim() } : {}),
           defaultChatId: chatId.trim() || undefined,
+          ...(provider.kind === 'whatsapp' && defaultIsOwner && chatId.trim() ? { ownerChatId: chatId.trim() } : {}),
+          ...(provider.kind === 'whatsapp' && defaultIsOwner && ownerName.trim() ? { ownerName: ownerName.trim() } : {}),
           ...(provider.kind === 'whatsapp' ? { mode: whatsappMode } : {}),
           ...(provider.kind === 'slack' && signingSecret.trim() ? { signingSecret: signingSecret.trim() } : {}),
           ...(isWhatsAppCloud
@@ -351,6 +365,8 @@ function ProviderCard({
             name: name.trim() || `${agentName} ${provider.label}`,
             agentId,
             defaultChatId: chatId.trim() || undefined,
+            ...(defaultIsOwner && chatId.trim() ? { ownerChatId: chatId.trim() } : {}),
+            ...(defaultIsOwner && ownerName.trim() ? { ownerName: ownerName.trim() } : {}),
           }),
         });
         connId = created.connection.id;
@@ -407,6 +423,8 @@ function ProviderCard({
         method: 'PATCH',
         body: JSON.stringify({
           defaultChatId: chatId.trim() || null,
+          ...(provider.kind === 'whatsapp' ? { ownerChatId: defaultIsOwner && chatId.trim() ? chatId.trim() : null } : {}),
+          ...(provider.kind === 'whatsapp' ? { ownerName: defaultIsOwner && ownerName.trim() ? ownerName.trim() : null } : {}),
           access: {
             recipients: (access.recipients ?? [])
               .map((r) => ({ handle: r.handle.trim(), name: r.name?.trim() || undefined, rules: r.rules?.trim() || undefined }))
@@ -458,6 +476,10 @@ function ProviderCard({
             busy={busy === 'target'}
             onChange={setChatId}
             onSave={() => void saveTargets()}
+            ownerTarget={defaultIsOwner}
+            onOwnerTargetChange={setDefaultIsOwner}
+            ownerName={ownerName}
+            onOwnerNameChange={setOwnerName}
             access={access}
             onAccessChange={setAccess}
           />
@@ -543,6 +565,26 @@ function ProviderCard({
               className={INPUT_CLS}
             />
           </ConnectField>
+          {isWhatsApp && (
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 text-[12px] text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={defaultIsOwner}
+                  onChange={(event) => setDefaultIsOwner(event.target.checked)}
+                />
+                <span>
+                  This is my owner/operator chat
+                  <span className="mt-0.5 block text-[11px] text-text-muted">Manual messages here keep the agent available by default. This does not grant extra permissions.</span>
+                </span>
+              </label>
+              {defaultIsOwner && (
+                <ConnectField label="Owner/operator name (optional)" hint="Lets the agent recognize who it is speaking with.">
+                  <input value={ownerName} onChange={(event) => setOwnerName(event.target.value)} placeholder="e.g. Robson" className={INPUT_CLS} />
+                </ConnectField>
+              )}
+            </div>
+          )}
 
           {provider.persistent && (
             <label className="flex items-center gap-2 text-[12px] text-text-secondary">
@@ -774,8 +816,39 @@ function ChannelBehaviorControls({
             >
               {warming ? 'Stop warmup' : 'Start warmup'}
             </Button>
-            {connection.kind === 'whatsapp' && (
-              <label className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+          </div>
+
+          {connection.kind === 'whatsapp' && (
+            <div className="space-y-2 rounded-input border border-line bg-surface-1 px-2.5 py-2 text-[11px] text-text-secondary">
+              <div className="font-medium text-text-primary">Manual-message handoff</div>
+              <label className="flex items-start gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={connection.whatsappProfile?.manualOutboundTakeover !== 'off'}
+                  disabled={saving}
+                  onChange={(e) => void patch(
+                    { manualOutboundTakeover: e.target.checked ? 'until_handback' : 'off' },
+                    e.target.checked ? 'Manual-message handoff enabled' : 'Manual-message handoff disabled',
+                  )}
+                />
+                <span>Pause automation in a conversation after an operator sends from WhatsApp, until Hand back.</span>
+              </label>
+              <label className="flex items-start gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={connection.whatsappProfile?.ownerManualOutboundTakeover === 'until_handback'}
+                  disabled={saving || !connection.ownerChatId || connection.whatsappProfile?.manualOutboundTakeover === 'off'}
+                  onChange={(e) => void patch(
+                    { ownerManualOutboundTakeover: e.target.checked ? 'until_handback' : 'off' },
+                    e.target.checked ? 'Owner-chat handoff enabled' : 'Owner-chat handoff disabled',
+                  )}
+                />
+                <span>
+                  Also pause automation for the owner/operator chat.
+                  {!connection.ownerChatId && <span className="block text-text-muted">Mark the default recipient as owner/operator above to enable this choice.</span>}
+                </span>
+              </label>
+              <label className="flex items-center gap-1.5">
                 <input
                   type="checkbox"
                   checked={connection.whatsappProfile?.ownerReasoningVisibility === 'indicator'}
@@ -787,8 +860,8 @@ function ChannelBehaviorControls({
                 />
                 Owner-only reasoning indicator
               </label>
-            )}
-          </div>
+            </div>
+          )}
 
           {caps && (
             <div className="text-[10px] text-text-muted">
@@ -812,7 +885,7 @@ function HealthDetails({ health }: { health: ChannelHealth }) {
       {health.checks.map((check) => (
         <div key={check.name} className="rounded-input border border-line bg-surface-2 px-3 py-2">
           <div className="flex items-start gap-2">
-            {check.ok ? <CheckCircle2 size={13} className="mt-0.5 text-accent" /> : <XCircle size={13} className="mt-0.5 text-danger" />}
+            {check.ok ? <CheckCircle2 size={13} className="mt-0.5 text-accent" /> : check.code === 'not_checked' ? <CircleHelp size={13} className="mt-0.5 text-text-muted" /> : <XCircle size={13} className="mt-0.5 text-danger" />}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[12px] font-medium capitalize text-text-primary">{check.name}</span>
@@ -845,6 +918,10 @@ function TargetEditor({
   busy,
   onChange,
   onSave,
+  ownerTarget,
+  onOwnerTargetChange,
+  ownerName,
+  onOwnerNameChange,
   access,
   onAccessChange,
 }: {
@@ -853,6 +930,10 @@ function TargetEditor({
   busy: boolean;
   onChange: (value: string) => void;
   onSave: () => void;
+  ownerTarget: boolean;
+  onOwnerTargetChange: (value: boolean) => void;
+  ownerName: string;
+  onOwnerNameChange: (value: string) => void;
   access: ChannelAccess;
   onAccessChange: (access: ChannelAccess) => void;
 }) {
@@ -865,8 +946,8 @@ function TargetEditor({
   return (
     <div className="mt-3 flex flex-col gap-3 rounded-input border border-line bg-surface-2 px-3 py-3">
       <ConnectField
-        label={provider.kind === 'whatsapp' ? 'Default recipient (you)' : 'Default target (you)'}
-        hint="You — full access, no rules needed."
+        label={provider.kind === 'whatsapp' ? 'Owner/operator chat' : 'Default target (you)'}
+        hint={provider.kind === 'whatsapp' ? 'The person who directs this agent in WhatsApp.' : 'You — full access, no rules needed.'}
       >
         <input
           value={value}
@@ -875,6 +956,27 @@ function TargetEditor({
           className={INPUT_CLS}
         />
       </ConnectField>
+      {provider.kind === 'whatsapp' && (
+        <div className="space-y-2">
+          <label className="flex items-start gap-2 text-[12px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={ownerTarget}
+              disabled={!value.trim() || busy}
+              onChange={(event) => onOwnerTargetChange(event.target.checked)}
+            />
+            <span>
+              This is my owner/operator chat
+              <span className="mt-0.5 block text-[11px] text-text-muted">Manual messages here keep automation active by default. It does not grant owner access or expose diagnostics.</span>
+            </span>
+          </label>
+          {ownerTarget && (
+            <ConnectField label="Owner/operator name (optional)" hint="Lets the agent recognize who it is speaking with.">
+              <input value={ownerName} onChange={(event) => onOwnerNameChange(event.target.value)} placeholder="e.g. Robson" className={INPUT_CLS} />
+            </ConnectField>
+          )}
+        </div>
+      )}
 
       <div>
         <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-text-muted">

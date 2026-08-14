@@ -60,6 +60,10 @@ describe('Plan mode', () => {
       mode: 'plan',
       rest: 'build a workflow for ad research',
     });
+    expect(parseModeCommand('build a workflow for ad research\n\n/plan')).toEqual({
+      mode: 'plan',
+      rest: 'build a workflow for ad research',
+    });
     expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('directly in the conversation as clean Markdown');
     expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('Do not save the plan to a local runtime file');
     expect(PLAN_MODE_SYSTEM_ADDENDUM).toContain('Never emit XML-like protocol tags');

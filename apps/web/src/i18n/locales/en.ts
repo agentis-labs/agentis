@@ -40,6 +40,16 @@ const en = {
   },
   settings: {
     title: 'Settings',
+    navigationLabel: 'Settings sections',
+    destinations: {
+      account: { title: 'Account', description: 'Your profile, preferences, and personal data.' },
+      workspace: { title: 'Workspace', description: 'Identity, spending, and how your team operates.' },
+      connections: { title: 'Connections', description: 'Channels, integrations, credentials, and API access.' },
+      intelligence: { title: 'Intelligence', description: 'Choose the models and memory that power your agents.' },
+      advanced: { title: 'Advanced', description: 'Governance, recovery, browser control, and runtime diagnostics.' },
+    },
+    mobileSection: 'Settings section',
+    closeLabel: 'Close settings',
     tabs: {
       profile: 'Profile',
       data: 'Your Data',

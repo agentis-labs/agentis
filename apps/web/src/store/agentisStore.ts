@@ -41,7 +41,29 @@ export interface ActiveRunSummary {
   startedAt: string;
 }
 
-export type SettingsTab = 'profile' | 'data' | 'workspace' | 'channels' | 'mcp' | 'integrations' | 'apiKeys' | 'budget' | 'runtimes' | 'governance';
+export type SettingsDestination = 'account' | 'workspace' | 'connections' | 'intelligence' | 'advanced';
+export type LegacySettingsTab = 'profile' | 'data' | 'channels' | 'mcp' | 'integrations' | 'apiKeys' | 'budget' | 'runtimes' | 'governance';
+export type SettingsTab = SettingsDestination | LegacySettingsTab;
+export type SettingsSubsection =
+  | 'profile' | 'data' | 'workspace' | 'channels' | 'mcp' | 'integrations'
+  | 'apiKeys' | 'budget' | 'models' | 'governance' | 'runtimes';
+
+const SETTINGS_TARGETS: Record<SettingsTab, { destination: SettingsDestination; subsection: SettingsSubsection }> = {
+  account: { destination: 'account', subsection: 'profile' },
+  workspace: { destination: 'workspace', subsection: 'workspace' },
+  connections: { destination: 'connections', subsection: 'channels' },
+  intelligence: { destination: 'intelligence', subsection: 'models' },
+  advanced: { destination: 'advanced', subsection: 'governance' },
+  profile: { destination: 'account', subsection: 'profile' },
+  data: { destination: 'account', subsection: 'data' },
+  channels: { destination: 'connections', subsection: 'channels' },
+  mcp: { destination: 'connections', subsection: 'mcp' },
+  integrations: { destination: 'connections', subsection: 'integrations' },
+  apiKeys: { destination: 'connections', subsection: 'apiKeys' },
+  budget: { destination: 'workspace', subsection: 'budget' },
+  runtimes: { destination: 'advanced', subsection: 'runtimes' },
+  governance: { destination: 'advanced', subsection: 'governance' },
+};
 
 export interface AgentisStore {
   // Workspace + ambient context
@@ -60,6 +82,9 @@ export interface AgentisStore {
   togglePalette: () => void;
 
   settingsOpen: boolean;
+  settingsDestination: SettingsDestination;
+  settingsSubsection: SettingsSubsection;
+  /** @deprecated Compatibility mirror for older callers and extensions. */
   settingsTab: SettingsTab;
   setSettingsOpen: (open: boolean, tab?: SettingsTab) => void;
   closeSettings: () => void;
@@ -98,11 +123,19 @@ export const useAgentisStore = create<AgentisStore>((set) => ({
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
 
   settingsOpen: false,
+  settingsDestination: 'account',
+  settingsSubsection: 'profile',
   settingsTab: 'profile',
-  setSettingsOpen: (open, tab) => set((s) => ({ 
-    settingsOpen: open, 
-    settingsTab: tab ?? s.settingsTab 
-  })),
+  setSettingsOpen: (open, tab) => set(() => {
+    if (!tab) return { settingsOpen: open };
+    const target = SETTINGS_TARGETS[tab];
+    return {
+      settingsOpen: open,
+      settingsTab: tab,
+      settingsDestination: target.destination,
+      settingsSubsection: target.subsection,
+    };
+  }),
   closeSettings: () => set({ settingsOpen: false }),
 
   presenceByAgent: {},

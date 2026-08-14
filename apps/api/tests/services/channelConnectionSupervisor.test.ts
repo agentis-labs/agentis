@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { REALTIME_EVENTS } from '@agentis/core';
-import { ChannelConnectionSupervisor } from '../../src/services/conversation/channelConnectionSupervisor.js';
+import { ChannelConnectionSupervisor, reconcileTransportHealth } from '../../src/services/conversation/channelConnectionSupervisor.js';
 import { ConversationStore } from '../../src/services/conversation/conversationStore.js';
 import { ConversationHandoffService } from '../../src/services/conversation/conversationHandoffService.js';
 import { createTestContext, type TestContext } from '../_helpers/createTestContext.js';
@@ -51,6 +51,25 @@ function fixture() {
 }
 
 describe('ChannelConnectionSupervisor observed outbound synchronization', () => {
+  it('keeps an open persistent channel healthy while optional diagnostics are still unverified', () => {
+    const health = reconcileTransportHealth({
+      status: 'needs_action',
+      checks: ['credential', 'transport', 'outbound', 'inbound', 'runtime'].map((name) => ({
+        name: name as 'credential' | 'transport' | 'outbound' | 'inbound' | 'runtime',
+        ok: false,
+        code: 'not_checked',
+        message: `${name} has not been checked yet.`,
+        checkedAt: new Date().toISOString(),
+      })),
+    }, 'active', 'open', new Date().toISOString());
+
+    expect(health.status).toBe('active');
+    expect(health.checks.find((check) => check.name === 'transport')).toMatchObject({
+      ok: true, code: 'persistent_transport_open',
+    });
+    expect(health.checks.filter((check) => check.code === 'not_checked')).toHaveLength(4);
+  });
+
   it('prepares optional STT when a media channel is configured, not at global API bootstrap', async () => {
     const prepareInboundAudio = vi.fn(async () => {});
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
@@ -126,5 +145,70 @@ describe('ChannelConnectionSupervisor observed outbound synchronization', () => 
     expect(ctx.db.select().from(schema.conversationMessages).all()).toHaveLength(0);
     expect(ctx.db.select().from(schema.channelDeliveries)
       .where(eq(schema.channelDeliveries.externalId, 'AGENTIS-MESSAGE-1')).all()).toHaveLength(0);
+  });
+
+  it('keeps automation available for the explicitly configured owner/operator chat by default', () => {
+    const { connectionId, supervisor, handoffs } = fixture();
+    ctx.db.update(schema.channelConnections).set({
+      settings: { mode: 'qr_local', ownerChatId: '5521970398568@s.whatsapp.net' },
+    }).where(eq(schema.channelConnections.id, connectionId)).run();
+
+    supervisor.observeOutbound(connectionId, {
+      externalId: 'OWNER-MESSAGE-1', chatId: '5521970398568@s.whatsapp.net', body: 'Testing my assistant',
+    });
+
+    const message = ctx.db.select().from(schema.conversationMessages).get()!;
+    expect(message.authorType).toBe('operator');
+    expect(handoffs.current(ctx.workspace.id, message.conversationId)).toMatchObject({
+      state: 'agent', automationEpoch: 0, claimedAt: null,
+    });
+  });
+
+  it('can apply takeover to the explicit owner/operator chat when configured', () => {
+    const { connectionId, supervisor, handoffs } = fixture();
+    ctx.db.update(schema.channelConnections).set({
+      settings: {
+        mode: 'qr_local',
+        ownerChatId: '5521970398568@s.whatsapp.net',
+        whatsappProfile: { ownerManualOutboundTakeover: 'until_handback' },
+      },
+    }).where(eq(schema.channelConnections.id, connectionId)).run();
+
+    supervisor.observeOutbound(connectionId, {
+      externalId: 'OWNER-MESSAGE-2', chatId: '5521970398568@s.whatsapp.net', body: 'Take over this one',
+    });
+
+    const message = ctx.db.select().from(schema.conversationMessages).get()!;
+    expect(handoffs.current(ctx.workspace.id, message.conversationId)).toMatchObject({ state: 'human' });
+  });
+
+  it('does not treat an auto/default routing target as an owner exception', () => {
+    const { connectionId, supervisor, handoffs } = fixture();
+    ctx.db.update(schema.channelConnections).set({
+      settings: { mode: 'qr_local', defaultChatId: '5521970398568@s.whatsapp.net' },
+    }).where(eq(schema.channelConnections.id, connectionId)).run();
+
+    supervisor.observeOutbound(connectionId, {
+      externalId: 'DEFAULT-MESSAGE-1', chatId: '5521970398568@s.whatsapp.net', body: 'Still take over',
+    });
+
+    const message = ctx.db.select().from(schema.conversationMessages).get()!;
+    expect(handoffs.current(ctx.workspace.id, message.conversationId)).toMatchObject({ state: 'human' });
+  });
+
+  it('can disable manual WhatsApp takeover for every conversation', () => {
+    const { connectionId, supervisor, handoffs } = fixture();
+    ctx.db.update(schema.channelConnections).set({
+      settings: { mode: 'qr_local', whatsappProfile: { manualOutboundTakeover: 'off' } },
+    }).where(eq(schema.channelConnections.id, connectionId)).run();
+
+    supervisor.observeOutbound(connectionId, {
+      externalId: 'NO-TAKEOVER-1', chatId: '5521970398568@s.whatsapp.net', body: 'Do not claim',
+    });
+
+    const message = ctx.db.select().from(schema.conversationMessages).get()!;
+    expect(handoffs.current(ctx.workspace.id, message.conversationId)).toMatchObject({
+      state: 'agent', automationEpoch: 0, claimedAt: null,
+    });
   });
 });

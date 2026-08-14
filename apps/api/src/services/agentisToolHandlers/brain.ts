@@ -275,7 +275,7 @@ export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHand
         id: 'agentis.skill.load',
         family: 'run',
         description:
-          "Load a Skill's full procedure (its SKILL.md body) by id or slug. The short description is discoverable via agentis.brain.search or from your materialized skills; call this to read the WHOLE procedure before you apply it. Returns { id, slug, name, description, body, confidence }. Example: {\"skill\":\"deploy-migrations-safely\"}.",
+          "Load a Skill's full procedure (its SKILL.md body) by id or slug. Only pass a result returned by agentis.brain.search with kind:\"skill\"; knowledge and memory ids are not skills. The short description is discoverable via agentis.brain.search({kind:\"skill\"}) or from your materialized skills. Returns { id, slug, name, description, body, confidence }. Example: {\"skill\":\"deploy-migrations-safely\"}.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -298,7 +298,15 @@ export function registerBrainTools(registry: AgentisToolRegistry, deps: ToolHand
           ?? deps.skills.getByScopeAndSlug(ctx.workspaceId, ctx.agentId ?? null, ref)
           ?? deps.skills.getByScopeAndSlug(ctx.workspaceId, null, ref);
         if (!found) {
-          throw new AgentisError('RESOURCE_NOT_FOUND', `skill "${ref}" not found in this workspace`);
+          const available = deps.skills
+            .listForScopes(ctx.workspaceId, [ctx.agentId ?? null, null])
+            .slice(0, 8)
+            .map((skill) => skill.slug);
+          const suggestions = available.length > 0 ? ` Available skill slugs: ${available.join(', ')}.` : '';
+          throw new AgentisError(
+            'RESOURCE_NOT_FOUND',
+            `skill "${ref}" not found. Search agentis.brain.search with kind:"skill" and pass an exact returned id or slug; do not pass a knowledge or memory id.${suggestions}`,
+          );
         }
         // Loading a skill = committing to it. Attribute it to the run so the run's
         // verdict later moves the skill's confidence (Living Skills metabolism).

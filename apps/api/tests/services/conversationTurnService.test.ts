@@ -235,6 +235,16 @@ describe('classifyConversationExecutionMode', () => {
     expect(classifyConversationExecutionMode('auto', { body: 'Please review this', attachmentCount: 1, permissionMode: 'ask' }).mode).toBe('deep');
   });
 
+  it('never promotes Plan permission into Mission acceptance', () => {
+    const classified = classifyConversationExecutionMode('mission', {
+      body: 'Build and implement the entire production-ready app from start to finish.',
+      attachmentCount: 0,
+      permissionMode: 'plan',
+    });
+    expect(classified.mode).toBe('deep');
+    expect(classified.reason).toMatch(/Plan mode/i);
+  });
+
   it('keeps short continuation turns on the unfinished mission path', () => {
     const classified = classifyConversationExecutionMode('auto', {
       body: 'Proceed',

@@ -1,6 +1,7 @@
 ﻿export * from './activityLabel.js';
 export * from './architectureCanvas.js';
 export * from './chatProgress.js';
+export * from './chatModeDirective.js';
 export * from './constants.js';
 export * from './errors.js';
 export * from './events.js';

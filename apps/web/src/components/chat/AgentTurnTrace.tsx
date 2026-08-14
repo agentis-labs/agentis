@@ -154,6 +154,7 @@ export function AgentTurnTrace({
           <span className="chat-work-rule" />
         </div>
         <Timeline entries={entries} live />
+        <LiveToolRows toolCalls={toolCalls} entries={entries} />
       </section>
     );
   }
@@ -191,20 +192,66 @@ function Timeline({ entries, live = false }: { entries: TimelineEntry[]; live?: 
             </p>
           );
         }
+        // A recoverable attempt should not remain as a red tombstone after the
+        // live agent has visibly moved on to another operation.
+        if (live && entry.status === 'error' && !latest) return null;
         const recovered = entry.status === 'error' && entries.slice(index + 1).some((next) => next.kind === 'activity' && next.status === 'success');
+        const retrying = live && entry.status === 'error';
+        const visibleText = retrying ? `Retrying ${activityMeaning(entry.text)}` : entry.text;
         return (
           <div key={entry.id} className="group flex min-w-0 items-start gap-2 text-[11.5px] leading-5 text-text-muted">
-            {latest && entry.status === 'running' ? (
-              <Loader2 size={12} className="mt-1 shrink-0 animate-spin text-text-muted" />
+            {(latest && entry.status === 'running') || retrying ? (
+              <Loader2 size={12} className={clsx('mt-1 shrink-0 animate-spin', retrying ? 'text-warn' : 'text-text-muted')} />
             ) : entry.status === 'error' ? (
               <AlertTriangle size={12} className={clsx('mt-1 shrink-0', recovered ? 'text-warn' : 'text-danger')} />
             ) : (
               <Check size={12} className="mt-1 shrink-0 text-text-muted/65" />
             )}
             <div className="min-w-0">
-              <div className={entry.status === 'error' ? (recovered ? 'text-warn' : 'text-danger') : undefined}>{entry.text}</div>
+              <div className={entry.status === 'error' ? (recovered || retrying ? 'text-warn' : 'text-danger') : undefined}>{visibleText}</div>
               {entry.detail && <div className="line-clamp-2 text-[10.5px] text-text-muted/65">{entry.detail}</div>}
             </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function operationKey(value: string): string {
+  return activityMeaning(value).replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Tool protocol events arrive before execution and carry the most accurate
+ * loading state. Render them during the live turn (not only in the completed
+ * details drawer), updating retries in place by semantic tool name.
+ */
+function LiveToolRows({ toolCalls, entries }: { toolCalls: ToolCallData[]; entries: TimelineEntry[] }) {
+  const activityKeys = new Set(entries.filter((entry) => entry.kind === 'activity').map((entry) => operationKey(entry.text)));
+  const latestByTool = new Map<string, ToolCallData>();
+  toolCalls.forEach((call) => latestByTool.set(operationKey(call.name), call));
+  const visible = [...latestByTool.entries()]
+    .filter(([key]) => !activityKeys.has(key))
+    .map(([, call]) => call)
+    .slice(-8);
+  if (visible.length === 0) return null;
+  return (
+    <div className="space-y-2.5 pb-3 pt-2" aria-label="Live tool operations">
+      {visible.map((call) => {
+        const retrying = call.status === 'error';
+        const running = call.status === 'running' || call.status === 'paused' || retrying;
+        const verb = retrying ? 'Retrying' : running ? 'Running' : call.status === 'success' ? 'Used' : 'Stopped';
+        return (
+          <div key={call.id} className="flex min-w-0 items-start gap-2 text-[11.5px] leading-5 text-text-muted">
+            {running ? (
+              <Loader2 size={12} className={clsx('mt-1 shrink-0 animate-spin', retrying && 'text-warn')} />
+            ) : call.status === 'success' ? (
+              <Check size={12} className="mt-1 shrink-0 text-text-muted/65" />
+            ) : (
+              <CircleSlash size={12} className="mt-1 shrink-0" />
+            )}
+            <span className={clsx('min-w-0 truncate', retrying && 'text-warn')}>{verb} {call.name}</span>
           </div>
         );
       })}

@@ -2,7 +2,7 @@
 import { AlertTriangle, Check, Clock3, Copy, FileText, Loader2, Pencil, Plug, ShieldCheck, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { initialTurnActivityLabel, normalizeAgentPlanText, normalizeToolInvocation, REALTIME_EVENTS, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatSwarm, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
+import { initialTurnActivityLabel, normalizeAgentPlanText, normalizeToolInvocation, parseChatPermissionDirective, REALTIME_EVENTS, type ChatCommentary, type ChatContextManifest, type ChatDelta, type ChatExecutionEnvelope, type ChatPermissionMode, type ChatPlan, type ChatSwarm, type ChatTurnTrace, type ViewportContext } from '@agentis/core';
 import { PermissionModePicker } from './PermissionModePicker';
 import { api, apiErrorMessage, streamSse } from '../../lib/api';
 import { useViewportAwareness } from '../../lib/viewportContext';
@@ -1236,6 +1236,15 @@ export function ThreadView({
     // requires one and the chat bubble needs something to show alongside the
     // rendered attachment card.
     const bodyText = value || defaultAttachmentCaption(attachments);
+    const modeDirective = parseChatPermissionDirective(bodyText);
+    const turnPermissionMode = modeDirective?.mode ?? permissionMode;
+    if (modeDirective) {
+      // Update the selector immediately. The turn request below is still the
+      // authoritative persistence path, so this does not wait on a second API
+      // round trip before Plan protections take effect.
+      setPermissionModeState(turnPermissionMode);
+      try { window.localStorage.setItem(permissionModeKey, turnPermissionMode); } catch { /* ignore */ }
+    }
     const artifactIds = attachments.map((a) => a.id);
     // Chat V2 persists every operator turn immediately. If another turn is
     // active, the durable worker queues this one by conversation order; the
@@ -1328,7 +1337,7 @@ export function ThreadView({
           useViewportContext: options?.useViewportContext !== false,
           attachments: artifactIds.length ? artifactIds : undefined,
           viewportOverride,
-          permissionMode,
+          permissionMode: turnPermissionMode,
           executionMode: 'auto',
         }),
       });

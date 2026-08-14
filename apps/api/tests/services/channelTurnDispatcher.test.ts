@@ -388,7 +388,7 @@ describe('ChannelTurnDispatcher', () => {
     ctx.db.insert(schema.channelConnections).values({
       id: connectionId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
       agentId, kind: 'whatsapp', name: 'Owner boundary', tokenEncrypted: 'x',
-      settings: { defaultChatId: handle },
+      settings: { defaultChatId: handle, ownerChatId: handle, ownerName: 'Robson' },
     }).run();
     const conv = conversations.getOrCreateByChannel({
       workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
@@ -413,6 +413,8 @@ describe('ChannelTurnDispatcher', () => {
     });
     expect(ownerVerified).toBe(false);
     expect(addendum).toContain('Address that person, never an imagined operator');
+    expect(addendum).toContain('configured as the channel owner/operator (Robson)');
+    expect(addendum).toContain('protected owner-only capabilities remain gated');
     expect(addendum).toContain('Keep runtime state');
 
     identity.record({ workspaceId: ctx.workspace.id, channelKind: 'whatsapp', handle });

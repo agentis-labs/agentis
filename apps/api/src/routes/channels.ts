@@ -33,6 +33,8 @@ const createSchema = z
     agentId: z.string().min(1).nullish(),
     token: z.string().min(8).max(4096).optional(),
     defaultChatId: z.string().min(1).max(120).optional(),
+    ownerChatId: z.string().min(1).max(120).optional(),
+    ownerName: z.string().min(1).max(120).optional(),
     defaultRecipient: z.string().min(1).max(120).optional(),
     mode: z.enum(['qr_local', 'cloud']).optional(),
     signingSecret: z.string().min(8).max(4096).optional(),
@@ -79,6 +81,7 @@ const behaviorSchema = z.object({
   startWarmup: z.boolean().optional(),
   ownerReasoningVisibility: z.enum(['off', 'indicator']).optional(),
   manualOutboundTakeover: z.enum(['until_handback', 'off']).optional(),
+  ownerManualOutboundTakeover: z.enum(['until_handback', 'off']).optional(),
   historyReconciliation: z.enum(['recent', 'off']).optional(),
 });
 
@@ -129,6 +132,8 @@ const accessSchema = z
 
 const targetSchema = z.object({
   defaultChatId: z.string().min(1).max(120).nullable().optional(),
+  ownerChatId: z.string().min(1).max(120).nullable().optional(),
+  ownerName: z.string().min(1).max(120).nullable().optional(),
   targetAliases: z.record(z.string().min(1).max(80), z.string().min(1).max(120).nullable()).optional(),
   access: accessSchema,
 });
@@ -199,6 +204,8 @@ export function buildChannelRoutes(deps: {
     };
     if (body.token) input.token = body.token;
     if (body.defaultChatId) input.defaultChatId = body.defaultChatId;
+    if (body.ownerChatId) input.ownerChatId = body.ownerChatId;
+    if (body.ownerName) input.ownerName = body.ownerName;
     if (body.defaultRecipient) input.defaultRecipient = body.defaultRecipient;
     if (body.transport) input.transport = body.transport;
     if (body.mode) input.mode = body.mode;
