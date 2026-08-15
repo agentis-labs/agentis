@@ -40,7 +40,7 @@ import type { Logger } from '../../logger.js';
 import type { EventBus } from '../../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from '../agent/agentWorkProgress.js';
 import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type OutboundAttachmentRef } from '../../adapters/channels/types.js';
-import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
+import { isConfiguredWhatsAppOwnerChat, resolveWhatsAppConnectionProfile, shouldClaimWhatsAppManualOutbound } from './channelBridge.js';
 import { channelModelRole } from './channelConversationRole.js';
 import type { ConversationHandoffService, ConversationHandoffSnapshot } from './conversationHandoffService.js';
 
@@ -454,7 +454,14 @@ export class ChannelTurnDispatcher {
    * that instead of starting a fresh turn. Never throws.
    */
   async #executeTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
-    const ownership = this.deps.handoffs?.current(input.workspaceId, input.conversationId);
+    let ownership = this.deps.handoffs?.current(input.workspaceId, input.conversationId);
+    // A configured owner/operator chat used to remain parked forever if it was
+    // claimed before that exception was configured. Release only that legacy,
+    // provider-observed claim on the owner's next live message; explicit App
+    // takeovers still require Hand back.
+    if (ownership?.state === 'human' && ownership.source === 'provider_observed' && this.#isOwnerChatExemptFromTakeover(input)) {
+      ownership = this.deps.handoffs?.releaseToAgent(input.workspaceId, input.conversationId);
+    }
     if (ownership?.state === 'human') return { replied: false, reason: 'human_handling' };
     if (ownership) input = { ...input, automationEpoch: ownership.automationEpoch };
     const clientTurnId = `channel-${randomUUID()}`;
@@ -1102,6 +1109,20 @@ export class ChannelTurnDispatcher {
       : {};
     if (typeof settings.ownerChatId !== 'string' || normalizeHandle(settings.ownerChatId) !== normalizeHandle(input.chatId)) return null;
     return { name: typeof settings.ownerName === 'string' && settings.ownerName.trim() ? settings.ownerName.trim() : null };
+  }
+
+  #isOwnerChatExemptFromTakeover(input: ChannelTurnInput): boolean {
+    if (input.kind !== 'whatsapp') return false;
+    const connection = this.deps.db
+      .select({ settings: schema.channelConnections.settings })
+      .from(schema.channelConnections)
+      .where(and(
+        eq(schema.channelConnections.id, input.connectionId),
+        eq(schema.channelConnections.workspaceId, input.workspaceId),
+      ))
+      .get();
+    if (!connection || !isConfiguredWhatsAppOwnerChat(connection.settings, input.chatId)) return false;
+    return !shouldClaimWhatsAppManualOutbound(connection.settings, input.chatId);
   }
 
   /**

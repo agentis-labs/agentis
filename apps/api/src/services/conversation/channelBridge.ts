@@ -41,7 +41,7 @@ import {
 } from '../../adapters/channels/types.js';
 import type { ChannelTurnDispatcher } from './channelTurnDispatcher.js';
 import type { ArtifactService } from '../artifactService.js';
-import type { ChannelAccess, ChannelRecipient } from './channelAccess.js';
+import { normalizeHandle, type ChannelAccess, type ChannelRecipient } from './channelAccess.js';
 import { normalizePersona, resolveHumanize, type ChannelPersona, type HumanizeConfig } from './humanize.js';
 import { ChannelSendGuard } from './channelGuards.js';
 import { channelCapabilities, type ChannelCapabilities } from '../../adapters/channels/channelCapabilities.js';
@@ -188,6 +188,31 @@ export function resolveWhatsAppConnectionProfile(value: unknown): WhatsAppConnec
     ownerManualOutboundTakeover: candidate?.ownerManualOutboundTakeover === 'until_handback' ? 'until_handback' : 'off',
     historyReconciliation: candidate?.historyReconciliation === 'off' ? 'off' : 'recent',
   };
+}
+
+/** True only for the explicit owner/operator chat — never the routing default. */
+export function isConfiguredWhatsAppOwnerChat(settings: unknown, chatId: string): boolean {
+  const value = settings && typeof settings === 'object' && !Array.isArray(settings)
+    ? settings as { ownerChatId?: unknown }
+    : {};
+  return typeof value.ownerChatId === 'string'
+    && Boolean(normalizeHandle(value.ownerChatId))
+    && normalizeHandle(value.ownerChatId) === normalizeHandle(chatId);
+}
+
+/**
+ * One policy used by observed phone sends and operator-console sends. The
+ * owner/operator exception is explicit; a routing default can never disable
+ * handoff protection for an arbitrary customer conversation.
+ */
+export function shouldClaimWhatsAppManualOutbound(settings: unknown, chatId: string): boolean {
+  const value = settings && typeof settings === 'object' && !Array.isArray(settings)
+    ? settings as { whatsappProfile?: unknown }
+    : {};
+  const profile = resolveWhatsAppConnectionProfile(value.whatsappProfile);
+  if (profile.manualOutboundTakeover === 'off') return false;
+  return !isConfiguredWhatsAppOwnerChat(settings, chatId)
+    || profile.ownerManualOutboundTakeover === 'until_handback';
 }
 
 export interface PublicConnection {
@@ -428,16 +453,22 @@ export class ChannelBridge {
    * Persistent kinds (WhatsApp) route through the live socket; webhook kinds
    * (Telegram/Discord/Slack) send via the stateless adapter + decrypted token.
    */
-  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent; idempotencyKey?: string; bypassGuards?: boolean; pacing?: 'immediate'; actor?: 'automation' | 'human'; conversationId?: string; expectedAutomationEpoch?: number }): Promise<ChannelDeliveryReceipt> {
+  async deliverToConnection(args: { connectionId: string; chatId: string; body: string; attachments?: OutboundAttachmentRef[]; native?: OutboundNativeContent; idempotencyKey?: string; bypassGuards?: boolean; pacing?: 'immediate'; actor?: 'automation' | 'human'; conversationId?: string; expectedAutomationEpoch?: number; persistOutboundContext?: boolean }): Promise<ChannelDeliveryReceipt> {
     const row = this.deps.db
       .select()
       .from(schema.channelConnections)
       .where(eq(schema.channelConnections.id, args.connectionId))
       .get();
     if (!row) throw new AgentisError('RESOURCE_NOT_FOUND', `channel connection ${args.connectionId} not found`);
-    const targetConversation = this.#conversationForDelivery(row, args.chatId, args.actor === 'human');
+    const targetConversation = this.#conversationForDelivery(
+      row,
+      args.chatId,
+      args.actor === 'human' || args.persistOutboundContext === true,
+    );
     if (args.actor === 'human') {
-      if (targetConversation) this.deps.handoffs?.claimHuman({
+      const shouldClaimHuman = row.kind !== 'whatsapp'
+        || shouldClaimWhatsAppManualOutbound(row.settings, args.chatId);
+      if (targetConversation && shouldClaimHuman) this.deps.handoffs?.claimHuman({
         workspaceId: row.workspaceId,
         conversationId: targetConversation.id,
         source: 'explicit',
@@ -503,6 +534,18 @@ export class ChannelBridge {
         }
         const stored = existing.receipt as ChannelDeliveryReceipt | null;
         if (['accepted', 'delivered', 'read'].includes(existing.status) && stored?.providerMessageId && stored.providerAcknowledged !== false) {
+          if (args.persistOutboundContext && targetConversation) {
+            this.#persistProgrammaticOutboundContext({
+              row,
+              conversationId: targetConversation.id,
+              chatId: args.chatId,
+              sessionMessageId: existing.idempotencyKey,
+              body: args.body,
+              attachments: args.attachments,
+              native: args.native,
+              receipt: stored,
+            });
+          }
           return { ...stored, deduplicated: true, idempotencyKey };
         }
         throw new AgentisError(
@@ -514,15 +557,28 @@ export class ChannelBridge {
     // Journal every provider-bound attempt, not only workflow-idempotent ones.
     // Direct agent/tool sends also need a durable correlation row so an async
     // WhatsApp acknowledgement can promote queued -> accepted/delivered/read.
+    const journalKey = idempotencyKey ?? `attempt:${journalId}`;
     this.deps.db.insert(schema.channelOutboundDeliveries).values({
       id: journalId,
       workspaceId: row.workspaceId,
       connectionId: row.id,
-      idempotencyKey: idempotencyKey ?? `attempt:${journalId}`,
+      idempotencyKey: journalKey,
       chatId: args.chatId,
       bodyHash,
       status: 'sending',
     }).run();
+    const outboundContext = args.persistOutboundContext && targetConversation
+      ? this.#persistProgrammaticOutboundContext({
+          row,
+          conversationId: targetConversation.id,
+          chatId: args.chatId,
+          sessionMessageId: journalKey,
+          body: args.body,
+          attachments: args.attachments,
+          native: args.native,
+          deliveryStatus: 'sending',
+        })
+      : null;
     try {
       if (args.actor !== 'human') {
         if (args.conversationId) this.deps.handoffs?.assertAutomationAllowed({
@@ -554,6 +610,15 @@ export class ChannelBridge {
         error: null,
         updatedAt: new Date().toISOString(),
       }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+      if (outboundContext) {
+        this.deps.conversations.updateDeliveryStatus({
+          workspaceId: row.workspaceId,
+          conversationId: targetConversation!.id,
+          messageId: outboundContext.id,
+          deliveryStatus: receipt.status === 'delivered' || receipt.status === 'read' ? 'delivered' : 'sent',
+          metadata: { channelDeliveryReceipt: durableReceipt, providerMessageId: receipt.providerMessageId },
+        });
+      }
       const eventPayload = {
         connectionId: row.id,
         kind: row.kind,
@@ -591,6 +656,15 @@ export class ChannelBridge {
         error: msg,
         updatedAt: new Date().toISOString(),
       }).where(eq(schema.channelOutboundDeliveries.id, journalId)).run();
+      if (outboundContext) {
+        this.deps.conversations.updateDeliveryStatus({
+          workspaceId: row.workspaceId,
+          conversationId: targetConversation!.id,
+          messageId: outboundContext.id,
+          deliveryStatus: 'failed',
+          metadata: { channelDeliveryError: msg },
+        });
+      }
       if (ownershipCancelled) {
         // The provider boundary was never crossed. This is expected arbitration,
         // not a transport failure and must not poison connection health.
@@ -1550,6 +1624,46 @@ export class ChannelBridge {
       channelConnectionId: row.id,
       channelChatId: chatId,
       appId: row.appId,
+    });
+  }
+
+  /**
+   * Programmatic sends (for example a deterministic workflow's first contact)
+   * must be visible to the next channel turn just like an operator or agent
+   * reply. This is deliberately at the bridge boundary, independent of any
+   * particular App/workflow, and idempotent on the durable delivery key.
+   */
+  #persistProgrammaticOutboundContext(input: {
+    row: ChannelConnectionRow;
+    conversationId: string;
+    chatId: string;
+    sessionMessageId: string;
+    body: string;
+    attachments?: OutboundAttachmentRef[];
+    native?: OutboundNativeContent;
+    receipt?: ChannelDeliveryReceipt;
+    deliveryStatus?: 'sending' | 'sent' | 'delivered';
+  }) {
+    const hasMedia = Boolean(input.attachments?.length || input.native);
+    if (!input.body.trim() && !hasMedia) return;
+    return this.deps.conversations.appendMirrored({
+      workspaceId: input.row.workspaceId,
+      conversationId: input.conversationId,
+      sessionMessageId: input.sessionMessageId,
+      authorType: 'agent',
+      participantSide: 'business',
+      body: input.body.trim() || '[Media sent]',
+      deliveryStatus: input.deliveryStatus
+        ?? (input.receipt?.status === 'delivered' || input.receipt?.status === 'read' ? 'delivered' : 'sent'),
+      metadata: {
+        channel: input.row.kind,
+        channelConnectionId: input.row.id,
+        channelChatId: input.chatId,
+        channelProgrammaticOutbound: true,
+        channelDeliveryClass: 'programmatic',
+        ...(input.receipt?.providerMessageId ? { providerMessageId: input.receipt.providerMessageId } : {}),
+        ...(input.receipt ? { channelDeliveryReceipt: input.receipt } : {}),
+      },
     });
   }
 

@@ -32,7 +32,7 @@ export interface ChannelSendArgs {
   connectionId?: string | null;
   /** Destination ("default"/"me" → the saved default target; else a phone/JID/alias). */
   to?: string | null;
-  /** Calling agent — gates §3.3 authority. Null/undefined = deterministic/system caller (allowed). */
+  /** Calling agent — gates §3.3 authority. Null/undefined is a workspace caller. */
   agentId?: string | null;
   /** Lifecycle semantics for conversational callers; transport behavior is unchanged. */
   deliveryRole?: 'progress' | 'final';
@@ -52,6 +52,12 @@ export interface ChannelSendArgs {
   actor?: 'automation' | 'human';
   conversationId?: string;
   expectedAutomationEpoch?: number;
+  /**
+   * Persist this programmatic delivery as business-side transcript context.
+   * Used by deterministic workflows so a later inbound reply continues the
+   * same conversation instead of looking like a brand-new chat.
+   */
+  persistOutboundContext?: boolean;
 }
 
 export type ChannelSendResult =
@@ -107,6 +113,27 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
   const requestedTo = typeof args.to === 'string' ? args.to.trim() : '';
 
   const connections = deps.channels.list(args.workspaceId);
+  const isAuthorized = (connection: (typeof connections)[number]): boolean => {
+    // A workspace caller has no agent authority to borrow an agent-owned
+    // transport. This closes the legacy deterministic-workflow fallback that
+    // could select another agent's default number when a workflow had no owner.
+    if (!args.agentId) return connection.agentId == null;
+    if (deps.connectionGrants) {
+      return deps.connectionGrants.authorize({
+        workspaceId: args.workspaceId,
+        connectionId: connection.id,
+        agentId: args.agentId,
+        ownerAgentId: connection.agentId ?? null,
+        required: 'send',
+      }).ok;
+    }
+    // A caller without an authority service still cannot silently select a
+    // connection belonging to a different agent. Workspace connections remain
+    // available for compatibility; cross-agent use requires an explicit grant
+    // once the authority service is wired.
+    return connection.agentId == null || connection.agentId === args.agentId;
+  };
+  const eligibleConnections = connections.filter(isAuthorized);
   // Resolution order: explicit connectionId → the workspace DEFAULT connection of
   // the kind (or the sole active one) → for a kindless call, the single active
   // one. This is what makes a deterministic send unambiguous when several
@@ -117,9 +144,17 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
     candidate = connections.find((c) => c.id === connectionId);
   } else if (kind) {
     const defaultId = deps.channels.defaultConnectionFor(args.workspaceId, kind);
-    candidate = defaultId ? connections.find((c) => c.id === defaultId) : undefined;
+    const defaultCandidate = defaultId ? connections.find((c) => c.id === defaultId) : undefined;
+    if (defaultCandidate && isAuthorized(defaultCandidate)) {
+      candidate = defaultCandidate;
+    } else {
+      const activeEligible = eligibleConnections.filter((c) => c.status === 'active' && c.kind === kind);
+      candidate = activeEligible.length === 1
+        ? activeEligible[0]
+        : activeEligible.find((c) => c.isDefault) ?? defaultCandidate;
+    }
   } else {
-    candidate = resolveCandidate(connections, null, requestedTo) ?? undefined;
+    candidate = resolveCandidate(eligibleConnections, null, requestedTo) ?? undefined;
   }
   if (!candidate) {
     const ofKind = connections.filter((c) => !kind || c.kind === kind);
@@ -143,8 +178,32 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
   // already treats "no governing grants" as open — so consulting it here is safe
   // for BOTH owned and workspace connections, and lets an operator restrict a
   // shared/global connection to specific agents by issuing grants on it.
+  if (!args.agentId && candidate.agentId) {
+    return {
+      sent: false,
+      errorCode: 'CONNECTION_SCOPE_MISSING',
+      error: `workspace caller cannot send on agent-owned connection '${candidate.name}'`,
+      remediation: `Assign this workflow to the owning agent, bind it to an App with that owner, or use a workspace-owned connection.`,
+      connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
+    };
+  }
+  if (args.agentId && !deps.connectionGrants && candidate.agentId && candidate.agentId !== args.agentId) {
+    return {
+      sent: false,
+      errorCode: 'CONNECTION_SCOPE_MISSING',
+      error: `agent ${args.agentId} lacks authority on connection '${candidate.name}'`,
+      remediation: `Use the agent's own connection or configure an explicit connection grant for '${candidate.name}'.`,
+      connection: { id: candidate.id, kind: candidate.kind, name: candidate.name },
+    };
+  }
   if (args.agentId && deps.connectionGrants) {
-    const decision = deps.connectionGrants.authorize({ workspaceId: args.workspaceId, connectionId: candidate.id, agentId: args.agentId, required: 'send' });
+    const decision = deps.connectionGrants.authorize({
+      workspaceId: args.workspaceId,
+      connectionId: candidate.id,
+      agentId: args.agentId,
+      ownerAgentId: candidate.agentId ?? null,
+      required: 'send',
+    });
     if (!decision.ok) {
       return {
         sent: false,
@@ -190,6 +249,7 @@ export async function resolveAndSend(deps: ChannelSendDeps, args: ChannelSendArg
         ...(args.actor ? { actor: args.actor } : {}),
         ...(args.conversationId ? { conversationId: args.conversationId } : {}),
         ...(args.expectedAutomationEpoch !== undefined ? { expectedAutomationEpoch: args.expectedAutomationEpoch } : {}),
+        ...(args.persistOutboundContext ? { persistOutboundContext: true } : {}),
       });
     } catch (err) {
       if (err instanceof ChannelDeliveryRejectedError) {

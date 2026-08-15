@@ -12,6 +12,9 @@ export interface ChatMessageLike {
       startedAt?: string;
     };
     toolCalls?: ToolCallData[];
+    durableTurnId?: string;
+    queued?: boolean;
+    queuePosition?: number;
   };
 }
 
@@ -112,7 +115,12 @@ export function mergeMessage<T extends ChatMessageLike>(messages: T[], incoming:
     });
     if (optimisticIndex >= 0) {
       return dedupeMessages(messages.map((message, index) => (
-        index === optimisticIndex ? { ...incoming, createdAt: message.createdAt } : message
+        // Server persistence owns the content, while the client may already
+        // have learned a durable queue position from the turn endpoint. Keep
+        // that small local presentation state through the message event race.
+        index === optimisticIndex
+          ? { ...incoming, createdAt: message.createdAt, metadata: { ...incoming.metadata, ...message.metadata } }
+          : message
       )));
     }
   }

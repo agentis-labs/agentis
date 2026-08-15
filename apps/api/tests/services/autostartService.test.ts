@@ -73,13 +73,14 @@ describe('autostartService', () => {
       expect(vbs).toContain('WshShell.Run');
       expect(vbs).toContain('0, False');
 
-      const runCmdPath = join(dataDir, 'autostart', 'run.cmd');
+      const runCmdPath = join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agentis.cmd');
       expect(existsSync(runCmdPath)).toBe(true);
+      expect(vbs).toContain(`WshShell.Run """${runCmdPath}""", 0, False`);
       const runCmd = readFileSync(runCmdPath, 'utf8');
       expect(runCmd).toContain('"C:\\Program Files\\nodejs\\node.exe"');
       expect(runCmd).toContain(`"${join(home, 'a space dir', 'cli', 'dist', 'index.cjs')}"`);
       expect(runCmd).toContain('up');
-      expect(runCmd).toContain(`AGENTIS_DATA_DIR=${dataDir}`);
+      expect(runCmd).toContain(`set "AGENTIS_DATA_DIR=${dataDir}"`);
 
       await disableAutostart(target);
       expect(getAutostartStatus(target)).toBe(false);

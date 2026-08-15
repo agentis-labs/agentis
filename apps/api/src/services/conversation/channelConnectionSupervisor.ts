@@ -41,8 +41,7 @@ import type { ChannelDeliveryReceipt, ChannelHealth, ChannelHealthCheck, Channel
 import { chunkText, sleep, typingDelayMs, type HumanizeConfig } from './humanize.js';
 import type { ConversationHandoffService } from './conversationHandoffService.js';
 import type { ConversationSummaryService } from './conversationSummaryService.js';
-import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
-import { normalizeHandle } from './channelAccess.js';
+import { resolveWhatsAppConnectionProfile, shouldClaimWhatsAppManualOutbound } from './channelBridge.js';
 
 type LiveSession = WhatsAppSession | TelegramSession | DiscordSession;
 
@@ -217,7 +216,10 @@ export class ChannelConnectionSupervisor {
     if (session instanceof WhatsAppSession && (session.status === 'logged_out' || session.status === 'error')) {
       clearVaultAuthState({ db: this.deps.db, connectionId });
     }
-    await session.start();
+    // QR provisioning includes a lazy Baileys load and a WhatsApp Web version
+    // lookup. Do not hold the HTTP request open for that network work: the
+    // caller receives `connecting` immediately and polls for the QR.
+    void session.start();
     return this.loginState(connectionId);
   }
 
@@ -677,15 +679,7 @@ export class ChannelConnectionSupervisor {
     const settings = row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
       ? row.settings as { whatsappProfile?: unknown; ownerChatId?: unknown }
       : {};
-    const profile = resolveWhatsAppConnectionProfile(settings.whatsappProfile);
-    // `defaultChatId` is intentionally not used here: it can be auto-populated
-    // by the first inbound message and is a routing convenience only. The owner
-    // exception requires an explicit saved owner/operator chat.
-    const ownerChatId = typeof settings.ownerChatId === 'string' ? settings.ownerChatId : null;
-    const isOwnerChat = Boolean(ownerChatId && normalizeHandle(ownerChatId) === normalizeHandle(msg.chatId));
-    const shouldClaimHuman = profile.manualOutboundTakeover === 'until_handback'
-      && (!isOwnerChat || profile.ownerManualOutboundTakeover === 'until_handback');
-    if (shouldClaimHuman) {
+    if (shouldClaimWhatsAppManualOutbound(settings, msg.chatId)) {
       this.deps.handoffs?.claimHuman({
         workspaceId: row.workspaceId,
         conversationId: conversation.id,

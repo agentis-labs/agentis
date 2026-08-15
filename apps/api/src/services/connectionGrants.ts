@@ -8,12 +8,10 @@
  * to the wrong resource. This service is that shape, generalized to any
  * connection (channel / credential / mcp) and enforced at the single send door.
  *
- * Back-compat is structural, not a flag hack: a connection with NO grant rows is
- * *ungoverned* (open, exactly as today). The moment an operator issues the first
- * grant for a connection, it flips to default-deny for that connection — only the
- * connection's own owner agent (`channel_connections.agent_id`) plus explicitly
- * granted agents may use it. A global `AGENTIS_ENFORCE_CONNECTION_GRANTS=true`
- * hardens EVERY connection to default-deny for operators who want that posture.
+ * Agent-owned connections are isolated by default: only their owner or an
+ * explicitly granted agent may use them. A workspace-owned connection with no
+ * grant rows remains shared for compatibility; issuing the first grant (or
+ * enabling global enforcement) changes it to default-deny.
  *
  * `request` is the capability-negotiation on-ramp: an agent that lacks access
  * writes a `status='requested'` row an operator approves (→ `grant`).
@@ -113,8 +111,9 @@ export class ConnectionGrantService {
    * The authorization decision at the use door. Order:
    *  1. The connection's owner agent is always allowed.
    *  2. An active, non-expired grant at ≥ required scope allows.
-   *  3. No grants at all + not globally enforced → allow (ungoverned, back-compat).
-   *  4. Otherwise deny.
+   *  3. A different agent's owned connection is denied unless it has an active grant.
+   *  4. Workspace-owned connection with no grants + not globally enforced → allow.
+   *  5. Otherwise deny.
    */
   authorize(input: AuthorizeInput): AuthorizeDecision {
     const required = input.required ?? 'send';
@@ -129,7 +128,17 @@ export class ConnectionGrantService {
       && SCOPE_RANK[(g.scope as ConnectionScope)] >= SCOPE_RANK[required]);
     if (mine) return { ok: true };
 
-    // A connection nobody has ever granted on is open — unless global enforcement is on.
+    // Ownership is an isolation boundary, not a UI preference. An agent cannot
+    // inherit another agent's phone/token merely because that connection has no
+    // grant rows yet. Explicit grants above are the only cross-owner route.
+    if (owner) {
+      return {
+        ok: false,
+        reason: `agent ${input.agentId} lacks a '${required}' grant on connection ${input.connectionId}`,
+      };
+    }
+
+    // Workspace-owned connections are deliberately shared until governed.
     if (grants.length === 0 && !this.enforceAll) return { ok: true };
 
     return {

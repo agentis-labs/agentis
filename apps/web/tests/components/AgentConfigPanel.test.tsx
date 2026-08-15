@@ -34,7 +34,7 @@ describe('<AgentConfigPanel /> runtime connection', () => {
     localStorage.setItem('agentis.workspace', 'ws-1');
   });
 
-  it('does not re-probe or rewrite an existing runtime when the panel opens', async () => {
+  it('detects harness availability without rewriting an existing runtime when the panel opens', async () => {
     const onSaved = vi.fn();
     const fetchSpy = vi.fn(async () => jsonResponse({}));
     vi.stubGlobal('fetch', fetchSpy);
@@ -48,7 +48,7 @@ describe('<AgentConfigPanel /> runtime connection', () => {
     );
 
     await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
-    expect(fetchSpy.mock.calls.some(([input]) => String(input) === '/v1/harness/detect')).toBe(false);
+    expect(fetchSpy.mock.calls.some(([input]) => String(input) === '/v1/harness/detect')).toBe(true);
     expect(fetchSpy.mock.calls.some(([input, init]) => (
       String(input) === '/v1/agents/agent-1' && init?.method === 'PATCH'
     ))).toBe(false);
@@ -82,7 +82,7 @@ describe('<AgentConfigPanel /> runtime connection', () => {
     const detectionCalls = fetchSpy.mock.calls.filter(([input]) => String(input) === '/v1/harness/detect');
     const agentPatchCalls = fetchSpy.mock.calls.filter(([input, init]) => String(input) === '/v1/agents/agent-1' && init?.method === 'PATCH');
     expect(installCalls).toHaveLength(0);
-    expect(detectionCalls).toHaveLength(0);
+    expect(detectionCalls).toHaveLength(1);
     expect(agentPatchCalls).toHaveLength(0);
   });
 

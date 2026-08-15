@@ -1738,7 +1738,10 @@ function LiveWorkspacePanel({
     .filter((event) => LIVE_WORKSPACE_KINDS.has(event.kind) && isActiveObservation(event) && isRecentIso(event.createdAt, 30 * 60_000))
     .slice(0, 5);
   const waitingObservations = observabilityEvents
-    .filter((event) => (event.status === 'waiting' || event.status === 'blocked' || event.kind === 'approval') && isRecentIso(event.createdAt, 30 * 60_000))
+    // Approval observations are historical signals, not a second source of
+    // truth. The live approvals list above owns them; otherwise a resolved
+    // approval can linger here until its event ages out.
+    .filter((event) => event.kind !== 'approval' && !event.approvalId && (event.status === 'waiting' || event.status === 'blocked') && isRecentIso(event.createdAt, 30 * 60_000))
     .slice(0, 4);
   // Recency gate — stale failures (days old) and re-run workflows must not keep
   // nagging. Drop failed observations outside the live window, and failed runs

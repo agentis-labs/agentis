@@ -161,6 +161,23 @@ describe('classifyWhatsAppReconnect', () => {
   });
 });
 
+describe('WhatsAppSession startup state', () => {
+  it('reports connecting before a slow WhatsApp Web version lookup completes', () => {
+    let resolveVersion!: (value: { version: [number, number, number] }) => void;
+    const versionLookup = new Promise<{ version: [number, number, number] }>((resolve) => { resolveVersion = resolve; });
+    const session = new WhatsAppSession({
+      connectionId: 'wa-slow-start', authDir: '.', logger: createLogger({ level: 'error' }),
+      onInbound: () => {},
+      baileysModule: { fetchLatestBaileysVersion: () => versionLookup },
+    });
+
+    void session.start();
+
+    expect(session.status).toBe('connecting');
+    resolveVersion({ version: [2, 3000, 1] });
+  });
+});
+
 describe('shouldProcessWhatsAppUpsert', () => {
   it('keeps append events in silent history reconciliation rather than the live turn path', () => {
     expect(shouldProcessWhatsAppUpsert('notify', false)).toBe(true);

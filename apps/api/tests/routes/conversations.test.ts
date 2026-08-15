@@ -71,6 +71,67 @@ describe('GET /v1/conversations', () => {
   });
 });
 
+describe('POST /v1/conversations/:agentId/:messageId/rewrite', () => {
+  it('retires preserved turns from the superseded branch before starting the edit', async () => {
+    const agentId = seedAgent();
+    const conversation = conversations.getOrCreateByAgent({
+      workspaceId: ctx.workspace.id,
+      ambientId: ctx.ambient.id,
+      userId: ctx.user.id,
+      agentId,
+    });
+    const message = conversations.appendOutbound({
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      operatorId: ctx.user.id,
+      body: 'Original task',
+    });
+    const turnId = randomUUID();
+    const now = new Date().toISOString();
+    ctx.db.insert(schema.conversationTurns).values({
+      id: turnId,
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      agentId,
+      userId: ctx.user.id,
+      messageId: message.id,
+      planId: null,
+      clientTurnId: randomUUID(),
+      prompt: 'Original task',
+      requestedMode: 'auto',
+      effectiveMode: 'mission',
+      permissionMode: 'auto',
+      status: 'blocked',
+      attachments: [],
+      viewport: null,
+      executionEnvelope: null,
+      contextManifest: null,
+      lastEventSeq: 0,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      error: 'Completion verification is incomplete.',
+      startedAt: now,
+      completedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const response = await app().request(
+      `/v1/conversations/${agentId}/${message.id}/rewrite?conversationId=${conversation.id}`,
+      {
+        method: 'POST',
+        headers: ctx.authHeaders,
+        body: JSON.stringify({ text: 'Replacement task', clientTurnId: randomUUID() }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const persisted = ctx.db.select().from(schema.conversationTurns).all().find((turn) => turn.id === turnId);
+    expect(persisted?.status).toBe('cancelled');
+    expect(conversations.messages(conversation.id, 20).find((item) => item.id === message.id)?.body).toBe('Replacement task');
+  });
+});
+
 describe('PATCH /v1/conversations/:conversationId/handoff', () => {
   it('persists human ownership and releases it through the generic channel-safe API', async () => {
     const agentId = seedAgent();

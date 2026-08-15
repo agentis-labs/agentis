@@ -426,6 +426,42 @@ describe('ChannelTurnDispatcher', () => {
     expect(ownerVerified).toBe(true);
   });
 
+  it('releases a legacy phone-observed handoff when its chat is configured as the owner/operator', async () => {
+    const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
+    const handoffs = new ConversationHandoffService({ db: ctx.db, bus: ctx.bus });
+    const agentId = seedAgent(ctx);
+    const handle = '5511991234567@s.whatsapp.net';
+    const connectionId = randomUUID();
+    ctx.db.insert(schema.channelConnections).values({
+      id: connectionId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'Owner recovery', tokenEncrypted: 'x',
+      settings: { ownerChatId: handle, ownerName: 'Robson' },
+    }).run();
+    const conv = conversations.getOrCreateByChannel({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, channelConnectionId: connectionId, channelChatId: handle,
+    });
+    handoffs.claimHuman({ workspaceId: ctx.workspace.id, conversationId: conv.id, source: 'provider_observed' });
+    const delivered: string[] = [];
+    const dispatcher = new ChannelTurnDispatcher({
+      db: ctx.db, adapters: new AdapterManager(ctx.logger), conversations, logger: ctx.logger, handoffs,
+      deliver: async ({ body, chatId }) => { delivered.push(body); return ackReceipt(chatId); },
+      fallbackAdapter: () => chatStub('unused'),
+      runTurn: async function* () {
+        yield { type: 'text', delta: 'I am back.' } as ChatDelta;
+        yield { type: 'done', finishReason: 'stop' } as ChatDelta;
+      } as unknown as typeof ChatSessionExecutor.turn,
+    });
+
+    const result = await dispatcher.dispatch({
+      workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id,
+      agentId, conversationId: conv.id, connectionId, kind: 'whatsapp', chatId: handle, text: 'Are you there?',
+    });
+    expect(result).toMatchObject({ replied: true });
+    expect(delivered).toEqual(['I am back.']);
+    expect(handoffs.current(ctx.workspace.id, conv.id)).toMatchObject({ state: 'agent', automationEpoch: 2 });
+  });
+
   it('silently drops an inbound turn from a BLOCKED sender (no reply, no agent turn)', async () => {
     const conversations = new ConversationStore({ db: ctx.db, bus: ctx.bus });
     const identity = new ChannelIdentityService({ db: ctx.db, logger: ctx.logger });

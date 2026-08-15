@@ -63,21 +63,26 @@ function logPath(dataDir: string): string {
 }
 
 function buildWindowsTarget(opts: BuildAutostartTargetOptions): Omit<AutostartTarget, 'supported' | 'reason'> {
-  const runCmdPath = join(opts.dataDir, 'autostart', 'run.cmd');
   const startupDir = join(opts.appDataDir ?? '', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+  // Keep the helper beside the Startup marker. The marker survives data-dir
+  // resets, so placing run.cmd under dataDir can leave an orphaned Agentis.vbs
+  // that fails with WSH error 80070002 at every login.
+  const runCmdPath = join(startupDir, 'Agentis.cmd');
   const markerPath = join(startupDir, 'Agentis.vbs');
 
   const runCmd = [
     '@echo off',
-    `set AGENTIS_DATA_DIR=${opts.dataDir}`,
+    `set "AGENTIS_DATA_DIR=${opts.dataDir}"`,
     `${q(opts.execPath)} ${q(opts.scriptPath)} up >> ${q(logPath(opts.dataDir))} 2>&1`,
     '',
   ].join('\r\n');
 
   // 0 = hidden window, False = fire-and-forget (don't block the login sequence).
+  // Triple quotes make the value of the VBScript string include quotes around
+  // the command path; the normal Startup path contains spaces ("Start Menu").
   const vbs = [
     'Set WshShell = CreateObject("WScript.Shell")',
-    `WshShell.Run ${q(runCmdPath)}, 0, False`,
+    `WshShell.Run """${runCmdPath}""", 0, False`,
     '',
   ].join('\r\n');
 

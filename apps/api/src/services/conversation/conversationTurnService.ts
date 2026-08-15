@@ -100,6 +100,10 @@ export class ConversationTurnService {
       updatedAt: now,
     };
     this.deps.db.insert(schema.conversationTurns).values(row).run();
+    // Queue state is part of the durable transcript, not a browser-side guess.
+    // A reconnecting client can therefore distinguish "accepted" from
+    // "actually executing" without inventing a second live turn.
+    this.appendEvent(row.id, row.workspaceId, 'turn', { type: 'turn_status', status: 'queued' });
     this.appendEvent(row.id, row.workspaceId, 'delta', {
       type: 'execution',
       envelope: input.executionEnvelope,
@@ -107,6 +111,23 @@ export class ConversationTurnService {
     });
     queueMicrotask(() => void this.start(row.id));
     return row;
+  }
+
+  /** Zero-based position among work that can still execute in this chat. */
+  queuePosition(workspaceId: string, turnId: string): number {
+    const turn = this.require(workspaceId, turnId);
+    const turns = this.deps.db.select({ id: schema.conversationTurns.id })
+      .from(schema.conversationTurns)
+      .where(and(
+        eq(schema.conversationTurns.workspaceId, workspaceId),
+        eq(schema.conversationTurns.conversationId, turn.conversationId),
+        inArray(schema.conversationTurns.status, ['queued', 'running']),
+      ))
+      // createdAt is normally enough, but SQLite rowid makes same-millisecond
+      // submissions deterministic as well.
+      .orderBy(asc(schema.conversationTurns.createdAt), sql`rowid`)
+      .all();
+    return Math.max(0, turns.findIndex((candidate) => candidate.id === turnId));
   }
 
   recover(): void {
@@ -182,6 +203,10 @@ export class ConversationTurnService {
       inArray(schema.conversationTurns.status, CLAIMABLE_STATUSES),
     )).run();
     if (claimed.changes === 0) return;
+
+    // This is the hand-off that wakes a queued browser turn. It deliberately
+    // precedes provider work so the UI can render an honest starting state.
+    this.appendEvent(turnId, turn.workspaceId, 'turn', { type: 'turn_status', status: 'running' });
 
     const controller = new AbortController();
     this.#running.set(turnId, controller);

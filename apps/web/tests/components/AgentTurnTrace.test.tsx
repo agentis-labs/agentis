@@ -104,7 +104,7 @@ describe('AgentTurnTrace', () => {
     expect(screen.getByText(/turn remains connected and can be stopped/i)).toBeInTheDocument();
   });
 
-  it('shows a contextual start state before the harness emits progress', () => {
+  it('shows neutral immediate feedback before the harness emits real progress', () => {
     render(
       <AgentTurnTrace
         streaming
@@ -116,8 +116,28 @@ describe('AgentTurnTrace', () => {
       />,
     );
 
-    expect(screen.getByText('Starting the interface check')).toBeInTheDocument();
+    expect(screen.getByText('Starting')).toBeInTheDocument();
+    expect(screen.queryByText('Starting the interface check')).not.toBeInTheDocument();
     expect(screen.queryByText('Request received')).not.toBeInTheDocument();
+  });
+
+  it('replaces the neutral start receipt with the honest waiting state', () => {
+    render(
+      <AgentTurnTrace
+        streaming
+        activities={[
+          activity(1, { phase: 'received', label: 'Starting the build' }),
+          activity(2, {
+            phase: 'waiting',
+            label: "Waiting for the agent's first progress update",
+            detail: 'No operator-visible update has arrived after 8s; the turn remains connected and can be stopped.',
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText('Starting the build')).not.toBeInTheDocument();
+    expect(screen.getByText("Waiting for the agent's first progress update")).toBeInTheDocument();
   });
 
   it('shows a tool as running before its result arrives and updates it in place', () => {

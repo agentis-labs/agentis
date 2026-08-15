@@ -27,7 +27,7 @@ let ctx: TestContext;
 beforeEach(async () => { ctx = await createTestContext(); });
 afterEach(() => ctx.close());
 
-async function runChannel(port: ChannelSendPort): Promise<{ status: string; output: Record<string, unknown> }> {
+async function runChannel(port: ChannelSendPort, ownerAgentId: string | null = null): Promise<{ status: string; output: Record<string, unknown> }> {
   const graph = {
     version: 1, viewport: { x: 0, y: 0, zoom: 1 },
     nodes: [
@@ -40,7 +40,7 @@ async function runChannel(port: ChannelSendPort): Promise<{ status: string; outp
   } as unknown as WorkflowGraph;
   const wfId = randomUUID();
   const runId = randomUUID();
-  ctx.db.insert(schema.workflows).values({ id: wfId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, title: 'ch-wf', graph, settings: {} }).run();
+  ctx.db.insert(schema.workflows).values({ id: wfId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, userId: ctx.user.id, ownerAgentId, title: 'ch-wf', graph, settings: {} }).run();
   ctx.db.insert(schema.workflowRuns).values({ id: runId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id, workflowId: wfId, userId: ctx.user.id, status: 'CREATED', runState: {} }).run();
 
   const engine = new WorkflowEngine({
@@ -69,10 +69,10 @@ async function runChannel(port: ChannelSendPort): Promise<{ status: string; outp
 
 describe('WorkflowEngine — channel node', () => {
   it('delivers via the channel port (templated body) and stores a delivery receipt', async () => {
-    const calls: Array<{ kind?: string | null; body: string; to?: string | null }> = [];
+    const calls: Array<{ kind?: string | null; body: string; to?: string | null; agentId?: string | null; persistOutboundContext?: boolean }> = [];
     const port: ChannelSendPort = {
       async send(args) {
-        calls.push({ kind: args.kind, body: args.body, to: args.to });
+        calls.push({ kind: args.kind, body: args.body, to: args.to, agentId: args.agentId, persistOutboundContext: args.persistOutboundContext });
         return {
           sent: true,
           verified: true,
@@ -94,10 +94,33 @@ describe('WorkflowEngine — channel node', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.kind).toBe('whatsapp');
     expect(calls[0]!.body).toBe('Oi Ada'); // {{nodes.C.name}} resolved
+    expect(calls[0]!.persistOutboundContext).toBe(true);
     expect((output.delivery as { sent: boolean }).sent).toBe(true);
     expect((output.delivery as { connectionId: string }).connectionId).toBe('wa1');
     expect((output.delivery as { verified: boolean }).verified).toBe(true);
     expect((output.delivery as { providerMessageId: string }).providerMessageId).toBe('wamid.generic-1');
+  });
+
+  it('attributes a deterministic channel delivery to the workflow owner', async () => {
+    const ownerAgentId = randomUUID();
+    ctx.db.insert(schema.agents).values({
+      id: ownerAgentId, workspaceId: ctx.workspace.id, ambientId: ctx.ambient.id,
+      userId: ctx.user.id, name: 'Bia', adapterType: 'http',
+    }).run();
+    let callerAgentId: string | null | undefined;
+    const port: ChannelSendPort = {
+      async send(args) {
+        callerAgentId = args.agentId;
+        return {
+          sent: true, verified: true, connectionId: 'wa1', kind: 'whatsapp', to: '+5511', targetSource: 'default', status: 'active', attachments: 0,
+          providerMessageId: 'wamid.owner-1', deliveryStatus: 'accepted', acceptedAt: '2026-07-14T00:00:00.000Z',
+          receipt: { provider: 'whatsapp', providerMessageId: 'wamid.owner-1', status: 'accepted', acceptedAt: '2026-07-14T00:00:00.000Z', recipient: '+5511' },
+        } satisfies ChannelSendResult;
+      },
+    };
+    const { status } = await runChannel(port, ownerAgentId);
+    expect(status).toBe('COMPLETED');
+    expect(callerAgentId).toBe(ownerAgentId);
   });
 
   it('FAILS the node when the send does not go through (no hollow success)', async () => {

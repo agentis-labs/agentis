@@ -236,7 +236,7 @@ export function ApprovalReviewModal({ approval, open, onClose, onResolved }: App
   const title = approval.title ?? approval.workflowName ?? 'Approval needed';
   const actionable = !approval.status || approval.status === 'pending';
   return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-overlay p-4 backdrop-blur-[3px]" role="dialog" aria-modal="true">
+    <div className="pointer-events-auto fixed inset-0 z-[10100] flex items-center justify-center bg-overlay p-4 backdrop-blur-[3px]" role="dialog" aria-modal="true">
       <div
         className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-line bg-canvas"
         style={{ boxShadow: 'var(--app-modal-shadow, var(--shadow-modal))' }}

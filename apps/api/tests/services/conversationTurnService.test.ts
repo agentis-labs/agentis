@@ -69,18 +69,50 @@ describe('ConversationTurnService', () => {
     });
 
     expect(ctx.db.select().from(schema.conversationTurns).where(eq(schema.conversationTurns.id, turn.id)).get()).toMatchObject({ status: 'queued' });
-    expect(service.events(ctx.workspace.id, turn.id, 0)).toHaveLength(1);
-    expect(service.events(ctx.workspace.id, turn.id, 0)[0]?.data).toMatchObject({ type: 'execution' });
+    expect(service.events(ctx.workspace.id, turn.id, 0)).toHaveLength(2);
+    expect(service.events(ctx.workspace.id, turn.id, 0)[0]?.data).toMatchObject({ type: 'turn_status', status: 'queued' });
+    expect(service.events(ctx.workspace.id, turn.id, 0)[1]?.data).toMatchObject({ type: 'execution' });
+    const secondMessage = conversations.appendOutbound({
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      operatorId: ctx.user.id,
+      body: 'Follow up after the first task',
+    });
+    const queuedTurn = service.enqueue({
+      workspaceId: ctx.workspace.id,
+      conversationId: conversation.id,
+      agentId,
+      userId: ctx.user.id,
+      messageId: secondMessage.id,
+      clientTurnId: randomUUID(),
+      prompt: 'Follow up after the first task',
+      requestedMode: 'auto',
+      effectiveMode: 'mission',
+      permissionMode: 'auto',
+      attachmentIds: [],
+      contextManifest: { version: 1, generatedAt: new Date().toISOString(), historyMessages: 1, attachmentCount: 0, attachments: [], sources: [], warnings: [] },
+      executionEnvelope: { version: 1, requestedMode: 'auto', effectiveMode: 'mission', classificationReason: 'test', adapterType: 'http', model: 'test', configuredReasoningEffort: 'high', effectiveReasoningEffort: 'high', fastMode: false, loadedSources: ['agentis'], toolMode: 'none', durable: true, createdAt: new Date().toISOString(), warnings: [] },
+    });
+    expect(service.queuePosition(ctx.workspace.id, turn.id)).toBe(0);
+    expect(service.queuePosition(ctx.workspace.id, queuedTurn.id)).toBe(1);
+    await Promise.resolve();
+    expect(service.require(ctx.workspace.id, queuedTurn.id).status).toBe('queued');
     release();
     await expect.poll(() => service.require(ctx.workspace.id, turn.id).status).toBe('completed');
+    await expect.poll(() => service.require(ctx.workspace.id, queuedTurn.id).status).toBe('completed');
     const events = service.events(ctx.workspace.id, turn.id, 0);
-    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
-    expect(events.map((event) => event.event)).toEqual(['delta', 'delta', 'done', 'turn']);
-    expect(service.events(ctx.workspace.id, turn.id, 1).map((event) => event.seq)).toEqual([2, 3, 4]);
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(events.map((event) => event.event)).toEqual(['turn', 'delta', 'turn', 'delta', 'done', 'turn']);
+    expect(events.map((event) => event.data)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'turn_status', status: 'queued' }),
+      expect.objectContaining({ type: 'turn_status', status: 'running' }),
+    ]));
+    expect(service.events(ctx.workspace.id, turn.id, 1).map((event) => event.seq)).toEqual([2, 3, 4, 5, 6]);
     const history = service.history(ctx.workspace.id, conversation.id);
-    expect(history).toHaveLength(1);
-    expect(history[0]?.events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
-    expect(history[0]?.events.some((event) => event.category === 'narration')).toBe(false);
+    expect(history).toHaveLength(2);
+    const firstHistory = history.find((entry) => entry.turn.id === turn.id);
+    expect(firstHistory?.events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(firstHistory?.events.some((event) => event.category === 'narration')).toBe(false);
     expect(realtimeEvents.some((event) => event.event === REALTIME_EVENTS.CONVERSATION_TURN_EVENT)).toBe(true);
     unsubscribe();
   });
@@ -149,7 +181,7 @@ describe('ConversationTurnService', () => {
     service.recover();
 
     await expect.poll(() => service.require(ctx.workspace.id, turnId).status).toBe('completed');
-    expect(service.events(ctx.workspace.id, turnId, 0).map((event) => event.event)).toEqual(['delta', 'done', 'turn']);
+    expect(service.events(ctx.workspace.id, turnId, 0).map((event) => event.event)).toEqual(['delta', 'turn', 'done', 'turn']);
     expect(service.events(ctx.workspace.id, turnId, 0)[0]?.data).toMatchObject({ label: 'Recovered after restart' });
   });
 

@@ -111,6 +111,9 @@ describe('<ChatApprovalStrip />', () => {
       fireEvent.click(screen.getByText(/Review/i));
     });
 
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.className).toContain('z-[10100]');
+    expect(dialog.className).toContain('pointer-events-auto');
     expect(screen.getAllByText(/Seed Supabase/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/store identity/i).length).toBeGreaterThan(0);
     expect(screen.getByText('[Redacted]')).toBeTruthy();

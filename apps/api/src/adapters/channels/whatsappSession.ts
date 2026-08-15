@@ -222,6 +222,10 @@ export class WhatsAppSession {
       clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = undefined;
     }
+    // Expose progress before loading Baileys or fetching its current Web version.
+    // Those operations can take several seconds on a cold install/network, but the
+    // UI can safely begin polling while the socket setup continues in the background.
+    this.#setStatus('connecting');
     this.#startPromise = this.#connect().catch((err) => {
       this.opts.logger.warn('whatsapp.start_failed', { connectionId: this.opts.connectionId, err: (err as Error).message });
       this.#setStatus('error');

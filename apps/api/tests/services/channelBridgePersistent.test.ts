@@ -165,6 +165,40 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
     expect(journal[0]?.status).toBe('accepted');
   });
 
+  it('persists a programmatic delivery as business context for the recipient conversation', async () => {
+    const { bridge } = buildBridge(ctx);
+    const { transport } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA workflow',
+    });
+    const chatId = '5511999999999@s.whatsapp.net';
+
+    await bridge.deliverToConnection({
+      connectionId: connection.id,
+      chatId,
+      body: 'Olá, aqui é a Bia da Talki.',
+      idempotencyKey: 'run-1:first-contact',
+      persistOutboundContext: true,
+    });
+
+    const conversation = ctx.db.select().from(schema.conversations)
+      .where(eq(schema.conversations.channelConnectionId, connection.id)).get()!;
+    expect(conversation).toMatchObject({ agentId, channelChatId: chatId });
+    const messages = ctx.db.select().from(schema.conversationMessages)
+      .where(eq(schema.conversationMessages.conversationId, conversation.id)).all();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      body: 'Olá, aqui é a Bia da Talki.',
+      authorType: 'agent',
+      participantSide: 'business',
+      sessionMessageId: 'run-1:first-contact',
+      deliveryStatus: 'sent',
+    });
+  });
+
   it('claims before a human send and rejects every later automated delivery until handback', async () => {
     const { bridge, handoffs } = buildBridge(ctx);
     const { transport, sent } = fakeTransport();
@@ -193,6 +227,24 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
     })).rejects.toMatchObject({ code: 'TURN_CANCELLED' });
     await bridge.deliverToConnection({ connectionId: connection.id, chatId: target, body: 'agent is back' });
     expect(sent.map((item) => item.body)).toEqual(['human reply', 'agent is back']);
+  });
+
+  it('does not claim the explicit owner/operator chat when an operator sends through Agentis', async () => {
+    const { bridge, handoffs } = buildBridge(ctx);
+    const { transport, sent } = fakeTransport();
+    bridge.setPersistentTransport(transport);
+    const agentId = seedAgent(ctx);
+    const target = '5511999999999@s.whatsapp.net';
+    const { connection } = bridge.create({
+      workspaceId: ctx.workspace.id, ambientId: null, userId: ctx.user.id,
+      agentId, kind: 'whatsapp', name: 'WA owner', ownerChatId: target,
+    });
+
+    await bridge.deliverToConnection({ connectionId: connection.id, chatId: target, body: 'operator note', actor: 'human' });
+    const snapshot = handoffs.findByChannel(ctx.workspace.id, connection.id, target)!;
+    expect(snapshot).toMatchObject({ state: 'agent', automationEpoch: 0 });
+    await bridge.deliverToConnection({ connectionId: connection.id, chatId: target, body: 'agent reply', conversationId: snapshot.conversationId });
+    expect(sent.map((item) => item.body)).toEqual(['operator note', 'agent reply']);
   });
 
   it('persists a client-only WhatsApp submission as queued, never as sent', async () => {

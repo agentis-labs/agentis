@@ -97,6 +97,9 @@ interface MessageMeta {
   contextManifest?: ChatContextManifest;
   swarms?: ChatSwarm[];
   durableTurnId?: string;
+  /** Server-confirmed ordering for a turn that has not begun provider work. */
+  queued?: boolean;
+  queuePosition?: number;
   /** Concrete runtime failure preserved even when partial work already exists. */
   failureMessage?: string;
 }
@@ -385,6 +388,29 @@ function normalizeInteractionMessage(event: InteractionEvent): ChatMessage {
   };
 }
 
+function blockedTurnNotice(error?: string | null): { title: string; body: string; action: string } {
+  const message = error?.trim() ?? '';
+  if (/acceptance verification|completion.*verification|blocked by verification/i.test(message)) {
+    return {
+      title: 'Verification incomplete',
+      body: 'The agent produced its result, but Agentis could not prove every completion check. Nothing is still running.',
+      action: 'Verify remaining',
+    };
+  }
+  if (/capacity|overloaded|rate.?limit|quota|credits?|billing|payment required|temporarily unavailable|no healthy runtime/i.test(message)) {
+    return {
+      title: 'Runtime unavailable',
+      body: message || 'The selected model is temporarily unavailable. Retry this turn or choose another model.',
+      action: 'Retry',
+    };
+  }
+  return {
+    title: 'Work paused',
+    body: message || 'The turn stopped at a concrete blocker. Resume when you want the agent to continue from that point.',
+    action: 'Resume',
+  };
+}
+
 function runtimeCapabilityWarning(runtime: AgentRuntimeInfo | null): { title: string; body: string } | null {
   const capabilities = runtime?.adapterCapabilities;
   if (!capabilities) return null;
@@ -480,6 +506,8 @@ export function ThreadView({
   const activeClientTurnIdRef = useRef<string | null>(null);
   const stopRequestedClientTurnsRef = useRef(new Set<string>());
   const resumedTurnIdsRef = useRef(new Set<string>());
+  const queuedDurableTurnIdsRef = useRef(new Set<string>());
+  const queuedTurnWatchersRef = useRef(new Map<string, number>());
   useEffect(() => {
     if (kind !== 'agent') return;
     const stored = readStoredPermissionMode(permissionModeKey);
@@ -501,6 +529,10 @@ export function ThreadView({
   }
   const typingTimer = useRef<number | null>(null);
   const activeChatAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    for (const timer of queuedTurnWatchersRef.current.values()) window.clearTimeout(timer);
+    queuedTurnWatchersRef.current.clear();
+  }, []);
   const autoSentDraftKeyRef = useRef<string | null>(null);
   const consumedLaunchKeyRef = useRef<string | null>(null);
   const pendingViewportOverrideRef = useRef<ViewportContext | null>(initialViewportOverride ?? null);
@@ -618,6 +650,10 @@ export function ThreadView({
           ?? turns[0]!;
         setActiveDurableTurn(active);
         subscribeRecoveredTurn(active);
+        // There may be more than one persisted follow-up behind the active
+        // turn. Watch all of them so each promotes itself after reconnect.
+        turns.filter((turn) => turn.status === 'queued' && turn.id !== active.id)
+          .forEach((turn) => subscribeRecoveredTurn(turn));
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
@@ -1016,6 +1052,29 @@ export function ThreadView({
     }
   });
 
+  // Durable turns own their queue on the server. The browser listens for the
+  // exact queued -> running transition so a second composer submission never
+  // steals the first turn's stream or pretends to be executing early.
+  useRealtime([REALTIME_EVENTS.CONVERSATION_TURN_EVENT], (env) => {
+    if (kind !== 'agent' || readOnly) return;
+    const payload = (env.payload && typeof env.payload === 'object' ? env.payload : {}) as {
+      turnId?: string;
+      agentId?: string;
+      conversationId?: string;
+      data?: { type?: string; status?: string };
+    };
+    const expectedConversationId = loadedConversationId ?? conversationId ?? null;
+    if (!payload.turnId || payload.agentId !== id || !expectedConversationId || payload.conversationId !== expectedConversationId) return;
+    if (payload.data?.type !== 'turn_status') return;
+    if (payload.data.status === 'running' && queuedDurableTurnIdsRef.current.has(payload.turnId)) {
+      void beginQueuedTurn(payload.turnId);
+    }
+    if (['completed', 'failed', 'cancelled'].includes(payload.data.status ?? '') && queuedDurableTurnIdsRef.current.has(payload.turnId)) {
+      clearQueuedTurnWatch(payload.turnId);
+      queuedDurableTurnIdsRef.current.delete(payload.turnId);
+    }
+  });
+
   // Global Chat (__broadcast__) is a virtual view over a real backing room, so a
   // posted agent reply only renders through the primary room-message handler if
   // the backing room id has resolved AND matches — a fragile, race-prone path that
@@ -1224,6 +1283,56 @@ export function ThreadView({
     }
   }
 
+  function clearQueuedTurnWatch(turnId: string) {
+    const timer = queuedTurnWatchersRef.current.get(turnId);
+    if (timer) window.clearTimeout(timer);
+    queuedTurnWatchersRef.current.delete(turnId);
+  }
+
+  /** WebSocket events normally promote a queued turn immediately. This small
+   * recovery poll only protects an interrupted browser subscription; it never
+   * fabricates progress or starts work locally. */
+  function watchQueuedTurn(turn: DurableConversationTurn) {
+    queuedDurableTurnIdsRef.current.add(turn.id);
+    clearQueuedTurnWatch(turn.id);
+    const check = () => {
+      void api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${turn.id}`)
+        .then(({ turn: latest }) => {
+          if (!queuedDurableTurnIdsRef.current.has(latest.id)) return;
+          if (latest.status === 'running') {
+            void beginQueuedTurn(latest.id, latest);
+            return;
+          }
+          if (['completed', 'failed', 'cancelled'].includes(latest.status)) {
+            queuedDurableTurnIdsRef.current.delete(latest.id);
+            clearQueuedTurnWatch(latest.id);
+            return;
+          }
+          queuedTurnWatchersRef.current.set(latest.id, window.setTimeout(check, 1_500));
+        })
+        .catch(() => {
+          if (queuedDurableTurnIdsRef.current.has(turn.id)) {
+            queuedTurnWatchersRef.current.set(turn.id, window.setTimeout(check, 1_500));
+          }
+        });
+    };
+    queuedTurnWatchersRef.current.set(turn.id, window.setTimeout(check, 1_500));
+  }
+
+  async function beginQueuedTurn(turnId: string, existing?: DurableConversationTurn) {
+    if (!queuedDurableTurnIdsRef.current.has(turnId)) return;
+    try {
+      const turn = existing ?? (await api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${turnId}`)).turn;
+      if (turn.status !== 'running') return;
+      clearQueuedTurnWatch(turn.id);
+      queuedDurableTurnIdsRef.current.delete(turn.id);
+      subscribeRecoveredTurn(turn);
+    } catch {
+      // The watcher retries; keeping the compact Queued state is more honest
+      // than replacing it with a speculative agent trace.
+    }
+  }
+
   async function handleSend(text: string, options?: { useViewportContext?: boolean; attachments?: SendAttachment[] }) {
     if (readOnly) {
       toast.warn('Past conversation', 'Use the + button in the header to start a fresh conversation.');
@@ -1299,24 +1408,10 @@ export function ThreadView({
       metadata: artifactIds.length ? { clientTurnId, artifactIds } : { clientTurnId },
     };
     const streamId = `stream-${clientTurnId}`;
-    const streamingMessage: ChatMessage = {
-      id: streamId,
-      authorId: id,
-      authorKind: 'agent',
-      text: '',
-      createdAt,
-      deliveryStatus: 'sending',
-      metadata: {
-        source: 'chat_loop',
-        clientTurnId,
-        turn: { clientTurnId, startedAt: createdAt, status: 'running' },
-        activity: immediateTurnActivity(clientTurnId, id, bodyText, createdAt),
-      },
-    };
-
-    setMessages((current) => dedupeMessages([...current, operatorMessage, streamingMessage]));
-    setAgentTyping(true);
-    setActiveTask({ agentId: id, agentName: name, label: taskLabel(bodyText), done: 0, total: 0, startedAt: Date.now() });
+    // Do not create an agent trace before the server has accepted and ordered
+    // the turn. A queued follow-up is a sent operator message, not work in
+    // progress, and must never interrupt the preceding SSE stream.
+    setMessages((current) => dedupeMessages([...current, operatorMessage]));
 
     const toolStartedAt = new Map<string, number>();
     let toolTotal = 0;
@@ -1324,12 +1419,9 @@ export function ThreadView({
     let streamedBody = '';
 
     try {
-      const controller = new AbortController();
-      activeChatAbortRef.current?.abort();
-      activeChatAbortRef.current = controller;
       const viewportOverride = pendingViewportOverrideRef.current;
       if (!turnsEndpoint) throw new Error('Durable turn endpoint is unavailable.');
-      const created = await api<{ turn: DurableConversationTurn; conversationId: string; message?: AgentMsg }>(turnsEndpoint, {
+      const created = await api<{ turn: DurableConversationTurn; conversationId: string; message?: AgentMsg; queued?: boolean; queuePosition?: number }>(turnsEndpoint, {
         method: 'POST',
         body: JSON.stringify({
           body: bodyText,
@@ -1341,10 +1433,50 @@ export function ThreadView({
           executionMode: 'auto',
         }),
       });
+      setLoadedConversationId(created.conversationId);
+      const queued = created.queued || (created.queuePosition ?? 0) > 0;
+      if (queued) {
+        setMessages((current) => current.map((message) => (message.id === operatorMessage.id || (message.authorKind === 'operator' && message.metadata?.clientTurnId === clientTurnId))
+          ? {
+              ...message,
+              deliveryStatus: 'delivered' as const,
+              metadata: {
+                ...(message.metadata ?? {}),
+                durableTurnId: created.turn.id,
+                queued: true,
+                queuePosition: created.queuePosition ?? 1,
+              },
+            }
+          : message));
+        pendingViewportOverrideRef.current = null;
+        watchQueuedTurn(created.turn);
+        return;
+      }
+
+      const streamingMessage: ChatMessage = {
+        id: streamId,
+        authorId: id,
+        authorKind: 'agent',
+        text: '',
+        createdAt,
+        deliveryStatus: 'sending',
+        metadata: {
+          source: 'chat_loop',
+          clientTurnId,
+          durableTurnId: created.turn.id,
+          turn: { clientTurnId, startedAt: createdAt, status: 'running' },
+          activity: immediateTurnActivity(clientTurnId, id, bodyText, createdAt),
+        },
+      };
+      setMessages((current) => dedupeMessages(current.map((message) => (message.id === operatorMessage.id || (message.authorKind === 'operator' && message.metadata?.clientTurnId === clientTurnId))
+        ? { ...message, deliveryStatus: 'delivered' as const }
+        : message).concat(streamingMessage)));
+      setAgentTyping(true);
+      setActiveTask({ agentId: id, agentName: name, label: taskLabel(bodyText), done: 0, total: 0, startedAt: Date.now() });
       activeDurableTurnIdRef.current = created.turn.id;
+      activeClientTurnIdRef.current = clientTurnId;
       resumedTurnIdsRef.current.add(created.turn.id);
       setActiveDurableTurn(created.turn);
-      setLoadedConversationId(created.conversationId);
       if (created.message) {
         setMessages((current) => mergeMessage(current, normalizeAgentMessage(created.message!)));
       }
@@ -1354,6 +1486,8 @@ export function ThreadView({
         await api(`/v1/conversations/${id}/turns/${created.turn.id}/cancel`, { method: 'POST' });
         throw new DOMException('operator_stop', 'AbortError');
       }
+      const controller = new AbortController();
+      activeChatAbortRef.current = controller;
       await streamSse(`/v1/conversations/${id}/turns/${created.turn.id}/events?after=0`, {
         method: 'GET',
         signal: controller.signal,
@@ -1426,7 +1560,7 @@ export function ThreadView({
                 },
               };
               const delivered = current.map((message): ChatMessage => {
-                if (message.id === operatorMessage.id) return { ...message, deliveryStatus: 'delivered' as const };
+                if (message.id === operatorMessage.id || (message.authorKind === 'operator' && message.metadata?.clientTurnId === clientTurnId)) return { ...message, deliveryStatus: 'delivered' as const };
                 return message;
               });
               return mergeMessage(delivered, incoming);
@@ -1474,7 +1608,7 @@ export function ThreadView({
             },
           }];
         }
-        if (message.id === operatorMessage.id) {
+        if (message.id === operatorMessage.id || (message.authorKind === 'operator' && message.metadata?.clientTurnId === clientTurnId)) {
           return [{ ...message, deliveryStatus: stopped ? 'delivered' as const : 'failed' as const }];
         }
         return [message];
@@ -1498,13 +1632,21 @@ export function ThreadView({
     setAgentTyping(false);
     setActiveTask(null);
     if (durableTurnId && kind === 'agent') {
-      void api<{ turn: DurableConversationTurn }>(`/v1/conversations/${id}/turns/${durableTurnId}/cancel`, { method: 'POST' })
+      // Composer Stop means stop this chat, not merely close the currently
+      // visible turn. The conversation endpoint cancels the active durable
+      // turn *and* every queued follow-up before releasing its lease.
+      for (const queuedTurnId of queuedDurableTurnIdsRef.current) clearQueuedTurnWatch(queuedTurnId);
+      queuedDurableTurnIdsRef.current.clear();
+      setMessages((current) => current.map((message) => message.metadata?.queued
+        ? { ...message, metadata: { ...(message.metadata ?? {}), queued: false, queuePosition: undefined } }
+        : message));
+      void api<{ ok: boolean; failedRunIds?: string[] }>(stopEndpoint!, { method: 'POST' })
         .then(() => {
           setActiveDurableTurn(null);
           setAgentTyping(false);
           setActiveTask(null);
         })
-        .catch((error) => toast.error('Could not stop mission', apiErrorMessage(error)));
+        .catch((error) => toast.error('Could not stop chat work', apiErrorMessage(error)));
       return;
     }
     if (clientTurnId && kind === 'agent') {
@@ -1545,13 +1687,31 @@ export function ThreadView({
 
   /** Reattach to a server-owned turn after reload, fullscreen/dock remount, or resume. */
   function subscribeRecoveredTurn(turn: DurableConversationTurn) {
+    if (turn.status === 'queued') {
+      setMessages((current) => current.map((message) => message.metadata?.clientTurnId === turn.clientTurnId && message.authorKind === 'operator'
+        ? {
+            ...message,
+            deliveryStatus: 'delivered' as const,
+            metadata: { ...(message.metadata ?? {}), durableTurnId: turn.id, queued: true, queuePosition: message.metadata?.queuePosition ?? 1 },
+          }
+        : message));
+      watchQueuedTurn(turn);
+      return;
+    }
     if (resumedTurnIdsRef.current.has(turn.id)) return;
     resumedTurnIdsRef.current.add(turn.id);
     const streamId = `stream-${turn.clientTurnId}`;
     const createdAt = turn.startedAt ?? turn.createdAt;
     setMessages((current) => {
-      if (current.some((message) => message.metadata?.clientTurnId === turn.clientTurnId && message.authorKind === 'agent')) return current;
-      return dedupeMessages([...current, {
+      const promoted = current.map((message) => message.metadata?.clientTurnId === turn.clientTurnId && message.authorKind === 'operator'
+        ? {
+            ...message,
+            deliveryStatus: 'delivered' as const,
+            metadata: { ...(message.metadata ?? {}), durableTurnId: turn.id, queued: false, queuePosition: undefined },
+          }
+        : message);
+      if (promoted.some((message) => message.metadata?.clientTurnId === turn.clientTurnId && message.authorKind === 'agent')) return promoted;
+      return dedupeMessages([...promoted, {
         id: streamId,
         authorId: id,
         authorKind: 'agent',
@@ -1565,26 +1725,21 @@ export function ThreadView({
           executionEnvelope: turn.executionEnvelope ?? undefined,
           contextManifest: turn.contextManifest ?? undefined,
           turn: { clientTurnId: turn.clientTurnId, startedAt: createdAt, status: 'running' },
-          activity: [{
-            type: 'activity',
-            id: `activity-${turn.clientTurnId}-reattached`,
-            phase: 'waiting',
-            status: 'running',
-            label: 'Reattached to background work',
-            detail: 'Replaying persisted progress from the server.',
-            agentId: id,
-            clientTurnId: turn.clientTurnId,
-            startedAt: new Date().toISOString(),
-          }],
+          // Keep the initial trace deliberately empty. The first visible item
+          // must be a genuine model commentary or a live tool transition,
+          // never generic reattachment filler.
+          activity: [],
         },
       }]);
     });
     setActiveDurableTurn(turn);
     activeDurableTurnIdRef.current = turn.id;
     activeClientTurnIdRef.current = turn.clientTurnId;
-    setAgentTyping(turn.status === 'running' || turn.status === 'queued');
+    setAgentTyping(turn.status === 'running');
     const controller = new AbortController();
-    activeChatAbortRef.current?.abort();
+    // A queue promotion happens only after the previous durable turn has
+    // released the conversation lease. Do not abort another reader here: that
+    // was the UI bug that made queued work appear to start immediately.
     activeChatAbortRef.current = controller;
     const toolStartedAt = new Map<string, number>();
     let streamedBody = '';
@@ -1693,7 +1848,9 @@ export function ThreadView({
   async function rerunFromEditedMessage(message: ChatMessage, value: string) {
     const clientTurnId = createClientTurnId();
     const streamId = `stream-${clientTurnId}`;
-    const createdAt = message.createdAt;
+    // Preserve the operator bubble's historical position, but never inherit
+    // the superseded run's elapsed clock or execution identity.
+    const createdAt = new Date().toISOString();
     const editedMessage: ChatMessage = {
       ...message,
       text: value,
@@ -1719,6 +1876,9 @@ export function ThreadView({
     };
 
     setEditingId(null);
+    setActiveDurableTurn(null);
+    activeDurableTurnIdRef.current = null;
+    activeClientTurnIdRef.current = null;
     setMessages((current) => {
       const ordered = sortMessages(current);
       const anchorIndex = ordered.findIndex((item) => item.id === message.id);
@@ -1884,6 +2044,9 @@ export function ThreadView({
   const runtimeWarning = kind === 'agent' && !agentNoAdapter
     ? runtimeCapabilityWarning(agentRuntime)
     : null;
+  const blockedNotice = activeDurableTurn?.status === 'blocked'
+    ? blockedTurnNotice(activeDurableTurn.error)
+    : null;
   // When an assistant bubble is mid-stream it shows its own in-bubble typing
   // indicator, so the standalone "is thinking…" footer would be a duplicate.
   const streamingAgentActive = messages.some(
@@ -2006,22 +2169,22 @@ export function ThreadView({
         </div>
       )}
 
-      {activeDurableTurn?.status === 'blocked' && (
-        <div className="border-t border-warn/25 bg-warn/8 px-3 py-2.5">
+      {blockedNotice && (
+        <div className="border-t border-line/55 px-3 py-2.5">
           <div className="flex items-center gap-2">
-            <AlertTriangle size={14} className="shrink-0 text-warn" />
+            <AlertTriangle size={13} className="shrink-0 text-text-muted" />
             <div className="min-w-0 flex-1">
-              <div className="text-[12px] font-medium text-text-primary">Work needs attention</div>
+              <div className="text-[12px] font-medium text-text-primary">{blockedNotice.title}</div>
               <div className="mt-0.5 text-[11px] text-text-muted">
-                {activeDurableTurn.error ?? 'Continue from the preserved turn after resolving the reported blocker.'}
+                {blockedNotice.body}
               </div>
             </div>
             <button
               type="button"
               onClick={() => void resumeBlockedTurn()}
-              className="h-8 rounded-md border border-warn/35 bg-warn/10 px-3 text-[11px] font-semibold text-warn hover:bg-warn/15"
+              className="h-8 rounded-md border border-line bg-surface-2 px-3 text-[11px] font-medium text-text-secondary hover:bg-surface-3 hover:text-text-primary"
             >
-              Continue fixing
+              {blockedNotice.action}
             </button>
           </div>
         </div>
@@ -2079,9 +2242,20 @@ function hydrateDurableTurnHistory(
   const byClientTurn = new Map(history.map((entry) => [entry.turn.clientTurnId, entry]));
   return messages.map((message) => {
     const clientTurnId = message.metadata?.clientTurnId ?? message.metadata?.turn?.clientTurnId;
-    if (!clientTurnId || message.authorKind !== 'agent') return message;
+    if (!clientTurnId) return message;
     const entry = byClientTurn.get(clientTurnId);
     if (!entry) return message;
+    if (message.authorKind === 'operator') {
+      return {
+        ...message,
+        metadata: {
+          ...(message.metadata ?? {}),
+          durableTurnId: entry.turn.id,
+          queued: entry.turn.status === 'queued',
+        },
+      };
+    }
+    if (message.authorKind !== 'agent') return message;
     let hydrated: ChatMessage = {
       ...message,
       metadata: {
@@ -2255,6 +2429,16 @@ function MessageBubble({
                 {streaming ? <StreamingCursor /> : null}
               </div>
             )
+          )}
+          {isOperator && !isEditing && (msg.metadata?.queued || streaming) && (
+            <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-text-muted">
+              {msg.metadata?.queued ? <Clock3 size={10} /> : <Loader2 size={10} className="animate-spin" />}
+              <span>
+                {msg.metadata?.queued
+                  ? `Queued${(msg.metadata.queuePosition ?? 0) > 0 ? ` · ${msg.metadata.queuePosition} ahead` : ''}`
+                  : 'Sending…'}
+              </span>
+            </div>
           )}
           {msg.metadata?.confirmation && (
             <ConfirmationCard

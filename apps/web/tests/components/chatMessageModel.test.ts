@@ -62,6 +62,32 @@ describe('chat message model', () => {
     ]);
   });
 
+  it('keeps server-confirmed queued presentation through the outbound message realtime race', () => {
+    const current = [
+      msg({
+        id: 'tmp-turn-b',
+        authorKind: 'operator',
+        text: 'follow up',
+        createdAt: '2026-06-03T10:01:00.000Z',
+        metadata: { clientTurnId: 'turn-b', durableTurnId: 'durable-b', queued: true, queuePosition: 1 },
+      }),
+    ];
+    const persisted = msg({
+      id: 'persisted-turn-b',
+      authorKind: 'operator',
+      text: 'follow up',
+      createdAt: '2026-06-03T10:01:00.050Z',
+      metadata: { clientTurnId: 'turn-b' },
+    });
+
+    const merged = mergeMessage(current, persisted);
+
+    expect(merged).toEqual([expect.objectContaining({
+      id: 'persisted-turn-b',
+      metadata: expect.objectContaining({ durableTurnId: 'durable-b', queued: true, queuePosition: 1 }),
+    })]);
+  });
+
   it('keeps a replaced assistant message in the original local turn position', () => {
     const firstAt = '2026-06-03T10:00:00.000Z';
     const secondAt = '2026-06-03T10:01:00.000Z';

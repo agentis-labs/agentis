@@ -16,7 +16,7 @@ import { ChatArtifactAttachments, collectArtifactIds } from './ArtifactAttachmen
 type ChatActivity = Extract<ChatDelta, { type: 'activity' }>;
 type TimelineEntry =
   | { id: string; kind: 'commentary'; text: string; at: string; order: number }
-  | { id: string; kind: 'activity'; text: string; detail?: string; status: ChatActivity['status']; at: string; order: number };
+  | { id: string; kind: 'activity'; text: string; detail?: string; phase: ChatActivity['phase']; status: ChatActivity['status']; at: string; order: number };
 
 function formatDuration(ms: number): string {
   if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
@@ -51,7 +51,10 @@ function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): Tim
     .map((activity, index) => ({ activity, label: compactActivityLabel(activity), index }))
     .filter((entry): entry is { activity: ChatActivity; label: string; index: number } => Boolean(entry.label))
     .filter((entry) => !isInternalActivity(entry.label))
-    .filter((entry) => !isGenericRuntimeActivity(entry.label, entry.activity));
+    .filter((entry) => !isGenericRuntimeActivity(entry.label, entry.activity))
+    // The host receipt becomes the neutral Starting spinner. Connectivity is
+    // not an agent-authored thought and should not look like one.
+    .filter((entry) => entry.activity.phase !== 'received');
   // The waiting heartbeat is a temporary honesty signal, not permanent log
   // history. As soon as real commentary or a real operation arrives, replace it
   // visually so the live transcript stays as clean as the Codex reference.
@@ -70,6 +73,7 @@ function timeline(commentary: ChatCommentary[], activities: ChatActivity[]): Tim
       kind: 'activity',
       text: label,
       detail: activity.detail,
+      phase: activity.phase,
       status: activity.status,
       at: activity.startedAt ?? activity.completedAt ?? '',
       order: index * 2 + 1,
@@ -131,6 +135,12 @@ export function AgentTurnTrace({
   const stopped = turn?.status === 'stopped' || turn?.status === 'interrupted';
   const duration = resolvedDuration(turn, now);
   const durationLabel = duration == null ? null : formatDuration(duration);
+  const hasProviderProgress = commentary.some((entry) => entry.text.trim() && !isGenericHostCommentary(entry.text))
+    || toolCalls.length > 0
+    || activities.some((activity) => activity.phase !== 'received' && activity.phase !== 'waiting');
+  const starting = streaming
+    && !hasProviderProgress
+    && !activities.some((activity) => activity.phase === 'waiting');
   const meaningful = entries.some((entry) => entry.kind === 'commentary' || !/^(reading context|starting up|writing the reply|thinking)$/i.test(entry.text));
   const worthShowing = streaming || turnFailed || stopped || meaningful || toolCalls.length > 0;
 
@@ -150,7 +160,8 @@ export function AgentTurnTrace({
     return (
       <section className="chat-work-transcript mb-4 min-w-0" aria-label="Agent work in progress" data-testid="agent-turn-trace">
         <div className="chat-work-heading">
-          <span>{durationLabel ? `Working for ${durationLabel}` : 'Working'}</span>
+          {starting && <Loader2 size={12} className="shrink-0 animate-spin text-text-muted" />}
+          <span>{starting ? 'Starting' : durationLabel ? `Working for ${durationLabel}` : 'Working'}</span>
           <span className="chat-work-rule" />
         </div>
         <Timeline entries={entries} live />

@@ -166,10 +166,22 @@ with a durable cursor and a visibility level (`chat`, `technical`, or `both`). S
 reads use this same contract, so reconnecting, reopening Chat, or moving away from Home replays
 one coherent timeline without leaks or duplicates.
 
+### Ordered follow-up turns
+
+Conversation turns are serialized by the server, not by a browser-local queue. A newly accepted
+turn is persisted as `queued`, emits its durable queue event, and receives an exact zero-based
+position among the conversation's runnable turns. The turn endpoint returns that position so the
+composer can render a quiet **Queued · N ahead** receipt instead of an assistant trace. When the
+preceding turn releases its lease, the worker atomically claims the next turn, persists a
+`queued → running` transition, and only then does the browser attach its SSE transcript. A second
+submission therefore never aborts or visually replaces the first stream. Realtime delivery makes
+that hand-off immediate; a short state read is only a reconnect fallback, never a client-side
+attempt to start work.
+
 The conversation renders safe commentary and a small factual activity set in chronological order.
 It never presents generic lifecycle narration as thoughts. A substantive request immediately receives
-a small task-aware start state such as **Starting the interface check**, before the harness produces its
-first event. If no safe provider update follows after eight seconds, one honest waiting row says that the
+a neutral **Starting** spinner; the host receipt is deliberately not rendered as agent-authored text.
+If no safe provider update follows after eight seconds, one honest waiting row says that the
 turn is still connected and can be stopped; the row disappears as soon as real progress arrives. Provider-designated summaries and the agent's
 own operator-facing preambles are persisted beside real tool/command activity; raw chain-of-thought,
 prompts, secrets, and sensitive tool arguments remain private. CLI assistant-message events preserve
@@ -193,6 +205,14 @@ commentary after stripping tool markers; the transcript's private `thinking` fie
 into the chat ledger. Provider failures are preserved beside any partial work rather than hidden by
 a generic failed state. Credit, quota, billing, and HTTP 402 errors explicitly tell the operator to
 add credits or choose another model.
+
+Editing an earlier operator message creates a new execution branch. Before the replacement runs,
+Agentis cancels non-terminal durable turns, queued follow-ups, and active conversation-scoped workflow
+runs from the superseded branch. The edited operator message keeps its historical position, while the
+replacement assistant turn receives a fresh client identity and start timestamp. Old elapsed time and
+blocked Mission recovery state therefore cannot reattach to the new task. Blocked-turn controls use
+operator language (**Verification incomplete**, **Runtime unavailable**, or **Work paused**) and state
+explicitly when no work remains active; internal Mission-acceptance jargon is not shown.
 
 Codex model-catalogue parse failures (including a missing `base_instructions` field) are treated
 as recoverable runtime state. Agentis only quarantines an identified `models-cache.json` or

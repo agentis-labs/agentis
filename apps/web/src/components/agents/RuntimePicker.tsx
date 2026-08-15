@@ -235,10 +235,10 @@ export function RuntimePicker({
   }
 
   useEffect(() => {
-    // Creation may discover runtimes to prefill a new binding. Editing is
-    // intentionally passive: opening an existing agent must never probe or
-    // rewrite its runtime. The explicit connection control owns that action.
-    if (controlledDetections !== undefined || editing) return;
+    // Detection is read-only and provides the availability indicators in the
+    // Runtime tab. Editing never auto-selects or rewrites a runtime (guarded
+    // below), but it must still refresh these indicators.
+    if (controlledDetections !== undefined) return;
     void refreshDetections();
   }, [controlledDetections, editing]);
 

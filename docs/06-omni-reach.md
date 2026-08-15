@@ -55,6 +55,17 @@ the responsible agent/subject.
   duplication across caller-loop and MCP-native adapters. The provider-backed delivery is
   mirrored into conversation history without being sent again. A send to a different recipient
   does not suppress the natural acknowledgement to the requester.
+- A programmatic channel delivery, including a deterministic workflow's first contact, creates
+  or reuses the same `(connectionId, chatId)` conversation and is persisted as business-side
+  context with its durable delivery key. It starts as `sending` before the provider boundary and
+  is reconciled to `sent`/`delivered` or `failed` from the same journal. Therefore the recipient's
+  next message continues the exchange rather than starting with an empty transcript.
+- Agent-owned connections are an isolation boundary. A workflow resolves through its direct
+  `ownerAgentId` (or its owning App's agent), and an agent can use another agent's connection only
+  through an active explicit grant. Workspace-owned connections remain shared until governed;
+  an unauthorized workspace default is never silently selected over the caller's eligible channel.
+  A workflow without an agent/App owner may use only workspace-owned connections until it is
+  attributed explicitly.
 - Internal strategy state, tool/runtime events, JIDs, connection settings, routing diagnostics,
   and provider receipts remain Agentis telemetry. Channel users receive the natural response;
   the only optional external status is the generic, identity-verified owner reasoning indicator.
@@ -67,6 +78,9 @@ the responsible agent/subject.
   Agentis aborts the active turn and companion lane, revokes the tool lease, clears typing, cancels
   pending durable turn jobs, and fences every automated provider send with a monotonic
   `automationEpoch`. Agentis-originated provider echoes never claim ownership.
+  If that chat was claimed by a phone-observed send before it was configured as owner/operator, its
+  next inbound message releases that legacy observed claim. An explicit App **Take over** remains
+  deliberate and still requires **Hand back**.
 - Operator messages are business-side conversation context and compile as model role `assistant`;
   customer messages compile as `user`. Platform-chat actor semantics are unchanged. This prevents
   a manual promise such as “I will send the proposal” from being interpreted as a new customer

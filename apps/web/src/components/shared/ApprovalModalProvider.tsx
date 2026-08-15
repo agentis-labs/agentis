@@ -65,7 +65,7 @@ export function ApprovalModalProvider({ children }: { children: React.ReactNode 
             document.body,
           )
         : snapshot.open ? createPortal(
-            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Approval review">
+            <div className="pointer-events-auto fixed inset-0 z-[10100] flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Approval review">
               <div className="w-full max-w-md rounded-xl border border-line bg-surface p-4 shadow-dropdown">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-[14px] font-semibold text-text-primary">Approval review</div>

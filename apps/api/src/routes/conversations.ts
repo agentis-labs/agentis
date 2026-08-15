@@ -557,7 +557,14 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
       executionEnvelope: envelope,
       planId: plan?.id ?? null,
     });
-    return c.json({ turn: serializeDurableTurn(turn), conversationId: conversation.id, message }, 202);
+    const queuePosition = durableTurns.queuePosition(ws.workspaceId, turn.id);
+    return c.json({
+      turn: serializeDurableTurn(turn),
+      conversationId: conversation.id,
+      message,
+      queuePosition,
+      queued: queuePosition > 0,
+    }, 202);
   });
 
   app.get('/:agentId/turns/active', (c) => {
@@ -935,6 +942,26 @@ export function buildConversationRoutes(deps: ConversationRouteDeps) {
           userId: ws.user.id,
           agentId,
         });
+    // A rewrite is a new execution branch. Retire every preserved state from
+    // the old branch before editing history, otherwise a blocked Mission can
+    // reattach its old clock and recovery state to the fresh task.
+    const supersededTurns = durableTurns.listActive(ws.workspaceId, conversation.id);
+    await Promise.allSettled(supersededTurns.map((turn) => durableTurns.cancel(ws.workspaceId, turn.id)));
+    const supersededRuntime = activeConversationTurns.get(conversation.id);
+    if (supersededRuntime && !supersededRuntime.signal.aborted) {
+      hardStoppedConversations.add(conversation.id);
+      supersededRuntime.abort(new Error('conversation_rewrite'));
+    }
+    deps.conversations.discardPendingQueue({ workspaceId: ws.workspaceId, conversationId: conversation.id });
+    const activeRuns = deps.db.select({ id: schema.workflowRuns.id })
+      .from(schema.workflowRuns)
+      .where(and(
+        eq(schema.workflowRuns.workspaceId, ws.workspaceId),
+        eq(schema.workflowRuns.conversationId, conversation.id),
+        inArray(schema.workflowRuns.status, ['CREATED', 'PLANNING', 'RUNNING', 'WAITING', 'PAUSED']),
+      ))
+      .all();
+    if (deps.engine) await Promise.allSettled(activeRuns.map((run) => deps.engine!.cancelRun(run.id)));
     const result = deps.conversations.rewriteFromMessage({
       workspaceId: ws.workspaceId,
       conversationId: conversation.id,
@@ -1293,7 +1320,12 @@ async function executeDurableConversationTurn(
       })),
       receipts,
     });
-    if (!verification.passed) return { status: 'blocked' as const, error: 'Mission acceptance verification did not pass. Continue fixing from the preserved turn.' };
+    if (!verification.passed) {
+      return {
+        status: 'blocked' as const,
+        error: 'Completion verification is incomplete. The result was produced, but not every acceptance check has concrete evidence yet.',
+      };
+    }
   }
   return { status: 'completed' as const };
 }

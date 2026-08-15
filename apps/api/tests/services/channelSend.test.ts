@@ -29,7 +29,7 @@ function fakeDeps(connections: Conn[], opts: { deliver?: () => Promise<ChannelDe
   return { deps, deliver };
 }
 
-const wa = (over: Partial<Conn> = {}): Conn => ({ id: 'wa1', kind: 'whatsapp', name: 'WhatsApp', status: 'active', agentId: 'owner-agent', defaultChatId: '+551199', health: { status: 'ok' }, ...over });
+const wa = (over: Partial<Conn> = {}): Conn => ({ id: 'wa1', kind: 'whatsapp', name: 'WhatsApp', status: 'active', agentId: null, defaultChatId: '+551199', health: { status: 'ok' }, ...over });
 
 describe('resolveAndSend', () => {
   it('resolves the single active WhatsApp connection by kind and delivers', async () => {
@@ -108,16 +108,40 @@ describe('resolveAndSend', () => {
     expect(deliver).toHaveBeenCalledOnce();
   });
 
-  it('blocks an agent without a grant on an OWNED connection (§3.3), but a system caller passes', async () => {
+  it('selects the caller\'s eligible connection instead of another agent\'s workspace default', async () => {
+    const { deps, deliver } = fakeDeps([
+      wa({ id: 'other-default', agentId: 'agent-other', isDefault: true }),
+      wa({ id: 'mine', agentId: 'agent-me' }),
+    ]);
+    const res = await resolveAndSend(deps, {
+      workspaceId: 'w', kind: 'whatsapp', body: 'Oi', to: '+55', agentId: 'agent-me',
+    });
+    expect(res.sent).toBe(true);
+    if (res.sent) expect(res.connectionId).toBe('mine');
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'mine' }));
+  });
+
+  it('blocks both an ungranted agent and a workspace caller from an agent-owned connection', async () => {
     const authorize = () => ({ ok: false, reason: 'no grant' });
-    const blocked = await resolveAndSend(fakeDeps([wa()], { authorize }).deps, { workspaceId: 'w', kind: 'whatsapp', body: 'Oi', agentId: 'agent-x' });
+    const blocked = await resolveAndSend(fakeDeps([wa({ agentId: 'owner-agent' })], { authorize }).deps, { workspaceId: 'w', kind: 'whatsapp', body: 'Oi', agentId: 'agent-x' });
     expect(blocked.sent).toBe(false);
     if (!blocked.sent) expect(blocked.errorCode).toBe('CONNECTION_SCOPE_MISSING');
 
-    const system = fakeDeps([wa()], { authorize });
-    const passed = await resolveAndSend(system.deps, { workspaceId: 'w', kind: 'whatsapp', body: 'Oi', agentId: null });
-    expect(passed.sent).toBe(true);
-    expect(system.deliver).toHaveBeenCalledOnce();
+    const workspace = fakeDeps([wa({ agentId: 'owner-agent' })], { authorize });
+    const blockedWorkspace = await resolveAndSend(workspace.deps, { workspaceId: 'w', kind: 'whatsapp', body: 'Oi', agentId: null });
+    expect(blockedWorkspace.sent).toBe(false);
+    if (!blockedWorkspace.sent) expect(blockedWorkspace.errorCode).toBe('CONNECTION_SCOPE_MISSING');
+    expect(workspace.deliver).not.toHaveBeenCalled();
+  });
+
+  it('blocks an explicit cross-agent connection even when the authority service is unavailable', async () => {
+    const { deps, deliver } = fakeDeps([wa({ id: 'other', agentId: 'agent-other' })]);
+    const res = await resolveAndSend(deps, {
+      workspaceId: 'w', connectionId: 'other', body: 'Oi', agentId: 'agent-me',
+    });
+    expect(res.sent).toBe(false);
+    if (!res.sent) expect(res.errorCode).toBe('CONNECTION_SCOPE_MISSING');
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it('a WORKSPACE-owned connection (agentId null) is open when no grant service is wired', async () => {

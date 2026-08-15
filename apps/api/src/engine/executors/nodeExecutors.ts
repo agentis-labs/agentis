@@ -338,6 +338,22 @@ export class NodeExecutorController {
       startedAt: new Date().toISOString(),
     };
     try {
+      // A deterministic workflow is still owned work. Attribute channel
+      // delivery to its owning agent (or its App owner) so resolving "WhatsApp"
+      // cannot fall through to another agent's connection in the workspace.
+      const workflow = this.host.deps.db.select({
+        ownerAgentId: schema.workflows.ownerAgentId,
+        appId: schema.workflows.appId,
+      }).from(schema.workflows).where(and(
+        eq(schema.workflows.id, ctx.workflowId),
+        eq(schema.workflows.workspaceId, ctx.workspaceId),
+      )).get();
+      const appOwner = workflow?.appId
+        ? this.host.deps.db.select({ ownerAgentId: schema.apps.ownerAgentId })
+          .from(schema.apps)
+          .where(and(eq(schema.apps.id, workflow.appId), eq(schema.apps.workspaceId, ctx.workspaceId)))
+          .get()?.ownerAgentId ?? null
+        : null;
       const result = await this.host.deps.channelSend.send({
         workspaceId: ctx.workspaceId,
         body,
@@ -347,10 +363,11 @@ export class NodeExecutorController {
         ...(attachments.length ? { attachments } : {}),
         ...(messages.length ? { messages } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
-        // Deterministic/system caller — the node runs with the workflow's authority,
-        // not a specific agent's, so §3.3 grants don't gate it (the operator author
-        // put the node there deliberately).
-        agentId: null,
+        agentId: workflow?.ownerAgentId ?? appOwner,
+        // A workflow's first proactive delivery is part of the shared channel
+        // transcript. Persist it after provider acknowledgement so a recipient's
+        // next inbound turn sees the business message that preceded it.
+        persistOutboundContext: true,
       });
       if (!result.sent) {
         throw new AgentisError('INTEGRATION_OPERATION_FAILED', `channel send failed: ${result.error}${result.errorCode ? ` [${result.errorCode}]` : ''}`);

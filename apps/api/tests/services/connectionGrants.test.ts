@@ -1,8 +1,8 @@
 /**
  * ConnectionGrantService — per-agent scoped authority over connections
- * (Agent-Native Platform Plan §3.3). Proves: ungoverned connections stay open
- * (back-compat), the owner is implicitly authorized, grants gate by scope +
- * expiry, and the request→grant negotiation on-ramp works.
+ * (Agent-Native Platform Plan §3.3). Proves: agent-owned connections are
+ * isolated, workspace-owned connections remain compatible, the owner is
+ * implicitly authorized, and grants gate by scope + expiry.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
@@ -20,7 +20,7 @@ function seedAgent(name = 'Agent'): string {
   return id;
 }
 
-function seedChannel(ownerAgentId: string): string {
+function seedChannel(ownerAgentId: string | null): string {
   const id = randomUUID();
   ctx.db.insert(schema.channelConnections).values({
     id, workspaceId: ctx.workspace.id, userId: ctx.user.id, agentId: ownerAgentId,
@@ -30,12 +30,18 @@ function seedChannel(ownerAgentId: string): string {
 }
 
 describe('ConnectionGrantService', () => {
-  it('leaves an ungoverned connection open (back-compat)', () => {
+  it('isolates an ungranted agent-owned connection by default', () => {
     const svc = new ConnectionGrantService(ctx.db);
     const owner = seedAgent('Owner');
     const stranger = seedAgent('Stranger');
     const conn = seedChannel(owner);
-    // No grants exist → any agent may use it, exactly as before this feature.
+    expect(svc.authorize({ workspaceId: ctx.workspace.id, connectionId: conn, agentId: stranger }).ok).toBe(false);
+  });
+
+  it('leaves an ungoverned workspace-owned connection open for compatibility', () => {
+    const svc = new ConnectionGrantService(ctx.db);
+    const stranger = seedAgent('Stranger');
+    const conn = seedChannel(null);
     expect(svc.authorize({ workspaceId: ctx.workspace.id, connectionId: conn, agentId: stranger }).ok).toBe(true);
   });
 
