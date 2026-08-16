@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   buildAutostartTarget,
@@ -60,23 +60,17 @@ describe('autostartService', () => {
   });
 
   describe('windows', () => {
-    it('writes run.cmd + a hidden-launch .vbs marker in the Startup folder, quoting space-containing paths', async () => {
+    it('writes a direct .cmd marker in the Startup folder, quoting space-containing paths', async () => {
       const target = buildAutostartTarget(baseOpts('win32', { home, appData, data: dataDir }));
       expect(target.supported).toBe(true);
-      expect(target.markerPath).toBe(join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agentis.vbs'));
+      expect(target.markerPath).toBe(join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agentis.cmd'));
       expect(getAutostartStatus(target)).toBe(false);
 
       await enableAutostart(target);
       expect(getAutostartStatus(target)).toBe(true);
 
-      const vbs = readFileSync(target.markerPath, 'utf8');
-      expect(vbs).toContain('WshShell.Run');
-      expect(vbs).toContain('0, False');
-
-      const runCmdPath = join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agentis.cmd');
-      expect(existsSync(runCmdPath)).toBe(true);
-      expect(vbs).toContain(`WshShell.Run """${runCmdPath}""", 0, False`);
-      const runCmd = readFileSync(runCmdPath, 'utf8');
+      expect(existsSync(target.markerPath)).toBe(true);
+      const runCmd = readFileSync(target.markerPath, 'utf8');
       expect(runCmd).toContain('"C:\\Program Files\\nodejs\\node.exe"');
       expect(runCmd).toContain(`"${join(home, 'a space dir', 'cli', 'dist', 'index.cjs')}"`);
       expect(runCmd).toContain('up');
@@ -84,7 +78,21 @@ describe('autostartService', () => {
 
       await disableAutostart(target);
       expect(getAutostartStatus(target)).toBe(false);
-      expect(existsSync(runCmdPath)).toBe(false);
+      expect(existsSync(target.markerPath)).toBe(false);
+    });
+
+    it('removes the legacy VBS launcher when enabling or disabling autostart', async () => {
+      const target = buildAutostartTarget(baseOpts('win32', { home, appData, data: dataDir }));
+      const legacyVbs = join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Agentis.vbs');
+      mkdirSync(dirname(legacyVbs), { recursive: true });
+      writeFileSync(legacyVbs, 'broken launcher', 'utf8');
+
+      await enableAutostart(target);
+      expect(existsSync(legacyVbs)).toBe(false);
+
+      writeFileSync(legacyVbs, 'broken launcher', 'utf8');
+      await disableAutostart(target);
+      expect(existsSync(legacyVbs)).toBe(false);
     });
   });
 

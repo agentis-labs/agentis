@@ -463,7 +463,22 @@ export class ChatSessionExecutor {
   static #filterToRegistered(tools: ToolDefinition[]): ToolDefinition[] {
     const registered = ChatToolExecutor.registeredIds();
     if (registered.size === 0) return tools;
-    const kept = tools.filter((tool) => tool.name === 'agentis.team.spawn' || tool.name.startsWith('workflow.') || registered.has(tool.name));
+    const canonical = new Map(ChatToolExecutor.registeredDefinitions().map((definition) => [definition.id, definition]));
+    const kept = tools
+      .filter((tool) => tool.name === 'agentis.team.spawn' || tool.name.startsWith('workflow.') || registered.has(tool.name))
+      .map((tool) => {
+        const definition = canonical.get(tool.name);
+        // Registered definitions are the transport-independent source of truth.
+        // This prevents chat/channel runtimes from seeing an older, reduced
+        // schema while MCP and workflows see the complete tool.
+        return definition
+          ? {
+              name: definition.id,
+              description: definition.description,
+              parameters: definition.inputSchema as ToolDefinition['parameters'],
+            }
+          : tool;
+      });
     const present = new Set(kept.map((tool) => tool.name));
     for (const definition of ChatToolExecutor.registeredDefinitions()) {
       if (present.has(definition.id)) continue;

@@ -62,7 +62,7 @@ export function AppExportModal({
 
   useEffect(() => {
     let cancelled = false;
-    api<{ data: AppClosure }>(`/v1/apps/${appId}/export/preview`)
+    api<{ data: AppClosure }>(`/v1/apps/${appId}/export/preview?revisionTarget=candidate`)
       .then((r) => { if (!cancelled) setClosure(r.data); })
       .catch((e) => { if (!cancelled) setError(apiErrorMessage(e)); });
     return () => { cancelled = true; };
@@ -92,7 +92,12 @@ export function AppExportModal({
     setBusy(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ fidelity: full ? 'full' : 'shareable' });
+      const params = new URLSearchParams({
+        fidelity: full ? 'full' : 'shareable',
+        // Export the graph visible in the editor. The API falls back to the
+        // active revision when this App has no staged candidate.
+        revisionTarget: 'candidate',
+      });
       if (excluded.size > 0) params.set('exclude', [...excluded].join(','));
       const envelope = await api<{ data: unknown }>(`/v1/apps/${appId}/export?${params}`).then((r) => r.data);
       const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });

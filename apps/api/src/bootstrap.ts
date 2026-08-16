@@ -71,7 +71,7 @@ import { OrchestratorModelRouter, type ModelProfile } from './services/orchestra
 import { WorkspaceHarnessRuntimeResolver, WorkspaceHarnessStructuredCompleter } from './services/workspace/workspaceHarnessRuntime.js';
 import { ChannelTurnDispatcher, type ChannelTurnInput } from './services/conversation/channelTurnDispatcher.js';
 import { ConversationService } from './services/conversation/conversationService.js';
-import { MediaService, openAiImageProvider } from './services/mediaService.js';
+import { MediaService, compatibleAudioGenerationProvider, openAiImageProvider, openAiSpeechProvider } from './services/mediaService.js';
 import { resolveSynthesisCompleter } from './services/agentisToolHandlers/build.js';
 import { ChannelTurnQueue } from './services/conversation/channelTurnQueue.js';
 import { ChannelConnectionSupervisor } from './services/conversation/channelConnectionSupervisor.js';
@@ -1432,6 +1432,24 @@ export async function bootstrap(envSource: NodeJS.ProcessEnv = process.env): Pro
       ...(env.AGENTIS_MEDIA_IMAGE_API_KEY ? { apiKey: env.AGENTIS_MEDIA_IMAGE_API_KEY } : {}),
     },
     build: openAiImageProvider,
+  });
+  mediaService.registerConfigurable({
+    modality: 'speech',
+    envDefaults: {
+      baseUrl: env.AGENTIS_MEDIA_SPEECH_BASE_URL,
+      model: env.AGENTIS_MEDIA_SPEECH_MODEL,
+      ...(env.AGENTIS_MEDIA_SPEECH_API_KEY ? { apiKey: env.AGENTIS_MEDIA_SPEECH_API_KEY } : {}),
+    },
+    build: openAiSpeechProvider,
+  });
+  mediaService.registerConfigurable({
+    modality: 'audio',
+    envDefaults: {
+      baseUrl: env.AGENTIS_MEDIA_AUDIO_BASE_URL,
+      model: env.AGENTIS_MEDIA_AUDIO_MODEL,
+      ...(env.AGENTIS_MEDIA_AUDIO_API_KEY ? { apiKey: env.AGENTIS_MEDIA_AUDIO_API_KEY } : {}),
+    },
+    build: compatibleAudioGenerationProvider,
   });
   toolHandlerDeps.media = mediaService;
   // LAYER 0: agent_task runtime inheritance — bind the workspace default model to

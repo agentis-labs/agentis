@@ -79,10 +79,10 @@ interface ChannelConnection {
   requireOptIn?: boolean;
   warmupStartedAt?: string | null;
   whatsappProfile?: {
-    version: 3;
+    version: 4;
     ownerReasoningVisibility: 'off' | 'indicator';
     manualOutboundTakeover: 'until_handback' | 'off';
-    ownerManualOutboundTakeover: 'until_handback' | 'off';
+    ownerManualOutboundTakeover: 'off';
     historyReconciliation: 'recent' | 'off';
   } | null;
   capabilities?: ChannelCapabilities;
@@ -833,21 +833,7 @@ function ChannelBehaviorControls({
                 />
                 <span>Pause automation in a conversation after an operator sends from WhatsApp, until Hand back.</span>
               </label>
-              <label className="flex items-start gap-1.5">
-                <input
-                  type="checkbox"
-                  checked={connection.whatsappProfile?.ownerManualOutboundTakeover === 'until_handback'}
-                  disabled={saving || !connection.ownerChatId || connection.whatsappProfile?.manualOutboundTakeover === 'off'}
-                  onChange={(e) => void patch(
-                    { ownerManualOutboundTakeover: e.target.checked ? 'until_handback' : 'off' },
-                    e.target.checked ? 'Owner-chat handoff enabled' : 'Owner-chat handoff disabled',
-                  )}
-                />
-                <span>
-                  Also pause automation for the owner/operator chat.
-                  {!connection.ownerChatId && <span className="block text-text-muted">Mark the default recipient as owner/operator above to enable this choice.</span>}
-                </span>
-              </label>
+              <p className="text-text-muted">The owner/operator conversation always remains active. Manual handoff applies only to customer conversations.</p>
               <label className="flex items-center gap-1.5">
                 <input
                   type="checkbox"

@@ -6,7 +6,7 @@
  * against temp directories with no real filesystem locations touched.
  *
  * The source of truth for "enabled" is the presence of the OS-level
- * registration file itself (Startup-folder script / LaunchAgent plist / XDG
+ * registration file itself (Startup-folder command / LaunchAgent plist / XDG
  * autostart entry) — there is no separate DB flag to drift out of sync with
  * what the OS will actually do at next login.
  */
@@ -64,11 +64,10 @@ function logPath(dataDir: string): string {
 
 function buildWindowsTarget(opts: BuildAutostartTargetOptions): Omit<AutostartTarget, 'supported' | 'reason'> {
   const startupDir = join(opts.appDataDir ?? '', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
-  // Keep the helper beside the Startup marker. The marker survives data-dir
-  // resets, so placing run.cmd under dataDir can leave an orphaned Agentis.vbs
-  // that fails with WSH error 80070002 at every login.
-  const runCmdPath = join(startupDir, 'Agentis.cmd');
-  const markerPath = join(startupDir, 'Agentis.vbs');
+  // The Startup folder runs .cmd files directly. Avoid a VBS launcher entirely:
+  // it adds a second file reference that can become orphaned and produces WSH
+  // error 80070002 at login.
+  const markerPath = join(startupDir, 'Agentis.cmd');
 
   const runCmd = [
     '@echo off',
@@ -77,22 +76,10 @@ function buildWindowsTarget(opts: BuildAutostartTargetOptions): Omit<AutostartTa
     '',
   ].join('\r\n');
 
-  // 0 = hidden window, False = fire-and-forget (don't block the login sequence).
-  // Triple quotes make the value of the VBScript string include quotes around
-  // the command path; the normal Startup path contains spaces ("Start Menu").
-  const vbs = [
-    'Set WshShell = CreateObject("WScript.Shell")',
-    `WshShell.Run """${runCmdPath}""", 0, False`,
-    '',
-  ].join('\r\n');
-
   return {
     platform: 'win32',
     markerPath,
-    writes: [
-      { path: runCmdPath, contents: runCmd },
-      { path: markerPath, contents: vbs },
-    ],
+    writes: [{ path: markerPath, contents: runCmd }],
   };
 }
 
@@ -208,6 +195,9 @@ function tryLaunchctl(args: string[]): void {
 
 export async function enableAutostart(target: AutostartTarget): Promise<void> {
   if (!target.supported) throw new Error(target.reason ?? 'Autostart is not supported on this host.');
+  // Remove registrations made by earlier releases before writing the direct
+  // command entry. Otherwise Windows keeps executing the stale VBS file too.
+  if (target.platform === 'win32') rmSync(join(dirname(target.markerPath), 'Agentis.vbs'), { force: true });
   for (const write of target.writes) {
     mkdirSync(dirname(write.path), { recursive: true });
     writeFileSync(write.path, write.contents, 'utf8');
@@ -221,4 +211,5 @@ export async function disableAutostart(target: AutostartTarget): Promise<void> {
   for (const write of target.writes) {
     rmSync(write.path, { force: true });
   }
+  if (target.platform === 'win32') rmSync(join(dirname(target.markerPath), 'Agentis.vbs'), { force: true });
 }

@@ -151,6 +151,12 @@ export class WorkspacePackager {
       .map((app) =>
         this.appPackager.toManifest(workspaceId, app.id, {
           fidelity,
+          // A portable workspace must preserve what the operator currently sees
+          // in the workflow editor. Newly imported/drafted workflows can have an
+          // intentionally empty active baseline while their real graph is staged
+          // as the candidate revision. AppPackager falls back to active when no
+          // candidate exists.
+          revisionTarget: 'candidate',
           ...(this.brainPort ? { brain: this.brainPort } : {}),
           includeAppBrain: sel.includeAppBrains,
           // Agent brains ride the workspace-level flat list, not the App, so a

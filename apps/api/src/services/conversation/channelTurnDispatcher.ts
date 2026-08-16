@@ -40,7 +40,7 @@ import type { Logger } from '../../logger.js';
 import type { EventBus } from '../../event-bus.js';
 import { publishAgentWorkStep, publishChatDeltaProgress, publishAppAgentActivity } from '../agent/agentWorkProgress.js';
 import { isAcknowledgedChannelDelivery, type ChannelDeliveryReceipt, type OutboundAttachmentRef } from '../../adapters/channels/types.js';
-import { isConfiguredWhatsAppOwnerChat, resolveWhatsAppConnectionProfile, shouldClaimWhatsAppManualOutbound } from './channelBridge.js';
+import { resolveWhatsAppConnectionProfile } from './channelBridge.js';
 import { channelModelRole } from './channelConversationRole.js';
 import type { ConversationHandoffService, ConversationHandoffSnapshot } from './conversationHandoffService.js';
 
@@ -316,7 +316,7 @@ export class ChannelTurnDispatcher {
     // Operator block gate: a blocked sender is fully silent — no subject routing,
     // no agent turn, no reply. Cheap single-row lookup on the same handle the
     // identity table shows. (Same handle rule as #recordIdentity below.)
-    if (this.deps.identity) {
+    if (this.deps.identity && !this.#configuredOwnerOperator(input)) {
       const handle = (input.kind === 'slack' || input.kind === 'discord') ? (input.from ?? input.chatId) : input.chatId;
       if (this.deps.identity.isBlocked(input.workspaceId, input.kind, handle)) {
         return { replied: false, reason: 'blocked' };
@@ -455,11 +455,9 @@ export class ChannelTurnDispatcher {
    */
   async #executeTurn(input: ChannelTurnInput, excludeMessageIds: string[]): Promise<{ replied: boolean; reason?: string }> {
     let ownership = this.deps.handoffs?.current(input.workspaceId, input.conversationId);
-    // A configured owner/operator chat used to remain parked forever if it was
-    // claimed before that exception was configured. Release only that legacy,
-    // provider-observed claim on the owner's next live message; explicit App
-    // takeovers still require Hand back.
-    if (ownership?.state === 'human' && ownership.source === 'provider_observed' && this.#isOwnerChatExemptFromTakeover(input)) {
+    // The configured operator channel is a permanent live control conversation.
+    // Any old/manual handoff is stale here, regardless of where it originated.
+    if (ownership?.state === 'human' && this.#configuredOwnerOperator(input)) {
       ownership = this.deps.handoffs?.releaseToAgent(input.workspaceId, input.conversationId);
     }
     if (ownership?.state === 'human') return { replied: false, reason: 'human_handling' };
@@ -490,7 +488,10 @@ export class ChannelTurnDispatcher {
       // sender is silently ignored by default, or gets a one-line decline if the
       // operator opted into that; an allowed non-owner carries the operator's
       // free-text rules into the turn as guidance (below).
-      const resolvedAccess = this.#resolveAccess(input);
+      const configuredOperator = this.#configuredOwnerOperator(input);
+      const resolvedAccess: AccessDecision = configuredOperator
+        ? { allow: true, isOwner: false, who: configuredOperator.name ?? input.from?.trim() ?? input.chatId }
+        : this.#resolveAccess(input);
       const ownerVerified = this.#isVerifiedConnectionOwner(input);
       // A saved default recipient is a routing convenience, never identity
       // evidence. Until the exact peer is explicitly linked to the owner, it
@@ -746,6 +747,14 @@ export class ChannelTurnDispatcher {
           });
           await this.#persistAndDeliver(input, failure, { failureNotice: true });
           return { replied: true, reason: 'runtime_error' };
+        }
+        if (generatedAttachments.length > 0 && !deliveredByChannelTool) {
+          const attachments = dedupeAttachmentRefs(generatedAttachments);
+          const gate = this.#gateAppReply(input, '[Media response]');
+          if (gate.action !== 'send') return gate.result;
+          await this.#persistAndDeliver(input, '', { attachments });
+          if (input.appId) this.deps.outboundPolicy?.record(input.appId, 'agent');
+          return { replied: true, reason: 'media_only_reply' };
         }
         this.deps.logger.info('channel.turn.empty_reply', {
           connectionId: input.connectionId,
@@ -1111,20 +1120,6 @@ export class ChannelTurnDispatcher {
     return { name: typeof settings.ownerName === 'string' && settings.ownerName.trim() ? settings.ownerName.trim() : null };
   }
 
-  #isOwnerChatExemptFromTakeover(input: ChannelTurnInput): boolean {
-    if (input.kind !== 'whatsapp') return false;
-    const connection = this.deps.db
-      .select({ settings: schema.channelConnections.settings })
-      .from(schema.channelConnections)
-      .where(and(
-        eq(schema.channelConnections.id, input.connectionId),
-        eq(schema.channelConnections.workspaceId, input.workspaceId),
-      ))
-      .get();
-    if (!connection || !isConfiguredWhatsAppOwnerChat(connection.settings, input.chatId)) return false;
-    return !shouldClaimWhatsAppManualOutbound(connection.settings, input.chatId);
-  }
-
   /**
    * Mirror an already provider-verified current-peer tool send into conversation
    * history without crossing the transport boundary a second time.
@@ -1241,7 +1236,7 @@ export class ChannelTurnDispatcher {
       sessionMessageId,
       authorType: 'agent',
       participantSide: 'business',
-      body,
+      body: body || '[Media sent]',
       deliveryStatus: 'sending',
       metadata: {
         channel: input.kind,
@@ -1850,8 +1845,10 @@ function toolResultAttachments(name: string, result: unknown): OutboundAttachmen
     if (typeof entry.ref !== 'string' || !entry.ref.trim()) return [];
     const mimeType = typeof entry.mimeType === 'string' ? entry.mimeType : undefined;
     const modality = typeof value.modality === 'string' ? value.modality : undefined;
-    const kind: OutboundAttachmentRef['kind'] = modality === 'audio' || modality === 'speech'
-      ? 'audio'
+    const kind: OutboundAttachmentRef['kind'] = modality === 'speech'
+      ? 'voice'
+      : modality === 'audio'
+        ? 'audio'
       : modality === 'video' ? 'video'
         : mimeType?.startsWith('audio/') ? 'audio'
           : mimeType?.startsWith('video/') ? 'video'

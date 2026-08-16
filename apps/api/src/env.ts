@@ -125,6 +125,12 @@ const envSchema = z.object({
   AGENTIS_MEDIA_IMAGE_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
   AGENTIS_MEDIA_IMAGE_API_KEY: z.string().optional(),
   AGENTIS_MEDIA_IMAGE_MODEL: z.string().default('gpt-image-1'),
+  AGENTIS_MEDIA_SPEECH_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
+  AGENTIS_MEDIA_SPEECH_API_KEY: z.string().optional(),
+  AGENTIS_MEDIA_SPEECH_MODEL: z.string().default('gpt-4o-mini-tts'),
+  AGENTIS_MEDIA_AUDIO_BASE_URL: z.string().url().default('http://127.0.0.1:8188/v1'),
+  AGENTIS_MEDIA_AUDIO_API_KEY: z.string().optional(),
+  AGENTIS_MEDIA_AUDIO_MODEL: z.string().default('audio-generation'),
 
   // Idle watchdog for streaming chat turns (HermesAdapter/LocalLlmAdapter). If a
   // model endpoint sends no bytes for this many ms — while waiting for the first

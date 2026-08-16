@@ -228,6 +228,7 @@ export function computeAppClosure(
   if (extIds.length > 0) {
     const rows = db.select().from(schema.extensions)
       .where(and(eq(schema.extensions.workspaceId, workspaceId), inArray(schema.extensions.id, extIds))).all();
+    const found = new Set(rows.map((row) => row.id));
     for (const row of rows) {
       // `builtin` extensions ship with every install — declare, never copy.
       const builtin = row.runtime === 'builtin';
@@ -240,6 +241,9 @@ export function computeAppClosure(
         reason: builtin ? 'Built in — must exist on the target' : reasonFor(row.id),
         transportable: !builtin,
       });
+    }
+    for (const missing of extIds.filter((id) => !found.has(id))) {
+      warnings.push(`A step calls an extension (${missing}) that no longer exists — that step will not run after import.`);
     }
   }
 

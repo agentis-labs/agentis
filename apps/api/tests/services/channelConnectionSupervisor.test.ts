@@ -164,7 +164,7 @@ describe('ChannelConnectionSupervisor observed outbound synchronization', () => 
     });
   });
 
-  it('can apply takeover to the explicit owner/operator chat when configured', () => {
+  it('ignores the removed v3 owner takeover flag and keeps the operator chat active', () => {
     const { connectionId, supervisor, handoffs } = fixture();
     ctx.db.update(schema.channelConnections).set({
       settings: {
@@ -179,7 +179,7 @@ describe('ChannelConnectionSupervisor observed outbound synchronization', () => 
     });
 
     const message = ctx.db.select().from(schema.conversationMessages).get()!;
-    expect(handoffs.current(ctx.workspace.id, message.conversationId)).toMatchObject({ state: 'human' });
+    expect(handoffs.current(ctx.workspace.id, message.conversationId)).toMatchObject({ state: 'agent', automationEpoch: 0 });
   });
 
   it('does not treat an auto/default routing target as an owner exception', () => {

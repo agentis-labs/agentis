@@ -32,7 +32,7 @@ beforeEach(async () => {
 afterEach(() => ctx.close());
 
 describe('/v1/media/models', () => {
-  it('GET lists every modality with its env default and (no) override, unavailable when no key anywhere', async () => {
+  it('GET does not advertise an unauthenticated public default as available', async () => {
     const res = await app().request('/v1/media/models', { headers: ctx.authHeaders });
     expect(res.status).toBe(200);
     const body = await res.json() as { modalities: Array<{ modality: string; envDefault: unknown; override: unknown; effectiveModel: string | null; available: boolean }> };
@@ -40,7 +40,7 @@ describe('/v1/media/models', () => {
     expect(image.envDefault).toMatchObject({ model: 'gpt-image-1', hasApiKey: false });
     expect(image.override).toBeNull();
     expect(image.effectiveModel).toBe('gpt-image-1');
-    expect(image.available).toBe(false); // no key configured anywhere yet
+    expect(image.available).toBe(false);
   });
 
   it('PUT sets a full custom override (arbitrary model/baseUrl/apiKey — bring your own OpenRouter endpoint)', async () => {

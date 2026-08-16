@@ -71,16 +71,15 @@ the responsible agent/subject.
   the only optional external status is the generic, identity-verified owner reasoning indicator.
 - A newly observed, uncorrelated WhatsApp `fromMe` event from the primary phone or another
   companion normally claims that conversation for the human until an explicit **Hand back**. The
-  exception is an explicitly saved owner/operator chat: it keeps automation available by default so
-  the owner can talk to their agent naturally. Operators can enable the same takeover rule for that
-  chat or disable manual-message takeover entirely. `defaultChatId` never creates this exception;
+  exception is an explicitly saved owner/operator chat: it always keeps automation available so
+  the owner can talk to their agent naturally. Manual-message takeover remains configurable for
+  customer conversations. `defaultChatId` never creates the operator exception;
   it can be auto-populated and is routing only. The claim is durable and conversation-local:
   Agentis aborts the active turn and companion lane, revokes the tool lease, clears typing, cancels
   pending durable turn jobs, and fences every automated provider send with a monotonic
   `automationEpoch`. Agentis-originated provider echoes never claim ownership.
-  If that chat was claimed by a phone-observed send before it was configured as owner/operator, its
-  next inbound message releases that legacy observed claim. An explicit App **Take over** remains
-  deliberate and still requires **Hand back**.
+  Any stale handoff on the configured operator conversation is released on its next inbound message;
+  customer conversations remain human-owned until explicit **Hand back**.
 - Operator messages are business-side conversation context and compile as model role `assistant`;
   customer messages compile as `user`. Platform-chat actor semantics are unchanged. This prevents
   a manual promise such as “I will send the proposal” from being interpreted as a new customer
@@ -95,12 +94,15 @@ the responsible agent/subject.
   advanced by message watermark. History import invalidates and rebuilds that local summary in the
   background without delaying the first live reply.
 
-The allow-listed WhatsApp behavior profile is version 3. Existing settings resolve lazily with safe
+The allow-listed WhatsApp behavior profile is version 4. Existing settings resolve lazily with safe
 defaults: `manualOutboundTakeover:"until_handback"`,
 `ownerManualOutboundTakeover:"off"`, and `historyReconciliation:"recent"`. The explicit
 `ownerChatId` and optional `ownerName` let the agent recognize its configured owner/operator in
 that conversation. They are a handoff and conversation-context setting only; owner privileges
 still require a linked peer identity.
+Channel transcript identity is `(workspaceId, connectionId, chatId)`, independent of whichever
+agent currently owns the connection. Rebinding an agent or receiving activity in an archived thread
+reactivates the same durable transcript instead of creating a context-free parallel conversation.
 Operators may configure these behaviors without exposing arbitrary Baileys socket options or
 browser-identity knobs. Generic clients can transfer ownership with
 `PATCH /v1/conversations/:conversationId/handoff` and `{ "state": "human" | "agent" }`; the App
@@ -115,6 +117,12 @@ prepares it explicitly, `--repair` preserves the previous cache, and
 `AGENTIS_TRANSCRIPTION_OFFLINE=true` forbids network acquisition. OGG/Opus and common channel
 audio containers use the packaged portable decoder; system FFmpeg is only a compatibility
 fallback for containers outside that decoder set.
+
+Outbound generation is separately configurable per workspace for image, speech/voice, and generic
+audio. Each modality accepts a free-text model id, base URL, and optional API key; unauthenticated
+local endpoints are valid. The built-in protocol adapters use compatible `/images`, `/audio/speech`,
+and `/audio/generations` contracts behind the common media-provider interface. Generated artifacts
+can be delivered without a text body, and speech is mapped to a native voice note where supported.
 
 ### Audio decoder contract and transcript admission
 

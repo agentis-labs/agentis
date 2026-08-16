@@ -267,7 +267,13 @@ export class ChannelTurnQueue {
     }
     try {
       const input = row.payload as unknown as ChannelTurnInput;
-      await this.#runner.runQueued(input);
+      const result = await this.#runner.runQueued(input);
+      // Policy silence and supersession are terminal by design. An empty model
+      // result or unavailable adapter is not: marking either "done" loses the
+      // customer's message with no visible outcome.
+      if (!result.replied && (result.reason === 'empty_reply' || result.reason === 'no_chat_adapter')) {
+        throw new Error(`retryable channel turn outcome: ${result.reason}`);
+      }
       // Success — the turn (incl. its own error→user-notify path) ran exactly once.
       this.deps.db
         .update(schema.channelTurnQueue)

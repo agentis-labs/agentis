@@ -102,7 +102,7 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
 
     const updated = bridge.updateBehavior(ctx.workspace.id, connection.id, { ownerReasoningVisibility: 'indicator' });
     expect(updated.whatsappProfile).toMatchObject({
-      version: 3,
+      version: 4,
       ownerReasoningVisibility: 'indicator',
       manualOutboundTakeover: 'until_handback',
       ownerManualOutboundTakeover: 'off',
@@ -110,7 +110,7 @@ describe('ChannelBridge persistent transport (WhatsApp)', () => {
     });
     const row = ctx.db.select().from(schema.channelConnections).where(eq(schema.channelConnections.id, connection.id)).get()!;
     expect((row.settings as { whatsappProfile?: { version?: number; ownerReasoningVisibility?: string } }).whatsappProfile)
-      .toMatchObject({ version: 3, ownerReasoningVisibility: 'indicator' });
+      .toMatchObject({ version: 4, ownerReasoningVisibility: 'indicator' });
   });
 
   it('persists an explicit owner/operator chat separately from the routing default', () => {

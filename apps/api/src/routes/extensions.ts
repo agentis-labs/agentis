@@ -16,6 +16,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireWorkspace, getWorkspace } from '../middleware/workspace.js';
 import { isDockerSandboxAvailable } from '../extensions/dockerSandboxRuntime.js';
 import { componentInstallPayloadSchema, installComponentExtension } from '../services/componentInstaller.js';
+import { repairMissingExtensionReferences } from '../services/workflow/extensionReferenceRepair.js';
 
 const operationSchema = z.object({
   name: z.string().min(1),
@@ -185,6 +186,7 @@ export function buildExtensionRoutes(deps: {
     } else {
       await deps.runtime?.cleanupExtensionBrowser(ws.workspaceId, created.id);
     }
+    const repaired = repairMissingExtensionReferences(deps.db, ws.workspaceId, created.id);
     return c.json({
       extension: {
         id: created.id,
@@ -195,6 +197,7 @@ export function buildExtensionRoutes(deps: {
         created: created.created,
         matchedBy: created.matchedBy,
       },
+      repaired,
     }, created.created ? 201 : 200);
   });
 

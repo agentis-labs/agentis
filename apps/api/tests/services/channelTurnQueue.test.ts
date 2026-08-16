@@ -131,6 +131,20 @@ describe('ChannelTurnQueue', () => {
     expect(runs.length).toBe(1);
   });
 
+  it('does not mark an empty model result done and silently lose the inbound message', async () => {
+    const queue = new ChannelTurnQueue({
+      db: ctx.db,
+      logger: ctx.logger,
+      runner: { async runQueued() { return { replied: false, reason: 'empty_reply' }; } },
+      maxAttempts: 2,
+    });
+    const id = queue.enqueue(input({ text: 'must receive an answer' }))!;
+
+    await queue.poll();
+
+    expect(queue.getStatus(id)).toMatchObject({ status: 'pending', attempts: 1 });
+  });
+
   it('a crashing turn is RETRIED, not duplicated, then parked failed', async () => {
     let attempts = 0;
     const runner: ChannelTurnRunner = {

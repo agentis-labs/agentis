@@ -237,7 +237,7 @@ export const appsApi = {
     api<Wrapped<{ viewers: AppPresenceViewer[] }>>(`/v1/apps/${id}/presence`, { method: 'DELETE' }).then((r) => r.data.viewers),
   runOperatorCommand: (id: string, command: string) =>
     api<Wrapped<unknown>>(`/v1/apps/${id}/operator/command`, { method: 'POST', body: JSON.stringify({ command }) }).then((r) => r.data),
-  exportApp: (id: string) => api<Wrapped<AppManifestEnvelope>>(`/v1/apps/${id}/export`).then((r) => r.data),
+  exportApp: (id: string) => api<Wrapped<AppManifestEnvelope>>(`/v1/apps/${id}/export?revisionTarget=candidate`).then((r) => r.data),
   previewImport: (envelope: AppManifestEnvelope) =>
     api<Wrapped<AppInstallPreview>>('/v1/apps/import/preview', { method: 'POST', body: JSON.stringify(envelope) }).then((r) => r.data),
   importApp: (envelope: AppManifestEnvelope, permissionsAcknowledged: string[]) =>
@@ -375,5 +375,4 @@ export const appsApi = {
       { method: 'POST', body: JSON.stringify({ collection, ...q }) },
     ),
 };
-
 

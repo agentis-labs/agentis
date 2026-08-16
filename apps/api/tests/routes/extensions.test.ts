@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@agentis/db/sqlite';
 import { buildExtensionRoutes } from '../../src/routes/extensions.js';
 import { ExtensionLibraryService } from '../../src/services/extensionLibrary.js';
@@ -88,6 +89,54 @@ describe('POST /v1/extensions/install-local', () => {
     const body = (await res.json()) as { extension: { slug: string; runtime: string } };
     expect(body.extension.slug).toBe('my-extension');
     expect(body.extension.runtime).toBe('node_worker');
+  });
+
+  it('imports an exported network extension with a named operation', async () => {
+    const workflowId = randomUUID();
+    const staleExtensionId = randomUUID();
+    ctx.db.insert(schema.workflows).values({
+      id: workflowId,
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      title: 'Imported prospecting',
+      graph: {
+        version: 1,
+        nodes: [{
+          id: 'prospect', type: 'extension_task', position: { x: 0, y: 0 },
+          config: { kind: 'extension_task', extensionId: staleExtensionId, operationName: 'crawl_and_score', inputMapping: {}, outputMapping: {} },
+        }],
+        edges: [],
+      },
+    }).run();
+    const res = await app().request('/v1/extensions/install-local', {
+      method: 'POST',
+      headers: ctx.authHeaders,
+      body: JSON.stringify({
+        manifest: {
+          name: 'BIA Prospecting',
+          slug: 'bia-prospecting',
+          version: '1.0.0',
+          runtime: 'node_worker',
+          source: 'async function crawl_and_score(inputs, ctx) { const response = await ctx.http.fetch("https://www.google.com"); return { status: response.status }; }',
+          operations: [{ name: 'crawl_and_score', inputSchema: {}, outputSchema: {} }],
+          permissions: ['network'],
+          allowedDomains: ['www.google.com'],
+          timeoutMs: 60_000,
+        },
+        permissionsAcknowledged: ['network'],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { extension: { id: string; slug: string; created: boolean }; repaired: { workflows: number; nodes: number } };
+    expect(body.extension).toEqual(expect.objectContaining({ slug: 'bia-prospecting', created: true }));
+    expect(body.repaired).toEqual({ workflows: 1, nodes: 1 });
+    const workflow = ctx.db.select().from(schema.workflows).where(eq(schema.workflows.id, workflowId)).get()!;
+    const candidate = ctx.db.select().from(schema.workflowGraphRevisions)
+      .where(and(eq(schema.workflowGraphRevisions.workflowId, workflowId), eq(schema.workflowGraphRevisions.status, 'candidate'))).get()!;
+    expect(workflow.candidateRevisionId).toBe(candidate.id);
+    expect((candidate.graphJson as { nodes: Array<{ config: { extensionId: string; extensionSlug?: string } }> }).nodes[0]?.config)
+      .toEqual(expect.objectContaining({ extensionId: body.extension.id, extensionSlug: 'bia-prospecting' }));
   });
 
   it('updates a duplicate local install through the canonical extension library', async () => {

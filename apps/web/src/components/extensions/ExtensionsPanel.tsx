@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Code2, Plus, Search, Trash2, Pencil, MoreHorizontal, Radio, Globe, Key, Database,
-  Boxes, Wand2, Webhook, Network,
+  Boxes, Wand2, Webhook, Network, Upload, Download,
 } from 'lucide-react';
 import { Button, IconButton } from '../shared/Button';
 import { EmptyState } from '../shared/EmptyState';
@@ -31,6 +31,10 @@ import { ExtensionStudioModal, type ExtensionInitial } from './ExtensionStudioMo
 
 interface ExtOperation { name: string; description?: string; isListenerSource?: boolean }
 interface ExtManifest {
+  name?: string;
+  slug?: string;
+  version?: string;
+  runtime?: string;
   description?: string;
   permissions?: string[];
   allowedDomains?: string[];
@@ -128,6 +132,52 @@ export function ExtensionsPanel({
     catch (err) { toast.error('Delete failed', apiErrorMessage(err)); }
   }
 
+  function handleExport(ext: WorkspaceExtension) {
+    const manifest = {
+      ...ext.manifest,
+      name: ext.manifest.name ?? ext.name,
+      slug: ext.manifest.slug ?? ext.slug,
+      version: ext.manifest.version ?? ext.version,
+      runtime: ext.manifest.runtime ?? ext.runtime,
+    };
+    const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${ext.slug || 'extension'}.agentisext`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    toast.success('Extension exported', ext.name);
+  }
+
+  function handleImport() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.agentisext,.json,application/json';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const manifest = JSON.parse(await file.text()) as ExtManifest;
+        if (!manifest.name || !manifest.slug || !manifest.version || manifest.runtime !== 'node_worker' || !manifest.source) {
+          throw new Error('This is not a valid node-worker extension manifest.');
+        }
+        await api('/v1/extensions/install-local', {
+          method: 'POST',
+          body: JSON.stringify({
+            manifest,
+            permissionsAcknowledged: manifest.permissions ?? [],
+          }),
+        });
+        toast.success('Extension imported', manifest.name);
+        await refresh();
+      } catch (err) {
+        toast.error('Import failed', apiErrorMessage(err));
+      }
+    };
+    input.click();
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Capability strip — what's possible */}
@@ -154,6 +204,9 @@ export function ExtensionsPanel({
             className="w-full rounded-input border border-line bg-surface-2 py-2 pl-8 pr-2 text-[12px] text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
           />
         </div>
+        <Button variant="secondary" size="md" iconLeft={<Upload size={14} />} onClick={handleImport}>
+          Import
+        </Button>
         <Button variant="primary" size="md" iconLeft={<Plus size={14} />} onClick={() => setStudio({ mode: 'create' })}>
           New extension
         </Button>
@@ -176,6 +229,7 @@ export function ExtensionsPanel({
                 <ExtensionRow
                   ext={ext}
                   onEdit={() => setStudio({ mode: 'edit', initial: manifestToInitial(ext) })}
+                  onExport={() => handleExport(ext)}
                   onDelete={() => handleDelete(ext)}
                 />
               </li>
@@ -196,7 +250,7 @@ export function ExtensionsPanel({
   );
 }
 
-function ExtensionRow({ ext, onEdit, onDelete }: { ext: WorkspaceExtension; onEdit: () => void; onDelete: () => void }) {
+function ExtensionRow({ ext, onEdit, onExport, onDelete }: { ext: WorkspaceExtension; onEdit: () => void; onExport: () => void; onDelete: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const ops = ext.manifest.operations ?? [];
   const perms = ext.manifest.permissions ?? [];
@@ -244,6 +298,7 @@ function ExtensionRow({ ext, onEdit, onDelete }: { ext: WorkspaceExtension; onEd
         {menuOpen && (
           <div className="absolute right-0 top-full z-30 mt-1 w-40 overflow-hidden rounded-card border border-line bg-surface shadow-dropdown" onMouseLeave={() => setMenuOpen(false)}>
             <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-text-secondary hover:bg-surface-2 hover:text-text-primary" onClick={() => { setMenuOpen(false); onEdit(); }}><Pencil size={12} /> Edit</button>
+            <button type="button" className="flex w-full items-center gap-2 border-t border-line px-3 py-2 text-left text-[12px] text-text-secondary hover:bg-surface-2 hover:text-text-primary" onClick={() => { setMenuOpen(false); onExport(); }}><Download size={12} /> Export</button>
             <button type="button" className="flex w-full items-center gap-2 border-t border-line px-3 py-2 text-left text-[12px] text-danger hover:bg-danger-soft" onClick={() => { setMenuOpen(false); onDelete(); }}><Trash2 size={12} /> Delete</button>
           </div>
         )}

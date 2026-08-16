@@ -101,30 +101,55 @@ export class ConversationStore {
     /** When the channel belongs to an Agentic App, the thread is owned by it (Living Apps Phase 0). */
     appId?: string | null;
   }) {
+    // A provider conversation is identified by the connection + provider chat,
+    // not by whichever agent currently owns the connection. Rebinding a channel
+    // must preserve the relationship instead of creating an empty parallel chat.
+    // Archived channel threads are reactivated on new provider activity: archive
+    // is an inbox presentation state, not permission to forget the transcript.
     const existing = this.deps.db
       .select()
       .from(schema.conversations)
       .where(
         and(
           eq(schema.conversations.workspaceId, args.workspaceId),
-          eq(schema.conversations.agentId, args.agentId),
           eq(schema.conversations.channelConnectionId, args.channelConnectionId),
           eq(schema.conversations.channelChatId, args.channelChatId),
-          isNull(schema.conversations.archivedAt),
         ),
       )
-      // Same rowid tiebreak as getOrCreateByAgent — newest insert wins ties.
-      .orderBy(desc(schema.conversations.createdAt), desc(sql`rowid`))
+      .orderBy(
+        desc(sql`${schema.conversations.archivedAt} is null`),
+        desc(schema.conversations.lastMessageAt),
+        desc(schema.conversations.createdAt),
+        desc(sql`rowid`),
+      )
       .get();
     if (existing) {
-      // Backfill: a pre-existing thread adopts the App once its channel is bound.
-      if (args.appId && existing.appId !== args.appId) {
+      const nextAppId = args.appId ?? existing.appId ?? null;
+      const changed = existing.agentId !== args.agentId
+        || existing.appId !== nextAppId
+        || existing.archivedAt !== null
+        || existing.ambientId !== args.ambientId;
+      if (changed) {
+        const now = new Date().toISOString();
         this.deps.db
           .update(schema.conversations)
-          .set({ appId: args.appId, updatedAt: new Date().toISOString() })
+          .set({
+            agentId: args.agentId,
+            appId: nextAppId,
+            ambientId: args.ambientId,
+            archivedAt: null,
+            updatedAt: now,
+          })
           .where(eq(schema.conversations.id, existing.id))
           .run();
-        return { ...existing, appId: args.appId };
+        return {
+          ...existing,
+          agentId: args.agentId,
+          appId: nextAppId,
+          ambientId: args.ambientId,
+          archivedAt: null,
+          updatedAt: now,
+        };
       }
       return existing;
     }

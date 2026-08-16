@@ -652,6 +652,16 @@ export function wireRoutes(deps: WireRoutesDeps) {
         model: env.AGENTIS_MEDIA_IMAGE_MODEL,
         hasApiKey: Boolean(env.AGENTIS_MEDIA_IMAGE_API_KEY),
       },
+      speech: {
+        baseUrl: env.AGENTIS_MEDIA_SPEECH_BASE_URL,
+        model: env.AGENTIS_MEDIA_SPEECH_MODEL,
+        hasApiKey: Boolean(env.AGENTIS_MEDIA_SPEECH_API_KEY),
+      },
+      audio: {
+        baseUrl: env.AGENTIS_MEDIA_AUDIO_BASE_URL,
+        model: env.AGENTIS_MEDIA_AUDIO_MODEL,
+        hasApiKey: Boolean(env.AGENTIS_MEDIA_AUDIO_API_KEY),
+      },
     },
   }));
   app.route('/v1/extensions/registry', buildExtensionRegistryRoutes({ db: sqlite, auth, registry: extensionRegistry, activity }));

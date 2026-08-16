@@ -61,6 +61,27 @@ describe('ConversationStore', () => {
     expect(store.list('ws1')).toHaveLength(3);
   });
 
+  it('keeps one channel transcript across agent rebinding and archive reactivation', () => {
+    const first = store.getOrCreateByChannel({
+      ...baseGet, channelConnectionId: 'conn-stable', channelChatId: 'customer-1',
+    });
+    store.appendMirrored({
+      workspaceId: 'ws1', conversationId: first.id, sessionMessageId: 'history-1',
+      authorType: 'operator', participantSide: 'business', body: 'Earlier promise',
+    });
+    db.update(schema.conversations).set({ archivedAt: new Date().toISOString() })
+      .where(eq(schema.conversations.id, first.id)).run();
+
+    const rebound = store.getOrCreateByChannel({
+      ...baseGet, agentId: 'a2', channelConnectionId: 'conn-stable', channelChatId: 'customer-1',
+    });
+
+    expect(rebound.id).toBe(first.id);
+    expect(rebound.agentId).toBe('a2');
+    expect(rebound.archivedAt).toBeNull();
+    expect(store.messages(rebound.id).map((message) => message.body)).toEqual(['Earlier promise']);
+  });
+
   it('appendOutbound writes a message and emits MESSAGE_SENT', () => {
     const conv = store.getOrCreateByAgent(baseGet);
     const events: string[] = [];

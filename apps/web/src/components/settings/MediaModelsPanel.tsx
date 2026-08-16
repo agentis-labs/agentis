@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, ImageIcon } from 'lucide-react';
+import { AudioLines, ImageIcon, Loader2, Mic2 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Button } from '../shared/Button';
 import { Skeleton } from '../shared/Skeleton';
@@ -33,8 +33,8 @@ interface ModalityRow {
 
 const MODALITY_LABELS: Record<string, { title: string; blurb: string }> = {
   image: { title: 'Image generation', blurb: 'Any OpenAI-compatible /images endpoint — point it at OpenRouter, a self-hosted model, or a different vendor. No vendor lock-in.' },
-  audio: { title: 'Audio generation', blurb: 'No provider wired yet on this deployment.' },
-  speech: { title: 'Speech generation', blurb: 'No provider wired yet on this deployment.' },
+  audio: { title: 'Audio generation', blurb: 'Any compatible /audio/generations endpoint, including a local runtime.' },
+  speech: { title: 'Voice generation', blurb: 'Any OpenAI-compatible /audio/speech endpoint, hosted or local.' },
   video: { title: 'Video generation', blurb: 'No provider wired yet on this deployment.' },
 };
 
@@ -64,7 +64,7 @@ export function MediaModelsPanel() {
     <section>
       <h3 className="mb-1 text-[14px] font-semibold text-text-primary">Media generation</h3>
       <p className="mb-3 text-[12px] text-text-muted">
-        Image (and eventually audio/video) generation resolves the same free-text, no-lock-in way chat models do.
+        Image, voice, and audio generation resolve through free-text model and endpoint settings.
         Modalities with no override use this server&apos;s configured default.
       </p>
       {modalities === null ? (
@@ -91,6 +91,7 @@ function ModalityCard({ row, onChanged, toast }: { row: ModalityRow; onChanged: 
   const [model, setModel] = useState(row.override?.model ?? '');
   const [baseUrl, setBaseUrl] = useState(row.override?.baseUrl ?? '');
   const [apiKey, setApiKey] = useState('');
+  const Icon = row.modality === 'speech' ? Mic2 : row.modality === 'audio' ? AudioLines : ImageIcon;
 
   async function save() {
     if (model.trim().length < 1) {
@@ -138,7 +139,7 @@ function ModalityCard({ row, onChanged, toast }: { row: ModalityRow; onChanged: 
   return (
     <div className="rounded-card border border-line bg-surface px-4 py-3">
       <div className="flex items-center gap-2">
-        <ImageIcon size={14} className="text-text-muted" />
+        <Icon size={14} className="text-text-muted" />
         <span className="text-[14px] font-medium text-text-primary">{label.title}</span>
         <span className="text-[12px] text-text-muted">
           {row.override
@@ -147,7 +148,7 @@ function ModalityCard({ row, onChanged, toast }: { row: ModalityRow; onChanged: 
               ? `${row.envDefault.model} · server default`
               : 'Not configured'}
         </span>
-        {!row.available && <span className="text-[11px] text-warn">no API key set</span>}
+        {!row.available && <span className="text-[11px] text-warn">not configured</span>}
         {!editing && (
           <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setEditing(true)}>
             {row.override ? 'Change' : 'Override'}
@@ -166,7 +167,7 @@ function ModalityCard({ row, onChanged, toast }: { row: ModalityRow; onChanged: 
               className={INPUT_CLS}
             />
           </Field>
-          <Field label="Base URL" hint="Optional — inherits the server default endpoint when blank. Any OpenAI-compatible /images endpoint (OpenRouter, a self-hosted model, …) works.">
+          <Field label="Base URL" hint="Optional — inherits the server default. Compatible hosted gateways and local endpoints are supported.">
             <input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
@@ -174,7 +175,7 @@ function ModalityCard({ row, onChanged, toast }: { row: ModalityRow; onChanged: 
               className={INPUT_CLS}
             />
           </Field>
-          <Field label="API key" hint={row.override?.hasApiKey ? 'A key is set — leave blank to keep it' : 'Optional — inherits the server default key when blank'}>
+          <Field label="API key" hint={row.override?.hasApiKey ? 'A key is set — leave blank to keep it' : 'Optional — local endpoints may not require one'}>
             <input
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}

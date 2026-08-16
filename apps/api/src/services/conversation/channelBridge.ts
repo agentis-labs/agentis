@@ -123,7 +123,7 @@ export type OwnerReasoningVisibility = 'off' | 'indicator';
  * migration. Socket/browser knobs intentionally do not belong here.
  */
 export interface WhatsAppConnectionProfile {
-  version: 3;
+  version: 4;
   reliability: {
     sessionRecovery: true;
     classifiedReconnect: true;
@@ -145,13 +145,13 @@ export interface WhatsAppConnectionProfile {
   ownerReasoningVisibility: OwnerReasoningVisibility;
   /** Applies to ordinary conversations. */
   manualOutboundTakeover: 'until_handback' | 'off';
-  /** Applies only to the explicitly configured owner/operator chat. */
-  ownerManualOutboundTakeover: 'until_handback' | 'off';
+  /** @deprecated Owner/operator conversations are always automated in v4. */
+  ownerManualOutboundTakeover: 'off';
   historyReconciliation: 'recent' | 'off';
 }
 
 export const DEFAULT_WHATSAPP_CONNECTION_PROFILE: WhatsAppConnectionProfile = {
-  version: 3,
+  version: 4,
   reliability: {
     sessionRecovery: true,
     classifiedReconnect: true,
@@ -185,13 +185,13 @@ export function resolveWhatsAppConnectionProfile(value: unknown): WhatsAppConnec
     ...DEFAULT_WHATSAPP_CONNECTION_PROFILE,
     ownerReasoningVisibility: candidate?.ownerReasoningVisibility === 'indicator' ? 'indicator' : 'off',
     manualOutboundTakeover: candidate?.manualOutboundTakeover === 'off' ? 'off' : 'until_handback',
-    ownerManualOutboundTakeover: candidate?.ownerManualOutboundTakeover === 'until_handback' ? 'until_handback' : 'off',
+    ownerManualOutboundTakeover: 'off',
     historyReconciliation: candidate?.historyReconciliation === 'off' ? 'off' : 'recent',
   };
 }
 
-/** True only for the explicit owner/operator chat — never the routing default. */
-export function isConfiguredWhatsAppOwnerChat(settings: unknown, chatId: string): boolean {
+/** True only for the explicit owner/operator peer — never the routing default. */
+export function isConfiguredChannelOwnerChat(settings: unknown, chatId: string): boolean {
   const value = settings && typeof settings === 'object' && !Array.isArray(settings)
     ? settings as { ownerChatId?: unknown }
     : {};
@@ -199,6 +199,9 @@ export function isConfiguredWhatsAppOwnerChat(settings: unknown, chatId: string)
     && Boolean(normalizeHandle(value.ownerChatId))
     && normalizeHandle(value.ownerChatId) === normalizeHandle(chatId);
 }
+
+/** Back-compatible export for existing WhatsApp callers. */
+export const isConfiguredWhatsAppOwnerChat = isConfiguredChannelOwnerChat;
 
 /**
  * One policy used by observed phone sends and operator-console sends. The
@@ -211,8 +214,7 @@ export function shouldClaimWhatsAppManualOutbound(settings: unknown, chatId: str
     : {};
   const profile = resolveWhatsAppConnectionProfile(value.whatsappProfile);
   if (profile.manualOutboundTakeover === 'off') return false;
-  return !isConfiguredWhatsAppOwnerChat(settings, chatId)
-    || profile.ownerManualOutboundTakeover === 'until_handback';
+  return !isConfiguredChannelOwnerChat(settings, chatId);
 }
 
 export interface PublicConnection {
@@ -993,7 +995,9 @@ export class ChannelBridge {
         ...resolveWhatsAppConnectionProfile(settings.whatsappProfile),
         ...(input.ownerReasoningVisibility !== undefined ? { ownerReasoningVisibility: input.ownerReasoningVisibility } : {}),
         ...(input.manualOutboundTakeover !== undefined ? { manualOutboundTakeover: input.manualOutboundTakeover } : {}),
-        ...(input.ownerManualOutboundTakeover !== undefined ? { ownerManualOutboundTakeover: input.ownerManualOutboundTakeover } : {}),
+        // Kept in the input for wire compatibility with v3 clients. In v4 an
+        // explicitly configured operator conversation can never be parked.
+        ownerManualOutboundTakeover: 'off',
         ...(input.historyReconciliation !== undefined ? { historyReconciliation: input.historyReconciliation } : {}),
       };
     }

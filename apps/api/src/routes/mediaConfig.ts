@@ -32,7 +32,7 @@ export function buildMediaConfigRoutes(deps: {
   db: AgentisSqliteDb;
   auth: AuthService;
   config: WorkspaceMediaConfigService;
-  /** Instance-wide env default per modality, if any (only 'image' is wired today). */
+  /** Instance-wide protocol adapter/default per modality, if any. */
   envDefaults: Partial<Record<(typeof MEDIA_MODALITIES)[number], { baseUrl: string; model: string; hasApiKey: boolean }>>;
 }) {
   const app = new Hono();
@@ -47,7 +47,10 @@ export function buildMediaConfigRoutes(deps: {
       // The model actually in effect for this workspace right now.
       const effectiveModel = override?.model ?? envDefault?.model ?? null;
       const effectiveHasApiKey = override ? override.hasApiKey || Boolean(envDefault?.hasApiKey) : Boolean(envDefault?.hasApiKey);
-      return { modality, envDefault, override, effectiveModel, available: Boolean(effectiveModel && effectiveHasApiKey) };
+      // Credentials are optional: localhost and other self-hosted endpoints
+      // commonly authenticate at the network boundary instead.
+      const localDefault = envDefault ? isLocalEndpoint(envDefault.baseUrl) : false;
+      return { modality, envDefault, override, effectiveModel, available: Boolean(effectiveModel && (override || effectiveHasApiKey || localDefault)), authenticated: effectiveHasApiKey };
     });
     return c.json({ modalities });
   });
@@ -83,4 +86,13 @@ export function buildMediaConfigRoutes(deps: {
   });
 
   return app;
+}
+
+function isLocalEndpoint(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
 }

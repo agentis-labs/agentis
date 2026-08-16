@@ -142,6 +142,106 @@ describe('WorkspacePackager', () => {
     expect(creds).toHaveLength(0);
   });
 
+  it('preserves the current App workflow graph when the active baseline is empty', () => {
+    const app = new AppStore(ctx.db).create(ctx.workspace.id, ctx.user.id, { name: 'Drafted app' });
+    const workflowId = randomUUID();
+    const extensionId = randomUUID();
+    const activeRevisionId = randomUUID();
+    const candidateRevisionId = randomUUID();
+    const emptyGraph = { version: 1, nodes: [], edges: [] };
+    const currentGraph = {
+      version: 1,
+      nodes: [{
+        id: 'prospect',
+        type: 'extension_task',
+        position: { x: 40, y: 80 },
+        config: { kind: 'extension_task', extensionId, operationName: 'crawl_and_score', inputMapping: {}, outputMapping: {} },
+      }],
+      edges: [],
+    };
+    const now = new Date().toISOString();
+
+    ctx.db.insert(schema.extensions).values({
+      id: extensionId,
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      name: 'Deterministic prospecting',
+      slug: 'deterministic-prospecting',
+      version: '1.0.0',
+      runtime: 'node_worker',
+      manifest: {
+        name: 'Deterministic prospecting',
+        slug: 'deterministic-prospecting',
+        version: '1.0.0',
+        runtime: 'node_worker',
+        source: 'module.exports = { crawl_and_score: async () => ({ accepted: [] }) };',
+        operations: [{ name: 'crawl_and_score', inputSchema: {}, outputSchema: {} }],
+      },
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    ctx.db.insert(schema.workflows).values({
+      id: workflowId,
+      workspaceId: ctx.workspace.id,
+      userId: ctx.user.id,
+      appId: app.id,
+      title: 'Visible draft',
+      graph: currentGraph,
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+    ctx.db.insert(schema.workflowGraphRevisions).values([
+      {
+        id: activeRevisionId,
+        workspaceId: ctx.workspace.id,
+        workflowId,
+        graphJson: emptyGraph,
+        semanticHash: 'empty-active',
+        presentationHash: 'empty-active',
+        source: 'import',
+        reason: 'empty baseline',
+        status: 'active',
+        trustState: 'proven',
+      },
+      {
+        id: candidateRevisionId,
+        workspaceId: ctx.workspace.id,
+        workflowId,
+        graphJson: currentGraph,
+        semanticHash: 'populated-candidate',
+        presentationHash: 'populated-candidate',
+        source: 'editor',
+        reason: 'current draft',
+        status: 'candidate',
+        trustState: 'unverified',
+      },
+    ]).run();
+    ctx.db.update(schema.workflows)
+      .set({ activeRevisionId, candidateRevisionId })
+      .where(eq(schema.workflows.id, workflowId)).run();
+
+    const envelope = packager.exportWorkspace(ctx.workspace.id, 'share');
+    expect(envelope.manifest.apps[0]?.workflows[0]?.graph).toEqual(currentGraph);
+    expect(envelope.manifest.apps[0]?.extensions).toEqual([
+      expect.objectContaining({ exportId: extensionId, slug: 'deterministic-prospecting' }),
+    ]);
+
+    const targetWs = makeWorkspace(ctx, 'workflow-import');
+    packager.installBundle(
+      { workspaceId: targetWs, ambientId: null, userId: ctx.user.id },
+      envelope,
+      { permissionsAcknowledged: true },
+    );
+    const imported = ctx.db.select().from(schema.workflows)
+      .where(eq(schema.workflows.workspaceId, targetWs)).get();
+    const importedExtension = ctx.db.select().from(schema.extensions)
+      .where(and(eq(schema.extensions.workspaceId, targetWs), eq(schema.extensions.slug, 'deterministic-prospecting'))).get();
+    expect(importedExtension).toBeTruthy();
+    expect(importedExtension?.id).not.toBe(extensionId);
+    expect((imported?.graph as typeof currentGraph).nodes[0]?.config.extensionId).toBe(importedExtension?.id);
+  });
+
   it('rejects a tampered envelope on deserialize', () => {
     seedRichWorkspace(ctx.workspace.id);
     const envelope = packager.exportWorkspace(ctx.workspace.id, 'share');

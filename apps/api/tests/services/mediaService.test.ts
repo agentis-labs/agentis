@@ -103,12 +103,18 @@ describe('MediaService.registerConfigurable — per-workspace "bring your own mo
     }
   });
 
-  it('without an env default AND without an override apiKey, throws a clean MEDIA_UNAVAILABLE naming the model', async () => {
+  it('allows an unauthenticated workspace endpoint for local/self-hosted models', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>)?.Authorization).toBeUndefined();
+      return { ok: true, json: async () => ({ data: [{ b64_json: Buffer.from('LOCAL').toString('base64') }] }) } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
     const workspaceMediaConfig = fakeConfigService({ 'ws1:image': { model: 'my-model' } });
     const svc = new MediaService({ assetStore: fakeAssetStore(), logger, workspaceMediaConfig });
     svc.registerConfigurable({ modality: 'image', envDefaults: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-image-1' }, build: openAiImageProvider });
-    expect(svc.modalities('ws1')).toEqual([]);
-    await expect(svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'x' })).rejects.toThrow(/my-model/);
+    expect(svc.modalities('ws1')).toEqual(['image']);
+    await expect(svc.generate({ workspaceId: 'ws1' }, { modality: 'image', prompt: 'x' })).resolves.toMatchObject({ provider: 'openai-image:my-model' });
+    vi.unstubAllGlobals();
   });
 
   it('is workspace-scoped — a different workspace with no override falls back to the env default, unaffected by ws1', async () => {

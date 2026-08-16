@@ -31,7 +31,7 @@ export interface MediaGeneratedAsset {
   mimeType: string;
 }
 
-const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'video/mp4': 'mp4' };
+const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/opus': 'opus', 'video/mp4': 'mp4' };
 
 /**
  * A provider whose {baseUrl,model,apiKey} can be overridden per workspace
@@ -43,7 +43,7 @@ const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', '
 export interface ConfigurableMediaFactory {
   modality: MediaModality;
   envDefaults: { baseUrl: string; apiKey?: string; model: string };
-  build: (cfg: { baseUrl: string; apiKey: string; model: string }) => MediaProvider;
+  build: (cfg: { baseUrl: string; apiKey?: string; model: string }) => MediaProvider;
 }
 
 export class MediaService {
@@ -65,7 +65,7 @@ export class MediaService {
    */
   registerConfigurable(factory: ConfigurableMediaFactory): void {
     this.configurable.set(factory.modality, factory);
-    if (factory.envDefaults.apiKey) {
+    if (factory.envDefaults.apiKey || isLocalEndpoint(factory.envDefaults.baseUrl)) {
       this.register(factory.build({
         baseUrl: factory.envDefaults.baseUrl,
         apiKey: factory.envDefaults.apiKey,
@@ -107,13 +107,9 @@ export class MediaService {
       ? this.deps.workspaceMediaConfig.resolveOverride(workspaceId, modality)
       : null;
     if (factory && override) {
-      const apiKey = override.apiKey ?? factory.envDefaults.apiKey;
-      if (!apiKey) {
-        throw new AgentisError('MEDIA_UNAVAILABLE', `No API key configured for ${modality} generation — set one in Settings → Media for model "${override.model}".`);
-      }
       return factory.build({
         baseUrl: override.baseUrl ?? factory.envDefaults.baseUrl,
-        apiKey,
+        ...(override.apiKey ?? factory.envDefaults.apiKey ? { apiKey: override.apiKey ?? factory.envDefaults.apiKey } : {}),
         model: override.model,
       });
     }
@@ -163,7 +159,7 @@ async function toBytes(item: GeneratedMedia): Promise<Buffer> {
 
 export interface OpenAiImageProviderConfig {
   baseUrl: string; // e.g. https://api.openai.com/v1
-  apiKey: string;
+  apiKey?: string;
   model: string;   // e.g. gpt-image-1
 }
 
@@ -190,11 +186,11 @@ export function openAiImageProvider(cfg: OpenAiImageProviderConfig): MediaProvid
         form.set('size', size);
         form.set('n', String(n));
         req.images!.forEach((img, i) => form.append('image[]', new Blob([Buffer.from(img.b64, 'base64')], { type: img.mime }), `ref-${i}.${EXT[img.mime] ?? 'png'}`));
-        res = await fetch(`${base}/images/edits`, { method: 'POST', headers: { Authorization: `Bearer ${cfg.apiKey}` }, body: form });
+        res = await fetch(`${base}/images/edits`, { method: 'POST', headers: authHeaders(cfg.apiKey), body: form });
       } else {
         res = await fetch(`${base}/images/generations`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${cfg.apiKey}`, 'content-type': 'application/json' },
+          headers: { ...authHeaders(cfg.apiKey), 'content-type': 'application/json' },
           body: JSON.stringify({ model: cfg.model, prompt: req.prompt, size, n }),
         });
       }
@@ -208,4 +204,80 @@ export function openAiImageProvider(cfg: OpenAiImageProviderConfig): MediaProvid
       return items.map((d) => ({ mime: 'image/png', ...(d.b64_json ? { b64: d.b64_json } : {}), ...(d.url ? { url: d.url } : {}) }));
     },
   };
+}
+
+export interface OpenAiCompatibleAudioProviderConfig {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+}
+
+/** OpenAI-compatible text-to-speech adapter; local endpoints may omit auth. */
+export function openAiSpeechProvider(cfg: OpenAiCompatibleAudioProviderConfig): MediaProvider {
+  const base = cfg.baseUrl.replace(/\/+$/, '');
+  return {
+    id: `openai-compatible-speech:${cfg.model}`,
+    modalities: ['speech'] as const,
+    async generate(req): Promise<GeneratedMedia[]> {
+      const res = await fetch(`${base}/audio/speech`, {
+        method: 'POST',
+        headers: { ...authHeaders(cfg.apiKey), 'content-type': 'application/json' },
+        body: JSON.stringify({ model: cfg.model, input: req.prompt, voice: 'alloy', response_format: 'opus' }),
+      });
+      if (!res.ok) throw new AgentisError('MEDIA_PROVIDER_ERROR', `speech generation failed (${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`);
+      const mime = normalizeAudioMime(res.headers.get('content-type'), 'audio/ogg');
+      return [{ mime, b64: Buffer.from(await res.arrayBuffer()).toString('base64') }];
+    },
+  };
+}
+
+/**
+ * Provider-neutral audio-generation HTTP adapter. It accepts either raw audio
+ * bytes or the common `{data:[{b64_json|b64|url,mime_type?}]}` response shape.
+ * This deliberately works with hosted vendors, gateways, and local runtimes.
+ */
+export function compatibleAudioGenerationProvider(cfg: OpenAiCompatibleAudioProviderConfig): MediaProvider {
+  const base = cfg.baseUrl.replace(/\/+$/, '');
+  return {
+    id: `compatible-audio:${cfg.model}`,
+    modalities: ['audio'] as const,
+    async generate(req): Promise<GeneratedMedia[]> {
+      const res = await fetch(`${base}/audio/generations`, {
+        method: 'POST',
+        headers: { ...authHeaders(cfg.apiKey), 'content-type': 'application/json' },
+        body: JSON.stringify({ model: cfg.model, prompt: req.prompt, n: Math.max(1, Math.min(req.n ?? 1, 4)) }),
+      });
+      if (!res.ok) throw new AgentisError('MEDIA_PROVIDER_ERROR', `audio generation failed (${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`);
+      const contentType = res.headers.get('content-type') ?? '';
+      if (contentType.toLowerCase().startsWith('audio/')) {
+        return [{ mime: normalizeAudioMime(contentType, 'audio/mpeg'), b64: Buffer.from(await res.arrayBuffer()).toString('base64') }];
+      }
+      const body = await res.json() as { data?: Array<{ b64_json?: string; b64?: string; url?: string; mime_type?: string; mime?: string }> };
+      const items = body.data ?? [];
+      if (items.length === 0) throw new AgentisError('MEDIA_PROVIDER_ERROR', 'audio provider returned no data');
+      return items.map((item) => ({
+        mime: normalizeAudioMime(item.mime_type ?? item.mime, 'audio/mpeg'),
+        ...(item.b64_json ?? item.b64 ? { b64: item.b64_json ?? item.b64 } : {}),
+        ...(item.url ? { url: item.url } : {}),
+      }));
+    },
+  };
+}
+
+function authHeaders(apiKey?: string): Record<string, string> {
+  return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+}
+
+function normalizeAudioMime(value: string | null | undefined, fallback: string): string {
+  const mime = value?.split(';', 1)[0]?.trim().toLowerCase();
+  return mime?.startsWith('audio/') ? mime : fallback;
+}
+
+function isLocalEndpoint(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
 }
